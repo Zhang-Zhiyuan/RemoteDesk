@@ -33,6 +33,7 @@ final class AndroidScreenCaptureSession {
 
     private int resultCode;
     private Intent resultData;
+    private volatile AndroidAccessibilityCapture accessibilityCapture;
     private MediaProjection mediaProjection;
     private MediaProjection.Callback mediaProjectionCallback;
     private ProjectionStoppedListener projectionStoppedListener;
@@ -91,6 +92,27 @@ final class AndroidScreenCaptureSession {
 
     long getDisplayConfigurationGeneration() {
         return displayConfigurationGeneration;
+    }
+
+    boolean isAccessibilityCapture() { return accessibilityCapture != null; }
+
+    synchronized boolean startAccessibility(Context context) {
+        if (Build.VERSION.SDK_INT < 30 || !RemoteDeskAccessibilityService.canCaptureScreen()) return false;
+        if (accessibilityCapture != null) return true;
+        clearInternal(true);
+        DisplayMetrics metrics = resolveDisplayMetrics(context);
+        sourceWidth = Math.max(1, metrics.widthPixels);
+        sourceHeight = Math.max(1, metrics.heightPixels);
+        width = sourceWidth;
+        height = sourceHeight;
+        accessibilityCapture = new AndroidAccessibilityCapture();
+        displayConfigurationGeneration++;
+        return true;
+    }
+
+    String captureStatus() {
+        AndroidAccessibilityCapture capture = accessibilityCapture;
+        return capture == null ? "屏幕录制" : capture.status();
     }
 
     synchronized boolean start(Context context) {
@@ -290,6 +312,16 @@ final class AndroidScreenCaptureSession {
     }
 
     synchronized ScreenFrame captureJpeg(Context context, int quality, int maxEdge) {
+        if (Build.VERSION.SDK_INT >= 30 && accessibilityCapture != null) {
+            AndroidAccessibilityCapture.Frame frame = accessibilityCapture.capture(quality, maxEdge, sourceWidth, sourceHeight);
+            if (frame == null) return null;
+            if (sourceWidth != frame.sourceWidth || sourceHeight != frame.sourceHeight) {
+                sourceWidth = frame.sourceWidth;
+                sourceHeight = frame.sourceHeight;
+                displayConfigurationGeneration++;
+            }
+            return frame.encoded;
+        }
         try {
             refreshDisplayConfigurationIfChanged(context);
             return captureJpegCore(quality, maxEdge);
@@ -499,6 +531,9 @@ final class AndroidScreenCaptureSession {
     }
 
     private void clearInternal(boolean stopProjection) {
+        AndroidAccessibilityCapture previousAccessibility = accessibilityCapture;
+        accessibilityCapture = null;
+        if (Build.VERSION.SDK_INT >= 30 && previousAccessibility != null) previousAccessibility.close();
         VirtualDisplay display = virtualDisplay;
         virtualDisplay = null;
         activeVideoSurface = null;

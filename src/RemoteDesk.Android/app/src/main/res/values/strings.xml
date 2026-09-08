@@ -6,7 +6,7 @@
     <string name="platform_badge" translatable="false">ANDROID</string>
     <string name="main_ready">已就绪，可在局域网中发现</string>
     <string name="connecting_to">正在连接 %1$s:%2$d</string>
-    <string name="accessibility_service_description">RemoteDesk input control for authenticated remote desktop sessions over direct or private relay connections, including gestures, system actions, and focused text fields.</string>
+    <string name="accessibility_service_description">RemoteDesk 为通过连接口令验证的远程设备提供触控、文本输入和系统操作。可选的免重复授权模式使用无障碍截图，锁屏后仍可连接；系统保护的页面不会被截取。可随时从应用或常驻通知停止服务。</string>
     <string name="relay_saved_private">已保存，访问密钥由 Android Keystore 加密保护。</string>
     <string name="relay_directory_failed">读取失败：请检查网络、共享密钥和 TLS 指纹，未使用直连回退。</string>
     <string name="relay_online_count">在线设备 %1$d 台；点击连接，口令使用上方“连接口令”。</string>

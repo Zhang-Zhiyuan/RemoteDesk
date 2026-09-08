@@ -53,8 +53,20 @@ public final class ViewerProbeApplication extends Application implements Applica
                 .put("surfaceAlpha",((View)field(viewer,"surfaceView")).getAlpha())
                 .put("keyboardEnabled",chrome.keyboard.isEnabled()).put("mouseEnabled",chrome.mouse.isEnabled())
                 .put("draftLength",chrome.composer.length()).put("sendEnabled",chrome.send.isEnabled());
-            if (android.os.Build.VERSION.SDK_INT>=30 && frame.getRootWindowInsets()!=null)
-                data.put("imeInset",frame.getRootWindowInsets().getInsets(android.view.WindowInsets.Type.ime()).bottom);
+            if (android.os.Build.VERSION.SDK_INT>=30 && frame.getRootWindowInsets()!=null) {
+                data.put("imeInset",frame.getRootWindowInsets().getInsets(android.view.WindowInsets.Type.ime()).bottom)
+                    .put("imeInsetSource","WindowInsets");
+            } else {
+                // API 26-29 has no IME inset type. Observe the actual visible
+                // window instead; exclude normal navigation/status bars.
+                android.graphics.Rect visible=new android.graphics.Rect();
+                frame.getWindowVisibleDisplayFrame(visible);
+                android.util.DisplayMetrics display=new android.util.DisplayMetrics();
+                viewer.getWindowManager().getDefaultDisplay().getRealMetrics(display);
+                int occluded=Math.max(0,display.heightPixels-visible.bottom);
+                data.put("imeInset",occluded>display.heightPixels*.15f?occluded:0)
+                    .put("imeInsetSource","legacy-visible-frame");
+            }
             AtomicFile file=new AtomicFile(new File(getFilesDir(),"viewer-state.json"));
             FileOutputStream stream=file.startWrite();
             try { stream.write(data.toString(2).getBytes(StandardCharsets.UTF_8)); file.finishWrite(stream); }

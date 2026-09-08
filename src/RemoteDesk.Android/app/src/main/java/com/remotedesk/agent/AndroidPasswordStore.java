@@ -38,6 +38,25 @@ final class AndroidPasswordStore {
         return loadValue(context, "relay-options.keystore.v1", false);
     }
 
+    static String loadUnlockPin(Context context) {
+        return loadValue(context, "unlock-pin.keystore.v1", false);
+    }
+
+    static boolean hasUnlockPin(Context context) {
+        return preferences(context).contains("unlock-pin.keystore.v1");
+    }
+
+    static void saveUnlockPin(Context context, String pin) throws Exception {
+        if (pin != null && !pin.isEmpty() && !AndroidPinUnlockPolicy.validPin(pin))
+            throw new IllegalArgumentException("仅支持 4 至 16 位数字 PIN");
+        SharedPreferences.Editor editor = preferences(context).edit();
+        if (pin == null || pin.isEmpty()) editor.remove("unlock-pin.keystore.v1");
+        else editor.putString("unlock-pin.keystore.v1", encrypt(pin));
+        // The UI must not report success before this one-time credential is
+        // durable; an immediate update/restart must not lose the saved setting.
+        if (!editor.commit()) throw new java.io.IOException("无法持久保存自动解锁设置");
+    }
+
     static void saveRelay(Context context, String configuration) throws Exception {
         saveValue(context, "relay-options.keystore.v1", configuration, false);
     }
@@ -125,7 +144,9 @@ final class AndroidPasswordStore {
         return new String(cipher.doFinal(cipherText), StandardCharsets.UTF_8);
     }
 
-    private static SecretKey getOrCreateKey() throws Exception {
+    // First-use callers must not generate two keys for the same alias: replacing
+    // the first key would make a concurrently saved password unreadable.
+    private static synchronized SecretKey getOrCreateKey() throws Exception {
         KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
         keyStore.load(null);
         Key key = keyStore.getKey(KEY_ALIAS, null);

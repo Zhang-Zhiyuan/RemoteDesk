@@ -97,7 +97,7 @@ function Get-SourceState {
             & $git.Source `
                 -C $Root `
                 status --porcelain=v1 --untracked-files=normal `
-                -- . ":(exclude)artifacts/**" 2>$null)
+                -- . ":(exclude)artifacts/**" ":(exclude)release/**" 2>$null)
         $statusExitCode = $LASTEXITCODE
     }
     catch {
@@ -1255,6 +1255,7 @@ function New-LinuxSelfContainedRuntime {
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_app.py") -Destination (Join-Path $Staging "app\remotedesk_linux_app.py") -Force
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_dependencies.py") -Destination (Join-Path $Staging "app\remotedesk_linux_dependencies.py") -Force
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_relay.py") -Destination (Join-Path $Staging "app\remotedesk_linux_relay.py") -Force
+    Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_startup.py") -Destination (Join-Path $Staging "app\remotedesk_linux_startup.py") -Force
     Copy-Item -LiteralPath (Join-Path $Root "src\RemoteDesk\Assets\RemoteDesk.png") -Destination (Join-Path $Staging "app\RemoteDesk.png") -Force
     Copy-Item -LiteralPath (Join-Path $Root "docs\Linux-Sandbox.md") -Destination (Join-Path $Staging "docs\Linux-Sandbox.md") -Force
     Copy-Item -LiteralPath (Join-Path $Root "docs\RemoteDesk-Protocol.md") -Destination (Join-Path $Staging "docs\RemoteDesk-Protocol.md") -Force

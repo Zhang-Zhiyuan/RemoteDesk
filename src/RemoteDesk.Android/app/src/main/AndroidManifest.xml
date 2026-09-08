@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:allowBackup="false"
@@ -22,7 +23,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="stateHidden|adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -36,10 +37,21 @@
             android:exported="false"
             android:theme="@style/ViewerTheme" />
 
+        <activity android:name=".RemoteDeskWakeActivity" android:exported="false"
+            android:excludeFromRecents="true" android:taskAffinity="com.remotedesk.agent.wake"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+
         <service
             android:name=".RemoteDeskForegroundService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice|mediaProjection" />
+
+        <receiver android:name=".RemoteDeskResumeReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <service
             android:name=".RemoteDeskAccessibilityService"

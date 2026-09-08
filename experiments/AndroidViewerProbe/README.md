@@ -52,6 +52,17 @@ This does not establish real network latency, remote OS text-entry fidelity, or
 compatibility with other Android/OEM/IME versions. The green `90` overlay on this
 test phone is the phone's developer overlay, not the viewer's rendered FPS.
 
+The same suite can run on explicitly selected `emulator-*` devices. Its report
+labels emulators separately from physical phones. On API 26–29, keyboard visibility
+uses the actual visible-window rectangle (excluding system bars), since the IME
+WindowInsets API is available only on API 30+. This is probe telemetry, not a
+change to the production keyboard implementation.
+
+Fresh system images may display a first-fullscreen tutorial. The verifier only
+acknowledges the identified Android immersive tutorial while the probe owns app
+focus; it does not approve arbitrary dialogs or permissions. `--suite fullscreen`
+can resume the final four checks when an inspected probe is already fullscreen.
+
 ## Fault-injection / edge checks
 
 Add `--allow-test-controls` to the **synthetic peer** command and `--suite all`

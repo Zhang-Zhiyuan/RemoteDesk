@@ -1,10 +1,17 @@
 package com.remotedesk.agent;
 
 import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.AccessibilityServiceInfo;
 import android.accessibilityservice.GestureDescription;
+import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Build;
+import android.graphics.Bitmap;
+import android.hardware.HardwareBuffer;
+import android.view.Display;
+import java.util.concurrent.Executor;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
@@ -22,9 +29,86 @@ public final class RemoteDeskAccessibilityService extends AccessibilityService {
     private static volatile RemoteDeskAccessibilityService instance;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final AndroidRemoteUnlock remoteUnlock = new AndroidRemoteUnlock(this, mainHandler);
+
+    static void requestRemoteWake(java.util.function.BooleanSupplier authorized) {
+        RemoteDeskAccessibilityService service = instance;
+        if (service != null) service.mainHandler.post(() -> {
+            if (instance == service) service.remoteUnlock.request(authorized);
+        });
+    }
+
+    static boolean isWakeAuthorized(long generation) {
+        RemoteDeskAccessibilityService service = instance;
+        return service != null && service.remoteUnlock.isAuthorized(generation);
+    }
+
+    static void onKeyguardRequested(long generation) {
+        RemoteDeskAccessibilityService service = instance;
+        if (service != null) service.remoteUnlock.onKeyguardRequested(generation);
+    }
+
+    static boolean isEnteringUnlockPin() {
+        RemoteDeskAccessibilityService service = instance;
+        return service != null && service.remoteUnlock.enteringPin();
+    }
+
+    static void cancelRemoteUnlock() {
+        RemoteDeskAccessibilityService service = instance;
+        if (service != null) service.mainHandler.post(service.remoteUnlock::cancel);
+    }
 
     static boolean isEnabled() {
         return instance != null;
+    }
+
+    interface ScreenCallback {
+        void onBitmap(Bitmap bitmap);
+        void onFailure(int error);
+    }
+
+    static boolean canCaptureScreen() {
+        return canCaptureScreen(instance);
+    }
+
+    private static boolean canCaptureScreen(RemoteDeskAccessibilityService service) {
+        if (Build.VERSION.SDK_INT < 30 || service == null || instance != service) return false;
+        try {
+            AccessibilityServiceInfo info = service.getServiceInfo();
+            return info != null &&
+                (info.getCapabilities() & AccessibilityServiceInfo.CAPABILITY_CAN_TAKE_SCREENSHOT) != 0;
+        } catch (RuntimeException ex) {
+            // The system may unbind accessibility while a capture worker is checking it.
+            return false;
+        }
+    }
+
+    static boolean requestScreenshot(Executor executor, ScreenCallback callback) {
+        RemoteDeskAccessibilityService service = instance;
+        if (Build.VERSION.SDK_INT < 30 || !canCaptureScreen(service)) return false;
+        try {
+            service.takeScreenshot(Display.DEFAULT_DISPLAY, executor, new TakeScreenshotCallback() {
+                @Override public void onSuccess(ScreenshotResult result) {
+                    Bitmap hardware = null;
+                    Bitmap bitmap = null;
+                    try (HardwareBuffer buffer = result.getHardwareBuffer()) {
+                        if (instance != service) {
+                            callback.onFailure(ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS);
+                            return;
+                        }
+                        hardware = Bitmap.wrapHardwareBuffer(buffer, result.getColorSpace());
+                        if (hardware == null) throw new IllegalStateException("Missing screenshot buffer");
+                        bitmap = hardware.copy(Bitmap.Config.ARGB_8888, false);
+                        if (bitmap == null) throw new IllegalStateException("Could not copy screenshot buffer");
+                    } catch (RuntimeException ex) {
+                        callback.onFailure(1);
+                    } finally { if (hardware != null) hardware.recycle(); }
+                    if (bitmap != null) callback.onBitmap(bitmap);
+                }
+                @Override public void onFailure(int error) { callback.onFailure(error); }
+            });
+            return true;
+        } catch (RuntimeException ex) { return false; }
     }
 
     static boolean dispatchGestureFromAnyThread(GestureDescription gesture) {
@@ -78,7 +162,11 @@ public final class RemoteDeskAccessibilityService extends AccessibilityService {
             return false;
         }
 
-        return service.mainHandler.post(() -> service.performGlobalAction(action));
+        return service.mainHandler.post(() -> {
+            if (instance != service) return;
+            try { service.performGlobalAction(action); }
+            catch (RuntimeException ex) { AndroidSessionLog.error("Accessibility global action failed.", ex); }
+        });
     }
 
     static boolean inputTextFromAnyThread(String text) {
@@ -108,20 +196,32 @@ public final class RemoteDeskAccessibilityService extends AccessibilityService {
         instance = null;
         AndroidInputInjector.onAccessibilityServiceUnavailable();
         instance = this;
+        AndroidHostResume.tryResume(this);
     }
 
     @Override
     public void onDestroy() {
-        if (instance == this) {
-            instance = null;
-        }
-        AndroidInputInjector.onAccessibilityServiceUnavailable();
-
+        detachInstance();
         super.onDestroy();
     }
 
     @Override
+    public boolean onUnbind(Intent intent) {
+        detachInstance();
+        return super.onUnbind(intent);
+    }
+
+    private void detachInstance() {
+        remoteUnlock.cancel();
+        if (instance == this) {
+            instance = null;
+            AndroidInputInjector.onAccessibilityServiceUnavailable();
+        }
+    }
+
+    @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
+        remoteUnlock.observeUnlocked();
     }
 
     @Override

@@ -1,7 +1,8 @@
 # 构建产物与历史清单
 
-公开仓库只跟踪本说明和 `RemoteDesk-release-manifest.json`。安装包、缓存、
-签名材料、截图、设备配置和私有诊断报告均保留在本地，不应提交到源码历史。
+本目录只跟踪本说明和 `RemoteDesk-release-manifest.json`。缓存、签名材料、
+截图、设备配置和私有诊断报告保留在本地。供用户下载的成品放在根目录
+[release](../release/)，不把整个 artifacts 目录上传。
 
 ## 获取与构建
 
@@ -12,8 +13,8 @@ Linux 系统 Python/ARM64 安装见 [Linux-SystemPackage](../docs/Linux-SystemPa
 
 `scripts/Publish-LocalRelease.ps1` 是本地正式发布辅助入口；请先阅读其参数、
 版本及输出目录，避免把旧版目录或调试 APK 当作新版本安装包。
-需要发布二进制时，应在最终源码上重新构建、验证，并单独作为 GitHub Release
-附件上传。本次源码上传不包含或新建 Release 安装包。
+需要发布时，先在最终源码上重新构建、验证，再将 Windows EXE 及必要附带文件、
+Android APK 和 Linux 安装包整理到 `release/`。该目录不放日志、中间产物和旧版备份。
 
 ## 历史记录
 

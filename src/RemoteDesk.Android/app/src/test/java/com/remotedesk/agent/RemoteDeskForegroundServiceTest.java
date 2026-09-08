@@ -3,6 +3,8 @@ package com.remotedesk.agent;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertThrows;
 
 import android.content.pm.ServiceInfo;
 import android.net.wifi.WifiManager;
@@ -15,6 +17,48 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 
 public final class RemoteDeskForegroundServiceTest {
+    @Test
+    public void rejectedForegroundStartDoesNotCrashOrLoopRestart() {
+        SecurityException rejected = new SecurityException("platform denied start");
+        java.util.concurrent.atomic.AtomicReference<RuntimeException> failure = new java.util.concurrent.atomic.AtomicReference<>();
+        assertEquals(android.app.Service.START_NOT_STICKY, RemoteDeskForegroundService.runStartSafely(
+            () -> { throw rejected; }, failure::set));
+        assertSame(rejected, failure.get());
+    }
+
+    @Test
+    public void successfulStartPreservesItsRequestedRestartMode() {
+        assertEquals(android.app.Service.START_STICKY, RemoteDeskForegroundService.runStartSafely(
+            () -> android.app.Service.START_STICKY, ex -> { throw new AssertionError(ex); }));
+    }
+
+    @Test
+    public void fatalVmErrorsAreNotDisguisedAsRecoverableStartFailures() {
+        OutOfMemoryError fatal = new OutOfMemoryError("synthetic fatal condition");
+        assertSame(fatal, assertThrows(OutOfMemoryError.class, () -> RemoteDeskForegroundService.runStartSafely(
+            () -> { throw fatal; }, ex -> { throw new AssertionError(ex); })));
+    }
+
+    @Test
+    public void delayedAutomaticResumeCannotUndoAnExplicitStop() {
+        assertTrue(RemoteDeskForegroundService.shouldRejectAutomaticStart(true, false));
+        assertFalse(RemoteDeskForegroundService.shouldRejectAutomaticStart(true, true));
+    }
+
+    @Test
+    public void explicitStartRemainsAvailableWhenAutomaticResumeIsDisarmed() {
+        assertFalse(RemoteDeskForegroundService.shouldRejectAutomaticStart(false, false));
+        assertFalse(RemoteDeskForegroundService.shouldRejectAutomaticStart(false, true));
+    }
+
+    @Test
+    public void idleListenerAndUnverifiedConnectionsDoNotKeepScreenOrCpuAwake() {
+        assertFalse(RemoteDeskForegroundService.shouldHoldStreamingPower(false, false));
+        assertFalse(RemoteDeskForegroundService.shouldHoldStreamingPower(true, false));
+        assertFalse(RemoteDeskForegroundService.shouldHoldStreamingPower(false, true));
+        assertTrue(RemoteDeskForegroundService.shouldHoldStreamingPower(true, true));
+    }
+
     @Test
     @SuppressWarnings("deprecation")
     public void getStreamingWifiLockModeUsesPerformanceOrLowLatencyMode() {

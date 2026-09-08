@@ -69,6 +69,9 @@ final class AndroidViewerGestures {
 
     void secondDown(float centerX, float centerY, float span) {
         if (!active) return;
+        // Once a two-finger sequence has started, replacing a lifted finger is
+        // not a fresh tap. Keep its scroll/pinch decision until all fingers lift.
+        if (multi) { multiTap = false; return; }
         multiTap = singleAllowed && !moved && !dragging && !lockedDrag;
         releaseDrag();
         if (lockedDrag) toggleDrag();

@@ -12,6 +12,7 @@ internal static class Program
     [STAThread]
     static int Main(string[] args)
     {
+        Console.InputEncoding = System.Text.Encoding.UTF8;
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         // Surface UI-thread failures as evidence, not an unattended modal dialog.
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
@@ -20,7 +21,18 @@ internal static class Program
         var c = config.RootElement;
         var output = Path.GetFullPath(c.GetProperty("output").GetString()!);
         Directory.CreateDirectory(output);
+        if (args[0] == "startup-status")
+        {
+            Save(Path.Combine(output, "status.json"), new
+            {
+                persistent = WindowsPersistentStartup.GetStatus(),
+                startup = StartupService.GetStatus(),
+                elevated = WindowsProcessElevation.IsCurrentProcessElevated()
+            });
+            return 0;
+        }
         if (args[0] == "transport") return RelayThroughputProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
+        if (args[0] == "android-lock") return AndroidLockContinuityProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         var cursor = Cursor.Position;
         // Hardware Present correctly reports occlusion when the local monitor
         // sleeps. Hold only this test thread's display request, never change
@@ -28,7 +40,8 @@ internal static class Program
         uint previousExecutionState = SetThreadExecutionState(0x80000003);
         try
         {
-            if (args[0] == "host") Application.Run(new Target(c.Clone(), output));
+            if (args[0] == "ime") WindowsImeProbe.Run(c.Clone(), output);
+            else if (args[0] == "host") Application.Run(new Target(c.Clone(), output));
             else RunViewer(c.Clone(), output);
             return File.Exists(Path.Combine(output, "failure.txt")) ? 1 : 0;
         }
@@ -126,6 +139,8 @@ internal static class Program
                 var deadline = Stopwatch.StartNew();
                 while (frames < 10 && deadline.Elapsed.TotalSeconds < (relay == null ? 15 : 60)) await Task.Delay(100);
                 if (frames < 10) throw new Exception("No continuous remote frames");
+                if (c.TryGetProperty("inputDelaySeconds", out var inputDelay))
+                    await Task.Delay(TimeSpan.FromSeconds(Math.Clamp(inputDelay.GetDouble(), 0, 15)));
                 // Coordinates describe only the owned target, normalized to its
                 // actual physical screen; the product maps frame -> host input.
                 async Task Click(string key)

@@ -9,6 +9,14 @@ internal static class StartupService
 
     public static StartupRegistrationStatus GetStatus()
     {
+        PersistentStartupStatus persistent = WindowsPersistentStartup.GetStatus();
+        if (persistent.IsInstalled)
+        {
+            return persistent.IsEnabled
+                ? EvaluateRegistration(BuildRegistrationCommand(persistent.ExecutablePath!), Application.ExecutablePath)
+                    with { IsPersistent = true }
+                : StartupRegistrationStatus.Disabled with { IsPersistent = true };
+        }
         try
         {
             using RegistryKey? key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: false);
@@ -30,6 +38,16 @@ internal static class StartupService
     }
 
     public static void SetEnabled(bool enabled)
+    {
+        if (WindowsPersistentStartup.GetStatus().IsInstalled)
+        {
+            WindowsPersistentStartup.SetEnabled(enabled);
+            return;
+        }
+        SetRegistryEnabled(enabled);
+    }
+
+    internal static void SetRegistryEnabled(bool enabled)
     {
         using RegistryKey key = Registry.CurrentUser.CreateSubKey(RunKeyPath, writable: true)
             ?? throw new InvalidOperationException("无法打开当前用户开机启动注册表项。");
@@ -75,7 +93,7 @@ internal static class StartupService
         StartupRegistrationStatus status,
         Func<string, bool>? pathExists = null)
     {
-        if (!status.IsRegistered || status.TargetsCurrentExecutable)
+        if (!status.IsRegistered || status.TargetsCurrentExecutable || status.IsPersistent)
         {
             return false;
         }
@@ -140,6 +158,7 @@ internal readonly record struct StartupRegistrationStatus(
     bool TargetsCurrentExecutable,
     string? TargetExecutablePath)
 {
+    public bool IsPersistent { get; init; }
     public static StartupRegistrationStatus Disabled { get; } = new(
         IsRegistered: false,
         TargetsCurrentExecutable: false,

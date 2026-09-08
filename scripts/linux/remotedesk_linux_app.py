@@ -96,6 +96,7 @@ from remotedesk_protocol_probe import (
     validate_frame_dimensions,
     write_message,
 )
+import remotedesk_linux_startup as host_startup
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -4500,6 +4501,10 @@ class RemoteDeskLinuxApp:
         self.relay_refresh_generation = 0
         self.relay_refreshing = False
         self.relay_devices = {}
+        self.host_preferences = host_startup.HostPreferences()
+        self.host_resume_after_id = None
+        self.host_restart_attempt = 0
+        self.host_armed = False
 
         self._build_header(root)
         notebook = ttk.Notebook(root)
@@ -4507,8 +4512,9 @@ class RemoteDeskLinuxApp:
         self._build_host_tab(notebook)
         self._build_viewer_tab(notebook)
         self._build_relay_tab(notebook)
+        self._restore_host_preferences()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
-        self.root.after(EVENT_POLL_MS, self._poll_events)
+        self.event_poll_after_id = self.root.after(EVENT_POLL_MS, self._poll_events)
 
     def _build_relay_tab(self, notebook):
         tab = self._create_scrollable_tab(notebook, "公网中转")
@@ -4901,6 +4907,13 @@ class RemoteDeskLinuxApp:
             width=16,
         ).grid(row=7, column=1, sticky=tk.W, pady=6)
 
+        self.host_remember = tk.BooleanVar(value=True)
+        self.host_login_start = tk.BooleanVar(value=True)
+        ttk.Checkbutton(form, text="记住口令与被控状态（本机加密保存）", variable=self.host_remember,
+                        command=self._save_host_preferences).grid(row=8, column=0, columnspan=3, sticky=tk.W, pady=6)
+        ttk.Checkbutton(form, text="登录桌面后自动启动（需记住口令）", variable=self.host_login_start,
+                        command=self._save_host_preferences).grid(row=9, column=0, columnspan=3, sticky=tk.W, pady=6)
+
         buttons = ttk.Frame(tab, style="App.TFrame")
         buttons.pack(fill=tk.X, pady=(10, 6))
         self.start_host_button = ttk.Button(buttons, text="启动被控", command=self.start_host, style="Accent.TButton")
@@ -4916,7 +4929,7 @@ class RemoteDeskLinuxApp:
 
         self.host_status = ttk.Label(
             tab,
-            text="被控端默认关闭，请设置口令后手动启动。",
+            text="首次设置口令并启动后会记住被控状态；点击停止后不会自动恢复。",
             style="StatusCard.TLabel",
             justify=tk.LEFT,
         )
@@ -5058,12 +5071,58 @@ class RemoteDeskLinuxApp:
         if selected:
             variable.set(selected)
 
+    def _restore_host_preferences(self) -> None:
+        try:
+            values = self.host_preferences.load()
+            for name in ("password", "port", "receive_dir", "capture", "fps", "size", "machine_name", "remember", "login_start"):
+                if name in values:
+                    getattr(self, "host_" + name).set(values[name])
+            self.host_armed = bool(values.get("armed"))
+            if self.host_armed:
+                self.host_status.config(text="正在恢复上次开启的被控端…")
+                self.host_resume_after_id = self.root.after(350, self._resume_host)
+        except Exception:
+            self.host_armed = False
+            self.host_status.config(text="保存的口令或设置无法读取，未自动启动。请重新填写；不会使用默认口令。")
+
+    def _save_host_preferences(self) -> None:
+        if not hasattr(self, "host_preferences"):
+            return
+        try:
+            values = {name: getattr(self, "host_" + name).get()
+                      for name in ("port", "receive_dir", "capture", "fps", "size", "machine_name", "remember", "login_start")}
+            values["armed"] = bool(self.host_armed)
+            self.host_preferences.save(values, self.host_password.get().strip())
+            host_startup.set_login_start(bool(values["login_start"] and values["remember"]),
+                                         sys.executable, str(Path(__file__).resolve()))
+        except Exception:
+            self._append_host_log("# 无法保存被控状态或登录启动项，请检查配置目录权限；当前服务不受影响。\n")
+
+    def _resume_host(self) -> None:
+        self.host_resume_after_id = None
+        if not self.closing and self.host_armed:
+            self.start_host(auto=True)
+
+    def _retry_host_after_exit(self) -> None:
+        if not getattr(self, "host_armed", False) or self.closing:
+            return
+        if time.monotonic() - getattr(self, "host_started_at", 0) > 60:
+            self.host_restart_attempt = 0
+        attempts = getattr(self, "host_restart_attempt", 0)
+        if attempts >= 3:
+            self._append_host_log("# 被控端连续退出，已停止自动重试；请检查日志后手动启动。\n")
+            return
+        self.host_restart_attempt = attempts + 1
+        self.host_resume_after_id = self.root.after((1, 3, 10)[attempts] * 1000, self._resume_host)
+        self._append_host_log(f"# 被控端意外退出，安排第 {attempts + 1}/3 次恢复。\n")
+
     def start_host(self, auto: bool = False) -> None:
         if self.host_process is not None or self.host_stopping_generation is not None:
             return
         password = self.host_password.get().strip()
         if not password:
-            messagebox.showerror("RemoteDesk", "口令不能为空。")
+            if not auto:
+                messagebox.showerror("RemoteDesk", "口令不能为空。")
             return
         receive_dir = Path(self.host_receive_dir.get()).expanduser()
         try:
@@ -5129,6 +5188,11 @@ class RemoteDeskLinuxApp:
         self.host_generation += 1
         generation = self.host_generation
         self.host_process = process
+        self.host_armed = True
+        self.host_started_at = time.monotonic()
+        if not auto:
+            self.host_restart_attempt = 0
+        self._save_host_preferences()
         self.host_running_port = port
         self._sync_relay_registration()
         status_suffix = "（自动启动）" if auto else ""
@@ -5144,6 +5208,13 @@ class RemoteDeskLinuxApp:
         self.host_reader_thread.start()
 
     def stop_host(self) -> None:
+        if not getattr(self, "closing", False):
+            self.host_armed = False
+            self._save_host_preferences()
+        pending = getattr(self, "host_resume_after_id", None)
+        if pending is not None:
+            self.root.after_cancel(pending)
+            self.host_resume_after_id = None
         self._stop_relay_registration()
         process = self.host_process
         if process is None or self.host_stopping_generation is not None:
@@ -6333,6 +6404,7 @@ class RemoteDeskLinuxApp:
                 self.host_status.config(text=f"Host exited with code {code}.")
                 self.start_host_button.config(state=tk.NORMAL)
                 self.stop_host_button.config(state=tk.DISABLED)
+                self._retry_host_after_exit()
             elif event == "host_stop_completed":
                 if not isinstance(value, tuple) or len(value) != 4:
                     continue
@@ -6487,7 +6559,7 @@ class RemoteDeskLinuxApp:
             if not self.events.empty()
             else EVENT_POLL_MS
         )
-        self.root.after(next_poll_ms, self._poll_events)
+        self.event_poll_after_id = self.root.after(next_poll_ms, self._poll_events)
 
     def _append_host_log(self, text: str) -> None:
         self.host_log.insert(tk.END, text)
@@ -6582,6 +6654,10 @@ class RemoteDeskLinuxApp:
         if self.closing:
             return
         self.closing = True
+        pending_poll = getattr(self, "event_poll_after_id", None)
+        if pending_poll is not None:
+            self.root.after_cancel(pending_poll)
+            self.event_poll_after_id = None
         self.disconnect_viewer()
         self.stop_host()
         try:
@@ -6591,6 +6667,12 @@ class RemoteDeskLinuxApp:
 
 
 def main() -> int:
+    try:
+        instance = host_startup.AppInstance()
+    except BlockingIOError:
+        print("RemoteDesk 已在本用户会话中运行。", file=sys.stderr)
+        return 0
+    atexit.register(instance.close)
     root = tk.Tk(className="RemoteDesk")
     app = RemoteDeskLinuxApp(root)
     atexit.register(app.stop_host_at_exit)

@@ -186,6 +186,7 @@ public final class RemoteDeskViewerActivity extends Activity {
                 gestures.mode(!gestures.trackpad);
                 getPreferences(MODE_PRIVATE).edit().putBoolean("viewer.trackpad", gestures.trackpad).apply();
                 refreshInteraction();
+                toast(gestures.trackpad ? "触控板：滑动推动鼠标，轻触点击" : "直接触摸：点哪里，鼠标就到哪里并点击");
             }
             public void mouse(int button) {
                 if (inputReady(connectionOwner)) { gestureOwner = connectionOwner; gestures.click(button); refreshInteraction(); }
@@ -321,7 +322,7 @@ public final class RemoteDeskViewerActivity extends Activity {
                 else if (which == 2) setViewerFullscreen(true);
                 else if (which == 3) showOrientationOptions();
                 else if (which == 4) new android.app.AlertDialog.Builder(this).setTitle("手机远控手势")
-                    .setMessage("触控板：单指移动指针，轻触左键，连续轻触双击，长按后滑动拖拽。\n\n直接触摸：点哪里点哪里，单指滑动拖拽。\n\n双指轻触：右键；双指平行滑动：远端滚动；双指开合：只缩放本地画面，缩放中可平移。\n\n鼠标面板可锁定拖动，再点一次释放。失焦、切换模式和退出时会释放拖动。\n\n键盘：先点选远端输入框，使用手机输入法编辑后点发送；快捷键直接作用于远端。")
+                    .setMessage("触控板：单指滑动推动鼠标，不会跳到手指位置；轻触左键，连续轻触双击，长按后滑动拖拽。\n\n直接触摸：点哪里，鼠标就到哪里并点击；单指滑动拖拽。底部模式按钮可切换并记住选择。\n\n两种模式均支持双指平行上下滑动，让远端网页或列表滚动。触控板模式先把鼠标移到要滚动的区域。\n\n双指轻触：右键；双指开合：只缩放本地画面，缩放中可平移。\n\n鼠标面板可锁定拖动，再点一次释放。失焦、切换模式和退出时会释放拖动。\n\n键盘：先点选远端输入框，使用手机输入法编辑后点发送；快捷键直接作用于远端。")
                     .setPositiveButton("知道了", null).show();
                 else if (which == 5) showDiagnostics();
                 else confirmDisconnect();

@@ -29,13 +29,20 @@ public final class RemoteDeskForegroundService extends Service {
     static final String EXTRA_RESULT_DATA = "resultData";
     static final String EXTRA_PRESENCE_ONLY = "presenceOnly";
     static final String EXTRA_REFRESH_RELAY = "refreshRelay";
+    static final String EXTRA_REFRESH_POWER = "refreshPower";
+    static final String EXTRA_STOP = "stop";
+    static final String EXTRA_COMPATIBLE = "compatibleCapture";
+    static final String EXTRA_AUTO_RESUME = "automaticResume";
     static final String PREFS_NAME = "remotedesk-agent";
     static final String PREF_PASSWORD = "password";
+    static final String PREF_KEEP_SCREEN_AWAKE = "keepScreenAwake";
 
     private static final String CHANNEL_ID = "remotedesk-agent";
     private static final int NOTIFICATION_ID = 56565;
     private static volatile boolean serviceRunning;
     private static volatile boolean hostRunning;
+    private static volatile String lastStartFailure = "";
+    private static final AndroidProjectionState projectionState = new AndroidProjectionState();
 
     private final ExecutorService discoveryExecutor =
         Executors.newSingleThreadExecutor();
@@ -49,27 +56,71 @@ public final class RemoteDeskForegroundService extends Service {
     private WifiManager.MulticastLock multicastLock;
     private WifiManager.WifiLock streamingWifiLock;
     private PowerManager.WakeLock streamingWakeLock;
+    private final AndroidScreenAwakeController screenAwakeController =
+        new AndroidScreenAwakeController(this::createScreenWakeLock);
     private volatile boolean running;
-    private volatile long activeProjectionGeneration;
     private boolean discoveryResponderStarted;
 
     @Override
     public void onCreate() {
         super.onCreate();
         AndroidSessionLog.configure(this);
+        projectionState.reset();
         createNotificationChannel();
         hostServer = new RemoteDeskHostServer(this, AndroidScreenCaptureSession.getInstance());
+        Handler mainHandler = new Handler(Looper.getMainLooper());
+        hostServer.setSessionChangedListener(() -> mainHandler.post(() -> {
+            if (running) updateStreamingPower();
+        }));
         AndroidSessionLog.info("Foreground service created.");
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        return runStartSafely(() -> handleStartCommand(intent, startId), ex -> {
+            lastStartFailure = "被控启动被系统拒绝或暂不可用，请检查权限后重试；详情见诊断日志。";
+            AndroidSessionLog.error("Android host start failed without crashing the accessibility process.", ex);
+            hostRunning = false;
+            stopSelf(startId);
+        });
+    }
+
+    static int runStartSafely(java.util.function.IntSupplier start,
+        java.util.function.Consumer<RuntimeException> onFailure) {
+        try { return start.getAsInt(); }
+        catch (RuntimeException ex) {
+            onFailure.accept(ex);
+            return START_NOT_STICKY;
+        }
+    }
+
+    private int handleStartCommand(Intent intent, int startId) {
+        if (intent != null && intent.getBooleanExtra(EXTRA_STOP, false)) {
+            AndroidHostResume.setArmed(this, false);
+            lastStartFailure = "";
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        // Recheck persisted user intent when the queued start is delivered. A resume
+        // posted before the user pressed Stop must not silently re-arm the host.
+        boolean automatic = intent == null || intent.getBooleanExtra(EXTRA_AUTO_RESUME, false);
+        if (shouldRejectAutomaticStart(automatic, AndroidHostResume.shouldResume(this))) {
+            if (!running) stopSelf(startId);
+            return activeRestartMode();
+        }
+        if (intent != null && intent.getBooleanExtra(EXTRA_REFRESH_POWER, false)) {
+            updateStreamingPower();
+            if (!running) stopSelf(startId);
+            return activeRestartMode();
+        }
         if (intent != null && intent.getBooleanExtra(EXTRA_REFRESH_RELAY, false)) {
             refreshRelayRegistration();
             if (!running) stopSelf(startId);
-            return START_NOT_STICKY;
+            return activeRestartMode();
         }
         boolean presenceOnly = intent != null && intent.getBooleanExtra(EXTRA_PRESENCE_ONLY, false);
+        boolean compatible = intent == null ? AndroidHostResume.shouldResume(this)
+            : intent.getBooleanExtra(EXTRA_COMPATIBLE, false);
         int resultCode = intent != null ? intent.getIntExtra(EXTRA_RESULT_CODE, 0) : 0;
         Intent resultData = getProjectionData(intent);
         String password = AndroidPasswordStore.load(this);
@@ -84,7 +135,7 @@ public final class RemoteDeskForegroundService extends Service {
                 hostRunning = true;
                 updateNotification();
                 AndroidSessionLog.info("Presence start ignored because host is already running.");
-                return START_NOT_STICKY;
+                return activeRestartMode();
             }
 
             startForegroundCompat(false);
@@ -99,53 +150,63 @@ public final class RemoteDeskForegroundService extends Service {
             return START_NOT_STICKY;
         }
 
-        if (!AndroidScreenCaptureSession.getInstance().hasProjectionGrant() ||
+        if ((compatible ? !RemoteDeskAccessibilityService.canCaptureScreen()
+                : !AndroidScreenCaptureSession.getInstance().hasProjectionGrant()) ||
             password == null ||
             password.trim().isEmpty()) {
             AndroidSessionLog.info("Host start rejected: screen capture grant or password is missing.");
+            lastStartFailure = "被控未启动：缺少可用的截图权限或连接口令。";
             stopSelf(startId);
             return START_NOT_STICKY;
         }
 
-        startForegroundCompat(true);
+        startForegroundCompat(!compatible);
         running = true;
         serviceRunning = true;
         acquireMulticastLock();
-        acquireStreamingLocks();
         MainActivity.stopDiscoveryPreviewAndWait();
         startDiscoveryResponder();
 
         AndroidScreenCaptureSession captureSession =
             AndroidScreenCaptureSession.getInstance();
-        if (!captureSession.start(
-                this,
-                this::onProjectionStopped)) {
+        boolean captureStarted = compatible ? captureSession.startAccessibility(this)
+            : captureSession.start(this, this::onProjectionStopped);
+        if (!captureStarted) {
             AndroidSessionLog.info("Host start failed: screen capture session could not start.");
+            lastStartFailure = "截图服务未能启动，请检查权限后重试。";
             stopSelf(startId);
             return START_NOT_STICKY;
         }
-        activeProjectionGeneration = captureSession.getProjectionGeneration();
+        if (compatible) projectionState.reset();
+        else projectionState.started(captureSession.getProjectionGeneration());
 
         try {
+            boolean alreadyListening = hostServer.isRunning();
             hostServer.start(password);
             hostRunning = true;
-            refreshRelayRegistration();
+            lastStartFailure = "";
+            AndroidHostResume.setArmed(this, compatible);
+            updateStreamingPower();
+            // Duplicate Activity/accessibility resume requests must not tear down an
+            // established relay session. Configuration changes have their own action.
+            if (!alreadyListening) refreshRelayRegistration();
             updateNotification();
             AndroidSessionLog.info("Host server started on port " + RemoteDeskProtocol.HOST_PORT + ".");
         } catch (Exception ignored) {
             AndroidSessionLog.error("Host server failed to start.", ignored);
+            lastStartFailure = "被控监听未能启动，请检查端口占用或查看诊断日志。";
             stopSelf(startId);
             return START_NOT_STICKY;
         }
 
-        return START_NOT_STICKY;
+        return compatible ? START_STICKY : START_NOT_STICKY;
     }
 
     @Override
     public void onDestroy() {
         AndroidSessionLog.info("Foreground service destroying.");
         running = false;
-        activeProjectionGeneration = 0L;
+        projectionState.reset();
         serviceRunning = false;
         hostRunning = false;
         stopRelayRegistration();
@@ -171,8 +232,28 @@ public final class RemoteDeskForegroundService extends Service {
         return serviceRunning;
     }
 
+    private int activeRestartMode() {
+        return hostRunning && AndroidScreenCaptureSession.getInstance().isAccessibilityCapture()
+            ? START_STICKY : START_NOT_STICKY;
+    }
+
+    static boolean shouldRejectAutomaticStart(boolean automatic, boolean resumeAllowed) {
+        return automatic && !resumeAllowed;
+    }
+
     static boolean isHostRunning() {
         return hostRunning;
+    }
+
+    static String getLastStartFailure() { return lastStartFailure; }
+
+    static boolean isCapturePaused() {
+        return projectionState.isPaused();
+    }
+
+    static boolean shouldKeepScreenAwake(Context context) {
+        return context.getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getBoolean(PREF_KEEP_SCREEN_AWAKE, true);
     }
 
     static String getRelayStatus() { return relayStatus; }
@@ -202,24 +283,27 @@ public final class RemoteDeskForegroundService extends Service {
 
     private void onProjectionStopped(long projectionGeneration) {
         new Handler(Looper.getMainLooper()).post(() -> {
-            long activeGeneration = activeProjectionGeneration;
-            if (!running ||
-                projectionGeneration == 0L ||
-                projectionGeneration != activeGeneration) {
+            if (!running || !projectionState.stopped(projectionGeneration)) {
                 return;
             }
 
-            activeProjectionGeneration = 0L;
             AndroidSessionLog.info(
-                "MediaProjection stopped; closing the active host session.");
+                "MediaProjection stopped; closing the host and retaining discovery for reauthorization.");
             hostRunning = false;
             stopRelayRegistration();
             if (hostServer != null) {
                 hostServer.stop();
             }
             releaseStreamingLocks();
-            updateNotification();
-            stopSelf();
+            try {
+                // A locked device invalidates its projection grant on recent Android.
+                // Keep presence only; never reuse the revoked token or claim the screen is online.
+                startForegroundCompat(false);
+                updateNotification();
+            } catch (RuntimeException ex) {
+                AndroidSessionLog.error("Could not retain discovery after screen capture stopped.", ex);
+                stopSelf();
+            }
         });
     }
 
@@ -363,7 +447,8 @@ public final class RemoteDeskForegroundService extends Service {
         response.put("Type", RemoteDeskProtocol.DISCOVERY_RESPONSE_TYPE);
         response.put("MachineName", AndroidDeviceNames.displayName());
         response.put("Port", RemoteDeskProtocol.HOST_PORT);
-        response.put("CaptureTarget", activeHost ? RemoteDeskProtocol.CAPTURE_TARGET_NAME : "Android App 常驻，等待录屏授权");
+        response.put("CaptureTarget", activeHost ? RemoteDeskProtocol.CAPTURE_TARGET_NAME
+            : isCapturePaused() ? "录屏已停止，请在手机上重新授权" : "Android App 常驻，等待录屏授权");
         response.put("IsHostRunning", activeHost);
         response.put("CanRemoteStart", false);
         response.put("Platform", RemoteDeskProtocol.PLATFORM_ANDROID);
@@ -377,13 +462,22 @@ public final class RemoteDeskForegroundService extends Service {
         Notification.Builder builder = new Notification.Builder(this, CHANNEL_ID);
 
         String status = hostServer != null && hostServer.isRunning()
-            ? "正在监听 56565，可被局域网连接"
-            : "发现常驻中，等待屏幕录制授权";
+            ? AndroidScreenCaptureSession.getInstance().isAccessibilityCapture()
+                ? "兼容被控运行中 · 锁屏后仍可连接 · 56565"
+                : "正在监听 56565，可被局域网连接"
+            : isCapturePaused() ? "录屏已停止，解锁后点此重新授权" : "发现常驻中，等待屏幕录制授权";
         return builder
             .setContentTitle("RemoteDesk Agent")
             .setContentText(status)
             .setSmallIcon(android.R.drawable.presence_online)
             .setContentIntent(createContentIntent())
+            .addAction(new Notification.Action.Builder(
+                android.graphics.drawable.Icon.createWithResource(
+                    this, android.R.drawable.ic_menu_close_clear_cancel),
+                "停止服务",
+                PendingIntent.getService(this, 1,
+                    new Intent(this, RemoteDeskForegroundService.class).putExtra(EXTRA_STOP, true),
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE)).build())
             .setOngoing(true)
             .build();
     }
@@ -456,16 +550,57 @@ public final class RemoteDeskForegroundService extends Service {
             return;
         }
 
-        if (multicastLock.isHeld()) {
-            multicastLock.release();
-        }
-
+        WifiManager.MulticastLock previous = multicastLock;
         multicastLock = null;
+        try {
+            if (previous.isHeld()) previous.release();
+        } catch (RuntimeException ignored) {
+            // A revoked permission / dead system service must not crash teardown.
+        }
     }
 
     private void acquireStreamingLocks() {
         acquireStreamingWifiLock();
         acquireStreamingWakeLock();
+    }
+
+    static boolean shouldHoldStreamingPower(boolean listening, boolean authenticatedSession) {
+        return listening && authenticatedSession;
+    }
+
+    private void updateStreamingPower() {
+        boolean active = shouldHoldStreamingPower(hostRunning,
+            hostServer != null && hostServer.hasAuthenticatedSession());
+        if (active) acquireStreamingLocks();
+        else releaseStreamingLocks();
+        try {
+            // A listener is not a stream. Oplus/realme can forcibly stop an idle app
+            // holding a screen lock for ~30 minutes, and clear its accessibility grant.
+            screenAwakeController.setEnabled(active && shouldKeepScreenAwake(this));
+        } catch (RuntimeException ex) {
+            AndroidSessionLog.error("Could not keep the shared screen awake.", ex);
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private AndroidScreenAwakeController.ScreenLock createScreenWakeLock() {
+        PowerManager manager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (manager == null) throw new IllegalStateException("Power manager unavailable");
+        // FLAG_KEEP_SCREEN_ON only works while an Activity is visible. The host returns
+        // to the launcher, so use an app-scoped dim screen lock for the approved session.
+        // No ACQUIRE_CAUSES_WAKEUP: starting a session must not unlock/wake a locked phone.
+        PowerManager.WakeLock wakeLock = manager.newWakeLock(
+            PowerManager.SCREEN_DIM_WAKE_LOCK, "RemoteDesk:SharedScreen");
+        wakeLock.setReferenceCounted(false);
+        return new AndroidScreenAwakeController.ScreenLock() {
+            @Override
+            @SuppressLint("WakelockTimeout")
+            public void acquire() { wakeLock.acquire(); }
+            @Override
+            public void release() { wakeLock.release(); }
+            @Override
+            public boolean isHeld() { return wakeLock.isHeld(); }
+        };
     }
 
     private void acquireStreamingWifiLock() {
@@ -515,6 +650,7 @@ public final class RemoteDeskForegroundService extends Service {
     }
 
     private void releaseStreamingLocks() {
+        screenAwakeController.close();
         if (streamingWifiLock != null) {
             try {
                 if (streamingWifiLock.isHeld()) {

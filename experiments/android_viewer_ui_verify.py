@@ -21,12 +21,14 @@ def main():
     parser.add_argument("--serial", required=True)
     parser.add_argument("--server", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--suite", choices=("standard","edges","all"), default="standard")
+    parser.add_argument("--suite", choices=("standard","edges","all","fullscreen"), default="standard",
+                        help="fullscreen resumes the final checks with the probe already in fullscreen")
     parser.add_argument("--record-failures", action="store_true", help="Collect assertion failures for a before-fix baseline; still stop on UI/transport errors")
     args = parser.parse_args()
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=False)
-    report = {"scope": "physical Android UI, actual viewer code, encrypted synthetic TCP peer; no remote OS input", "checks": []}
+    device_kind = "Android emulator" if args.serial.startswith("emulator-") else "physical Android device"
+    report = {"scope": device_kind + " UI, actual viewer code, encrypted synthetic TCP peer; no remote OS input", "checks": []}
 
     def adb(*command, binary=False):
         value = subprocess.run([args.adb, "-s", args.serial, *map(str, command)], capture_output=True, timeout=25, check=True)
@@ -89,6 +91,31 @@ def main():
     def ui():
         adb("shell", "uiautomator", "dump", "/data/local/tmp/remotedesk-test-ui.xml")
         data = ET.fromstring(adb("shell", "cat", "/data/local/tmp/remotedesk-test-ui.xml"))
+        # Fresh devices can show an OS tutorial on first immersive entry.
+        # Acknowledge only that identified tutorial, never a generic OK or a
+        # permission dialog, and only while this test activity owns app focus.
+        nodes = list(data.iter("node"))
+        intro = [n for n in nodes if n.get("package") in ("android", "com.android.systemui") and
+                 n.get("resource-id") == n.get("package") + ":id/immersive_cling_title"]
+        intro_package = intro[0].get("package") if len(intro) == 1 else None
+        okay = [n for n in nodes if intro_package and n.get("package") == intro_package and
+                n.get("resource-id") == intro_package + ":id/ok" and n.get("enabled") == "true"]
+        if len(intro) == 1 and len(okay) == 1:
+            windows = adb("shell", "dumpsys", "window", "windows")
+            focused = next((line for line in windows.splitlines() if "mFocusedApp=" in line), "")
+            if not focused:
+                displays = adb("shell", "dumpsys", "window", "displays")
+                focused = next((line for line in displays.splitlines() if "mFocusedApp=" in line), "")
+            if PACKAGE not in focused or "ImmersiveModeConfirmation" not in windows:
+                raise RuntimeError("Fullscreen tutorial does not belong to the focused probe")
+            bounds = list(map(int, re.findall(r"\d+", okay[0].get("bounds", ""))))
+            if len(bounds) != 4 or bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+                raise RuntimeError("Fullscreen tutorial button has no visible bounds")
+            adb("shell", "input", "tap", (bounds[0]+bounds[2])//2, (bounds[1]+bounds[3])//2)
+            report["systemFullscreenTutorialAcknowledged"] = True
+            time.sleep(.4)
+            adb("shell", "uiautomator", "dump", "/data/local/tmp/remotedesk-test-ui.xml")
+            data = ET.fromstring(adb("shell", "cat", "/data/local/tmp/remotedesk-test-ui.xml"))
         if not any(n.get("package") == PACKAGE for n in data.iter("node")):
             raise RuntimeError("Probe UI not foreground; refusing to tap another app")
         return [n for n in data.iter("node") if n.get("package") == PACKAGE]
@@ -113,7 +140,25 @@ def main():
         x1,y1,x2,y2 = state()["viewport"]
         adb("shell", "input", "swipe", (x1+x2)//2-100, (y1+y2)//2, (x1+x2)//2+180, (y1+y2)//2+10, 300)
 
+    def fullscreen_checks(session, already_fullscreen=False):
+        if not already_fullscreen:
+            tap("更多"); tap("全屏显示")
+        check("Fullscreen retains toolbar restore control", any(n.get("text") == "工具栏" for n in ui()))
+        photo("fullscreen")
+        tap("工具栏")
+        adb("shell", "input", "keyevent", 4)
+        check("Back asks before disconnecting", any(n.get("text") == "断开远程连接？" for n in ui()))
+        tap("继续控制")
+        check("UI operations preserve the TCP session", server()["sessions"] == session, {"start":session,"end":server()["sessions"]})
+        action("portrait"); photo("final-portrait")
+        tap("键盘"); keyboard = wait(lambda s: s["keyboard"] and s["imeInset"] > 0)
+        check("Portrait keyboard preserves a visible desktop", keyboard["viewport"][3]-keyboard["viewport"][1] >= 64*keyboard["density"], keyboard["viewport"])
+        photo("keyboard-portrait"); tap("收起")
+
     try:
+        if args.suite == "fullscreen":
+            fullscreen_checks(server()["sessions"], already_fullscreen=True)
+            assert_finished(); return
         action("portrait")
         first = wait(lambda s: s["h264"] and "FPS 0.0" not in s["health"] and s["viewport"][2] < s["viewport"][3])
         if args.suite in ("edges","all"):
@@ -225,17 +270,7 @@ def main():
         h264 = wait(lambda s: s["h264"] and "已启用" in s["status"])
         check("Same-size H264 screen change presents again", h264["frame"] == [1920,1080], h264["health"])
 
-        tap("更多"); tap("全屏显示"); photo("fullscreen")
-        check("Fullscreen retains toolbar restore control", any(n.get("text") == "工具栏" for n in ui()))
-        tap("工具栏")
-        adb("shell", "input", "keyevent", 4)
-        check("Back asks before disconnecting", any(n.get("text") == "断开远程连接？" for n in ui()))
-        tap("继续控制")
-        check("UI operations preserve the TCP session", server()["sessions"] == session, {"start":session,"end":server()["sessions"]})
-        action("portrait"); photo("final-portrait")
-        tap("键盘"); keyboard = wait(lambda s: s["keyboard"] and s["imeInset"] > 0)
-        check("Portrait keyboard preserves a visible desktop", keyboard["viewport"][3]-keyboard["viewport"][1] >= 64*keyboard["density"], keyboard["viewport"])
-        photo("keyboard-portrait"); tap("收起")
+        fullscreen_checks(session)
         assert_finished()
     finally:
         report["server"] = server()

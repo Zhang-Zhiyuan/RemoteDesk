@@ -28,6 +28,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -261,6 +262,42 @@ public final class MainActivity extends Activity {
                 this,
                 "录屏授权时请选择“整个屏幕”。启动成功后自动返回桌面；无障碍权限用于远程触控与文本输入。"));
         addLabeledField(connectionColumn, "本机访问口令", passwordEdit);
+        CheckBox compatibleHost = new CheckBox(this);
+        compatibleHost.setText("免重复录屏授权（无障碍兼容模式）");
+        compatibleHost.setChecked(AndroidHostResume.compatibleSelected(this));
+        compatibleHost.setEnabled(Build.VERSION.SDK_INT >= 30);
+        compatibleHost.setOnCheckedChangeListener((button, checked) -> {
+            if (RemoteDeskForegroundService.isHostRunning() && checked != AndroidHostResume.compatibleSelected(this)) {
+                compatibleHost.setChecked(!checked);
+                Toast.makeText(this, "请先停止被控，再切换模式。", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            getSharedPreferences(RemoteDeskForegroundService.PREFS_NAME, MODE_PRIVATE)
+                .edit().putBoolean(AndroidHostResume.PREF_COMPATIBLE, checked).apply();
+            if (!checked) AndroidHostResume.setArmed(this, false);
+        });
+        addColumnView(connectionColumn, compatibleHost);
+        addColumnView(connectionColumn, AndroidUiTheme.createSectionSubtitle(this,
+            "Android 11 及以上可用。开启无障碍后不再弹录屏授权，锁屏后仍可连接，约 3 FPS；系统保护的内容除外。关闭此项使用 H.264 流畅模式。"));
+        Button unlockPinButton = new Button(this);
+        unlockPinButton.setText("设置 / 清除自动解锁 PIN");
+        AndroidUiTheme.styleButton(this, unlockPinButton, AndroidUiTheme.ButtonRole.SECONDARY);
+        unlockPinButton.setOnClickListener(view -> configureUnlockPin());
+        addColumnView(connectionColumn, unlockPinButton);
+        CheckBox keepScreenAwake = new CheckBox(this);
+        keepScreenAwake.setText("远控连接期间保持屏幕亮起");
+        keepScreenAwake.setChecked(RemoteDeskForegroundService.shouldKeepScreenAwake(this));
+        keepScreenAwake.setOnCheckedChangeListener((button, checked) -> {
+            getSharedPreferences(RemoteDeskForegroundService.PREFS_NAME, MODE_PRIVATE)
+                .edit().putBoolean(RemoteDeskForegroundService.PREF_KEEP_SCREEN_AWAKE, checked).apply();
+            if (RemoteDeskForegroundService.isServiceRunning()) {
+                startService(new Intent(this, RemoteDeskForegroundService.class)
+                    .putExtra(RemoteDeskForegroundService.EXTRA_REFRESH_POWER, true));
+            }
+        });
+        addColumnView(connectionColumn, keepScreenAwake);
+        addColumnView(connectionColumn, AndroidUiTheme.createSectionSubtitle(this,
+            "无人连接时释放亮屏和性能锁，降低耗电及系统清理风险。兼容模式不依赖录屏授权；H.264 在锁屏后可能需要重新授权。"));
         addColumnView(connectionColumn, startHostButton);
         addColumnView(connectionColumn, returnToDesktopButton);
         addColumnView(connectionColumn, AndroidUiTheme.createSectionSubtitle(this,
@@ -346,12 +383,17 @@ public final class MainActivity extends Activity {
 
         restoreMainUiState(savedInstanceState);
 
-        if (Build.VERSION.SDK_INT >= 33) {
+        if (Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+                !getSharedPreferences(RemoteDeskForegroundService.PREFS_NAME, MODE_PRIVATE)
+                    .getBoolean("notification.requested", false)) {
+            getSharedPreferences(RemoteDeskForegroundService.PREFS_NAME, MODE_PRIVATE)
+                .edit().putBoolean("notification.requested", true).apply();
             requestPermissions(new String[] { Manifest.permission.POST_NOTIFICATIONS }, 1002);
         }
 
         startDiscoveryPreview();
-        updateStatusPanel("已打开，可被局域网扫描\n等待屏幕录制授权");
+        updateStatusPanel(currentHeadline());
     }
 
     private int dp(float value) {
@@ -575,13 +617,14 @@ public final class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         activityResumed = true;
+        AndroidHostResume.tryResume(this);
         if (relayPanel != null) relayPanel.active(true);
         if (RemoteDeskForegroundService.isServiceRunning()) {
             stopDiscoveryPreviewAndWait();
             updateStatusPanel(currentHeadline());
         } else {
             startDiscoveryPreview();
-            updateStatusPanel("已打开，可被局域网扫描\n等待屏幕录制授权");
+            updateStatusPanel(currentHeadline());
         }
         if (hostLaunchPolicy.isPending()) {
             statusView.removeCallbacks(hostStartupCheck);
@@ -639,6 +682,21 @@ public final class MainActivity extends Activity {
             return;
         }
 
+        if (AndroidHostResume.compatibleSelected(this)) {
+            if (!RemoteDeskAccessibilityService.canCaptureScreen()) {
+                updateStatusPanel("请启用 RemoteDesk 无障碍权限；更新后如仍不可用，请在系统设置中关闭再开启一次。");
+                openAccessibilitySettings();
+                return;
+            }
+            if (startRemoteDeskService(new Intent(this, RemoteDeskForegroundService.class)
+                    .putExtra(RemoteDeskForegroundService.EXTRA_COMPATIBLE, true), "正在启动兼容被控...")) {
+                hostLaunchPolicy.begin(SystemClock.elapsedRealtime());
+                startHostButton.setEnabled(false);
+                statusView.post(hostStartupCheck);
+            }
+            return;
+        }
+
         updateStatusPanel("正在请求屏幕录制授权...");
         try {
             Intent captureIntent = Build.VERSION.SDK_INT >= 34
@@ -651,6 +709,65 @@ public final class MainActivity extends Activity {
             AndroidSessionLog.error("Failed to request screen capture permission.", ex);
             updateStatusPanel("请求屏幕录制授权失败：" + formatExceptionMessage(ex));
         }
+    }
+
+    private void configureUnlockPin() {
+        if (AndroidRemoteUnlock.isLocked(this)) {
+            updateStatusPanel("请先在手机上解锁，再设置或清除 PIN。");
+            return;
+        }
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(24), dp(8), dp(24), dp(8));
+        content.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
+        TextView notice = new TextView(this);
+        notice.setText((AndroidPasswordStore.hasUnlockPin(this) ? "已加密保存 PIN，不会回显。\n" : "尚未保存 PIN。\n") +
+            "可选：仅保存在这台手机的 Android Keystore 加密存储中。通过 RemoteDesk 连接口令验证的人可以用它解锁手机。\n" +
+            "只支持数字 PIN，失败后不自动重试；更改手机 PIN 后也请更新这里。重启后的首次解锁仍需在手机上完成。留空不修改已保存的 PIN。");
+        content.addView(notice);
+        EditText pin = new EditText(this);
+        EditText confirm = new EditText(this);
+        for (EditText field : new EditText[] {pin, confirm}) {
+            field.setSaveEnabled(false);
+            field.setSingleLine(true);
+            field.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+            field.setTransformationMethod(android.text.method.PasswordTransformationMethod.getInstance());
+            field.setFilters(new android.text.InputFilter[] {new android.text.InputFilter.LengthFilter(16)});
+            content.addView(field);
+        }
+        pin.setHint("手机锁屏 PIN");
+        confirm.setHint("再次输入 PIN");
+        AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle("自动解锁（可选）").setView(content)
+            .setNegativeButton("取消", null)
+            .setNeutralButton("清除已保存 PIN", (ignored, which) -> {
+                try {
+                    RemoteDeskAccessibilityService.cancelRemoteUnlock();
+                    AndroidPasswordStore.saveUnlockPin(this, "");
+                    AndroidRemoteUnlock.setAttemptBlocked(this, false);
+                    updateStatusPanel("已清除自动解锁 PIN");
+                } catch (Exception ex) { updateStatusPanel("PIN 清除失败，请重试。"); }
+            })
+            .setPositiveButton("加密保存", null).create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+            if (AndroidRemoteUnlock.isLocked(this)) { dialog.dismiss(); return; }
+            String value = pin.getText().toString();
+            if (value.isEmpty() && confirm.getText().length() == 0) { dialog.dismiss(); return; }
+            if (!AndroidPinUnlockPolicy.validPin(value) || !value.equals(confirm.getText().toString())) {
+                pin.setError("请两次输入相同的 4 至 16 位数字 PIN");
+                return;
+            }
+            try {
+                RemoteDeskAccessibilityService.cancelRemoteUnlock();
+                AndroidPasswordStore.saveUnlockPin(this, value);
+                AndroidRemoteUnlock.setAttemptBlocked(this, false);
+                dialog.dismiss();
+                updateStatusPanel("PIN 已加密保存在本机；仅认证成功的连接可尝试解锁。");
+            } catch (Exception ex) { pin.setError("加密保存失败，请重试"); }
+        }));
+        dialog.setOnDismissListener(ignored -> { pin.setText(""); confirm.setText(""); });
+        if (dialog.getWindow() != null) dialog.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
+        dialog.show();
     }
 
     private void startPresenceService() {
@@ -761,7 +878,7 @@ public final class MainActivity extends Activity {
         if (RemoteDeskForegroundService.isHostRunning()) {
             new AlertDialog.Builder(this)
                 .setTitle("停止被控服务？")
-                .setMessage("这会断开正在连接的控制端。再次被控需要重新授权屏幕共享。仅返回桌面请使用“返回桌面，保持被控”。")
+                .setMessage("这会断开控制端并关闭自动恢复。再次启动兼容模式无需重复录屏授权；H.264 模式需要重新授权。")
                 .setNegativeButton("取消", null)
                 .setPositiveButton("停止服务", (dialog, which) -> stopRemoteDeskService())
                 .show();
@@ -772,6 +889,7 @@ public final class MainActivity extends Activity {
 
     private void stopRemoteDeskService() {
         cancelHostStartupNavigation();
+        AndroidHostResume.setArmed(this, false);
         stopService(new Intent(this, RemoteDeskForegroundService.class));
         startDiscoveryPreview();
         updateStatusPanel("已请求停止服务");
@@ -945,7 +1063,7 @@ public final class MainActivity extends Activity {
         response.put("Type", RemoteDeskProtocol.DISCOVERY_RESPONSE_TYPE);
         response.put("MachineName", AndroidDeviceNames.displayName());
         response.put("Port", RemoteDeskProtocol.HOST_PORT);
-        response.put("CaptureTarget", "Android App 已打开，等待录屏授权");
+        response.put("CaptureTarget", "Android App 已打开，请启动被控端");
         response.put("IsHostRunning", false);
         response.put("CanRemoteStart", false);
         response.put("Platform", RemoteDeskProtocol.PLATFORM_ANDROID);
@@ -1120,20 +1238,39 @@ public final class MainActivity extends Activity {
         AndroidUiTheme.applyStatusBanner(this, statusView, headline);
         readinessView.setText(localStatusText());
         boolean hostRunning = RemoteDeskForegroundService.isHostRunning();
-        if (startHostButton != null) startHostButton.setEnabled(!hostRunning && !hostLaunchPolicy.isPending());
+        if (startHostButton != null) {
+            startHostButton.setEnabled(!hostRunning && !hostLaunchPolicy.isPending());
+            startHostButton.setText(RemoteDeskForegroundService.isCapturePaused()
+                ? "重新授权，恢复被控" : "启动被控端");
+        }
         if (returnToDesktopButton != null) returnToDesktopButton.setEnabled(hostRunning);
     }
 
     private String currentHeadline() {
         if (RemoteDeskForegroundService.isHostRunning()) {
+            if (AndroidScreenCaptureSession.getInstance().isAccessibilityCapture()) {
+                return "免重复授权被控正在运行\n" + AndroidScreenCaptureSession.getInstance().captureStatus();
+            }
             return "被控端正在运行\n若远端看到黑屏，请返回手机桌面；口令页可能被系统录屏保护遮蔽。";
         }
 
+        String startFailure = RemoteDeskForegroundService.getLastStartFailure();
+        if (!startFailure.isEmpty()) return startFailure;
+
+        if (AndroidHostResume.compatibleSelected(this) && !RemoteDeskAccessibilityService.canCaptureScreen()) {
+            return "无障碍截图服务未连接\n如系统开关已开启，请关闭后重新开启，再启动被控。";
+        }
+
         if (RemoteDeskForegroundService.isServiceRunning()) {
+            if (RemoteDeskForegroundService.isCapturePaused()) {
+                return "屏幕录制已停止\n锁屏或系统停止共享后，需要在手机上重新授权；设备发现仍在运行。";
+            }
             return "发现常驻中";
         }
 
-        return "已打开，可被局域网扫描\n等待屏幕录制授权";
+        return AndroidHostResume.compatibleSelected(this)
+            ? "已打开，可被局域网扫描\n点击启动兼容被控，无需录屏授权"
+            : "已打开，可被局域网扫描\n等待屏幕录制授权";
     }
 
     private String localStatusText() {
@@ -1143,16 +1280,20 @@ public final class MainActivity extends Activity {
         boolean serviceRunning = RemoteDeskForegroundService.isServiceRunning();
         boolean hostRunning = RemoteDeskForegroundService.isHostRunning();
         boolean projectionGranted = AndroidScreenCaptureSession.getInstance().hasProjectionGrant();
+        boolean compatible = AndroidHostResume.compatibleSelected(this);
         String discoveryStatus = hostRunning
             ? "正在广播完整被控能力"
             : serviceRunning
             ? "正在常驻广播 App 已打开，需在手机上启动被控端"
             : "仅广播 App 已打开，启动被控端后才能连接屏幕";
-        String projectionStatus = hostRunning && projectionGranted
+        String projectionStatus = hostRunning && AndroidScreenCaptureSession.getInstance().isAccessibilityCapture()
+            ? "无障碍兼容模式，无需重复录屏授权"
+            : hostRunning && projectionGranted
             ? "已授权并运行"
-            : "启动被控端时会请求";
+            : RemoteDeskForegroundService.isCapturePaused()
+            ? "已停止，请重新授权" : compatible ? "使用无障碍截图，无需录屏授权" : "启动被控端时会请求";
         String capabilitiesStatus = hostRunning
-            ? "屏幕观看、H.264/JPEG、剪贴板文本、文件接收" + (inputEnabled ? "、输入控制、聚焦文本输入" : "")
+            ? "屏幕观看、" + (compatible ? "JPEG 兼容截图" : "H.264/JPEG") + "、剪贴板文本、文件接收" + (inputEnabled ? "、输入控制、聚焦文本输入" : "")
             : "待启动被控端后提供屏幕观看、剪贴板和文件接收";
         String notificationStatus = notificationPermissionStatus();
         String batteryOptimizationStatus = AndroidBatteryOptimization.formatStatus(
@@ -1179,7 +1320,9 @@ public final class MainActivity extends Activity {
         boolean inputEnabled = AndroidInputInjector.isEnabled();
         boolean hostRunning = RemoteDeskForegroundService.isHostRunning();
         boolean projectionGranted = AndroidScreenCaptureSession.getInstance().hasProjectionGrant();
-        String projectionStatus = hostRunning && projectionGranted
+        String projectionStatus = AndroidHostResume.compatibleSelected(this)
+            ? "无障碍兼容模式，无需录屏授权"
+            : hostRunning && projectionGranted
             ? "已授权并运行"
             : "启动被控端时会请求";
         String h264Status = AndroidVideoCodecDiagnostics.formatH264Status(

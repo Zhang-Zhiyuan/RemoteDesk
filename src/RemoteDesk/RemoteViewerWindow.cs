@@ -290,7 +290,10 @@ internal sealed class RemoteViewerWindow : Form
             BackColor = Color.Black,
             SizeMode = PictureBoxSizeMode.Zoom,
             TabStop = true,
-            Cursor = inputEnabled ? Cursors.Default : Cursors.No
+            Cursor = inputEnabled ? Cursors.Default : Cursors.No,
+            LocalImeEnabled = isAndroidRemote && inputEnabled,
+            ReadInputGeneration = () => _client.InputConnectionGeneration,
+            TextCommitted = SendCommittedAndroidText
         };
 
         _statusBar = new StatusBarControl
@@ -1385,6 +1388,7 @@ internal sealed class RemoteViewerWindow : Form
         if (!_pictureBox.IsDisposed)
         {
             _pictureBox.Cursor = enabled ? Cursors.Default : Cursors.No;
+            _pictureBox.LocalImeEnabled = _isAndroidRemote && enabled;
         }
 
         UpdateRemoteInputMethodControls();
@@ -1927,6 +1931,7 @@ internal sealed class RemoteViewerWindow : Form
             normalizedPlatform,
             RemoteDevicePlatforms.Windows,
             StringComparison.OrdinalIgnoreCase);
+        _pictureBox.LocalImeEnabled = _isAndroidRemote && _inputEnabled;
         if (_isAndroidRemote)
         {
             CancelRemoteDragOut(status: null, cancelTransfer: true);
@@ -6548,6 +6553,13 @@ internal sealed class RemoteViewerWindow : Form
             return;
         }
 
+        if (_isAndroidRemote && IsLocalImeKey(args.KeyCode, _pictureBox.IsImeComposing))
+        {
+            // The local IME owns pre-edit keys, candidate selection and Enter.
+            // Only its committed result is sent to the phone.
+            return;
+        }
+
         if (_isAndroidRemote && IsPasteShortcut(args))
         {
             args.SuppressKeyPress = true;
@@ -6609,9 +6621,9 @@ internal sealed class RemoteViewerWindow : Form
             return;
         }
 
-        if (!char.IsControl(args.KeyChar) && !char.IsSurrogate(args.KeyChar))
+        if (!char.IsControl(args.KeyChar))
         {
-            _ = _client.SendInputAsync(RemoteInputCommand.TextInput(args.KeyChar));
+            _pictureBox.CommitCharacter(args.KeyChar);
             args.Handled = true;
         }
     }
@@ -6640,6 +6652,11 @@ internal sealed class RemoteViewerWindow : Form
         }
 
         if (!_inputEnabled || !_client.IsConnected)
+        {
+            return;
+        }
+
+        if (_isAndroidRemote && IsLocalImeKey(args.KeyCode, _pictureBox.IsImeComposing))
         {
             return;
         }
@@ -6771,6 +6788,27 @@ internal sealed class RemoteViewerWindow : Form
             Keys.OemPeriod or Keys.Oemplus => true,
             _ => false
         };
+    }
+
+    internal static bool IsLocalImeKey(Keys key, bool composing) =>
+        composing || key is Keys.ProcessKey or Keys.Packet or
+            Keys.ShiftKey or Keys.LShiftKey or Keys.RShiftKey or
+            Keys.IMEConvert or Keys.IMENonconvert or Keys.IMEModeChange;
+
+    private void SendCommittedAndroidText(string text, long generation)
+    {
+        if (!_isAndroidRemote || !_inputEnabled || !_client.IsConnected ||
+            !_pictureBox.ContainsFocus || generation != _client.InputConnectionGeneration ||
+            _remoteDragOutStage is RemoteDragOutStage.Pulling or RemoteDragOutStage.LocalDragging)
+        {
+            return;
+        }
+
+        RemoteTextInputResult result = _client.SendTextInput(text);
+        if (result.Truncated)
+        {
+            SetStatus("输入文字过长或发送队列已满，请分段输入。", MutedTextColor);
+        }
     }
 
     private async Task DropFilesToRemoteAsync(IReadOnlyList<string> files, Point? remotePoint)
@@ -8204,9 +8242,31 @@ internal sealed class RemoteViewerWindow : Form
             presentationGeneration);
     }
 
-    private sealed class BufferedPictureBox : PictureBox
+    internal sealed class BufferedPictureBox : PictureBox
     {
         private bool _directPresentationActive;
+        private bool _localImeEnabled;
+        private long _compositionGeneration;
+        private readonly RemoteTextInputBuffer _textInput = new();
+
+        public Func<long>? ReadInputGeneration { get; set; }
+        public Action<string, long>? TextCommitted { get; set; }
+        public bool IsImeComposing { get; private set; }
+
+        // PictureBox normally disables IME even though this subclass is focusable.
+        protected override ImeMode DefaultImeMode => ImeMode.NoControl;
+
+        public bool LocalImeEnabled
+        {
+            get => _localImeEnabled;
+            set
+            {
+                if (_localImeEnabled == value) return;
+                _localImeEnabled = value;
+                ResetComposition();
+                ImeMode = value ? ImeMode.On : ImeMode.Disable;
+            }
+        }
 
         public BufferedPictureBox()
         {
@@ -8217,6 +8277,115 @@ internal sealed class RemoteViewerWindow : Form
         }
 
         protected override bool IsInputKey(Keys keyData) => true;
+
+        public void CommitCharacter(char character)
+        {
+            if (!_localImeEnabled || IsImeComposing) return;
+            long generation = ReadInputGeneration?.Invoke() ?? 0;
+            EmitText(_textInput.Append(character, generation), generation);
+        }
+
+        protected override void OnLostFocus(EventArgs e)
+        {
+            ResetComposition();
+            base.OnLostFocus(e);
+        }
+
+        private void ResetComposition()
+        {
+            IsImeComposing = false;
+            _compositionGeneration = 0;
+            _textInput.Reset();
+        }
+
+        private void EmitText(string text, long generation)
+        {
+            if (_localImeEnabled && text.Length != 0)
+            {
+                TextCommitted?.Invoke(text, generation);
+            }
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            const int wmImeStartComposition = 0x010D;
+            const int wmImeEndComposition = 0x010E;
+            const int wmImeComposition = 0x010F;
+            const int wmImeChar = 0x0286;
+            const long resultString = 0x0800;
+            if (_localImeEnabled)
+            {
+                if (message.Msg == wmImeStartComposition)
+                {
+                    _textInput.Reset();
+                    _compositionGeneration = ReadInputGeneration?.Invoke() ?? 0;
+                    IsImeComposing = true;
+                }
+                else if (message.Msg == wmImeEndComposition)
+                {
+                    ResetComposition();
+                }
+                else if (message.Msg == wmImeComposition &&
+                    (message.LParam.ToInt64() & resultString) != 0 &&
+                    TryReadImeResult(out string text))
+                {
+                    long generation = IsImeComposing
+                        ? _compositionGeneration : ReadInputGeneration?.Invoke() ?? 0;
+                    _textInput.Reset();
+                    EmitText(text, generation);
+                    // DefWindowProc would otherwise emit the same result again
+                    // through WM_IME_CHAR / WM_CHAR. Preserve any new pre-edit flags.
+                    message.LParam = (nint)(message.LParam.ToInt64() & ~resultString);
+                    if (message.LParam == 0)
+                    {
+                        message.Result = 0;
+                        return;
+                    }
+                }
+                else if (message.Msg == wmImeChar)
+                {
+                    long generation = IsImeComposing
+                        ? _compositionGeneration : ReadInputGeneration?.Invoke() ?? 0;
+                    EmitText(_textInput.Append((char)message.WParam.ToInt64(), generation), generation);
+                    message.Result = 0;
+                    return;
+                }
+            }
+
+            base.WndProc(ref message);
+        }
+
+        private bool TryReadImeResult(out string text)
+        {
+            text = string.Empty;
+            nint context = ImmGetContext(Handle);
+            if (context == 0) return false;
+            try
+            {
+                const uint resultString = 0x0800;
+                int length = ImmGetCompositionStringW(context, resultString, null, 0);
+                if (length < 0 || length > 16 * 1024 || (length & 1) != 0) return false;
+                if (length == 0) return true;
+                byte[] buffer = new byte[length];
+                int copied = ImmGetCompositionStringW(context, resultString, buffer, (uint)length);
+                if (copied < 0 || copied > length || (copied & 1) != 0) return false;
+                text = System.Text.Encoding.Unicode.GetString(buffer, 0, copied);
+                return true;
+            }
+            finally
+            {
+                _ = ImmReleaseContext(Handle, context);
+            }
+        }
+
+        [DllImport("imm32.dll")]
+        private static extern nint ImmGetContext(nint window);
+        [DllImport("imm32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ImmReleaseContext(nint window, nint context);
+        [DllImport("imm32.dll", ExactSpelling = true)]
+        private static extern int ImmGetCompositionStringW(
+            nint context, uint index, [Out] byte[]? buffer, uint length);
 
         public bool DirectPresentationActive
         {

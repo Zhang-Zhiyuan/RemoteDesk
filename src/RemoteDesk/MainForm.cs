@@ -74,6 +74,7 @@ public sealed class MainForm : Form
     private CheckBox _adaptiveQualityBox = null!;
     private Button _hostToggleButton = null!;
     private Button _restartAsAdministratorButton = null!;
+    private Button _persistentStartupButton = null!;
     private Label _hostStatusLabel = null!;
     private TextBox _hostLogBox = null!;
 
@@ -393,6 +394,7 @@ public sealed class MainForm : Form
     {
         long startedAt = Stopwatch.GetTimestamp();
         base.OnHandleCreated(args);
+        WindowsAppInstance.AllowActivation(Handle);
         _diagnosticLog.Append(
             "PERF",
             "主窗口句柄创建耗时 " +
@@ -469,6 +471,11 @@ public sealed class MainForm : Form
 
     protected override void WndProc(ref Message message)
     {
+        if (WindowsAppInstance.ActivateMessage != 0 && (uint)message.Msg == WindowsAppInstance.ActivateMessage && !_isClosing)
+        {
+            if (IsHandleCreated) BeginInvoke((Action)ShowFromTray);
+            return;
+        }
         base.WndProc(ref message);
         bool workAreaChanged = message.Msg == WmSettingChange &&
             message.WParam.ToInt64() == SpiSetWorkArea;
@@ -894,6 +901,11 @@ public sealed class MainForm : Form
                 ? "已管理员运行"
                 : "管理员重启");
         _restartAsAdministratorButton.Enabled = !elevated;
+        _persistentStartupButton = CreateSecondaryButton("安装 / 更新常驻权限");
+        SetToolTip(_persistentStartupButton,
+            "一次管理员授权：安装到受保护目录，之后登录自动以管理员运行。" +
+            "不保存 Windows 密码，不关闭 UAC；取消“开机自启”可停用。");
+        _persistentStartupButton.Click += async (_, _) => await InstallPersistentStartupAsync();
         SetToolTip(
             _restartAsAdministratorButton,
             elevated
@@ -916,6 +928,7 @@ public sealed class MainForm : Form
 
         actions.Controls.Add(_hostToggleButton);
         actions.Controls.Add(_restartAsAdministratorButton);
+        actions.Controls.Add(_persistentStartupButton);
         actions.Controls.Add(refreshIpButton);
         actions.Controls.Add(minimizeToTrayButton);
         actions.Controls.Add(exportLogButton);
@@ -2087,7 +2100,7 @@ public sealed class MainForm : Form
         _viewerPortBox.ValueChanged += (_, _) => UpdateViewerActionState();
         _viewerPasswordBox.Leave += (_, _) => SaveSettingsFromUi();
         _captureTargetBox.SelectedIndexChanged += (_, _) => UpdateDiscoveryPresence();
-        _startWithWindowsBox.CheckedChanged += (_, _) => ApplyStartWithWindowsFromUi();
+        _startWithWindowsBox.CheckedChanged += async (_, _) => await ApplyStartWithWindowsFromUiAsync();
         _autoStartHostBox.CheckedChanged += (_, _) =>
         {
             if (!_applyingSettings)
@@ -3346,7 +3359,7 @@ public sealed class MainForm : Form
         }
     }
 
-    private void ApplyStartWithWindowsFromUi()
+    private async Task ApplyStartWithWindowsFromUiAsync()
     {
         if (_applyingSettings)
         {
@@ -3355,14 +3368,22 @@ public sealed class MainForm : Form
 
         try
         {
-            StartupService.SetEnabled(_startWithWindowsBox.Checked);
+            _startWithWindowsBox.Enabled = false;
+            if (WindowsPersistentStartup.GetStatus().IsInstalled && !WindowsProcessElevation.IsCurrentProcessElevated())
+                await WindowsPersistentStartup.ChangeAsync(_startWithWindowsBox.Checked
+                    ? WindowsPersistentStartup.EnableArgument : WindowsPersistentStartup.DisableArgument);
+            else
+                StartupService.SetEnabled(_startWithWindowsBox.Checked);
+            if (_isClosing || IsDisposed) return;
             StartupRegistrationStatus status = StartupService.GetStatus();
             _settings.App.StartWithWindows = status.IsRegistered;
             UpdateStartupRegistrationToolTip(status);
             SaveSettingsFromUi();
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or System.Security.SecurityException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or
+            System.Security.SecurityException or System.ComponentModel.Win32Exception or System.Runtime.InteropServices.COMException)
         {
+            if (_isClosing || IsDisposed) return;
             _applyingSettings = true;
             try
             {
@@ -3375,6 +3396,38 @@ public sealed class MainForm : Form
 
             MessageBox.Show(this, ex.Message, "开机自启", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+        finally
+        {
+            if (!_isClosing && !IsDisposed) _startWithWindowsBox.Enabled = true;
+        }
+    }
+
+    private async Task InstallPersistentStartupAsync()
+    {
+        _persistentStartupButton.Enabled = false;
+        try
+        {
+            SaveSettingsFromUi();
+            await WindowsPersistentStartup.ChangeAsync(WindowsPersistentStartup.InstallArgument);
+            if (_isClosing || IsDisposed) return;
+            _applyingSettings = true;
+            try { ApplyStartupRegistrationStatus(StartupService.GetStatus()); }
+            finally { _applyingSettings = false; }
+            SaveSettingsFromUi();
+            AppendHostLog("常驻权限已安装：下次登录自动以管理员运行。当前连接未中断；锁屏和 UAC 安全桌面仍需本机处理。");
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (WindowsProcessElevation.IsUserCancellation(ex))
+        {
+            if (!_isClosing && !IsDisposed) AppendHostLog("已取消常驻权限安装，现有被控服务保持不变。");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            if (!_isClosing && !IsDisposed) MessageBox.Show(this, ex.Message, "常驻权限", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        finally
+        {
+            if (!_isClosing && !IsDisposed) _persistentStartupButton.Enabled = true;
+        }
     }
 
     private async Task ToggleHostAsync()
@@ -3384,12 +3437,18 @@ public sealed class MainForm : Form
         {
             if (_hostServer.IsRunning)
             {
+                // An explicit Stop also disarms automatic listening at the next login.
+                // Closing the window or updating the app does not pass through this branch.
+                _autoStartHostBox.Checked = false;
+                SaveSettingsFromUi();
                 await _relayHostConnector.StopAsync();
                 await _hostServer.StopAsync();
             }
             else
             {
                 await StartHostCoreAsync();
+                _autoStartHostBox.Checked = true;
+                SaveSettingsFromUi();
             }
         }
         catch (Exception ex)
@@ -6188,6 +6247,13 @@ public sealed class MainForm : Form
 
     private void UpdateStartupRegistrationToolTip(StartupRegistrationStatus status)
     {
+        if (status.IsPersistent)
+        {
+            SetToolTip(_startWithWindowsBox, status.IsRegistered
+                ? "已安装常驻权限：当前用户登录后自动以管理员运行受保护的副本。取消勾选可停用。"
+                : "常驻权限已停用；勾选可重新启用，不需要保存 Windows 密码。");
+            return;
+        }
         if (!status.IsRegistered)
         {
             SetToolTip(_startWithWindowsBox, "当前 Windows 用户登录后自动启动 RemoteDesk。");

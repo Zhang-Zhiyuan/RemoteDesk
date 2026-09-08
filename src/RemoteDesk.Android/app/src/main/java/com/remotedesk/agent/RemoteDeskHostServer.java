@@ -57,6 +57,20 @@ final class RemoteDeskHostServer {
     private long activeSessionGeneration;
     private AndroidFileTransferReceiver activeFileTransferReceiver;
     private volatile String password;
+    private volatile Runnable sessionChanged = () -> {};
+
+    void setSessionChangedListener(Runnable listener) {
+        sessionChanged = listener == null ? () -> {} : listener;
+    }
+
+    synchronized boolean hasAuthenticatedSession() {
+        return running.get() && activeSessionState != null;
+    }
+
+    private void notifySessionChanged() {
+        try { sessionChanged.run(); }
+        catch (RuntimeException ex) { AndroidSessionLog.error("Session power update failed.", ex); }
+    }
 
     RemoteDeskHostServer(Context context, AndroidScreenCaptureSession captureSession) {
         this(
@@ -133,6 +147,7 @@ final class RemoteDeskHostServer {
         }
 
         activeFileTransferReceiver = null;
+        notifySessionChanged();
         // The active session worker owns file cleanup. Its socket was just
         // closed above, so its finally block will close/delete any partial
         // transfer off the service main thread.
@@ -259,6 +274,7 @@ final class RemoteDeskHostServer {
                 activeSessionGeneration = activatedSessionGeneration;
                 activeFileTransferReceiver = sessionFileTransferReceiver;
             }
+            notifySessionChanged();
 
             AndroidFileCompletionCoordinator sessionFileCompletionCoordinator =
                 createFileCompletionCoordinator(
@@ -272,6 +288,8 @@ final class RemoteDeskHostServer {
 
             configureAuthenticatedClientSocket(client);
             AndroidSessionLog.info("Viewer authenticated: " + client.getRemoteSocketAddress() + ".");
+            RemoteDeskAccessibilityService.requestRemoteWake(() ->
+                isCurrentSessionOwner(activatedSessionGeneration, sessionState, client));
 
             int capabilities = getCapabilities();
             RemoteDeskTransport.writeMessage(
@@ -354,6 +372,7 @@ final class RemoteDeskHostServer {
                 state.finishGestureTeardown();
                 state.closeLowLatencyVideo();
             }
+            notifySessionChanged();
             AndroidSessionLog.info(activeOwner
                 ? "Viewer session closed."
                 : "Viewer authentication connection closed.");
@@ -545,6 +564,11 @@ final class RemoteDeskHostServer {
             if (!running.get() || !state.running.get()) {
                 return false;
             }
+            if (RemoteDeskAccessibilityService.isEnteringUnlockPin()) return false;
+            if (AndroidRemoteUnlock.isScreenOff(appContext)) {
+                RemoteDeskAccessibilityService.requestRemoteWake(() -> running.get() && state.running.get());
+                return false;
+            }
             return AndroidInputInjector.apply(
                 payload,
                 state.lastFrameWidth.get(),
@@ -564,6 +588,7 @@ final class RemoteDeskHostServer {
         Set<String> rejectedH264Codecs = new HashSet<>();
         while (running.get() &&
             state.running.get() &&
+            !captureSession.isAccessibilityCapture() &&
             (state.viewerVideoCodecs.get() & RemoteDeskProtocol.VIDEO_CODEC_H264_ANNEX_B) != 0) {
             H264CaptureResult result = runH264CaptureLoopIfAvailable(
                 output,
@@ -1287,9 +1312,13 @@ final class RemoteDeskHostServer {
     }
 
     static int getCapabilities() {
-        return getCapabilities(
+        int capabilities = getCapabilities(
             AndroidVideoCodecDiagnostics.cachedH264Report(),
             AndroidInputInjector.isEnabled());
+        if (AndroidScreenCaptureSession.getInstance().isAccessibilityCapture()) {
+            capabilities &= ~AndroidH264CapabilityPolicy.hostCapabilities(AndroidVideoCodecDiagnostics.cachedH264Report());
+        }
+        return capabilities;
     }
 
     static int getCapabilities(
@@ -1629,9 +1658,12 @@ final class RemoteDeskHostServer {
             double averageEncode = encodeMillis / frames;
             double averageSend = sendMillis / frames;
             double budget = 1000d / currentFps;
+            if (AndroidScreenCaptureSession.getInstance().isAccessibilityCapture())
+                budget = AndroidScreenshotGate.frameBudgetMillis(currentFps);
+            double expectedFps = 1000d / budget;
             double processingMillis = averageCapture + averageEncode + averageSend;
-            boolean overloaded = processingMillis > budget * 0.82 || averageSend > budget * 0.45 || actualFps < currentFps * 0.84;
-            boolean comfortable = processingMillis < budget * 0.48 && averageSend < budget * 0.22 && actualFps > currentFps * 0.94;
+            boolean overloaded = processingMillis > budget * 0.82 || averageSend > budget * 0.45 || actualFps < expectedFps * 0.84;
+            boolean comfortable = processingMillis < budget * 0.48 && averageSend < budget * 0.22 && actualFps > expectedFps * 0.94;
 
             if (overloaded) {
                 reduceLoad();

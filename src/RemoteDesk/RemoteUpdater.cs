@@ -569,10 +569,14 @@ internal static class RemoteUpdater
             }
 
             Write-RemoteDeskUpdateLog "installing update package to $TargetPath"
+            # A same-volume move retains the received file's ACL. Preserve the installed
+            # executable's permissions, including the protected administrator-startup copy.
+            $targetFileSecurity = Get-Acl -LiteralPath $BackupPath
             Move-RemoteDeskFileWithRetry `
                 -Source $PackagePath `
                 -Destination $TargetPath
             $installedUpdate = $true
+            Set-Acl -LiteralPath $TargetPath -AclObject $targetFileSecurity
             if (-not (Test-RemoteDeskTrustedPackage -Path $TargetPath)) {
                 throw "installed update failed hash or signature-mode re-verification"
             }

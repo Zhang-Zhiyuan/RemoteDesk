@@ -35,7 +35,7 @@ final class AndroidBatteryOptimization {
         }
 
         return ignoringOptimizations
-            ? "已允许后台稳定运行"
+            ? "已忽略电池优化；厂商后台限制仍需单独检查"
             : "可能受省电影响，建议允许忽略电池优化";
     }
 }

@@ -21,6 +21,7 @@ internal static class Program
             ManagedLatencyMode
                 .TryAcquireSustainedLowLatency();
         ApplicationConfiguration.Initialize();
+        if (WindowsPersistentStartup.TryHandleCommand(args)) return;
         if (!previousProcessExited)
         {
             MessageBox.Show(
@@ -33,6 +34,17 @@ internal static class Program
         }
 
         FatalExitGuard.Install();
+        if (!WindowsProcessElevation.IsCurrentProcessElevated() && WindowsPersistentStartup.TryStartInstalled())
+        {
+            WindowsAppInstance.ActivateExisting();
+            return;
+        }
+        using var instance = new WindowsAppInstance();
+        if (!instance.IsOwner)
+        {
+            WindowsAppInstance.ActivateExisting();
+            return;
+        }
         bool startMinimizedToTray = args.Any(arg =>
             string.Equals(arg, "--tray", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(arg, "/tray", StringComparison.OrdinalIgnoreCase));

@@ -1,0 +1,16 @@
+plugins { id "com.android.application" version "8.10.1" }
+android {
+    namespace "com.remotedesk.lockprobe"
+    compileSdk 36
+    defaultConfig {
+        applicationId "com.remotedesk.lockprobe"
+        minSdk 30
+        targetSdk 36
+        versionCode 1
+        versionName "test-only"
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

@@ -55,4 +55,62 @@ public class AndroidViewerGesturesTest {
         g.secondDown(500,100,200); g.multiMove(500,100,400);
         assertEquals(1,g.viewport.zoom,0); assertTrue(events.isEmpty());
     }
+
+    @Test public void directTapPlacesCursorAndClickAtTheTouchedDesktopPoint() {
+        AndroidViewerGestures g=gestures(); g.mode(false);
+        int[] expected=g.viewport.point(700,600,true);
+        assertNotNull(expected);
+        g.down(700,600,0); g.up(700,600,100);
+        assertEquals(1,count(RemoteDeskProtocol.INPUT_MOUSE_MOVE));
+        assertEquals(1,count(RemoteDeskProtocol.INPUT_MOUSE_DOWN));
+        assertEquals(1,count(RemoteDeskProtocol.INPUT_MOUSE_UP));
+        for(int[] event : events) {
+            assertEquals(expected[0],event[2]); assertEquals(expected[1],event[3]);
+        }
+    }
+
+    @Test public void directTapRemainsAccurateAfterLocalZoomAndPan() {
+        AndroidViewerGestures g=gestures(); g.mode(false);
+        g.viewport.zoomAt(2,500,500); g.viewport.pan(-100,50);
+        int[] expected=g.viewport.point(700,600,true);
+        assertNotNull(expected);
+        g.down(700,600,0); g.up(700,600,100);
+        for(int[] event : events) {
+            assertEquals(expected[0],event[2]); assertEquals(expected[1],event[3]);
+        }
+    }
+
+    @Test public void twoFingerVerticalScrollWorksInBothInputModesAndDirections() {
+        for(boolean trackpad : new boolean[]{true,false}) {
+            for(int direction : new int[]{-1,1}) {
+                events.clear();
+                AndroidViewerGestures g=gestures(); g.mode(trackpad);
+                g.down(400,500,0); g.secondDown(500,500,200);
+                g.multiMove(500,500+direction*48,200);
+                g.pointerUp(); g.up(500,500+direction*48,200);
+                assertEquals(1,count(RemoteDeskProtocol.INPUT_MOUSE_WHEEL));
+                int[] wheel=events.stream().filter(e->e[0]==RemoteDeskProtocol.INPUT_MOUSE_WHEEL).findFirst().get();
+                assertEquals(direction*240,wheel[4]);
+                assertEquals(0,count(RemoteDeskProtocol.INPUT_MOUSE_DOWN));
+                assertEquals(1,g.viewport.zoom,0);
+            }
+        }
+    }
+
+    @Test public void replacingAFingerAfterScrollingMustNotBecomeARightClick() {
+        AndroidViewerGestures g=gestures();
+        g.down(400,500,0); g.secondDown(500,500,200);
+        g.multiMove(500,548,200); g.pointerUp();
+        g.secondDown(500,548,200); g.pointerUp(); g.up(500,548,250);
+        assertEquals(1,count(RemoteDeskProtocol.INPUT_MOUSE_WHEEL));
+        assertEquals(0,count(RemoteDeskProtocol.INPUT_MOUSE_DOWN));
+        assertEquals(0,count(RemoteDeskProtocol.INPUT_MOUSE_UP));
+    }
+
+    @Test public void replacingAFingerDuringTwoFingerTapCancelsTheTap() {
+        AndroidViewerGestures g=gestures();
+        g.down(400,500,0); g.secondDown(500,500,200); g.pointerUp();
+        g.secondDown(500,500,200); g.pointerUp(); g.up(500,500,250);
+        assertTrue(events.isEmpty());
+    }
 }

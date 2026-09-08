@@ -183,7 +183,7 @@ final class AndroidViewerChrome {
         mode.setContentDescription(trackpad ? "当前触控板模式，点击切换直接触摸" : "当前直接触摸模式，点击切换触控板");
         drag.setText(locked ? "结束拖动" : "拖动锁定"); mark(drag, locked);
         hint.setText(locked ? "拖动已锁定 · 移动手指定位 · 点结束拖动释放" :
-            trackpad ? "滑动移鼠标 · 轻触点击 · 双指滚动 / 缩放" : "点按定位点击 · 单指拖动 · 双指滚动 / 缩放");
+            trackpad ? "滑动移鼠标 · 轻触点击 · 双指滑动滚动" : "点哪里点哪里 · 单指拖动 · 双指滑动滚动");
     }
 
     private void updateSendState() { send.setEnabled(composer.isEnabled() && composer.length() > 0); }

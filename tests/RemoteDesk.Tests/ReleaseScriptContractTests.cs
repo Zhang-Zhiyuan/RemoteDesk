@@ -5,6 +5,15 @@ namespace RemoteDesk.Tests;
 public sealed class ReleaseScriptContractTests
 {
     [Fact]
+    public void BothLinuxPackagesIncludeThePersistentStartupModule()
+    {
+        Assert.Contains("remotedesk_linux_startup.py",
+            ReadRepositoryFile("scripts", "Build-LinuxSystemPackage.ps1"));
+        Assert.Contains("remotedesk_linux_startup.py",
+            ReadRepositoryFile("scripts", "Publish-RemoteDesk.ps1"));
+    }
+
+    [Fact]
     public void FinalReleaseUsesIsolatedCleanSourceOutputAndRequiresSignedAndroid()
     {
         string publisher = ReadRepositoryFile("scripts", "Publish-RemoteDesk.ps1");
@@ -81,6 +90,10 @@ public sealed class ReleaseScriptContractTests
             StringComparison.Ordinal);
         Assert.Contains(
             "\"artifacts/\"",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "\"release/\"",
             script,
             StringComparison.Ordinal);
     }

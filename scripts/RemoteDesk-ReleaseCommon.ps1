@@ -33,6 +33,9 @@ function Get-RemoteDeskSourceFingerprint {
                     "artifacts/",
                     [System.StringComparison]::OrdinalIgnoreCase) -and
                 -not $_.StartsWith(
+                    "release/",
+                    [System.StringComparison]::OrdinalIgnoreCase) -and
+                -not $_.StartsWith(
                     ".claude/worktrees/",
                     [System.StringComparison]::OrdinalIgnoreCase) -and
                 -not $_.EndsWith(

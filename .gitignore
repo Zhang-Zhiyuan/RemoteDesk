@@ -36,11 +36,25 @@ TestResults/
 /rhs.diff
 /rvw.diff
 
-# Keep reproducible release packages and private diagnostics out of Git.
-# Distribute binaries as release assets, not as source history.
+# Keep local build output and private diagnostics out of Git.
+# Only the selected distributables under release/ are published.
 /artifacts/*
 !/artifacts/README.md
 !/artifacts/RemoteDesk-release-manifest.json
+
+# Public release folder: distributables and required Windows companion files only.
+/release/*
+!/release/windows-x64/
+/release/windows-x64/*
+!/release/windows-x64/RemoteDesk.exe
+!/release/windows-x64/Install-RemoteDeskFfmpeg.ps1
+!/release/windows-x64/THIRD-PARTY-NOTICES.md
+!/release/windows-x64/DOTNET-RUNTIME-LICENSE.TXT
+!/release/windows-x64/DOTNET-RUNTIME-THIRD-PARTY-NOTICES.TXT
+!/release/RemoteDesk-Android.apk
+!/release/RemoteDesk-linux-amd64.deb
+!/release/RemoteDesk-linux-amd64.tar.gz
+!/release/RemoteDesk-linux-system-python.tar.gz
 
 # Local secrets
 .env
