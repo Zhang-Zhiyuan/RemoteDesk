@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RemoteDesk</string>
+    <string name="brand_mark" translatable="false">RD</string>
+    <string name="header_subtitle">Android · 直连与私有中转远程桌面</string>
+    <string name="platform_badge" translatable="false">ANDROID</string>
+    <string name="main_ready">已就绪，可在局域网中发现</string>
+    <string name="connecting_to">正在连接 %1$s:%2$d</string>
+    <string name="accessibility_service_description">RemoteDesk input control for authenticated remote desktop sessions over direct or private relay connections, including gestures, system actions, and focused text fields.</string>
+    <string name="relay_saved_private">已保存，访问密钥由 Android Keystore 加密保护。</string>
+    <string name="relay_directory_failed">读取失败：请检查网络、共享密钥和 TLS 指纹，未使用直连回退。</string>
+    <string name="relay_online_count">在线设备 %1$d 台；点击连接，口令使用上方“连接口令”。</string>
+</resources>

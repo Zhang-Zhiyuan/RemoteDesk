@@ -1,0 +1,13 @@
+* text=auto
+
+# Shell entry points must also work when cloned on Windows and run in WSL.
+*.sh text eol=lf
+*.py text eol=lf
+gradlew text eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Bundled assets and the Gradle wrapper are binary.
+*.png binary
+*.ico binary
+*.jar binary

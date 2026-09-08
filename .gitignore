@@ -1,0 +1,71 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Dependency caches / generated output
+node_modules/
+.gradle/
+.next/
+.nuxt/
+bin/
+obj/
+target/
+experiments/WgcProbe/publish/
+.cache/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+coverage/
+.coverage
+TestResults/
+
+# Local agent workspaces and review scratch files
+/.agents/
+/.claude/
+/.review-*.diff
+/*-plus-lines.txt
+/telemetry-*.diff
+/three-target.diff
+/lapp.diff
+/lhost.diff
+/rhs.diff
+/rvw.diff
+
+# Keep reproducible release packages and private diagnostics out of Git.
+# Distribute binaries as release assets, not as source history.
+/artifacts/*
+!/artifacts/README.md
+!/artifacts/RemoteDesk-release-manifest.json
+
+# Local secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+*.user
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.dpapi.xml
+*.key
+*.pem
+*.private
+*.private.*
+id_rsa
+id_ed25519
+src/RemoteDesk.Android/release-signing.properties
+local.properties
+
+# Logs
+*.log
+logs/
+
+# OS metadata
+.DS_Store
+Thumbs.db

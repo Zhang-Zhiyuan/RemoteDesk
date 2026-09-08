@@ -1,0 +1,74 @@
+# Physical mobile viewer UI probe
+
+This separate `com.remotedesk.viewerprobe` APK compiles the actual Android product
+Java/resources. By default its private viewer connects to a synthetic authenticated
+TCP peer through an explicitly configured ADB reverse. An explicitly supplied,
+app-private `files/interop-endpoint.json` also supports authorized physical LAN
+tests against **owned synthetic OS input targets** (see `../InteropProbe/README.md`).
+That file is consumed and deleted on launch; the secret remains only in this
+probe's keystore-backed viewer preferences until uninstall. Do not connect this
+automated probe to an ordinary user's active desktop.
+
+The probe never reads production preferences or declares accessibility/capture
+services. Its exported gesture/IME test receiver is **not** part of the
+production manifest/APK. Physical mode does send real OS input to the explicitly
+selected RemoteDesk host; the default synthetic peer does not.
+
+The public fixture token is deliberately not a real device/server password.
+Run only on an authorized, unlocked test phone. Do not publish the probe APK.
+
+From the repository root (PowerShell):
+
+```powershell
+$probeAdb = Join-Path $env:LOCALAPPDATA 'Android\Sdk\platform-tools\adb.exe'
+$probeSerial = '<authorized adb serial>'
+& src/RemoteDesk.Android/gradlew.bat --no-daemon -p experiments/AndroidViewerProbe assembleDebug
+& $probeAdb -s $probeSerial install -r experiments/AndroidViewerProbe/build/outputs/apk/debug/RemoteDeskAndroidViewerProbe-debug.apk
+python experiments/android_viewer_fixture_server.py --fixtures artifacts/video-quality-20260907-080209-8a9f141c --output artifacts/mobile-ui-peer-new --seconds 1800
+```
+
+The fixture prerequisite is `static-current-gop1.h264` (180 recovery access units)
+from the existing video-quality experiment. Python requires Pillow and the Linux
+protocol probe's crypto dependencies. The synthetic JPEG chart uses Windows fonts.
+The peer prints a randomly allocated **127.0.0.1-only** port. In another terminal:
+
+```powershell
+& $probeAdb -s $probeSerial reverse --list
+# Proceed only if phone tcp:7411 is free (never replace someone else's mapping).
+& $probeAdb -s $probeSerial reverse tcp:7411 tcp:<printed-host-port>
+& $probeAdb -s $probeSerial shell am start -W -n com.remotedesk.viewerprobe/com.remotedesk.agent.ViewerProbeLauncher --ei port 7411
+python experiments/android_viewer_ui_verify.py --adb $probeAdb --serial $probeSerial --server artifacts/mobile-ui-peer-new/server-state.json --output artifacts/mobile-ui-check-new
+```
+
+The verifier taps only controls belonging to this probe, makes ADB single-pointer
+gestures inside its viewport, and dispatches app-local multi-pointer MotionEvents
+and native InputConnection composition. It asserts the encrypted peer's received
+mouse/key/control messages, geometry and session continuity, and saves screenshots
+and JSON evidence. It stops on failure rather than tapping an unrelated app.
+
+The JPEG second target is 1280×720; the H.264 fixture remains 1920×1080 on both
+targets intentionally, to test same-dimension decoder/presentation recovery.
+This does not establish real network latency, remote OS text-entry fidelity, or
+compatibility with other Android/OEM/IME versions. The green `90` overlay on this
+test phone is the phone's developer overlay, not the viewer's rendered FPS.
+
+## Fault-injection / edge checks
+
+Add `--allow-test-controls` to the **synthetic peer** command and `--suite all`
+to the verifier to include repeated DeviceInfo during a held drag, letterbox
+pinch in direct mode, input revocation/regrant, delayed screen frames and a
+forced connection drop/reconnect. Use `--suite edges` for only those checks.
+The default remains the standard UI suite. `--record-failures` records all
+assertion failures for a before-fix baseline and exits nonzero at the end;
+unexpected UI/transport errors still stop immediately.
+
+The peer reads only its own output directory's `fixture-command.json`, enabled
+explicitly by the flag. Supported actions are a fixed allowlist, not shell
+commands; the listener stays bound to 127.0.0.1. Screen holds expire after ten
+seconds. A forced drop waits two seconds before accepting the next fixture
+connection, leaving time to verify disabled controls and old input cleanup.
+These tests do not change the phone's Wi-Fi, permissions or system settings.
+
+After inspection, uninstall only this probe, remove only its owned reverse entry
+and `/data/local/tmp/remotedesk-test-ui.xml`, and stop only the peer process started
+for this test. Keep screenshots/reports locally under ignored `artifacts/`.

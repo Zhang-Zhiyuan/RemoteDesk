@@ -1,0 +1,38 @@
+plugins { id "com.android.application" version "8.10.1" }
+
+android {
+    namespace "com.remotedesk.agent"
+    compileSdk 36
+    defaultConfig {
+        applicationId "com.remotedesk.codecprobe"
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName "1.0-test-only"
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    sourceSets.main {
+        // Compile the actual product classes, not a second decoder implementation.
+        java.srcDirs = ["src/main/java", "../../src/RemoteDesk.Android/app/src/main/java"]
+        res.srcDirs = ["../../src/RemoteDesk.Android/app/src/main/res"]
+        assets.srcDirs = ["build/generated/probe-assets"]
+    }
+}
+dependencies { compileOnly "androidx.annotation:annotation:1.10.0" }
+
+def fixtureDirectory = providers.gradleProperty("fixtureDir")
+tasks.register("prepareProbeAssets", Copy) {
+    from(fixtureDirectory.map { file(it) })
+    include "static-current-gop1.h264", "static-research-gop30.h264"
+    into layout.buildDirectory.dir("generated/probe-assets")
+    doFirst {
+        if (!fixtureDirectory.isPresent()) throw new GradleException("Pass -PfixtureDir=<VideoQualityProbe output directory>")
+        ["static-current-gop1.h264", "static-research-gop30.h264"].each {
+            if (!new File(file(fixtureDirectory.get()), it).isFile()) throw new GradleException("Missing fixture: " + it)
+        }
+    }
+}
+tasks.named("preBuild").configure { dependsOn "prepareProbeAssets" }

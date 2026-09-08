@@ -1,0 +1,14 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Authorized test endpoints only; no local capture or accessibility service. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <application android:name="com.remotedesk.agent.ViewerProbeApplication" android:label="RemoteDesk Viewer Test"
+        android:allowBackup="false" android:supportsRtl="true" android:theme="@style/ViewerTheme">
+        <activity android:name="com.remotedesk.agent.ViewerProbeLauncher" android:exported="true" />
+        <activity android:name="com.remotedesk.agent.RemoteDeskViewerActivity" android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode" />
+        <receiver android:name="com.remotedesk.agent.ViewerProbeReceiver" android:exported="true" />
+    </application>
+</manifest>

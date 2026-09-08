@@ -1,0 +1,27 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <application android:name="com.remotedesk.agent.HostProbeApplication"
+        android:label="RemoteDesk Relay Host Test" android:allowBackup="false"
+        android:theme="@style/AppTheme">
+        <activity android:name="com.remotedesk.agent.HostProbeLauncher" android:exported="true" />
+        <activity android:name="com.remotedesk.agent.MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize" />
+        <activity android:name="com.remotedesk.agent.RemoteDeskViewerActivity" android:exported="false"
+            android:theme="@style/ViewerTheme" android:windowSoftInputMode="adjustResize"
+            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode" />
+        <activity android:name="com.remotedesk.agent.InteractionProbeActivity" android:exported="true" />
+        <service android:name="com.remotedesk.agent.RemoteDeskForegroundService" android:exported="false"
+            android:foregroundServiceType="connectedDevice|mediaProjection" />
+        <service android:name="com.remotedesk.agent.RemoteDeskAccessibilityService" android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter>
+            <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility_service" />
+        </service>
+    </application>
+</manifest>

@@ -1,0 +1,13 @@
+# Copy this file to release-signing.properties and keep it private.
+# The real release-signing.properties file is ignored by git.
+#
+# Environment variable alternatives:
+# REMOTEDESK_ANDROID_STORE_FILE
+# REMOTEDESK_ANDROID_STORE_PASSWORD
+# REMOTEDESK_ANDROID_KEY_ALIAS
+# REMOTEDESK_ANDROID_KEY_PASSWORD
+
+storeFile=C:\\path\\to\\remotedesk-release.jks
+storePassword=change-this-password
+keyAlias=remotedesk
+keyPassword=change-this-password

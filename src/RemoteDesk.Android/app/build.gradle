@@ -1,0 +1,78 @@
+plugins {
+    id "com.android.application"
+}
+
+def releaseSigningProperties = new Properties()
+def releaseSigningFile = rootProject.file("release-signing.properties")
+if (releaseSigningFile.exists()) {
+    releaseSigningFile.withInputStream { stream ->
+        releaseSigningProperties.load(stream)
+    }
+}
+
+def signingValue = { propertyName, environmentName ->
+    def value = releaseSigningProperties.getProperty(propertyName)
+    if (value == null || value.trim().isEmpty()) {
+        value = System.getenv(environmentName)
+    }
+
+    return value == null ? "" : value.trim()
+}
+
+def releaseStoreFilePath = signingValue("storeFile", "REMOTEDESK_ANDROID_STORE_FILE")
+def releaseStorePassword = signingValue("storePassword", "REMOTEDESK_ANDROID_STORE_PASSWORD")
+def releaseKeyAlias = signingValue("keyAlias", "REMOTEDESK_ANDROID_KEY_ALIAS")
+def releaseKeyPassword = signingValue("keyPassword", "REMOTEDESK_ANDROID_KEY_PASSWORD")
+def hasReleaseSigning = !releaseStoreFilePath.isEmpty() &&
+        !releaseStorePassword.isEmpty() &&
+        !releaseKeyAlias.isEmpty() &&
+        !releaseKeyPassword.isEmpty() &&
+        file(releaseStoreFilePath).exists()
+
+android {
+    namespace "com.remotedesk.agent"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.remotedesk.agent"
+        minSdk 26
+        targetSdk 36
+        versionCode 3
+        versionName "1.0.1"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    signingConfigs {
+        release {
+            if (hasReleaseSigning) {
+                storeFile file(releaseStoreFilePath)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+}
+
+dependencies {
+    compileOnly "androidx.annotation:annotation:1.10.0"
+    testImplementation "junit:junit:4.13.2"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs += "-Xlint:deprecation"
+}

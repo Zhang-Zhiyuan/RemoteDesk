@@ -1,0 +1,13 @@
+plugins { id "com.android.application" version "8.10.1" }
+android {
+    namespace "com.remotedesk.agent"
+    compileSdk 36
+    defaultConfig { applicationId "com.remotedesk.relayhostprobe"; minSdk 26; targetSdk 36; versionCode 1; versionName "1.0-test-only" }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    sourceSets.main {
+        java.srcDirs = ["src/main/java", "../../src/RemoteDesk.Android/app/src/main/java", "../AndroidCodecProbe/src/main/java"]
+        java.exclude "**/CodecProbeActivity.java"
+        res.srcDirs = ["../../src/RemoteDesk.Android/app/src/main/res"]
+    }
+}
+dependencies { compileOnly "androidx.annotation:annotation:1.10.0" }
