@@ -446,6 +446,7 @@ public final class RemoteDeskForegroundService extends Service {
         boolean activeHost = hostServer != null && hostServer.isRunning();
         response.put("Type", RemoteDeskProtocol.DISCOVERY_RESPONSE_TYPE);
         response.put("MachineName", AndroidDeviceNames.displayName());
+        response.put("DeviceId", AndroidRelaySettings.localDeviceId(this));
         response.put("Port", RemoteDeskProtocol.HOST_PORT);
         response.put("CaptureTarget", activeHost ? RemoteDeskProtocol.CAPTURE_TARGET_NAME
             : isCapturePaused() ? "录屏已停止，请在手机上重新授权" : "Android App 常驻，等待录屏授权");

@@ -48,6 +48,7 @@ internal sealed class HostSettings
 
 internal sealed class ViewerSettings
 {
+    public bool AutoDetectPort { get; set; } = true;
     public string? Host { get; set; }
 
     public int Port { get; set; } = Protocol.DefaultPort;
@@ -65,6 +66,9 @@ internal sealed class ViewerSettings
 
 internal sealed class SavedRemoteDevice
 {
+    public string? DeviceId { get; set; }
+    public string? ProtectedPassword { get; set; }
+    public bool AutoDetectPort { get; set; } = true;
     public string? MachineName { get; set; }
 
     public string? Remark { get; set; }
@@ -401,10 +405,12 @@ internal sealed class AppSettingsService
             }
 
             string key = $"{address}:{device.Port}";
-            if (normalizedByEndpoint.TryGetValue(
+            SavedRemoteDevice? identityMatch = normalized.FirstOrDefault(item => RemoteDeviceIdentity.Same(item.DeviceId, device.DeviceId));
+            if (identityMatch is not null || normalizedByEndpoint.TryGetValue(
                     key,
                     out SavedRemoteDevice? retainedDevice))
             {
+                retainedDevice = identityMatch ?? normalizedByEndpoint[key];
                 if (string.IsNullOrWhiteSpace(
                         retainedDevice.Remark) &&
                     !string.IsNullOrWhiteSpace(
@@ -415,6 +421,8 @@ internal sealed class AppSettingsService
                             device.Remark);
                 }
 
+                retainedDevice.ProtectedPassword ??= device.ProtectedPassword;
+                retainedDevice.DeviceId ??= RemoteDeviceIdentity.Normalize(device.DeviceId);
                 continue;
             }
 
@@ -425,6 +433,9 @@ internal sealed class AppSettingsService
 
             var normalizedDevice = new SavedRemoteDevice
             {
+                DeviceId = RemoteDeviceIdentity.Normalize(device.DeviceId),
+                ProtectedPassword = device.ProtectedPassword,
+                AutoDetectPort = device.AutoDetectPort,
                 MachineName = NormalizeOptionalText(device.MachineName),
                 Remark = NormalizeSavedDeviceRemark(device.Remark),
                 Address = address,

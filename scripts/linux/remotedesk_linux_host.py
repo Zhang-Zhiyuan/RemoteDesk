@@ -70,6 +70,9 @@ from remotedesk_protocol_probe import (
     CONTROL_VIDEO_KEY_FRAME_REQUEST,
     CONTROL_VIEWER_CAPABILITIES,
     CONTROL_VIEWER_INFO,
+    CONTROL_DEVICE_IDENTITY_REQUEST,
+    CAPABILITY_DEVICE_IDENTITY,
+    encode_device_identity,
     FRAME_FLAG_CODEC_CONFIG,
     FRAME_FLAG_KEY_FRAME,
     RECOMMENDED_FILE_TRANSFER_CHUNK_BYTES,
@@ -3023,6 +3026,7 @@ class LinuxHostSession:
         self.host_capabilities = get_host_capabilities(
             self.input_controller.available
         )
+        if getattr(args, "device_id", ""): self.host_capabilities |= CAPABILITY_DEVICE_IDENTITY
         self.viewer_capabilities = 0
         self.video_lock = threading.Lock()
         self.viewer_video_codecs = VIDEO_CODEC_JPEG
@@ -3235,7 +3239,9 @@ class LinuxHostSession:
 
         control = decode_control(payload)
         kind = int(control["kind"])
-        if kind == CONTROL_VIEWER_CAPABILITIES:
+        if kind == CONTROL_DEVICE_IDENTITY_REQUEST and getattr(self.args, "device_id", ""):
+            self._write_control(encode_device_identity(self.args.device_id))
+        elif kind == CONTROL_VIEWER_CAPABILITIES:
             self.viewer_capabilities = int(control.get("capabilities") or 0)
             negotiated_fps = negotiated_h264_fps(
                 self.requested_fps,
@@ -4776,6 +4782,7 @@ def discovery_loop(args: argparse.Namespace, stop_event: threading.Event) -> Non
             response = {
                 "Type": DISCOVERY_RESPONSE_TYPE,
                 "MachineName": args.machine_name,
+                "DeviceId": getattr(args, "device_id", ""),
                 "Port": args.port,
                 "CaptureTarget": CAPTURE_TARGET_NAME,
                 "IsHostRunning": True,
@@ -5023,6 +5030,12 @@ def main() -> int:
     parser.add_argument("--discovery-host", default="0.0.0.0")
     parser.add_argument("--discovery-port", type=int, default=56566)
     args = parser.parse_args()
+    try:
+        from remotedesk_linux_devices import local_device_id
+        args.device_id = local_device_id()
+    except Exception:
+        # Identity/history problems must not prevent the remote host from starting.
+        args.device_id = ""
 
     try:
         args.password = resolve_password_argument(args.password, args.password_fd)

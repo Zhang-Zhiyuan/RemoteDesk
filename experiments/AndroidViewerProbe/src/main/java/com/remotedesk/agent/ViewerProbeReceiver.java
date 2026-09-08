@@ -17,7 +17,12 @@ public final class ViewerProbeReceiver extends BroadcastReceiver {
         try {
             AndroidViewerChrome chrome=(AndroidViewerChrome)ViewerProbeApplication.field(viewer,"chrome");
             View frame=(View)ViewerProbeApplication.field(viewer,"viewerFrame");
-            if("landscape".equals(action)) viewer.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+            if ("gesture_case".equals(action)) {
+                AndroidViewerGestures gestures=(AndroidViewerGestures)ViewerProbeApplication.field(viewer,"gestures");
+                gestures.cancel(); gestures.viewport.reset(); gestures.mode(intent.getBooleanExtra("trackpad",true)); gestures.centerCursor();
+                gestureCase(frame, intent.getStringExtra("case"));
+            }
+            else if("landscape".equals(action)) viewer.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
             else if("portrait".equals(action)) viewer.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
             else if("mode".equals(action)) chrome.mode.performClick();
             else if("keyboard".equals(action)) chrome.keyboard.performClick();
@@ -60,6 +65,46 @@ public final class ViewerProbeReceiver extends BroadcastReceiver {
                 event(frame,SystemClock.uptimeMillis(),0,MotionEvent.ACTION_CANCEL,new float[]{10},new float[]{10});
             }
         } catch(Exception error) { ViewerProbeApplication.failure=error.toString(); }
+    }
+    private void gestureCase(View frame, String name) {
+        float density=frame.getResources().getDisplayMetrics().density;
+        float cx=frame.getWidth()/2f, cy=frame.getHeight()/2f, half=40*density;
+        long start=SystemClock.uptimeMillis();
+        event(frame,start,0,MotionEvent.ACTION_DOWN,new float[]{cx-half},new float[]{cy});
+        event(frame,start,10,MotionEvent.ACTION_POINTER_DOWN|(1<<8),new float[]{cx-half,cx+half},new float[]{cy,cy});
+        if ("jitter".equals(name)) {
+            for (int i=1;i<=24;i++) {
+                float wobble=(i%3)*4*density, dy=i*6*density;
+                event(frame,start,10+i*16,MotionEvent.ACTION_MOVE,
+                    new float[]{cx-half-wobble,cx+half+wobble},new float[]{cy+dy,cy+dy});
+            }
+        } else if ("replace".equals(name)) {
+            event(frame,start,30,MotionEvent.ACTION_MOVE,new float[]{cx-half,cx+half},new float[]{cy+96*density,cy+96*density});
+            event(frame,start,40,MotionEvent.ACTION_POINTER_UP|(1<<8),new float[]{cx-half,cx+half},new float[]{cy+96*density,cy+96*density});
+            event(frame,start,50,MotionEvent.ACTION_MOVE,new float[]{cx-half},new float[]{cy-50*density});
+            event(frame,start,60,MotionEvent.ACTION_POINTER_DOWN|(1<<8),new float[]{cx-half,cx+half*1.5f},new float[]{cy-50*density,cy-50*density});
+            event(frame,start,70,MotionEvent.ACTION_MOVE,new float[]{cx-half,cx+half*1.5f},new float[]{cy+14*density,cy+14*density});
+        } else if ("reverse_batch".equals(name)) {
+            MotionEvent.PointerProperties[] props=new MotionEvent.PointerProperties[2];
+            MotionEvent.PointerCoords[] coords=new MotionEvent.PointerCoords[2];
+            for(int i=0;i<2;i++) {
+                props[i]=new MotionEvent.PointerProperties(); props[i].id=i; props[i].toolType=MotionEvent.TOOL_TYPE_FINGER;
+                coords[i]=new MotionEvent.PointerCoords(); coords[i].x=cx+(i==0?-half:half); coords[i].y=cy+100*density; coords[i].pressure=1;
+            }
+            MotionEvent batch=MotionEvent.obtain(start,start+30,MotionEvent.ACTION_MOVE,2,props,coords,0,0,1,1,0,0,InputDevice.SOURCE_TOUCHSCREEN,0);
+            for(MotionEvent.PointerCoords p:coords) p.y=cy;
+            batch.addBatch(start+60,coords,0);
+            frame.dispatchTouchEvent(batch); batch.recycle();
+        } else if ("horizontal".equals(name)) {
+            event(frame,start,30,MotionEvent.ACTION_MOVE,new float[]{cx-half+80*density,cx+half+80*density},new float[]{cy+10*density,cy+10*density});
+        } else if ("pinch_drift".equals(name)) {
+            for(int i=1;i<=10;i++) {
+                float spread=half*(1+i*.1f);
+                event(frame,start,10+i*16,MotionEvent.ACTION_MOVE,new float[]{cx-spread,cx+spread},new float[]{cy+i*density,cy+i*density});
+            }
+        } else throw new IllegalArgumentException("Unknown bounded synthetic gesture");
+        event(frame,start,430,MotionEvent.ACTION_POINTER_UP|(1<<8),new float[]{cx-half,cx+half},new float[]{cy,cy});
+        event(frame,start,440,MotionEvent.ACTION_UP,new float[]{cx-half},new float[]{cy});
     }
     private void event(View target,long start,long elapsed,int action,float[] x,float[] y) {
         MotionEvent.PointerProperties[] properties=new MotionEvent.PointerProperties[x.length];

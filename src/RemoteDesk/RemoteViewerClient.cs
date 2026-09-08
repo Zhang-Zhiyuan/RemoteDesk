@@ -189,6 +189,8 @@ internal sealed class RemoteViewerClient : IDisposable
     private RemoteDeviceCapabilities _remoteCapabilities = RemoteDeviceCapabilities.None;
     private int _remoteCapabilitiesInitialized;
     private string? _remoteBuildStamp;
+    private RemoteDeviceDescriptor? _remoteDeviceInfo;
+    private bool _deviceIdentityRequested;
     private TaskCompletionSource<bool>? _remoteCapabilitiesReady;
     private RemoteSessionRejectedException? _lastSessionRejection;
     private bool _selfUpdatePackageRequested;
@@ -1146,6 +1148,8 @@ internal sealed class RemoteViewerClient : IDisposable
         Volatile.Write(ref _remoteCapabilitiesInitialized, 0);
         _remoteCapabilities = RemoteDeviceCapabilities.None;
         _remoteBuildStamp = null;
+        _remoteDeviceInfo = null;
+        _deviceIdentityRequested = false;
         Volatile.Write(
             ref _latestCaptureTargetAvailability,
             null);
@@ -2711,13 +2715,15 @@ internal sealed class RemoteViewerClient : IDisposable
                         control.MachineName,
                         RemoteDevicePlatforms.Normalize(control.Platform),
                         control.Capabilities,
-                        control.BuildStamp ?? _remoteBuildStamp);
+                        control.BuildStamp ?? _remoteBuildStamp,
+                        _remoteDeviceInfo?.DeviceId);
                     if (IsCurrentConnection(ownerConnection) &&
                         IsCurrentInputConnectionGeneration(
                             inputConnectionGeneration))
                     {
                         _remoteCapabilities = control.Capabilities;
                         _remoteBuildStamp = device.BuildStamp;
+                        _remoteDeviceInfo = device;
                         _incomingFileReceiver.RequireChecksum =
                             control.Capabilities.HasFlag(
                                 RemoteDeviceCapabilities
@@ -2736,11 +2742,26 @@ internal sealed class RemoteViewerClient : IDisposable
 
                     // Preserve the original event for API compatibility.
                     DeviceInfoReceived?.Invoke(device);
+                    if (!_deviceIdentityRequested && control.Capabilities.HasFlag(RemoteDeviceCapabilities.DeviceIdentity) &&
+                        IsCurrentConnection(ownerConnection) && IsCurrentInputConnectionGeneration(inputConnectionGeneration))
+                    {
+                        _deviceIdentityRequested = true;
+                        await SendControlAsync(RemoteMessageCodec.EncodeDeviceIdentityRequest(), ownerConnection);
+                    }
                 }
 
                 break;
             case RemoteControlKind.DeviceBuildInfo:
                 _remoteBuildStamp = control.BuildStamp;
+                break;
+            case RemoteControlKind.DeviceIdentity:
+                if (_deviceIdentityRequested && _remoteDeviceInfo is not null && _remoteDeviceInfo.DeviceId is null && IsCurrentConnection(ownerConnection) &&
+                    IsCurrentInputConnectionGeneration(inputConnectionGeneration))
+                {
+                    _remoteDeviceInfo = _remoteDeviceInfo with { DeviceId = control.Text };
+                    DeviceInfoUpdated?.Invoke(new RemoteDeviceInfoUpdate(inputConnectionGeneration, _remoteDeviceInfo));
+                    DeviceInfoReceived?.Invoke(_remoteDeviceInfo);
+                }
                 break;
             case RemoteControlKind.CaptureTargetChanged:
                 if (!string.IsNullOrWhiteSpace(control.TargetId) && !string.IsNullOrWhiteSpace(control.DisplayName))

@@ -10,17 +10,21 @@ final class AndroidViewerGestures {
     }
     final AndroidViewerViewport viewport;
     private final Sink sink;
-    private final float slop, wheelStep;
+    private final float slop, wheelStep, scrollSlop;
     boolean trackpad = true, dragging, lockedDrag;
     float cursorX, cursorY;
-    private float downX, downY, lastX, lastY, firstSpan, lastSpan, wheel;
+    private float downX, downY, lastX, lastY, firstSpan, lastSpan, wheel, scrollY;
     private long downTime;
     private boolean active, moved, multi, multiEnded, singleAllowed, multiTap;
     private int multiMode; // 0 undecided, 1 scrolling, 2 local pinch/pan
 
     AndroidViewerGestures(AndroidViewerViewport viewport, Sink sink, float density) {
         this.viewport = viewport; this.sink = sink;
-        slop = Math.max(4, 8 * density); wheelStep = Math.max(12, 24 * density);
+        slop = Math.max(4, 8 * density);
+        // Keep whole wheel notches: older Linux/Android hosts round every tiny
+        // delta up to a full scroll. Pixel-sized packets make them jump wildly.
+        wheelStep = Math.max(16, 32 * density);
+        scrollSlop = Math.max(1, 2 * density);
     }
 
     void centerCursor() { cursorX = viewport.frameWidth / 2f; cursorY = viewport.frameHeight / 2f; }
@@ -71,12 +75,21 @@ final class AndroidViewerGestures {
         if (!active) return;
         // Once a two-finger sequence has started, replacing a lifted finger is
         // not a fresh tap. Keep its scroll/pinch decision until all fingers lift.
-        if (multi) { multiTap = false; return; }
+        if (multi) {
+            multiTap = false;
+            if (!multiEnded) return;
+            // Re-anchor a replacement finger, preserving the chosen intent.
+            // Its new position/span must not become a jump or a fresh click.
+            multiEnded = false; wheel = 0;
+            downX = lastX = centerX; downY = lastY = scrollY = centerY;
+            firstSpan = lastSpan = Math.max(1, span);
+            return;
+        }
         multiTap = singleAllowed && !moved && !dragging && !lockedDrag;
         releaseDrag();
         if (lockedDrag) toggleDrag();
         multi = true; multiMode = 0;
-        downX = lastX = centerX; downY = lastY = centerY;
+        downX = lastX = centerX; downY = lastY = scrollY = centerY;
         firstSpan = lastSpan = Math.max(1, span);
     }
 
@@ -84,8 +97,20 @@ final class AndroidViewerGestures {
         if (!active || !multi || multiEnded) return;
         float distance = (float) Math.hypot(x - downX, y - downY);
         if (multiMode == 0) {
-            if (Math.abs(span - firstSpan) > Math.max(slop * 1.5f, distance * 0.75f)) multiMode = 2;
-            else if (distance > slop) multiMode = 1;
+            float spanChange = Math.abs(span - firstSpan);
+            float vertical = Math.abs(y - downY), horizontal = Math.abs(x - downX);
+            if (distance > slop || spanChange > slop) multiTap = false;
+            // Two fingers rarely travel at exactly the same speed. Require a
+            // deliberate spread/squeeze, not normal scroll span wobble, to zoom.
+            if (spanChange > Math.max(Math.max(slop * 3, firstSpan * .12f), distance * 1.6f)) multiMode = 2;
+            else if (vertical > slop && vertical >= horizontal && spanChange < Math.max(slop * 3, vertical * 1.6f)) {
+                multiMode = 1;
+                if (!trackpad && singleAllowed) {
+                    int[] point = viewport.point(downX, downY, true);
+                    singleAllowed = point != null;
+                    if (point != null) { cursorX = point[0]; cursorY = point[1]; }
+                }
+            }
             // Until intent is known, retain the original span/centroid. Updating
             // lastSpan on every tiny movement loses the beginning of a pinch.
             if (multiMode == 0) return;
@@ -94,11 +119,20 @@ final class AndroidViewerGestures {
             viewport.zoomAt(span / Math.max(1, lastSpan), lastX, lastY);
             viewport.pan(x - lastX, y - lastY);
         } else if (multiMode == 1 && singleAllowed) {
-            wheel += y - lastY;
+            // A small positional dead band ignores finger jitter without a
+            // time-based filter or extra latency. Reversal discards old residue.
+            float delta = y - scrollY;
+            if (Math.abs(delta) > scrollSlop) {
+                delta -= Math.copySign(scrollSlop, delta);
+                scrollY += delta;
+                if (wheel * delta < 0) wheel = 0;
+                wheel += delta;
+            }
             int steps = (int) (wheel / wheelStep);
             if (steps != 0) {
+                steps = Math.max(-6, Math.min(6, steps));
                 emit(RemoteDeskProtocol.INPUT_MOUSE_WHEEL, RemoteDeskProtocol.MOUSE_NONE,
-                     Math.max(-10, Math.min(10, steps)) * 120);
+                     steps * 120);
                 wheel -= steps * wheelStep;
             }
         }

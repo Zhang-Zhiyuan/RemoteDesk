@@ -128,7 +128,9 @@ internal enum RemoteControlKind : byte
     LowLatencyVideoReady = 29,
     LowLatencyVideoStop = 30,
     LowLatencyVideoStopped = 31,
-    SessionRejected = 32
+    SessionRejected = 32,
+    DeviceIdentityRequest = 33,
+    DeviceIdentity = 34
 }
 
 internal sealed record LowLatencyVideoOffer(
@@ -516,6 +518,17 @@ internal static class RemoteMessageCodec
         using var writer = new BinaryWriter(output, Encoding.UTF8);
         writer.Write((byte)RemoteControlKind.DeviceBuildInfo);
         WriteBoundedString(writer, RemoteDeskBuildInfo.NormalizeBuildStamp(buildStamp) ?? string.Empty, string.Empty);
+        return output.ToArray();
+    }
+
+    public static byte[] EncodeDeviceIdentityRequest() => [(byte)RemoteControlKind.DeviceIdentityRequest];
+
+    public static byte[] EncodeDeviceIdentity(string deviceId)
+    {
+        using var output = new MemoryStream();
+        using var writer = new BinaryWriter(output, Encoding.UTF8);
+        writer.Write((byte)RemoteControlKind.DeviceIdentity);
+        writer.Write(RemoteDeviceIdentity.Normalize(deviceId) ?? throw new ArgumentException("Invalid device ID"));
         return output.ToArray();
     }
 
@@ -918,6 +931,10 @@ internal static class RemoteMessageCodec
                 StatusMessage: ReadBoundedString(reader)),
             RemoteControlKind.FileTransferChecksum => DecodeFileTransferChecksum(reader, kind),
             RemoteControlKind.DeviceInfo => DecodeDeviceInfo(reader, kind),
+            RemoteControlKind.DeviceIdentityRequest => new RemoteControlMessage(kind, [], null, null),
+            RemoteControlKind.DeviceIdentity => new RemoteControlMessage(kind, [], null, null,
+                Text: RemoteDeviceIdentity.Normalize(ReadBoundedString(reader)) ??
+                    throw new InvalidDataException("设备标识无效。")),
             RemoteControlKind.ViewerInfo => new RemoteControlMessage(
                 kind,
                 Array.Empty<CaptureTargetInfo>(),

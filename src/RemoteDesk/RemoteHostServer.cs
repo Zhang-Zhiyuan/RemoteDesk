@@ -5574,6 +5574,13 @@ internal sealed class RemoteHostServer : IDisposable
                     control.SupportedVideoCodecs);
                 clipboardLog($"查看端支持编码：{FormatVideoCodecs(control.SupportedVideoCodecs)}");
                 break;
+            case RemoteControlKind.DeviceIdentityRequest:
+                // Sent only on request from a client that saw the capability bit;
+                // old clients with strict control decoders never receive this.
+                await Protocol.WriteMessageAsync(stream, MessageType.Control,
+                    RemoteMessageCodec.EncodeDeviceIdentity(RemoteDeviceIdentity.LocalId),
+                    session, writeLock, cancellationToken);
+                break;
             case RemoteControlKind.VideoKeyFrameRequest:
                 viewerState.RequestVideoKeyFrame();
                 break;

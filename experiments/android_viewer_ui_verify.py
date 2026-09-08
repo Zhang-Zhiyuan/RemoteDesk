@@ -233,7 +233,10 @@ def main():
         tap("直接触摸"); tap("鼠标")
 
         tap("更多"); tap("屏幕方向"); tap("横屏")
-        landscape = wait(lambda s: s["viewport"][2] > s["viewport"][3] and s["healthVisible"] == 8)
+        # Visibility changes precede the next Android measure/layout pass. A
+        # snapshot can already say GONE while still reporting portrait bounds.
+        landscape = wait(lambda s: s["viewport"][2] > s["viewport"][3] and s["healthVisible"] == 8 and
+                         s["dock"][3]-s["dock"][1] < first["dock"][3]-first["dock"][1])
         check("Landscape compact chrome remeasures", landscape["dock"][3]-landscape["dock"][1] < first["dock"][3]-first["dock"][1], landscape["dock"])
         photo("landscape")
         tap("更多"); tap("画面缩放", prefix=True); tap("原始像素 1:1")

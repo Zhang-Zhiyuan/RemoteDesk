@@ -4,7 +4,8 @@ internal sealed record RemoteDeviceDescriptor(
     string MachineName,
     string Platform,
     RemoteDeviceCapabilities Capabilities,
-    string? BuildStamp = null);
+    string? BuildStamp = null,
+    string? DeviceId = null);
 
 [Flags]
 internal enum RemoteDeviceCapabilities
@@ -31,7 +32,8 @@ internal enum RemoteDeviceCapabilities
     ShortGopH264 = 1 << 18,
     HighFrameRateH264 = 1 << 19,
     AuthenticatedUdpHeartbeat = 1 << 20,
-    HighQualityJpeg = 1 << 21
+    HighQualityJpeg = 1 << 21,
+    DeviceIdentity = 1 << 22
 }
 
 internal static class RemoteDevicePlatforms
@@ -93,6 +95,7 @@ internal static class RemoteDeviceCapabilityInfo
     public static RemoteDeviceCapabilities LocalWindows(bool canRemoteStart)
     {
         RemoteDeviceCapabilities capabilities =
+            RemoteDeviceCapabilities.DeviceIdentity |
             RemoteDeviceCapabilities.RemoteDesktop |
             RemoteDeviceCapabilities.InputControl |
             RemoteDeviceCapabilities.ClipboardText |

@@ -60,6 +60,9 @@ CONTROL_FILE_TRANSFER_CHUNK = 9
 CONTROL_FILE_TRANSFER_COMPLETE = 10
 CONTROL_FILE_TRANSFER_STATUS = 11
 CONTROL_DEVICE_INFO = 12
+CONTROL_DEVICE_IDENTITY_REQUEST = 33
+CONTROL_DEVICE_IDENTITY = 34
+CAPABILITY_DEVICE_IDENTITY = 1 << 22
 CONTROL_VIEWER_INFO = 13
 CONTROL_VIDEO_KEY_FRAME_REQUEST = 14
 CONTROL_FILE_TRANSFER_REQUEST_CLIPBOARD_FILES = 18
@@ -625,6 +628,13 @@ def encode_device_build_info(build_stamp: str) -> bytes:
     return bytes([CONTROL_DEVICE_BUILD_INFO]) + encode_bounded_dotnet_string(build_stamp, "")
 
 
+def encode_device_identity(device_id: str) -> bytes:
+    import uuid
+    parsed = uuid.UUID(device_id)
+    if not parsed.int: raise ValueError("Invalid device identity")
+    return bytes([CONTROL_DEVICE_IDENTITY]) + encode_bounded_dotnet_string(str(parsed), "")
+
+
 def encode_capture_target_list(targets: list[tuple[str, str]]) -> bytes:
     target_items = targets[:MAX_CONTROL_ITEMS]
     payload = bytes([CONTROL_CAPTURE_TARGET_LIST]) + struct.pack("<i", len(target_items))
@@ -839,6 +849,13 @@ def decode_control(payload: bytes) -> dict[str, Any]:
                 "buildStamp": build_stamp,
             }
         )
+    elif kind == CONTROL_DEVICE_IDENTITY:
+        import uuid
+        parsed = uuid.UUID(cursor.read_dotnet_string())
+        if not parsed.int: raise ProtocolError("invalid device identity")
+        message["deviceId"] = str(parsed)
+    elif kind == CONTROL_DEVICE_IDENTITY_REQUEST:
+        pass
     elif kind == CONTROL_DEVICE_BUILD_INFO:
         message["buildStamp"] = cursor.read_dotnet_string()
     elif kind == CONTROL_CAPTURE_TARGET_LIST:

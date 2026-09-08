@@ -17,7 +17,7 @@ final class AndroidRelaySettings {
         AndroidPasswordStore.saveRelay(context, options == null ? "" : options.json().toString());
     }
 
-    static String localDeviceId(Context context) throws IOException {
+    static synchronized String localDeviceId(Context context) throws IOException {
         SharedPreferences preferences = context.getApplicationContext().getSharedPreferences(
             RemoteDeskForegroundService.PREFS_NAME, Context.MODE_PRIVATE);
         String existing = preferences.getString("relay-device-id", "");

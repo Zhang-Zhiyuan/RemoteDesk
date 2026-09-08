@@ -36,7 +36,7 @@ if ($Action -eq 'SetField') {
     if ($Value -notmatch '^[a-zA-Z0-9.:-]{1,128}$') { throw 'Only simple synthetic ASCII test values are accepted.' }
     $target = $target.SelectSingleNode("following-sibling::node[@class='android.widget.EditText'][1]")
     if ($null -eq $target -or $target.enabled -ne 'true') { throw 'The labeled editable field is not available.' }
-    $hints = @{ '本机访问口令' = '本机被控口令'; '远端地址' = '远端地址:端口'; '连接口令' = '远端口令' }
+    $hints = @{ '本机访问口令' = '本机被控口令'; '远端地址' = 'IP / 主机名（端口可省略）'; '连接口令' = '远端口令' }
     if ($target.text -and $target.text -ne $Value -and $target.text -ne $hints[$Text]) {
         throw 'Refusing to overwrite a non-empty test field.'
     }

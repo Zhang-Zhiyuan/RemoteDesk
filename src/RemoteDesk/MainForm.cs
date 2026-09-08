@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 
 namespace RemoteDesk;
 
-public sealed class MainForm : Form
+public sealed partial class MainForm : Form
 {
     private static readonly TimeSpan ExitWatchdogTimeout = TimeSpan.FromSeconds(6);
     private const int MaxRecentRemoteDevices = 20;
@@ -230,6 +230,8 @@ public sealed class MainForm : Form
         _startMinimizedToTray = startMinimizedToTray;
         _resumeHostAfterUpdate = resumeHostAfterUpdate;
         _settings = _settingsService.Load();
+        _settings.Relay.DeviceId = RemoteDeviceIdentity.Normalize(_settings.Relay.DeviceId) ?? Guid.NewGuid().ToString("D");
+        RemoteDeviceIdentity.LocalId = _settings.Relay.DeviceId;
         long settingsLoadedAt = Stopwatch.GetTimestamp();
         SuspendLayout();
         Text = "RemoteDesk";
@@ -259,6 +261,7 @@ public sealed class MainForm : Form
         long settingsAppliedAt = Stopwatch.GetTimestamp();
         UpdateDiscoveryPresence();
         StartPresenceResponder();
+        InitializeDeviceRefresh();
         FormClosing += MainForm_FormClosing;
         long servicesStartedAt = Stopwatch.GetTimestamp();
         ResumeLayout(performLayout: false);
@@ -1007,6 +1010,7 @@ public sealed class MainForm : Form
         };
         StyleInput(_viewerHostBox);
         _viewerPortBox = CreatePortInput();
+        _viewerAutoPortBox = new CheckBox { Text = "自动端口", Checked = true, AutoSize = true, Margin = new Padding(6, 12, 6, 0) };
         _viewerPasswordBox = CreatePasswordInput();
         _viewerPasswordBox.PlaceholderText = "连接口令";
         _discoveredHostsBox = new ComboBox
@@ -1066,6 +1070,9 @@ public sealed class MainForm : Form
                 _discoveredHostsBox));
         toolbar.Controls.Add(_discoverHostsButton);
         toolbar.Controls.Add(_diagnoseConnectionButton);
+        _addDeviceButton = CreateSecondaryButton("新增设备");
+        _addDeviceButton.Click += (_, _) => AddDevice();
+        toolbar.Controls.Add(_addDeviceButton);
         toolbar.Controls.Add(
             CreateNonWrappingToolbarField(
                 "IP/主机名",
@@ -1074,6 +1081,7 @@ public sealed class MainForm : Form
             CreateNonWrappingToolbarField(
                 "端口",
                 _viewerPortBox));
+        toolbar.Controls.Add(_viewerAutoPortBox);
         toolbar.Controls.Add(
             CreateNonWrappingToolbarField(
                 "口令",
@@ -4166,7 +4174,7 @@ public sealed class MainForm : Form
                 }
 
                 SaveSettingsFromUi();
-                await RefreshManualHostStatusAsync();
+                if (!await ResolveViewerEndpointAsync()) return;
                 bool remoteStartAttempted = await EnsureRemoteHostReadyAsync();
                 PrepareViewerCapabilitiesForConnection();
                 if (_viewerWindow is null || _viewerWindow.IsDisposed)
@@ -5167,7 +5175,7 @@ public sealed class MainForm : Form
         _discoverHostsButton.Enabled = false;
         if (!silent)
         {
-            SetViewerStatus("正在广播扫描、网段探测并探测手填/历史地址...", MutedTextColor);
+            SetViewerStatus("正在查找附近设备和已保存地址的实际端口...", MutedTextColor);
         }
 
         try
@@ -5178,7 +5186,7 @@ public sealed class MainForm : Form
                 scanCancellation.Token,
                 hostProbePort: hostProbePort,
                 directTargets: GetDiscoveryProbeTargets(),
-                includeDirectedTcpProbes: true);
+                includeDirectedTcpProbes: false);
             IReadOnlyList<DiscoveredHost> hosts = RemoveLocalDiscoveredHosts(discoveredHosts, out int ignoredLocalHosts);
 
             if (scanCancellation.IsCancellationRequested || _isClosing || IsDisposed)
@@ -5350,24 +5358,13 @@ public sealed class MainForm : Form
     private void UpdateDiscoveredHosts(IReadOnlyList<DiscoveredHost> hosts, bool silent)
     {
         _lastDiscoveredHosts = hosts;
-        bool recentPortsMigrated =
-            MigrateCompatibleRecentDevicePorts(
-                GetRecentDevices(),
-                hosts);
         IReadOnlyList<RemoteDeviceListItem> devices = BuildRemoteDeviceList(hosts);
         string currentAddress = _viewerHostBox.Text.Trim();
         int currentPort =
             (int)_viewerPortBox.Value;
-        RemoteDeviceListItem? selected = devices.FirstOrDefault(device =>
+        RemoteDeviceListItem? selected = devices.FirstOrDefault(device => device.Port == currentPort &&
+            string.Equals(device.Address, currentAddress, StringComparison.OrdinalIgnoreCase)) ?? devices.FirstOrDefault(device =>
             string.Equals(device.Address, currentAddress, StringComparison.OrdinalIgnoreCase)) ?? devices.FirstOrDefault();
-        bool adoptCompatibleDiscoveredPort =
-            selected is not null &&
-            ShouldAdoptCompatibleDiscoveredPort(
-                currentAddress,
-                currentPort,
-                selected.Address,
-                selected.Port,
-                selected.IsSavedOnly);
 
         _updatingDiscoveredHosts = true;
         _discoveredHostsBox.BeginUpdate();
@@ -5396,20 +5393,9 @@ public sealed class MainForm : Form
         }
 
         if (selected is not null &&
-            (string.IsNullOrWhiteSpace(currentAddress) ||
-                !silent ||
-                adoptCompatibleDiscoveredPort))
+            (string.IsNullOrWhiteSpace(currentAddress) || !silent))
         {
             ApplyRemoteDevice(selected);
-        }
-
-        if (adoptCompatibleDiscoveredPort)
-        {
-            SaveSettingsFromUi();
-        }
-        else if (recentPortsMigrated)
-        {
-            TrySaveSettings();
         }
 
         UpdateSavedDeviceActionState();
@@ -5565,8 +5551,15 @@ public sealed class MainForm : Form
 
     private void ApplyRemoteDevice(RemoteDeviceListItem device)
     {
+        _selectedHistoryDevice = FindSavedForDiscovery(device.Address, device.Port, device.DeviceId);
         _viewerHostBox.Text = device.Address;
         _viewerPortBox.Value = ClampToRange(device.Port, _viewerPortBox);
+        if (_selectedHistoryDevice is not null)
+        {
+            if (_selectedHistoryDevice.ProtectedPassword is not null)
+                _viewerPasswordBox.Text = AppSettingsService.UnprotectSecret(_selectedHistoryDevice.ProtectedPassword);
+            _viewerAutoPortBox.Checked = _selectedHistoryDevice.AutoDetectPort;
+        }
         SetViewerStatus($"已选择 {device.DisplayName} ({device.Address}:{device.Port})，{device.GetLongStatus()}", MutedTextColor);
         UpdateViewerActionState();
     }
@@ -5868,12 +5861,14 @@ public sealed class MainForm : Form
             .GroupBy(device => MakeDeviceKey(device.Address!, device.Port), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
 
-        foreach (DiscoveredHost host in hosts)
+        foreach (DiscoveredHost host in CollapseDiscoveryAliases(hosts))
         {
             string key = MakeDeviceKey(host.Address, host.Port);
             savedDevices.TryGetValue(key, out SavedRemoteDevice? savedDevice);
+            savedDevice ??= recentDevices.FirstOrDefault(item => RemoteDeviceIdentity.Same(item.DeviceId, host.DeviceId));
             devices.Add(RemoteDeviceListItem.FromDiscovered(host, savedDevice));
             seenKeys.Add(key);
+            if (savedDevice is not null) seenKeys.Add(MakeDeviceKey(savedDevice.Address!, savedDevice.Port));
         }
 
         foreach (SavedRemoteDevice savedDevice in recentDevices
@@ -5932,6 +5927,9 @@ public sealed class MainForm : Form
         int port = (int)_viewerPortBox.Value;
         RemoteDeviceListItem? selectedDevice = GetSelectedRemoteDevice();
         RemoteDeviceDescriptor? connectedDevice = _lastConnectedDeviceInfo;
+        if (connectedDevice is null || _rememberedViewerGeneration == _viewerClient.InputConnectionGeneration) return;
+        if (connectedDevice.Capabilities.HasFlag(RemoteDeviceCapabilities.DeviceIdentity) &&
+            connectedDevice.DeviceId is null) return;
         string machineName = connectedDevice?.MachineName ?? (selectedDevice is not null &&
             string.Equals(selectedDevice.Address, address, StringComparison.OrdinalIgnoreCase)
             ? selectedDevice.MachineName
@@ -5958,8 +5956,17 @@ public sealed class MainForm : Form
             : RemoteDeviceCapabilities.RemoteDesktop | RemoteDeviceCapabilities.InputControl;
 
         List<SavedRemoteDevice> recentDevices = GetRecentDevices();
-        UpsertRecentDevice(recentDevices, new SavedRemoteDevice
+        SavedRemoteDevice? confirmedSource = _confirmedHistorySource is null ? null : recentDevices.FirstOrDefault(d =>
+            d.Port == _confirmedHistorySource.Port && string.Equals(d.Address, _confirmedHistorySource.Address, StringComparison.OrdinalIgnoreCase));
+        if (_confirmedHistorySource is not null && confirmedSource is null) return; // Deleted while connecting.
+        if (confirmedSource is not null && RemoteDeviceIdentity.Normalize(confirmedSource.DeviceId) is not null &&
+            !RemoteDeviceIdentity.Same(confirmedSource.DeviceId, connectedDevice?.DeviceId)) confirmedSource = null;
+        var currentDevice = new SavedRemoteDevice
         {
+            DeviceId = connectedDevice?.DeviceId,
+            Remark = confirmedSource?.Remark,
+            ProtectedPassword = AppSettingsService.ProtectSecret(_viewerPasswordBox.Text),
+            AutoDetectPort = _viewerAutoPortBox.Checked,
             MachineName = machineName,
             Address = address,
             Port = port,
@@ -5968,7 +5975,11 @@ public sealed class MainForm : Form
             Capabilities = capabilities,
             BuildStamp = buildStamp,
             LastConnectedAt = DateTimeOffset.Now
-        });
+        };
+        if (confirmedSource is not null) recentDevices.Remove(confirmedSource);
+        UpsertRecentDevice(recentDevices, currentDevice);
+        _confirmedHistorySource = currentDevice;
+        _rememberedViewerGeneration = _viewerClient.InputConnectionGeneration;
 
         _settings.Viewer.Host = address;
         _settings.Viewer.Port = port;
@@ -6006,22 +6017,16 @@ public sealed class MainForm : Form
         }
 
         string address = currentDevice.Address!.Trim();
-        SavedRemoteDevice? previousDevice =
-            recentDevices.FirstOrDefault(device =>
-                IsValidSavedRemoteDevice(device) &&
-                string.Equals(
-                    device.Address!.Trim(),
-                    address,
-                    StringComparison.OrdinalIgnoreCase) &&
-                (device.Port == currentDevice.Port ||
-                    RemotePortPolicy.AreCompatibleHostPorts(
-                        device.Port,
-                        currentDevice.Port)));
+        SavedRemoteDevice? previousDevice = recentDevices.FirstOrDefault(device =>
+            IsValidSavedRemoteDevice(device) && SameSavedMachine(device, currentDevice));
         currentDevice.Address = address;
+        currentDevice.DeviceId = RemoteDeviceIdentity.Normalize(currentDevice.DeviceId) ?? previousDevice?.DeviceId;
+        currentDevice.ProtectedPassword ??= previousDevice?.ProtectedPassword;
         currentDevice.Remark = AppSettingsService
             .NormalizeSavedDeviceRemark(
                 currentDevice.Remark ??
-                previousDevice?.Remark);
+                recentDevices.FirstOrDefault(device => SameSavedMachine(device, currentDevice) &&
+                    !string.IsNullOrWhiteSpace(device.Remark))?.Remark);
 
         for (int index = recentDevices.Count - 1;
              index >= 0;
@@ -6029,15 +6034,7 @@ public sealed class MainForm : Form
         {
             SavedRemoteDevice device =
                 recentDevices[index];
-            if (IsValidSavedRemoteDevice(device) &&
-                string.Equals(
-                    device.Address!.Trim(),
-                    address,
-                    StringComparison.OrdinalIgnoreCase) &&
-                (device.Port == currentDevice.Port ||
-                    RemotePortPolicy.AreCompatibleHostPorts(
-                        device.Port,
-                        currentDevice.Port)))
+            if (IsValidSavedRemoteDevice(device) && SameSavedMachine(device, currentDevice))
             {
                 recentDevices.RemoveAt(index);
             }
@@ -6219,6 +6216,7 @@ public sealed class MainForm : Form
 
             _viewerHostBox.Text = _settings.Viewer.Host ?? string.Empty;
             _viewerPortBox.Value = ClampToRange(_settings.Viewer.Port, _viewerPortBox);
+            _viewerAutoPortBox.Checked = _settings.Viewer.AutoDetectPort;
             SetSelectedViewerVideoMode(_settings.Viewer.VideoMode);
             _viewerPasswordBox.Text = string.IsNullOrWhiteSpace(viewerPassword) ? DefaultAccessPassword : viewerPassword;
             _relayRegisterHostBox.Checked =
@@ -6298,6 +6296,7 @@ public sealed class MainForm : Form
 
             _settings.Viewer.Host = _viewerHostBox.Text.Trim();
             _settings.Viewer.Port = (int)_viewerPortBox.Value;
+            _settings.Viewer.AutoDetectPort = _viewerAutoPortBox.Checked;
             _settings.Viewer.VideoMode = GetSelectedViewerVideoMode();
             _settings.Viewer.PreferH264 = _settings.Viewer.VideoMode != ViewerVideoMode.StableJpeg;
             _settings.Viewer.ProtectedPassword = AppSettingsService.ProtectSecret(_viewerPasswordBox.Text);
@@ -6711,6 +6710,8 @@ public sealed class MainForm : Form
     {
         _viewerHostBox.Enabled = enabled;
         _viewerPortBox.Enabled = enabled;
+        _viewerAutoPortBox.Enabled = enabled;
+        _addDeviceButton.Enabled = enabled;
         _viewerPasswordBox.Enabled = enabled;
         _discoveredHostsBox.Enabled = enabled;
         _discoveredHostsList.Enabled = enabled;
@@ -8303,9 +8304,11 @@ public sealed class MainForm : Form
             bool canRemoteStart,
             bool isSaved,
             bool isSavedOnly,
-            DateTimeOffset? lastConnectedAt)
+            DateTimeOffset? lastConnectedAt,
+            string? deviceId = null)
         {
             MachineName = machineName;
+            DeviceId = RemoteDeviceIdentity.Normalize(deviceId);
             Remark = AppSettingsService
                 .NormalizeSavedDeviceRemark(remark);
             Address = address;
@@ -8322,6 +8325,7 @@ public sealed class MainForm : Form
         }
 
         public string MachineName { get; }
+        public string? DeviceId { get; }
 
         public string? Remark { get; }
 
@@ -8369,7 +8373,7 @@ public sealed class MainForm : Form
                 host.CanRemoteStart,
                 isSaved: savedDevice is not null,
                 isSavedOnly: false,
-                GetSavedLastConnectedAt(savedDevice));
+                GetSavedLastConnectedAt(savedDevice), host.DeviceId ?? savedDevice?.DeviceId);
         }
 
         public static RemoteDeviceListItem FromSaved(SavedRemoteDevice savedDevice)
@@ -8394,7 +8398,7 @@ public sealed class MainForm : Form
                 canRemoteStart: false,
                 isSaved: true,
                 isSavedOnly: true,
-                GetSavedLastConnectedAt(savedDevice));
+                GetSavedLastConnectedAt(savedDevice), savedDevice.DeviceId);
         }
 
         private static DateTimeOffset? GetSavedLastConnectedAt(SavedRemoteDevice? savedDevice)

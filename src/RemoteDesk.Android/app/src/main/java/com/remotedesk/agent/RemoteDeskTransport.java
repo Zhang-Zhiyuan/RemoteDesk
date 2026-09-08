@@ -248,6 +248,15 @@ final class RemoteDeskTransport {
         return output.toByteArray();
     }
 
+    static byte[] encodeDeviceIdentity(String deviceId) throws IOException {
+        String id = AndroidConnectionHistory.deviceIdentity(deviceId);
+        if (id.isEmpty()) throw new IOException("Invalid device identity");
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        output.write(RemoteDeskProtocol.CONTROL_DEVICE_IDENTITY);
+        writeBoundedString(output, id, "");
+        return output.toByteArray();
+    }
+
     static byte[] encodeCaptureTargetList() throws IOException {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         output.write(RemoteDeskProtocol.CONTROL_CAPTURE_TARGET_LIST);
@@ -421,6 +430,12 @@ final class RemoteDeskTransport {
         long fileOffset = 0;
         byte[] fileBytes = null;
         switch (kind) {
+            case RemoteDeskProtocol.CONTROL_DEVICE_IDENTITY_REQUEST:
+                break;
+            case RemoteDeskProtocol.CONTROL_DEVICE_IDENTITY:
+                text = AndroidConnectionHistory.deviceIdentity(cursor.readString(MAX_CONTROL_STRING_CHARS));
+                if (text.isEmpty()) throw new IOException("Invalid device identity");
+                break;
             case RemoteDeskProtocol.CONTROL_DEVICE_INFO:
                 String machineName = cursor.readString(MAX_CONTROL_STRING_CHARS);
                 String platform = cursor.readString(MAX_CONTROL_STRING_CHARS);

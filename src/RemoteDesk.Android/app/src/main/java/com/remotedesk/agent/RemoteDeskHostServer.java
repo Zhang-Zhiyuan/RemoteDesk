@@ -964,6 +964,10 @@ final class RemoteDeskHostServer {
         Socket sessionSocket) throws IOException, GeneralSecurityException {
         RemoteDeskTransport.ControlMessage control = RemoteDeskTransport.decodeControl(payload);
         switch (control.kind) {
+            case RemoteDeskProtocol.CONTROL_DEVICE_IDENTITY_REQUEST:
+                RemoteDeskTransport.writeMessage(output, RemoteDeskProtocol.MESSAGE_CONTROL,
+                    RemoteDeskTransport.encodeDeviceIdentity(AndroidRelaySettings.localDeviceId(appContext)), session, writeLock);
+                break;
             case RemoteDeskProtocol.CONTROL_CLIPBOARD_GET_TEXT:
                 sendClipboardText(output, session, writeLock);
                 break;
@@ -1334,6 +1338,7 @@ final class RemoteDeskHostServer {
             RemoteDeskProtocol.CAPABILITY_LOW_LATENCY_UDP_VIDEO_XOR_FEC |
             RemoteDeskProtocol.CAPABILITY_AUTHENTICATED_UDP_HEARTBEAT |
             RemoteDeskProtocol.CAPABILITY_HIGH_QUALITY_JPEG |
+            RemoteDeskProtocol.CAPABILITY_DEVICE_IDENTITY |
             AndroidH264CapabilityPolicy.hostCapabilities(encoderReport);
         if (inputEnabled) {
             capabilities |= RemoteDeskProtocol.CAPABILITY_INPUT_CONTROL;

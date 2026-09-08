@@ -61,6 +61,9 @@ from remotedesk_protocol_probe import (
     CONTROL_CAPTURE_TARGET_LIST,
     CONTROL_CLIPBOARD_STATUS,
     CONTROL_DEVICE_INFO,
+    CONTROL_DEVICE_IDENTITY_REQUEST,
+    CONTROL_DEVICE_IDENTITY,
+    CAPABILITY_DEVICE_IDENTITY,
     CONTROL_FILE_TRANSFER_STATUS,
     CONTROL_SESSION_REJECTED,
     RECOMMENDED_FILE_TRANSFER_CHUNK_BYTES,
@@ -97,6 +100,7 @@ from remotedesk_protocol_probe import (
     write_message,
 )
 import remotedesk_linux_startup as host_startup
+from remotedesk_linux_device_panel import DevicePanel
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -4087,12 +4091,19 @@ class ViewerConnection:
                 ).strip()
             )
         if kind == CONTROL_DEVICE_INFO:
+            self.remote_device_info = dict(control, deviceId=getattr(self, "remote_device_info", {}).get("deviceId", ""))
+            if control.get("capabilities", 0) & CAPABILITY_DEVICE_IDENTITY and not getattr(self, "identity_requested", False):
+                self.identity_requested = True
+                self._send_control(bytes([CONTROL_DEVICE_IDENTITY_REQUEST]))
             self.remote_capabilities = int(control.get("capabilities") or 0)
             name = control.get("machineName") or "RemoteDesk"
             platform = control.get("platform") or "Unknown"
             capabilities = ", ".join(capability_names(self.remote_capabilities)) or "none"
             self._put_event("viewer_status", f"{name} ({platform}) - {capabilities}")
             self._put_event("viewer_reconnect_qualified", True)
+        elif kind == CONTROL_DEVICE_IDENTITY and getattr(self, "identity_requested", False):
+            self.remote_device_info = dict(getattr(self, "remote_device_info", {}), deviceId=control["deviceId"])
+            self._put_event("viewer_device_identity", self.remote_device_info)
         elif kind == CONTROL_CAPTURE_TARGET_LIST:
             self.capture_target_list_received = True
             self.capture_targets = normalize_viewer_capture_targets(
@@ -4524,7 +4535,14 @@ class RemoteDeskLinuxApp:
         except (OSError, ValueError, TypeError):
             load_error = "保存的中转配置无法读取，请重新填写。"
         options = self.relay_options
-        self.relay_device_id = options.device_id if options else str(uuid4())
+        if options:
+            self.relay_device_id = options.device_id
+        else:
+            try:
+                from remotedesk_linux_devices import local_device_id
+                self.relay_device_id = local_device_id()
+            except (OSError, ValueError):
+                self.relay_device_id = str(uuid4())
         self.relay_server = tk.StringVar(value=options.server_address if options else "")
         self.relay_port = tk.StringVar(value=str(options.port if options else 56567))
         self.relay_token = tk.StringVar(value=options.access_token if options else "")
@@ -4958,17 +4976,17 @@ class RemoteDeskLinuxApp:
         form = ttk.LabelFrame(tab, text="远程连接", padding=16, style="Panel.TLabelframe")
         form.pack(fill=tk.X)
         self.viewer_host = tk.StringVar(value="")
-        self.viewer_port = tk.StringVar(value="56565")
+        self.viewer_port = tk.StringVar(value="")
         self.viewer_password = tk.StringVar(value="")
         ttk.Label(
             form,
-            text="输入另一台 RemoteDesk 的地址与口令，连接后将在独立窗口显示远程桌面。",
+            text="点选附近或已保存设备，或输入 IP 和口令；端口留空自动探测。",
             style="PanelSubtitle.TLabel",
             wraplength=760,
             justify=tk.LEFT,
         ).grid(row=0, column=0, columnspan=3, sticky=tk.EW, pady=(0, 10))
         self._row_entry(form, 1, "主机 / IP", self.viewer_host)
-        self._row_entry(form, 2, "端口", self.viewer_port)
+        self._row_entry(form, 2, "端口（留空自动）", self.viewer_port)
         self._row_entry(form, 3, "连接口令", self.viewer_password, show="*")
 
         buttons = ttk.Frame(tab, style="App.TFrame")
@@ -5045,6 +5063,8 @@ class RemoteDeskLinuxApp:
             justify=tk.LEFT,
         )
         self.viewer_status.pack(fill=tk.X)
+        self.device_panel = DevicePanel(self, tab)
+        self.device_panel.pack(fill=tk.X, before=form, pady=(0, 10))
 
     def _row_entry(
         self,
@@ -5304,6 +5324,9 @@ class RemoteDeskLinuxApp:
     def connect_viewer(self) -> None:
         if self.viewer is not None or self.viewer_reconnect_after_id is not None:
             return
+        if getattr(self, "device_panel", None) is not None:
+            self.device_panel.connect()
+            return
         self.viewer_relay_options = None
         self.viewer_pressed_keys.clear()
         host = self.viewer_host.get().strip()
@@ -5315,6 +5338,11 @@ class RemoteDeskLinuxApp:
             messagebox.showerror("RemoteDesk", "口令不能为空。")
             return
         port = normalize_port(self.viewer_port.get())
+        self._begin_direct_viewer(host, port, password)
+
+    def _begin_direct_viewer(self, host, port, password):
+        self.viewer_relay_options = None
+        self.viewer_pressed_keys.clear()
         self.viewer_reconnect_policy.begin()
         self._viewer_capture_state().begin_logical_session()
         self.viewer_reconnect_target = (host, port, password)
@@ -6462,12 +6490,17 @@ class RemoteDeskLinuxApp:
                         )
                     )
                     viewer = self.viewer
+                    if getattr(self, "device_panel", None) is not None:
+                        self.device_panel.record(getattr(viewer, "remote_device_info", None))
                     self._set_viewer_file_action_state(
                         self._viewer_has_capability(
                             viewer,
                             CAPABILITY_FILE_RECEIVE,
                         )
                     )
+            elif event == "viewer_device_identity":
+                info = self._unpack_viewer_event(value)
+                if getattr(self, "device_panel", None) is not None: self.device_panel.record(info)
             elif event == "viewer_capture_metadata":
                 snapshot = self._unpack_viewer_event(value)
                 if isinstance(snapshot, ViewerCaptureTargetSnapshot):
@@ -6654,6 +6687,7 @@ class RemoteDeskLinuxApp:
         if self.closing:
             return
         self.closing = True
+        if getattr(self, "device_panel", None) is not None: self.device_panel.close()
         pending_poll = getattr(self, "event_poll_after_id", None)
         if pending_poll is not None:
             self.root.after_cancel(pending_poll)

@@ -54,7 +54,11 @@ public final class RemoteDeskViewerActivity extends Activity {
     static final String EXTRA_HOST = "com.remotedesk.agent.extra.HOST";
     static final String EXTRA_PORT = "com.remotedesk.agent.extra.PORT";
     static final String EXTRA_RELAY_DEVICE_ID = "com.remotedesk.agent.extra.RELAY_DEVICE_ID";
+    static final String EXTRA_HISTORY_ID = "com.remotedesk.agent.extra.HISTORY_ID";
+    static final String EXTRA_HISTORY_REDIRECT = "com.remotedesk.agent.extra.HISTORY_REDIRECT";
     private AndroidRelay.Options relayOptions;
+    private java.util.function.BiConsumer<String, String> recordHistory;
+    private boolean historyRecorded;
 
     private static final int CONNECT_TIMEOUT_MILLIS = 8000;
     private static final int AUTHENTICATION_TIMEOUT_MILLIS = 10_000;
@@ -128,14 +132,40 @@ public final class RemoteDeskViewerActivity extends Activity {
         AndroidDisplay.configureEdgeToEdge(this, false);
         AndroidSessionLog.configure(this);
 
-        String host = trimExtra(EXTRA_HOST);
-        int port = getIntent().getIntExtra(EXTRA_PORT, RemoteDeskProtocol.HOST_PORT);
-        String password = AndroidPasswordStore.loadViewer(this).trim();
+        String requestedHost = trimExtra(EXTRA_HOST);
+        int requestedPort = getIntent().getIntExtra(EXTRA_PORT, RemoteDeskProtocol.HOST_PORT);
+        String requestedPassword = AndroidPasswordStore.loadViewer(this).trim();
+        String historyId = trimExtra(EXTRA_HISTORY_ID);
+        if (!historyId.isEmpty()) {
+            try {
+                AndroidConnectionHistory.Node node = AndroidConnectionHistoryStore.load(this).find(historyId);
+                if (node == null) throw new IOException("History removed");
+                requestedHost = node.host; requestedPort = node.port; requestedPassword = node.password;
+                if (!node.relay() && getIntent().getBooleanExtra(EXTRA_HISTORY_REDIRECT, false)) {
+                    requestedHost = AndroidConnectionHistory.normalizeHost(trimExtra(EXTRA_HOST));
+                    requestedPort = getIntent().getIntExtra(EXTRA_PORT, 0);
+                    if (requestedPort < 1 || requestedPort > 65535) throw new IOException("Invalid discovered endpoint");
+                }
+                if (node.relay()) {
+                    relayOptions = AndroidRelay.Options.parse(node.relayConfiguration);
+                    if (!AndroidConnectionHistory.normalizeHost(relayOptions.serverAddress).equals(node.host) || relayOptions.port != node.port ||
+                            !relayOptions.deviceId.equals(node.relayDeviceId)) throw new IOException("Invalid relay history");
+                    if (relayOptions.deviceId.equals(AndroidRelaySettings.localDeviceId(this)))
+                        throw new IOException("Cannot connect to local device");
+                }
+            } catch (Exception ex) {
+                buildViewerUi("", RemoteDeskProtocol.HOST_PORT);
+                updateStatus("这条历史连接已删除或无法读取，请返回首页重新连接。");
+                return;
+            }
+        }
+        final String host = requestedHost, password = requestedPassword;
+        final int port = requestedPort;
 
         buildViewerUi(host, port);
 
         String relayTarget = trimExtra(EXTRA_RELAY_DEVICE_ID);
-        if (!relayTarget.isEmpty()) {
+        if (historyId.isEmpty() && !relayTarget.isEmpty()) {
             try {
                 AndroidRelay.Options saved = AndroidRelaySettings.load(this);
                 if (saved == null) throw new IllegalStateException();
@@ -156,6 +186,18 @@ public final class RemoteDeskViewerActivity extends Activity {
         }
 
         running.set(true);
+        recordHistory = (name, deviceId) -> {
+            try {
+                String displayName = name == null ? "" : name.replace('\n', ' ').replace('\r', ' ');
+                if (displayName.length() > 128) displayName = displayName.substring(0, 128);
+                AndroidConnectionHistoryStore.remember(getApplicationContext(), historyId, host, port,
+                    password, relayOptions, displayName, deviceId);
+            } catch (Exception ex) {
+                // Saving a shortcut is optional; never tear down a healthy session.
+                runOnUiThread(() -> android.widget.Toast.makeText(this,
+                    "已连接，但历史记录保存失败，请稍后重试。", android.widget.Toast.LENGTH_LONG).show());
+            }
+        };
         registerDefaultNetworkCallback();
         connectionExecutor.execute(() -> runViewer(host, port, password));
     }
@@ -882,6 +924,19 @@ public final class RemoteDeskViewerActivity extends Activity {
         if (message.messageType == RemoteDeskProtocol.MESSAGE_CONTROL) {
             RemoteDeskTransport.ControlMessage control = RemoteDeskTransport.decodeControl(message.payload);
             if (control.kind == RemoteDeskProtocol.CONTROL_DEVICE_INFO) {
+                owner.remoteMachineName = control.machineName;
+                boolean identitySupported = (control.capabilities & RemoteDeskProtocol.CAPABILITY_DEVICE_IDENTITY) != 0;
+                if (identitySupported && !owner.identityRequested) {
+                    owner.identityRequested = true;
+                    RemoteDeskTransport.writeMessage(owner.socket.getOutputStream(), RemoteDeskProtocol.MESSAGE_CONTROL,
+                        new byte[]{RemoteDeskProtocol.CONTROL_DEVICE_IDENTITY_REQUEST}, owner.session, owner.writeLock);
+                }
+                // Only authenticated peers that actually report DeviceInfo enter
+                // history. Repeated metadata/reconnects must not recreate deletions.
+                if (!identitySupported && !historyRecorded && recordHistory != null) {
+                    historyRecorded = true;
+                    recordHistory.accept(control.machineName, "");
+                }
                 boolean inputControlAvailable =
                     applyRemoteCapabilities(owner, control.capabilities);
                 updateStatus(
@@ -903,6 +958,11 @@ public final class RemoteDeskViewerActivity extends Activity {
                     chrome.screens.setEnabled(captureTargets.length > 0 &&
                         (owner.remoteCapabilities.get() & RemoteDeskProtocol.CAPABILITY_CAPTURE_TARGET_SELECTION) != 0);
                 });
+            } else if (control.kind == RemoteDeskProtocol.CONTROL_DEVICE_IDENTITY && owner.identityRequested) {
+                if (!historyRecorded && recordHistory != null) {
+                    historyRecorded = true;
+                    recordHistory.accept(owner.remoteMachineName, control.text);
+                }
             } else if (control.kind == RemoteDeskProtocol.CONTROL_CAPTURE_TARGET_LIST) {
                 runOnUiThread(() -> {
                     if (!isCurrentConnectionOwner(owner)) return;
@@ -1147,7 +1207,17 @@ public final class RemoteDeskViewerActivity extends Activity {
             if (event.getPointerCount() == 2) gestures.secondDown(centerX(event), centerY(event), span(event));
             else gestures.cancel();
         } else if (action == MotionEvent.ACTION_MOVE) {
-            if (event.getPointerCount() == 2) gestures.multiMove(centerX(event), centerY(event), span(event));
+            if (event.getPointerCount() == 2) {
+                // Android batches touch samples. Preserve intermediate motion,
+                // especially direction changes, instead of using just the tail.
+                for (int i = 0; i < event.getHistorySize(); i++) {
+                    float x0 = event.getHistoricalX(0, i), x1 = event.getHistoricalX(1, i);
+                    float y0 = event.getHistoricalY(0, i), y1 = event.getHistoricalY(1, i);
+                    gestures.multiMove((x0 + x1) / 2, (y0 + y1) / 2,
+                        (float) Math.hypot(x0 - x1, y0 - y1));
+                }
+                gestures.multiMove(centerX(event), centerY(event), span(event));
+            }
             else if (event.getPointerCount() == 1) gestures.move(event.getX(), event.getY());
         } else if (action == MotionEvent.ACTION_POINTER_UP) {
             gestures.pointerUp();
@@ -2267,6 +2337,8 @@ public final class RemoteDeskViewerActivity extends Activity {
     }
 
     private final class ViewerConnectionOwner {
+        boolean identityRequested;
+        String remoteMachineName = "";
         final long generation;
         final Socket socket;
         final RemoteDeskTransport.SecureSession session;

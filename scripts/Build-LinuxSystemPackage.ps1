@@ -28,7 +28,7 @@ function Convert-LocalDrivePathToWsl([string]$Path) {
 try {
     foreach ($name in @("remotedesk_linux_app.py", "remotedesk_linux_host.py",
         "remotedesk_linux_dependencies.py", "remotedesk_linux_relay.py", "remotedesk_protocol_probe.py",
-        "remotedesk_linux_startup.py")) {
+        "remotedesk_linux_startup.py", "remotedesk_linux_devices.py", "remotedesk_linux_device_panel.py")) {
         Copy-Item -LiteralPath (Join-Path $repoRoot "scripts/linux/$name") -Destination (Join-Path $staging "app/$name")
     }
     Copy-Item -LiteralPath (Join-Path $repoRoot "src/RemoteDesk/Assets/RemoteDesk.png") -Destination (Join-Path $staging "app/RemoteDesk.png")

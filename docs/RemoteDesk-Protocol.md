@@ -169,6 +169,16 @@ Device capabilities are an `Int32` bitmask in `DeviceInfo`; viewer-selected capa
 - `1 << 19`: H.264 frame rates above 30 FPS
 - `1 << 20`: authenticated UDP heartbeat support
 - `1 << 21`: high-quality JPEG desktop-text profile
+- `1 << 22`: negotiated stable installation identity
+
+When a host advertises bit 22, an authenticated viewer may send control kind
+`33` (`DeviceIdentityRequest`, no fields). The host replies with kind `34`
+(`DeviceIdentity`) followed by a bounded .NET UTF-8 string containing a canonical,
+nonzero UUID. The host never sends kind 34 unsolicited. `DeviceInfo` is unchanged,
+so legacy clients need not understand either new control kind. An identity is
+persistent per installation, not a hardware fingerprint or authentication secret.
+Saved-device aliases are merged after the authenticated reply; matching names or
+unauthenticated discovery responses alone do not rewrite the device book.
 
 Linux clients should only send `ViewerCapabilities` bits that the remote host already advertised.
 The Linux protocol probe recognizes bits 13-21 when inspecting a Windows peer.
@@ -569,5 +579,6 @@ UDP discovery uses port `56566` by default. A client sends the UTF-8 payload `Re
 - `Platform`
 - `Capabilities`
 - `BuildStamp` (optional `yyyyMMddHHmmss` UTC packaging time)
+- `DeviceId` (optional installation UUID; discovery hint only)
 
 The Linux host prototype emits the same discovery response shape as Windows and Android.

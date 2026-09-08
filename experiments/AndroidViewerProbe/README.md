@@ -80,6 +80,33 @@ seconds. A forced drop waits two seconds before accepting the next fixture
 connection, leaving time to verify disabled controls and old input cleanup.
 These tests do not change the phone's Wi-Fi, permissions or system settings.
 
+`experiments/android_scroll_ui_verify.py` adds jitter, batched direction reversal,
+finger replacement and pinch-drift cases in both input modes (37 assertions).
+It uses the same `--adb`, `--serial`, `--server` and `--output` arguments; run it
+with the probe connected to the synthetic peer. These are generated MotionEvents,
+not a claim about subjective touch feel or a real browser's native scrolling.
+
+`experiments/android_history_ui_verify.py` tests the signed production APK's recent
+nodes, remark/delete UI, process restart, failed connection and per-node password
+selection. It is restricted to an owned emulator with a fresh history, two reverse
+ports (7411/7412) to the synthetic peer, and an unused port 7419. It never clears
+the app's data or accesses a user's remote machine.
+
 After inspection, uninstall only this probe, remove only its owned reverse entry
 and `/data/local/tmp/remotedesk-test-ui.xml`, and stop only the peer process started
 for this test. Keep screenshots/reports locally under ignored `artifacts/`.
+
+Discovery checks use `com.remotedesk.agent.DiscoveryProbeActivity` in this test APK.
+An optional `--es target <owned-IP>` verifies a real endpoint without AUTH or input.
+The activity exercises the product JSON parser, bounded interface discovery, a
+loopback UDP custom-port fixture and TCP-banner fallback when UDP is absent.
+Collect its private report with `android_discovery_ui_verify.py --phase collect-probe`.
+
+For signed-product UI checks, run the synthetic peer with `--discovery-port 40566
+--machine-name "Discovery test PC"` (loopback only; the port must be unused).
+`android_discovery_ui_verify.py --phase create` tests IP-only connect, rediscovery,
+saved credentials and cancellation on an owned emulator. Restart the peer with
+a new TCP port and use `--phase moved --old-port <previous>` to test confirmed
+relocation and cancellation. Both phases take `--adb`, `--serial`, `--server`
+(the peer's server-state.json) and a fresh `--output` directory. They preserve the
+earlier `Upgrade-Node` history test record and do not clear application data.

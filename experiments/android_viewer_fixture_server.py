@@ -21,6 +21,9 @@ def main():
     parser.add_argument("--fixtures", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--seconds", type=int, default=900)
+    parser.add_argument("--discovery-port", type=int, choices=(40566,), help="Optional loopback-only product UDP fixture, advertises this peer's actual TCP port")
+    parser.add_argument("--machine-name", default="Synthetic test PC")
+    parser.add_argument("--device-id", default="", help="Optional stable synthetic identity, negotiated after authentication")
     parser.add_argument("--allow-test-controls", action="store_true", help="Read a fixed local fixture-command.json for fault injection; never an OS command")
     args = parser.parse_args()
     output = Path(args.output).resolve()
@@ -56,6 +59,29 @@ def main():
             temp.replace(output / "server-state.json")
     listener = socket.socket(); listener.bind(("127.0.0.1",0)); listener.listen(2); listener.settimeout(1)
     report["port"] = listener.getsockname()[1]; save()
+    discovery = None
+    discovery_done = threading.Event()
+    if args.discovery_port:
+        # Never bind a LAN wildcard or replace the real host's discovery socket.
+        discovery = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        discovery.bind(("127.0.0.1", args.discovery_port)); discovery.settimeout(.3)
+        report["discoveryPort"] = args.discovery_port; report["discoveryRequests"] = 0; save()
+        def discover():
+            while not discovery_done.is_set():
+                try:
+                    request, endpoint = discovery.recvfrom(256)
+                    if request != b"RemoteDesk.Discover.v1": continue
+                    reply = {"Type":"RemoteDesk.Discover.Response.v1", "MachineName":args.machine_name,
+                             "Platform":"Windows", "Port":report["port"], "IsHostRunning":True}
+                    if args.device_id: reply["DeviceId"] = args.device_id
+                    discovery.sendto(json.dumps(reply).encode("utf-8"), endpoint)
+                    report["discoveryRequests"] += 1; save()
+                except socket.timeout: continue
+                except OSError:
+                    if discovery_done.is_set(): break
+                    raise
+        discovery_thread = threading.Thread(target=discover, name="SyntheticDiscovery", daemon=True)
+        discovery_thread.start()
     print(json.dumps({"port":report["port"],"scope":report["scope"]}), flush=True)
     try:
         while time.monotonic() < deadline:
@@ -65,7 +91,12 @@ def main():
             except socket.timeout: continue
             with client:
                 client.settimeout(5); wire.configure_low_latency_socket(client)
-                session = wire.authenticate_server(client, "RemoteDesk-synthetic-ui-fixture")
+                try:
+                    session = wire.authenticate_server(client, "RemoteDesk-synthetic-ui-fixture")
+                except (OSError, EOFError, ValueError, wire.ProtocolError):
+                    report["authenticationFailures"] = report.get("authenticationFailures", 0) + 1
+                    save()
+                    continue
                 client.settimeout(30)
                 report["sessions"] += 1
                 report["sessionStarts"].append({"session":report["sessions"],"eventOffset":len(report["events"])})
@@ -74,7 +105,8 @@ def main():
                 def send(kind,payload):
                     with lock: wire.write_message(client,session,kind,payload)
                 caps=wire.CAPABILITY_REMOTE_DESKTOP | wire.CAPABILITY_INPUT_CONTROL | wire.CAPABILITY_CAPTURE_TARGET_SELECTION
-                send(wire.MESSAGE_CONTROL,wire.encode_device_info("Synthetic test PC","Windows",caps))
+                if args.device_id: caps |= wire.CAPABILITY_DEVICE_IDENTITY
+                send(wire.MESSAGE_CONTROL,wire.encode_device_info(args.machine_name,"Windows",caps))
                 send(wire.MESSAGE_CONTROL,wire.encode_capture_target_list([("primary","测试屏幕 1 · 1080P"),("secondary","测试屏幕 2 · 720P")]))
                 send(wire.MESSAGE_CONTROL,wire.encode_capture_target_changed("primary","测试屏幕 1 · 1080P"))
                 def reader():
@@ -87,6 +119,8 @@ def main():
                             elif kind==wire.MESSAGE_CONTROL:
                                 control=wire.decode_control(payload); report["controls"].append(control)
                                 if payload[0]==wire.CONTROL_VIEWER_INFO: state["h264"]=bool(struct.unpack_from("<i",payload,1)[0]&2)
+                                elif payload[0]==wire.CONTROL_DEVICE_IDENTITY_REQUEST and args.device_id:
+                                    send(wire.MESSAGE_CONTROL, wire.encode_device_identity(args.device_id))
                                 elif payload[0]==wire.CONTROL_SELECT_CAPTURE_TARGET:
                                     selected=control["targetId"]
                                     if selected not in jpeg_images: raise ValueError("Unknown synthetic target")
@@ -111,7 +145,7 @@ def main():
                                 if action in ("info_repeat","readonly","control"):
                                     if action=="readonly": caps &= ~wire.CAPABILITY_INPUT_CONTROL
                                     elif action=="control": caps |= wire.CAPABILITY_INPUT_CONTROL
-                                    send(wire.MESSAGE_CONTROL,wire.encode_device_info("Synthetic test PC","Windows",caps))
+                                    send(wire.MESSAGE_CONTROL,wire.encode_device_info(args.machine_name,"Windows",caps))
                                 elif action=="hold_screen":
                                     state["target"]="secondary"; state["pausedUntil"]=time.monotonic()+10
                                     send(wire.MESSAGE_CONTROL,wire.encode_capture_target_changed("secondary","测试屏幕 secondary"))
@@ -135,7 +169,11 @@ def main():
                     try: client.shutdown(socket.SHUT_RDWR)
                     except OSError: pass
                     thread.join(timeout=2); save()
-    finally: listener.close(); save()
+    finally:
+        listener.close(); discovery_done.set()
+        if discovery is not None:
+            discovery.close(); discovery_thread.join(timeout=2)
+        save()
 
 
 if __name__ == "__main__": main()

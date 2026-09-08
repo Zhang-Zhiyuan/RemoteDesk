@@ -34,6 +34,20 @@ final class AndroidPasswordStore {
         return loadValue(context, PREF_VIEWER_PASSWORD_ENCRYPTED, false);
     }
 
+    static String loadHistory(Context context) throws Exception {
+        String encrypted = preferences(context).getString("viewer-history.keystore.v1", "");
+        if (encrypted == null || encrypted.isEmpty()) return "";
+        String value = decrypt(encrypted);
+        // Do not silently replace an unreadable history with an empty one.
+        if (value.isEmpty()) throw new java.io.IOException("无法读取历史连接");
+        return value;
+    }
+
+    static void saveHistory(Context context, String value) throws Exception {
+        if (!preferences(context).edit().putString("viewer-history.keystore.v1", encrypt(value)).commit())
+            throw new java.io.IOException("无法保存历史连接");
+    }
+
     static String loadRelay(Context context) {
         return loadValue(context, "relay-options.keystore.v1", false);
     }

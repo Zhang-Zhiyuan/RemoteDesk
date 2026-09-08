@@ -81,6 +81,10 @@ public final class MainActivity extends Activity {
     private LinearLayout columnsLayout;
     private LinearLayout connectionColumn;
     private AndroidRelayPanel relayPanel;
+    private AndroidConnectionHistoryPanel historyPanel;
+    private AndroidLanDiscoveryPanel lanPanel;
+    private int viewerLaunchEpoch;
+    private boolean historyRestored;
     private LinearLayout statusColumn;
     private int appliedContentWidth = -1;
     private boolean adaptiveColumnsApplied;
@@ -117,7 +121,7 @@ public final class MainActivity extends Activity {
         AndroidUiTheme.styleInput(this, passwordEdit);
 
         viewerAddressEdit = new EditText(this);
-        viewerAddressEdit.setHint("远端地址:端口");
+        viewerAddressEdit.setHint("IP / 主机名（端口可省略）");
         viewerAddressEdit.setSingleLine(true);
         viewerAddressEdit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         AndroidUiTheme.styleInput(this, viewerAddressEdit);
@@ -242,10 +246,19 @@ public final class MainActivity extends Activity {
             connectionColumn,
             AndroidUiTheme.createSectionSubtitle(
                 this,
-                "通过同一局域网中的 RemoteDesk 地址与口令建立加密连接。"));
+                "点选发现的设备，或填写 IP / 主机名；端口可自动探测。"));
+        lanPanel = new AndroidLanDiscoveryPanel(this, () -> viewerAddressEdit.getText().toString(), this::openDiscoveredViewer);
+        addColumnView(connectionColumn, lanPanel);
+        Button addDevice = new Button(this); addDevice.setText("新增设备");
+        AndroidUiTheme.styleButton(this, addDevice, AndroidUiTheme.ButtonRole.SECONDARY);
+        addDevice.setOnClickListener(view -> historyPanel.add());
+        addColumnView(connectionColumn, addDevice);
         addLabeledField(connectionColumn, "远端地址", viewerAddressEdit);
         addLabeledField(connectionColumn, "连接口令", viewerPasswordEdit);
         addColumnView(connectionColumn, viewerButton);
+        historyPanel = new AndroidConnectionHistoryPanel(this, this::openHistoryViewer,
+            this::fillHistoryNode, this::updateStatusPanel);
+        addColumnView(connectionColumn, historyPanel);
         relayPanel = new AndroidRelayPanel(this, this::openRelayViewer);
         addColumnView(connectionColumn, relayPanel);
 
@@ -617,6 +630,15 @@ public final class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         activityResumed = true;
+        if (historyPanel != null) historyPanel.refresh(nodes -> {
+            if (historyRestored) return;
+            historyRestored = true;
+            if (viewerAddressEdit.getText().length() != 0) return;
+            for (AndroidConnectionHistory.Node node : nodes) {
+                if (!node.relay()) { fillHistoryNode(node); break; }
+            }
+        });
+        if (lanPanel != null) lanPanel.active(true);
         AndroidHostResume.tryResume(this);
         if (relayPanel != null) relayPanel.active(true);
         if (RemoteDeskForegroundService.isServiceRunning()) {
@@ -636,6 +658,8 @@ public final class MainActivity extends Activity {
     protected void onDestroy() {
         cancelHostStartupNavigation();
         if (relayPanel != null) relayPanel.close();
+        if (historyPanel != null) historyPanel.close();
+        if (lanPanel != null) lanPanel.close();
         stopDiscoveryPreviewAndWait();
         discoveryExecutor.shutdownNow();
         super.onDestroy();
@@ -644,6 +668,8 @@ public final class MainActivity extends Activity {
     @Override
     protected void onPause() {
         activityResumed = false;
+        viewerLaunchEpoch++;
+        if (lanPanel != null) lanPanel.active(false);
         cancelHostStartupNavigation();
         if (relayPanel != null) relayPanel.active(false);
         super.onPause();
@@ -660,6 +686,84 @@ public final class MainActivity extends Activity {
                 .putExtra(RemoteDeskViewerActivity.EXTRA_PORT, target.port)
                 .putExtra(RemoteDeskViewerActivity.EXTRA_RELAY_DEVICE_ID, target.deviceId));
         } catch (Exception ex) { updateStatusPanel("中转连接未启动，请检查口令保存状态。"); }
+    }
+
+    private void fillHistoryNode(AndroidConnectionHistory.Node node) {
+        viewerAddressEdit.setText(node.address());
+        viewerPasswordEdit.setText(node.password);
+    }
+
+    private void openHistoryViewer(AndroidConnectionHistory.Node node) {
+        if (node.relay() || !node.autoPort) { launchHistoryViewer(node, null); return; }
+        int generation = ++viewerLaunchEpoch;
+        updateStatusPanel("正在查找 " + node.title() + " 的地址和端口…");
+        lanPanel.locate(node, options -> {
+            if (!activityResumed || viewerLaunchEpoch != generation) return;
+            if (options.isEmpty()) { launchHistoryViewer(node, null); return; }
+            lanPanel.showChoices(options, device -> {
+                if (node.host.equals(device.host) && node.port == device.port) launchHistoryViewer(node, null);
+                else confirmHistoryAddress(node, device);
+            });
+        });
+    }
+
+    private void launchHistoryViewer(AndroidConnectionHistory.Node node, AndroidLanDevice replacement) {
+        // Pass only an opaque local ID, not a credential or relay access token.
+        Intent intent = new Intent(this, RemoteDeskViewerActivity.class)
+            .putExtra(RemoteDeskViewerActivity.EXTRA_HISTORY_ID, node.id);
+        if (replacement != null) intent.putExtra(RemoteDeskViewerActivity.EXTRA_HISTORY_REDIRECT, true)
+            .putExtra(RemoteDeskViewerActivity.EXTRA_HOST, replacement.host)
+            .putExtra(RemoteDeskViewerActivity.EXTRA_PORT, replacement.port);
+        startActivity(intent);
+    }
+
+    private void confirmHistoryAddress(AndroidConnectionHistory.Node node, AndroidLanDevice device) {
+        new AlertDialog.Builder(this).setTitle("使用新地址连接？")
+            .setMessage("历史设备：" + node.title() + "\n原地址：" + node.address() +
+                "\n发现设备：" + device.name + "\n新地址：" + device.address() +
+                "\n\n设备发现不能验证身份；请确认这是你的设备。连接成功后更新原记录，保留备注。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("更新地址并连接", (dialog, which) -> launchHistoryViewer(node, device)).show();
+    }
+
+    private void openDiscoveredViewer(AndroidLanDevice device) {
+        viewerLaunchEpoch++;
+        if (!device.listening) {
+            new AlertDialog.Builder(this).setTitle(device.name)
+                .setMessage("已发现 " + device.address() + "，但被控端尚未启动。请先在对方设备上启动被控端。")
+                .setPositiveButton("知道了", null).show();
+            return;
+        }
+        List<AndroidConnectionHistory.Node> recentConnections = historyPanel.entries();
+        AndroidConnectionHistory.Node exact = AndroidLanDevice.exact(recentConnections, device);
+        if (exact != null) { launchHistoryViewer(exact, null); return; }
+        for (AndroidConnectionHistory.Node node : recentConnections)
+            if (!node.relay() && !node.deviceId.isEmpty() && node.deviceId.equals(device.deviceId)) {
+                confirmHistoryAddress(node, device); return;
+            }
+        List<AndroidConnectionHistory.Node> matches = new ArrayList<>();
+        for (AndroidConnectionHistory.Node node : recentConnections)
+            if (!node.relay() && device.advertised && !node.name.isEmpty() && node.name.equalsIgnoreCase(device.name)) matches.add(node);
+        if (matches.size() == 1) { confirmHistoryAddress(matches.get(0), device); return; }
+        EditText password = new EditText(this);
+        password.setSingleLine(true); password.setSaveEnabled(false);
+        password.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        password.setHint("对方设备的访问口令");
+        AndroidUiTheme.styleInput(this, password);
+        LinearLayout content = new LinearLayout(this); content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(24), dp(8), dp(24), 0);
+        content.addView(AndroidUiTheme.createSectionSubtitle(this, device.address() + "\n首次连接需要对方的访问口令，成功后自动记住。"));
+        content.addView(password, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("连接 " + device.name).setView(content)
+            .setNegativeButton("取消", null).setPositiveButton("连接", null).create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+            String value = password.getText().toString().trim();
+            if (value.isEmpty()) { password.setError("请输入访问口令"); return; }
+            viewerAddressEdit.setText(device.address()); viewerPasswordEdit.setText(value);
+            dialog.dismiss(); launchDirectViewer(device.host, device.port, value);
+        }));
+        dialog.setOnDismissListener(ignored -> password.setText(""));
+        dialog.show();
     }
 
     private void requestProjection() {
@@ -777,8 +881,11 @@ public final class MainActivity extends Activity {
     }
 
     private void openViewer() {
+        int generation = ++viewerLaunchEpoch;
+        String enteredAddress = viewerAddressEdit.getText().toString();
+        String enteredPassword = viewerPasswordEdit.getText().toString();
         RemoteEndpoint endpoint = parseRemoteEndpoint(
-            viewerAddressEdit.getText().toString(),
+            enteredAddress,
             RemoteDeskProtocol.HOST_PORT);
         String password = viewerPasswordEdit.getText().toString().trim();
         if (password.isEmpty()) {
@@ -790,6 +897,28 @@ public final class MainActivity extends Activity {
             return;
         }
 
+        final String connectionPassword = password;
+        if (!AndroidLanDevice.explicitPort(enteredAddress)) {
+            updateStatusPanel("正在自动探测端口…");
+            lanPanel.resolve(endpoint.host, options -> {
+                if (!activityResumed || viewerLaunchEpoch != generation ||
+                        !enteredAddress.equals(viewerAddressEdit.getText().toString()) ||
+                        !enteredPassword.equals(viewerPasswordEdit.getText().toString())) return;
+                if (options.isEmpty()) {
+                    // Unreachable discovery must not break the existing manual
+                    // path (e.g. a firewall allows TCP but blocks UDP).
+                    launchDirectViewer(endpoint.host, endpoint.port, connectionPassword);
+                } else lanPanel.showChoices(options, device -> {
+                    viewerAddressEdit.setText(AndroidLanDevice.formatAddress(endpoint.host, device.port));
+                    launchDirectViewer(endpoint.host, device.port, connectionPassword);
+                });
+            });
+            return;
+        }
+        launchDirectViewer(endpoint.host, endpoint.port, connectionPassword);
+    }
+
+    private void launchDirectViewer(String host, int port, String password) {
         try {
             AndroidPasswordStore.saveViewer(this, password);
         } catch (Exception ex) {
@@ -799,8 +928,8 @@ public final class MainActivity extends Activity {
         }
 
         Intent intent = new Intent(this, RemoteDeskViewerActivity.class)
-            .putExtra(RemoteDeskViewerActivity.EXTRA_HOST, endpoint.host)
-            .putExtra(RemoteDeskViewerActivity.EXTRA_PORT, endpoint.port);
+            .putExtra(RemoteDeskViewerActivity.EXTRA_HOST, host)
+            .putExtra(RemoteDeskViewerActivity.EXTRA_PORT, port);
         startActivity(intent);
     }
 
@@ -1058,10 +1187,11 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private static String createDiscoveryPreviewResponse() throws Exception {
+    private String createDiscoveryPreviewResponse() throws Exception {
         JSONObject response = new JSONObject();
         response.put("Type", RemoteDeskProtocol.DISCOVERY_RESPONSE_TYPE);
         response.put("MachineName", AndroidDeviceNames.displayName());
+        response.put("DeviceId", AndroidRelaySettings.localDeviceId(this));
         response.put("Port", RemoteDeskProtocol.HOST_PORT);
         response.put("CaptureTarget", "Android App 已打开，请启动被控端");
         response.put("IsHostRunning", false);

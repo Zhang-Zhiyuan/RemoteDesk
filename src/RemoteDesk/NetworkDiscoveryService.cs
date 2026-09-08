@@ -16,7 +16,8 @@ internal sealed record DiscoveredHost(
     bool CanRemoteStart,
     string Platform,
     RemoteDeviceCapabilities Capabilities,
-    string? BuildStamp = null)
+    string? BuildStamp = null,
+    string? DeviceId = null)
 {
     public override string ToString()
     {
@@ -426,7 +427,8 @@ internal static class NetworkDiscoveryService
         int discoveryPort = DiscoveryPort,
         int hostProbePort = Protocol.DefaultPort,
         IEnumerable<DiscoveryProbeTarget>? directTargets = null,
-        bool includeDirectedTcpProbes = false)
+        bool includeDirectedTcpProbes = false,
+        bool includeBroadcast = true)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(discoveryPort, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(discoveryPort, IPEndPoint.MaxPort);
@@ -446,7 +448,7 @@ internal static class NetworkDiscoveryService
         IReadOnlyList<int> discoveryPorts =
             RemotePortPolicy.GetDiscoveryProbePorts(
                 discoveryPort);
-        foreach (IPAddress broadcastAddress in GetBroadcastAddresses())
+        foreach (IPAddress broadcastAddress in includeBroadcast ? GetBroadcastAddresses() : Array.Empty<IPAddress>())
         {
             foreach (int port in discoveryPorts)
             {
@@ -457,7 +459,7 @@ internal static class NetworkDiscoveryService
             }
         }
 
-        foreach (IPAddress probeAddress in GetDirectedProbeAddresses())
+        foreach (IPAddress probeAddress in includeDirectedTcpProbes ? GetDirectedProbeAddresses() : Array.Empty<IPAddress>())
         {
             foreach (int port in discoveryPorts)
             {
@@ -470,7 +472,7 @@ internal static class NetworkDiscoveryService
 
         IReadOnlyList<IPAddress> resolvedDirectAddresses = await ResolveDirectProbeAddressesAsync(
             directAddresses,
-            cancellationToken).ConfigureAwait(false);
+            timeoutSource.Token).ConfigureAwait(false);
         foreach (IPAddress ipAddress in resolvedDirectAddresses)
         {
             foreach (int port in discoveryPorts)
@@ -484,7 +486,7 @@ internal static class NetworkDiscoveryService
 
         IReadOnlyList<IPEndPoint> resolvedDirectTargets = await ResolveDirectProbeTargetsAsync(
             directTargets,
-            cancellationToken).ConfigureAwait(false);
+            timeoutSource.Token).ConfigureAwait(false);
         foreach (IPEndPoint directTarget in resolvedDirectTargets)
         {
             foreach (int port in discoveryPorts)
@@ -543,6 +545,8 @@ internal static class NetworkDiscoveryService
                 break;
             }
 
+            if (!includeBroadcast && !resolvedDirectAddresses.Contains(result.RemoteEndPoint.Address) &&
+                !resolvedDirectTargets.Any(target => target.Address.Equals(result.RemoteEndPoint.Address))) continue;
             DiscoveryResponse? response = ParseResponse(result.Buffer);
             if (response is null || response.Port <= 0 || response.Port > IPEndPoint.MaxPort)
             {
@@ -552,6 +556,7 @@ internal static class NetworkDiscoveryService
             string address = result.RemoteEndPoint.Address.ToString();
             string machineName = NormalizeDiscoveryText(response.MachineName, address);
             string key = $"{address}:{response.Port}";
+            if (discovered.Count >= 64 && !discovered.ContainsKey(key)) continue;
             bool isHostRunning = response.IsHostRunning ?? true;
             bool canRemoteStart = response.CanRemoteStart ?? false;
             RemoteDeviceCapabilities capabilities = response.Capabilities ??
@@ -565,7 +570,8 @@ internal static class NetworkDiscoveryService
                 canRemoteStart,
                 RemoteDevicePlatforms.Normalize(response.Platform, RemoteDevicePlatforms.Windows),
                 capabilities,
-                RemoteDeskBuildInfo.NormalizeBuildStamp(response.BuildStamp));
+                RemoteDeskBuildInfo.NormalizeBuildStamp(response.BuildStamp),
+                RemoteDeviceIdentity.Normalize(response.DeviceId));
         }
 
         foreach (DiscoveredHost host in await tcpProbeTask.ConfigureAwait(false))
@@ -778,7 +784,8 @@ internal static class NetworkDiscoveryService
             CanRemoteStart = presence.CanRemoteStart,
             Platform = RemoteDevicePlatforms.Normalize(presence.Platform, RemoteDevicePlatforms.Current),
             Capabilities = presence.Capabilities,
-            BuildStamp = RemoteDeskBuildInfo.NormalizeBuildStamp(presence.BuildStamp) ?? RemoteDeskBuildInfo.BuildStamp
+            BuildStamp = RemoteDeskBuildInfo.NormalizeBuildStamp(presence.BuildStamp) ?? RemoteDeskBuildInfo.BuildStamp,
+            DeviceId = RemoteDeviceIdentity.LocalId
         };
 
         return JsonSerializer.SerializeToUtf8Bytes(response);
@@ -853,6 +860,7 @@ internal static class NetworkDiscoveryService
 
     private static DiscoveryResponse? ParseResponse(byte[] buffer)
     {
+        if (buffer.Length > 8192) return null;
         try
         {
             DiscoveryResponse? response = JsonSerializer.Deserialize<DiscoveryResponse>(buffer);
@@ -1322,6 +1330,7 @@ internal static class NetworkDiscoveryService
 
     private sealed class DiscoveryResponse
     {
+        public string? DeviceId { get; set; }
         public string? Type { get; set; }
 
         public string? MachineName { get; set; }
