@@ -1,13 +1,16 @@
 """Real Tk widgets and encrypted persistence, using an isolated test profile."""
 import os
+import gc
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
 import tkinter as tk
 from tkinter import ttk
 from types import SimpleNamespace
 import unittest
+import weakref
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "linux"))
@@ -80,6 +83,84 @@ class DevicePanelUiTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform.startswith("linux") and os.environ.get("DISPLAY"), "Tk display required")
 class FullApplicationDevicePanelTests(unittest.TestCase):
+    def test_close_releases_tk_before_slow_relay_directory_finishes(self):
+        import remotedesk_linux_app as application
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        def delayed_directory(_options):
+            entered.set()
+            try:
+                if not release.wait(5): raise TimeoutError("test relay request was not released")
+                return []
+            finally: finished.set()
+        with (tempfile.TemporaryDirectory() as folder,
+              mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": folder}),
+              mock.patch.object(application.relay, "list_devices", side_effect=delayed_directory)):
+            root = tk.Tk(); root.withdraw()
+            app = application.RemoteDeskLinuxApp(root)
+            storage = app.device_panel.storage
+            references = [weakref.ref(value) for value in (root, app, app.relay_server)]
+            try:
+                app.relay_options = object()
+                app._refresh_relay()
+                self.assertTrue(entered.wait(2))
+                app.close()
+                del app, root
+                gc.collect()
+                self.assertTrue(all(reference() is None for reference in references))
+            finally:
+                release.set(); storage.shutdown(wait=True)
+                self.assertTrue(finished.wait(2))
+
+    def test_close_releases_tk_before_slow_storage_worker_finishes(self):
+        import remotedesk_linux_app as application
+        entered, release = threading.Event(), threading.Event()
+        def delayed_load():
+            entered.set()
+            if not release.wait(5): raise TimeoutError("test worker was not released")
+            return model.Book()
+        with (tempfile.TemporaryDirectory() as folder,
+              mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": folder}),
+              mock.patch.object(model.Store, "load", side_effect=delayed_load)):
+            root = tk.Tk(); root.withdraw()
+            app = application.RemoteDeskLinuxApp(root)
+            storage = app.device_panel.storage
+            references = [weakref.ref(value) for value in (root, app, app.device_panel, app.host_port)]
+            try:
+                self.assertTrue(entered.wait(2))
+                app.close()
+                del app, root
+                gc.collect()  # Tk finalizers must run here, never on the delayed worker.
+                self.assertTrue(all(reference() is None for reference in references))
+            finally:
+                release.set(); storage.shutdown(wait=True)
+
+    def test_close_releases_tk_before_cancelled_discovery_finishes(self):
+        import remotedesk_linux_app as application
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        def delayed_scan(*_):
+            entered.set()
+            try:
+                if not release.wait(5): raise TimeoutError("test scanner was not released")
+                return []
+            finally: finished.set()
+        with (tempfile.TemporaryDirectory() as folder,
+              mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": folder}),
+              mock.patch.object(model.Scanner, "scan", side_effect=delayed_scan)):
+            root = tk.Tk(); root.withdraw()
+            app = application.RemoteDeskLinuxApp(root)
+            storage = app.device_panel.storage
+            references = [weakref.ref(value) for value in (root, app, app.device_panel)]
+            try:
+                app.device_panel.scan("127.0.0.1", callback=app.device_panel.render)
+                self.assertTrue(entered.wait(2))
+                app.close(); app.close()
+                del app, root
+                gc.collect()
+                self.assertTrue(all(reference() is None for reference in references))
+            finally:
+                release.set(); storage.shutdown(wait=True)
+                self.assertTrue(finished.wait(2))
+
     def test_real_application_initializes_new_directory_and_closes_cleanly(self):
         import remotedesk_linux_app as application
         with tempfile.TemporaryDirectory() as folder, mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": folder}):

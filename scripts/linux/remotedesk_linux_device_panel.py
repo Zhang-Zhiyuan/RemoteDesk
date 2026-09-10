@@ -13,6 +13,7 @@ class DevicePanel(ttk.LabelFrame):
         super().__init__(parent, text="附近 / 已保存设备", padding=12, style="Panel.TLabelframe")
         self.app = app; self.store = model.Store(); self.book = model.Book(); self.nearby = []
         self.messages = queue.Queue(); self.storage = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self.storage_callbacks = {}; self.storage_generation = 0; self.scan_callback = None
         self.epoch = 0; self.scanner = None; self.busy = False; self.closed = False; self.refreshed = 0
         self.network_slots = threading.BoundedSemaphore(2)
         self.selected_id = ""; self.recorded_generation = None; self.connection_auto = True; self.ready = False
@@ -35,13 +36,20 @@ class DevicePanel(ttk.LabelFrame):
         self.after_id = self.after(60, self.poll)
 
     def mutate(self, action, callback=None):
+        if self.closed: return
+        self.storage_generation += 1; generation = self.storage_generation
+        if callback: self.storage_callbacks[generation] = callback
+        # Worker closures and queued results must not own Tk widgets/callbacks.
+        # Otherwise the final widget reference can be released on a worker after
+        # window close, aborting Tcl with "async handler deleted by wrong thread".
+        store, messages = self.store, self.messages
         def run():
             try:
-                book = self.store.load(); value = action(book) if action else None
-                if action: self.store.save(book)
-                self.messages.put(("book", book, value, callback))
+                book = store.load(); value = action(book) if action else None
+                if action: store.save(book)
+                messages.put(("book", book, value, generation))
             except Exception:
-                self.messages.put(("error", "设备记录无法读取或保存；请检查配置目录权限，不影响手动连接。"))
+                messages.put(("error", "设备记录无法读取或保存；请检查配置目录权限，不影响手动连接。", generation))
         self.storage.submit(run)
 
     def poll(self):
@@ -52,12 +60,15 @@ class DevicePanel(ttk.LabelFrame):
             if row[0] == "book":
                 first = not self.ready; self.ready = True; self.book = row[1]; self.render()
                 if first and self.book.nodes and not self.app.viewer_host.get(): self.fill(self.book.nodes[0])
-                if row[3]: row[3](row[2])
-            elif row[0] == "error": self.status.config(text=row[1])
+                callback = self.storage_callbacks.pop(row[3], None)
+                if callback: callback(row[2])
+            elif row[0] == "error":
+                self.storage_callbacks.pop(row[2], None); self.status.config(text=row[1])
             elif row[0] == "scan" and row[1] == self.epoch:
                 self.busy = False; self.scanner = None; self.nearby = row[2]; self.refreshed = time.monotonic(); self.render()
                 self.status.config(text=f"发现 {len(self.nearby)} 个设备 / 端口。双击连接。" if self.nearby else "未发现设备。同网段可自动发现；跨网段可填 IP 探测端口，或使用中转在线列表。")
-                if row[3]: row[3](self.nearby)
+                callback, self.scan_callback = self.scan_callback, None
+                if callback: callback(self.nearby)
         visible = self.winfo_viewable() and self.app.root.state() != "iconic"
         if self.busy and (time.monotonic() > self.scan_deadline or not visible or self.app.viewer is not None):
             timed_out = time.monotonic() > self.scan_deadline; callback = self.scan_callback
@@ -69,7 +80,7 @@ class DevicePanel(ttk.LabelFrame):
         self.after_id = self.after(100, self.poll)
 
     def cancel_scan(self):
-        self.epoch += 1; self.busy = False
+        self.epoch += 1; self.busy = False; self.scan_callback = None
         if self.scanner: self.scanner.close(); self.scanner = None
 
     def scan(self, target=None, callback=None):
@@ -83,11 +94,12 @@ class DevicePanel(ttk.LabelFrame):
         self.scan_deadline = time.monotonic()+6; self.scan_callback = callback
         self.status.config(text="正在查找设备和实际端口，不发送口令…")
         nodes = tuple(self.book.nodes)
+        slots, messages = self.network_slots, self.messages
         def run():
             try: found = scanner.scan(target, nodes)
             except Exception: found = []
-            finally: self.network_slots.release()
-            self.messages.put(("scan", generation, found, callback))
+            finally: slots.release()
+            messages.put(("scan", generation, found))
         threading.Thread(target=run, name="RemoteDeskDiscovery", daemon=True).start()
 
     def render(self):
@@ -217,4 +229,9 @@ class DevicePanel(ttk.LabelFrame):
         self.mutate(lambda book:book.remember(host, port, password, info.get("machineName", ""), device_id, previous,
                                              auto_port=auto), saved)
     def close(self):
-        self.closed = True; self.cancel_scan(); self.after_cancel(self.after_id); self.storage.shutdown(wait=False)
+        if self.closed: return
+        self.closed = True; self.cancel_scan(); self.after_cancel(self.after_id)
+        self.storage_callbacks.clear()
+        self.app = None
+        # Finish accepted writes without keeping this panel or blocking the UI.
+        self.storage.shutdown(wait=False)

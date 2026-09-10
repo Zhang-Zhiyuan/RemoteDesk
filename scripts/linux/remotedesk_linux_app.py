@@ -4628,8 +4628,9 @@ class RemoteDeskLinuxApp:
         process = self.host_process
         if options is None or not options.publish or process is None or process.poll() is not None:
             return
+        events = self.events
         connector = relay.RelayHostConnector(options, self.host_running_port,
-            self.host_machine_name.get(), status=lambda value: put_ui_event(self.events, "relay_status", (connector, value)))
+            self.host_machine_name.get(), status=lambda value: put_ui_event(events, "relay_status", (connector, value)))
         self.relay_host = connector
         connector.start()
 
@@ -4645,12 +4646,13 @@ class RemoteDeskLinuxApp:
         self.relay_list.delete(*self.relay_list.get_children())
         self.relay_devices = {}
         self.relay_status.config(text="正在读取在线设备……")
+        events = self.events
         def work():
             try:
                 devices, error = relay.list_devices(options), ""
             except Exception:
                 devices, error = [], "在线列表读取失败，请核对服务器、访问密钥和 TLS 指纹。"
-            put_ui_event(self.events, "relay_directory", (generation, options, devices, error))
+            put_ui_event(events, "relay_directory", (generation, options, devices, error))
         threading.Thread(target=work, name="RemoteDeskRelayDirectory", daemon=True).start()
 
     def _connect_relay(self):
@@ -5243,7 +5245,7 @@ class RemoteDeskLinuxApp:
         self.stop_host_button.config(state=tk.NORMAL)
         self.host_reader_thread = threading.Thread(
             target=self._read_host_output,
-            args=(process, generation),
+            args=(self.events, process, generation),
             name="RemoteDeskLinuxHostOutput",
             daemon=True,
         )
@@ -5272,21 +5274,22 @@ class RemoteDeskLinuxApp:
 
         self.host_stop_thread = threading.Thread(
             target=self._stop_host_worker,
-            args=(process, generation),
+            args=(self.events, process, generation),
             name="RemoteDeskLinuxHostStop",
             # Keep process cleanup alive if the Tk window closes immediately.
             daemon=False,
         )
         self.host_stop_thread.start()
 
+    @staticmethod
     def _stop_host_worker(
-        self,
+        events: queue.Queue,
         process: subprocess.Popen[str],
         generation: int,
     ) -> None:
-        code, error = self._terminate_host_process(process)
+        code, error = RemoteDeskLinuxApp._terminate_host_process(process)
         put_ui_event(
-            self.events,
+            events,
             "host_stop_completed",
             (generation, process, code, error),
         )
@@ -5327,18 +5330,19 @@ class RemoteDeskLinuxApp:
         except Exception:
             pass
 
+    @staticmethod
     def _read_host_output(
-        self,
+        events: queue.Queue,
         process: subprocess.Popen[str],
         generation: int,
     ) -> None:
         if process.stdout is None:
             return
         for line in process.stdout:
-            put_ui_event(self.events, "host_log", line)
+            put_ui_event(events, "host_log", line)
         code = process.wait()
         put_ui_event(
-            self.events,
+            events,
             "host_exited",
             (generation, process, code),
         )
@@ -5956,6 +5960,7 @@ class RemoteDeskLinuxApp:
         worker = threading.Thread(
             target=self._prepare_viewer_file_transfer_preview,
             args=(
+                self.events,
                 list(paths),
                 title,
                 action_text,
@@ -5971,8 +5976,9 @@ class RemoteDeskLinuxApp:
         worker.start()
         return True
 
+    @staticmethod
     def _prepare_viewer_file_transfer_preview(
-        self,
+        events: queue.Queue,
         paths: list[str],
         title: str,
         action_text: str,
@@ -5998,7 +6004,7 @@ class RemoteDeskLinuxApp:
         if cancel_event.is_set():
             return
         put_viewer_event(
-            self.events,
+            events,
             "viewer_file_preview_ready",
             generation,
             ViewerFilePreviewResult(
