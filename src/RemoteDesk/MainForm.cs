@@ -1363,6 +1363,7 @@ public sealed partial class MainForm : Form
         AddSettingRow(configuration, 3, "画面模式", _relayVideoModeBox);
         AddSettingRow(configuration, 4, "网络", networkOptions);
         AddSettingRow(configuration, 5, "管理", configurationActions);
+        ConfigureWrappedActionRow(configurationActions);
 
         _relayDevicesList = new ListView
         {
@@ -1421,6 +1422,7 @@ public sealed partial class MainForm : Form
         online.SetColumnSpan(_relayStatusLabel, 2);
         online.Controls.Add(_relayDevicesList, 0, 2);
         online.SetColumnSpan(_relayDevicesList, 2);
+        ConfigureWrappedActionRow(deviceActions);
 
         root.Controls.Add(configuration.Parent!, 0, 0);
         root.Controls.Add(online.Parent!, 0, 1);
@@ -1717,6 +1719,36 @@ public sealed partial class MainForm : Form
         toolbar.ParentChanged += (_, _) => Apply();
         toolbar.HandleCreated += (_, _) => Apply();
         Apply();
+    }
+
+    private static void ConfigureWrappedActionRow(FlowLayoutPanel actions)
+    {
+        // AutoSize measures a wrapping panel before the table has assigned its
+        // width, retaining a one-button-per-row height even after reflow. Let
+        // the table assign the width, then size only this row from that width.
+        actions.AutoSize = false;
+        actions.Dock = DockStyle.Top;
+        bool applying = false;
+        void Apply()
+        {
+            if (applying || actions.IsDisposed || !actions.Visible || actions.ClientSize.Width <= 0) return;
+            applying = true;
+            try { ConstrainWrappedActionRow(actions, actions.ClientSize.Width); }
+            finally { applying = false; }
+        }
+        actions.ClientSizeChanged += (_, _) => Apply();
+        actions.VisibleChanged += (_, _) => Apply();
+        actions.DpiChangedAfterParent += (_, _) => Apply();
+        Apply();
+    }
+
+    internal static void ConstrainWrappedActionRow(FlowLayoutPanel actions, int availableWidth)
+    {
+        ArgumentNullException.ThrowIfNull(actions);
+        int height = CalculateWrappedToolbarHeight(actions, availableWidth);
+        actions.AutoSize = false;
+        actions.Dock = DockStyle.Top;
+        actions.Height = height;
     }
 
     internal static int ConstrainWrappedToolbarSection(

@@ -206,6 +206,30 @@ public sealed class MainFormViewerWindowTests
                 input.Width);
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void RelayActionRowShrinksAfterNarrowMeasurementAtDifferentScales(int scale)
+    {
+        using var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = true };
+        for (int index = 0; index < 3; index++)
+            actions.Controls.Add(new Button { AutoSize = true, Text = "立即上报本机 IP",
+                MinimumSize = new Size(190 * scale, 42 * scale), Margin = new Padding(4 * scale) });
+
+        MainForm.ConstrainWrappedActionRow(actions, 250 * scale);
+        int narrowHeight = actions.Height;
+        MainForm.ConstrainWrappedActionRow(actions, 800 * scale);
+        int wideHeight = actions.Height;
+        Assert.False(actions.AutoSize);
+        Assert.Equal(DockStyle.Top, actions.Dock);
+        Assert.True(narrowHeight > wideHeight);
+        Assert.Equal(actions.Controls.Cast<Control>().Max(button =>
+            Math.Max(button.MinimumSize.Height, button.PreferredSize.Height) + button.Margin.Vertical), wideHeight);
+        MainForm.ConstrainWrappedActionRow(actions, 250 * scale);
+        Assert.Equal(narrowHeight, actions.Height);
+    }
+
     private static int MeasureWrappedViewerToolbarSection(
         int availableWidth)
     {
