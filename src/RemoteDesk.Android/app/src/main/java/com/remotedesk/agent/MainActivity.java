@@ -259,7 +259,13 @@ public final class MainActivity extends Activity {
         historyPanel = new AndroidConnectionHistoryPanel(this, this::openHistoryViewer,
             this::fillHistoryNode, this::updateStatusPanel);
         addColumnView(connectionColumn, historyPanel);
-        relayPanel = new AndroidRelayPanel(this, this::openRelayViewer);
+        relayPanel = new AndroidRelayPanel(this, this::openRelayViewer, address -> {
+            viewerAddressEdit.setText(address);
+            viewerAddressEdit.requestFocus();
+            viewerAddressEdit.post(() -> viewerAddressEdit.requestRectangleOnScreen(
+                new android.graphics.Rect(0, 0, viewerAddressEdit.getWidth(), viewerAddressEdit.getHeight()), true));
+            Toast.makeText(this, "已填入最新地址和端口，确认口令后点击连接；跨网可使用中转。", Toast.LENGTH_LONG).show();
+        });
         addColumnView(connectionColumn, relayPanel);
 
         addColumnDivider(connectionColumn);

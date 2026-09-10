@@ -83,6 +83,61 @@ class DevicePanelUiTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform.startswith("linux") and os.environ.get("DISPLAY"), "Tk display required")
 class FullApplicationDevicePanelTests(unittest.TestCase):
+    def test_relay_address_dialog_fills_direct_endpoint_without_connecting(self):
+        import remotedesk_linux_app as application
+        with tempfile.TemporaryDirectory() as folder, mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": folder}):
+            root = tk.Tk(); root.withdraw()
+            app = application.RemoteDeskLinuxApp(root)
+            try:
+                options = app.relay_options
+                target = dict(deviceId="9220b49b-0f2f-4f87-913a-c3f95091500f", machineName="Owned target",
+                              directAddresses=["192.0.2.3", "198.51.100.4"], directPort=40565)
+                app.relay_password.set("test-only-password")
+                app._show_relay_addresses(options, target)
+                root.update()
+                dialog = next(widget for widget in root.winfo_children() if isinstance(widget, tk.Toplevel))
+                addresses = next(widget for widget in dialog.winfo_children() if isinstance(widget, tk.Listbox))
+                addresses.selection_clear(0, tk.END); addresses.selection_set(1)
+                next(widget for widget in dialog.winfo_children() if isinstance(widget, ttk.Button)).invoke()
+                root.update()
+                self.assertEqual("198.51.100.4", app.viewer_host.get())
+                self.assertEqual("40565", app.viewer_port.get())
+                self.assertEqual("test-only-password", app.viewer_password.get())
+                self.assertIsNone(app.viewer)
+                self.assertEqual(1, app.main_notebook.index(app.main_notebook.select()))
+            finally:
+                app.close()
+
+    def test_close_releases_tk_before_slow_address_lookup_finishes(self):
+        import remotedesk_linux_app as application
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        def delayed_directory(_options):
+            entered.set()
+            try:
+                if not release.wait(5): raise TimeoutError("test address request was not released")
+                return []
+            finally: finished.set()
+        with (tempfile.TemporaryDirectory() as folder,
+              mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": folder}),
+              mock.patch.object(application.relay, "list_devices", side_effect=delayed_directory)):
+            root = tk.Tk(); root.withdraw()
+            app = application.RemoteDeskLinuxApp(root)
+            storage = app.device_panel.storage
+            references = [weakref.ref(value) for value in (root, app, app.relay_server)]
+            try:
+                app.relay_options = object()
+                app.relay_list.insert("", tk.END, iid="owned-target", text="Owned target")
+                app.relay_list.selection_set("owned-target")
+                app._request_relay_addresses()
+                self.assertTrue(entered.wait(2))
+                app.close()
+                del app, root
+                gc.collect()
+                self.assertTrue(all(reference() is None for reference in references))
+            finally:
+                release.set(); storage.shutdown(wait=True)
+                self.assertTrue(finished.wait(2))
+
     def test_close_releases_tk_before_slow_relay_directory_finishes(self):
         import remotedesk_linux_app as application
         entered, release, finished = threading.Event(), threading.Event(), threading.Event()

@@ -76,7 +76,8 @@ public sealed class RelayDeviceSelectionTests
         Assert.EndsWith("（本机）", item.Text);
         Assert.Equal("本机（不可自连）", item.SubItems[3].Text);
         Assert.Same(device, item.Tag);
-        Assert.Equal(5, item.SubItems.Count);
+        Assert.Equal(6, item.SubItems.Count);
+        Assert.Contains("未上报", item.SubItems[5].Text);
     }
 
     [Fact]

@@ -20,6 +20,8 @@ internal sealed class RelayHostConnector : IDisposable
     ];
 
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
+    private readonly SemaphoreSlim _addressRefresh = new(0, 1);
+    private readonly Func<IReadOnlyList<string>> _addressProvider;
     private readonly ConcurrentDictionary<Guid, Task> _dataBridges = new();
     private readonly TimeSpan _handshakeTimeout;
     private readonly TimeSpan _heartbeatTimeout;
@@ -27,8 +29,10 @@ internal sealed class RelayHostConnector : IDisposable
     private Task? _runTask;
     private bool _disposed;
 
-    public RelayHostConnector(TimeSpan? handshakeTimeout = null, TimeSpan? heartbeatTimeout = null)
+    public RelayHostConnector(TimeSpan? handshakeTimeout = null, TimeSpan? heartbeatTimeout = null,
+        Func<IReadOnlyList<string>>? addressProvider = null)
     {
+        _addressProvider = addressProvider ?? RelayAddressReport.LocalAddresses;
         _handshakeTimeout = handshakeTimeout ?? TimeSpan.FromSeconds(10);
         _heartbeatTimeout = heartbeatTimeout ?? TimeSpan.FromSeconds(45);
     }
@@ -36,6 +40,13 @@ internal sealed class RelayHostConnector : IDisposable
     public event Action<string>? StatusChanged;
 
     public bool IsRunning => _runTask is { IsCompleted: false };
+
+    public bool RequestAddressRefresh()
+    {
+        if (_disposed || !IsRunning) return false;
+        try { _addressRefresh.Release(); } catch (SemaphoreFullException) { }
+        return true;
+    }
 
     public async Task StartAsync(
         RelayConnectionOptions options,
@@ -161,11 +172,14 @@ internal sealed class RelayHostConnector : IDisposable
                     deviceId = options.DeviceId,
                     machineName = Environment.MachineName,
                     platform = "Windows",
-                    buildStamp = RemoteDeskBuildInfo.BuildStamp
+                    buildStamp = RemoteDeskBuildInfo.BuildStamp,
+                    directAddresses = RelayAddressReport.Normalize(_addressProvider()),
+                    directPort = localHostPort
                 },
                 cancellationToken)
             .ConfigureAwait(false);
             bool heartbeatAcknowledged;
+            bool addressReporting;
             using (JsonDocument response = await RelayTls.ReadJsonWithTimeoutAsync(
                    relayStream,
                    _handshakeTimeout,
@@ -175,14 +189,18 @@ internal sealed class RelayHostConnector : IDisposable
                 RelayTls.EnsureSuccess(response.RootElement);
                 heartbeatAcknowledged = response.RootElement.TryGetProperty("heartbeatAck", out JsonElement ack) &&
                     ack.ValueKind == JsonValueKind.True;
+                addressReporting = response.RootElement.TryGetProperty("addressReporting", out var reportAck) &&
+                    reportAck.ValueKind == JsonValueKind.True;
             }
 
             PublishStatus(
                 $"已上线到中继 {options.ServerAddress}:{options.Port} · 本地端点 " +
-                RelayNetworkPathSelector.DescribeLocalEndpoint(relayClient.Client.LocalEndPoint));
+                RelayNetworkPathSelector.DescribeLocalEndpoint(relayClient.Client.LocalEndPoint) +
+                (addressReporting ? " · IP / 端口自动更新已启用" : " · 服务器需更新才能显示 IP"));
             Task heartbeat = RunHeartbeatAsync(
                 relayStream,
                 writeLock,
+                localHostPort,
                 connectionToken);
             Task<JsonDocument>? pendingRead = null;
             try
@@ -362,14 +380,15 @@ internal sealed class RelayHostConnector : IDisposable
         }
     }
 
-    private static async Task RunHeartbeatAsync(
+    private async Task RunHeartbeatAsync(
         Stream stream,
         SemaphoreSlim writeLock,
+        int localHostPort,
         CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            await Task.Delay(HeartbeatInterval, cancellationToken)
+            await _addressRefresh.WaitAsync(HeartbeatInterval, cancellationToken)
                 .ConfigureAwait(false);
             await WriteControlJsonAsync(
                     stream,
@@ -378,7 +397,9 @@ internal sealed class RelayHostConnector : IDisposable
                     {
                         version = 1,
                         type = "heartbeat",
-                        timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+                        timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                        directAddresses = RelayAddressReport.Normalize(_addressProvider()),
+                        directPort = localHostPort
                     },
                     cancellationToken)
                 .ConfigureAwait(false);

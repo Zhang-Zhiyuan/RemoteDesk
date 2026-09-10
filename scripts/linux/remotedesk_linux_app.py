@@ -4541,6 +4541,7 @@ class RemoteDeskLinuxApp:
 
         self._build_header(root)
         notebook = ttk.Notebook(root)
+        self.main_notebook = notebook
         notebook.pack(fill=tk.BOTH, expand=True, padx=16, pady=(8, 16))
         self._build_host_tab(notebook)
         self._build_viewer_tab(notebook)
@@ -4577,7 +4578,7 @@ class RemoteDeskLinuxApp:
             (0, "服务器 / IP", self.relay_server, False), (1, "端口", self.relay_port, False),
             (2, "共享访问密钥", self.relay_token, True), (3, "TLS SHA-256 指纹", self.relay_pin, False)):
             self._row_entry(form, row, label, variable, show="*" if secret else "")
-        ttk.Checkbutton(form, text="本机被控端启动后发布到在线列表", variable=self.relay_publish).grid(
+        ttk.Checkbutton(form, text="发布本机，并自动更新 IP / 端口", variable=self.relay_publish).grid(
             row=4, column=0, columnspan=3, sticky=tk.W, pady=8)
         ttk.Label(form, text="访问密钥不是远控口令。配置保存在仅本用户可读的 0600 文件中。",
                   wraplength=680, style="PanelSubtitle.TLabel").grid(row=5, column=0, columnspan=3, sticky=tk.W)
@@ -4585,21 +4586,81 @@ class RemoteDeskLinuxApp:
         actions.pack(fill=tk.X, pady=10)
         ttk.Button(actions, text="保存配置 / 应用上线设置", command=self._save_relay, style="Accent.TButton").pack(side=tk.LEFT)
         ttk.Button(actions, text="刷新在线设备", command=self._refresh_relay).pack(side=tk.LEFT, padx=8)
+        ttk.Button(actions, text="立即上报本机 IP", command=self._report_relay_address).pack(side=tk.LEFT)
         self.relay_status = ttk.Label(tab, text=load_error or "先保存服务器配置，再刷新在线设备。", wraplength=700)
         self.relay_status.pack(fill=tk.X, pady=6)
-        self.relay_list = ttk.Treeview(tab, columns=("platform", "status"), show="tree headings", height=7)
+        self.relay_list = ttk.Treeview(tab, columns=("platform", "status", "address"), show="tree headings", height=7)
         self.relay_list.heading("#0", text="设备")
         self.relay_list.heading("platform", text="平台")
         self.relay_list.heading("status", text="状态")
         self.relay_list.column("#0", width=240)
         self.relay_list.column("platform", width=90)
         self.relay_list.column("status", width=150)
+        self.relay_list.heading("address", text="直连 IP / 端口")
+        self.relay_list.column("address", width=280)
         self.relay_list.pack(fill=tk.BOTH, expand=True, pady=8)
+        address_scroll = ttk.Scrollbar(tab, orient=tk.HORIZONTAL, command=self.relay_list.xview)
+        self.relay_list.configure(xscrollcommand=address_scroll.set)
+        address_scroll.pack(fill=tk.X)
         self.relay_list.bind("<Double-1>", lambda _event: self._connect_relay())
         password_form = ttk.Frame(tab)
         password_form.pack(fill=tk.X)
         self._row_entry(password_form, 0, "目标远控口令", self.relay_password, show="*")
         ttk.Button(tab, text="连接选中设备", command=self._connect_relay, style="Accent.TButton").pack(anchor=tk.W, pady=10)
+        ttk.Button(tab, text="查看 / 使用 IP", command=self._request_relay_addresses).pack(anchor=tk.W)
+
+    def _report_relay_address(self):
+        connector = self.relay_host
+        requested = connector is not None and connector.request_address_refresh()
+        self.relay_status.config(text="已请求上报本机 IP / 端口；稍后刷新在线设备即可查看。" if requested
+                                 else "请先启动被控端并启用本机上线，等待连接中转服务器。")
+
+    def _request_relay_addresses(self):
+        selection = self.relay_list.selection()
+        if self.relay_refreshing or self.relay_options is None or not selection:
+            self.relay_status.config(text="请刷新并选择一台在线设备。")
+            return
+        self.relay_refreshing = True
+        self.relay_refresh_generation += 1
+        generation, options, device_id = self.relay_refresh_generation, self.relay_options, selection[0]
+        events = self.events
+        self.relay_status.config(text="正在核对设备最新地址……")
+
+        def work():
+            try:
+                target = next((device for device in relay.list_devices(options) if device["deviceId"] == device_id), None)
+            except Exception:
+                target = None
+            put_ui_event(events, "relay_addresses", (generation, options, target))
+        threading.Thread(target=work, name="RemoteDeskRelayAddresses", daemon=True).start()
+
+    def _show_relay_addresses(self, options, target):
+        if target is None or not target.get("directAddresses") or not target.get("directPort"):
+            self.relay_status.config(text="无法取得最新地址。请更新中转服务器和被控端；仍可使用中转连接。")
+            return
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"{target['machineName']} · 最新地址")
+        dialog.transient(self.root)
+        ttk.Label(dialog, text=f"设备 ID：{target['deviceId']}\n仅可达的地址能直连；跨网仍用中转。", padding=12).pack(fill=tk.X)
+        addresses = tk.Listbox(dialog, width=52, height=min(8, len(target["directAddresses"])))
+        for address in target["directAddresses"]:
+            addresses.insert(tk.END, f"{address}:{target['directPort']}")
+        addresses.selection_set(0)
+        addresses.pack(fill=tk.BOTH, expand=True, padx=12)
+
+        def use():
+            choice = addresses.curselection()
+            if options != self.relay_options or not choice or self.viewer is not None or self.viewer_reconnect_after_id is not None:
+                self.relay_status.config(text="配置已变化或已有会话，请重新选择设备。")
+                dialog.destroy()
+                return
+            self.viewer_host.set(target["directAddresses"][choice[0]])
+            self.viewer_port.set(str(target["directPort"]))
+            self.viewer_password.set(self.relay_password.get())
+            self.main_notebook.select(1)
+            dialog.destroy()
+        ttk.Button(dialog, text="填入 IP 直连", command=use,
+                   state=tk.DISABLED if target["deviceId"] == self.relay_device_id else tk.NORMAL).pack(pady=12)
 
     def _save_relay(self):
         try:
@@ -6428,6 +6489,14 @@ class RemoteDeskLinuxApp:
                 connector, message = value
                 if connector is self.relay_host:
                     self.relay_status.config(text=str(message))
+            elif event == "relay_addresses":
+                generation, options, target = value
+                if generation != self.relay_refresh_generation:
+                    continue
+                self.relay_refreshing = False
+                if options != self.relay_options:
+                    continue
+                self._show_relay_addresses(options, target)
             elif event == "relay_directory":
                 generation, options, devices, error = value
                 if generation != self.relay_refresh_generation:
@@ -6440,7 +6509,8 @@ class RemoteDeskLinuxApp:
                 for device in devices:
                     local = device["deviceId"] == self.relay_device_id
                     self.relay_list.insert("", tk.END, iid=device["deviceId"], text=device["machineName"],
-                        values=(device["platform"], "本机（不可自连）" if local else "使用中（可接管）" if device["busy"] else "在线"))
+                        values=(device["platform"], "本机（不可自连）" if local else "使用中（可接管）" if device["busy"] else "在线",
+                                relay.direct_address_display(device)))
                 self.relay_status.config(text=error or f"当前 {len(devices)} 台在线；选择设备后输入目标远控口令。")
             elif event == "host_log":
                 self._append_host_log(str(value))

@@ -32,7 +32,8 @@ internal static class RelayThroughputProbe
             {
                 await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new {
                     serverAddress = options.ServerAddress, port = options.Port, accessToken = options.AccessToken,
-                    tlsCertificateSha256 = options.TlsCertificateSha256, deviceId = options.DeviceId
+                    tlsCertificateSha256 = options.TlsCertificateSha256, deviceId = options.DeviceId,
+                    addressReportTest = config.TryGetProperty("addressReportTest", out var addressTest) && addressTest.GetBoolean()
                 }));
                 process.StandardInput.Close();
                 await process.WaitForExitAsync(limit.Token);
@@ -51,13 +52,16 @@ internal static class RelayThroughputProbe
             await control.ConnectAsync(IPAddress.Loopback, androidPort.GetInt32(), limit.Token);
             await RelayTls.WriteJsonAsync(control.GetStream(), new {
                 serverAddress = options.ServerAddress, port = options.Port, accessToken = options.AccessToken,
-                tlsCertificateSha256 = options.TlsCertificateSha256, deviceId = options.DeviceId
+                tlsCertificateSha256 = options.TlsCertificateSha256, deviceId = options.DeviceId,
+                addressReportTest = config.TryGetProperty("addressReportTest", out var addressTest) && addressTest.GetBoolean()
             }, limit.Token);
             using var result = await RelayTls.ReadJsonAsync(control.GetStream(), limit.Token);
             Program.Save(Path.Combine(output, "android-transport.json"), result.RootElement);
             Console.WriteLine(result.RootElement.GetRawText());
             return result.RootElement.GetProperty("complete").GetBoolean() ? 0 : 1;
         }
+        if (config.TryGetProperty("addressReportTest", out var localAddressTest) && localAddressTest.GetBoolean())
+            return await RelayAddressProbe.RunAsync(options, output);
         if (config.TryGetProperty("pathsOnly", out var pathsOnly) && pathsOnly.GetBoolean())
         {
             var candidates = new List<RelayNetworkPath?> { null };

@@ -29,6 +29,7 @@ public final class RemoteDeskForegroundService extends Service {
     static final String EXTRA_RESULT_DATA = "resultData";
     static final String EXTRA_PRESENCE_ONLY = "presenceOnly";
     static final String EXTRA_REFRESH_RELAY = "refreshRelay";
+    static final String EXTRA_REPORT_ADDRESS = "reportRelayAddress";
     static final String EXTRA_REFRESH_POWER = "refreshPower";
     static final String EXTRA_STOP = "stop";
     static final String EXTRA_COMPATIBLE = "compatibleCapture";
@@ -110,6 +111,13 @@ public final class RemoteDeskForegroundService extends Service {
         }
         if (intent != null && intent.getBooleanExtra(EXTRA_REFRESH_POWER, false)) {
             updateStreamingPower();
+            if (!running) stopSelf(startId);
+            return activeRestartMode();
+        }
+        if (intent != null && intent.getBooleanExtra(EXTRA_REPORT_ADDRESS, false)) {
+            relayStatus = relayHost != null && relayHost.requestAddressRefresh()
+                ? "已请求上报 IP / 端口；稍后刷新在线设备即可查看。"
+                : "本机尚未上线中转，请先启动被控端并保存上线配置。";
             if (!running) stopSelf(startId);
             return activeRestartMode();
         }

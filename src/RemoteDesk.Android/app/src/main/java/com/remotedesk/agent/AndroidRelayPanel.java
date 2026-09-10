@@ -25,6 +25,7 @@ final class AndroidRelayPanel extends LinearLayout {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor(r -> AndroidRelay.thread("RelayDirectory", r));
     private final Consumer<AndroidRelay.Options> connectTarget;
+    private final Consumer<String> useDirectAddress;
     private final LinearLayout content, devices;
     private final TextView status, hostStatus;
     private final EditText server, port, token, pin;
@@ -46,8 +47,13 @@ final class AndroidRelayPanel extends LinearLayout {
     };
 
     AndroidRelayPanel(Context context, Consumer<AndroidRelay.Options> connectTarget) {
+        this(context, connectTarget, null);
+    }
+
+    AndroidRelayPanel(Context context, Consumer<AndroidRelay.Options> connectTarget, Consumer<String> useDirectAddress) {
         super(context);
         this.connectTarget = connectTarget;
+        this.useDirectAddress = useDirectAddress;
         setOrientation(VERTICAL);
         Button expand = button("公网中转 · 配置与在线设备", false);
         addView(expand, layout());
@@ -63,7 +69,7 @@ final class AndroidRelayPanel extends LinearLayout {
         token = field("中转共享访问密钥", true);
         pin = field("TLS 证书 SHA-256 指纹", false);
         publish = new CheckBox(context);
-        publish.setText("启动被控端后将本机发布到在线列表");
+        publish.setText(R.string.relay_publish_addresses);
         publish.setTextColor(AndroidUiTheme.TEXT);
         publish.setChecked(true);
         content.addView(publish, layout());
@@ -79,6 +85,17 @@ final class AndroidRelayPanel extends LinearLayout {
         Button refresh = button("刷新在线设备", false);
         refresh.setOnClickListener(view -> refresh());
         content.addView(refresh, layout());
+        Button report = button("立即上报本机 IP", false);
+        report.setOnClickListener(view -> {
+            if (!RemoteDeskForegroundService.isServiceRunning()) {
+                status.setText("请先启动本机被控端并启用中转上线。");
+                return;
+            }
+            getContext().startService(new Intent(getContext(), RemoteDeskForegroundService.class)
+                .putExtra(RemoteDeskForegroundService.EXTRA_REPORT_ADDRESS, true));
+            status.setText("已请求上报；稍后刷新在线设备可核对地址。");
+        });
+        content.addView(report, layout());
         devices = new LinearLayout(context);
         devices.setOrientation(VERTICAL);
         content.addView(devices, layout());
@@ -195,11 +212,48 @@ final class AndroidRelayPanel extends LinearLayout {
                 for (AndroidRelay.Device device : online) {
                     boolean local = device.deviceId.equals(deviceId);
                     Button item = button(device.name + " · " + device.platform + "\n" +
-                        (local ? "本机（不可自连）" : device.busy ? "使用中（可接管）" : "在线 · 点击连接"), false);
+                        (local ? "本机（不可自连）" : device.busy ? "使用中（可接管）" : "在线 · 点击中转连接") +
+                        "\n" + device.addressDisplay(), false);
                     item.setEnabled(!local);
                     item.setOnClickListener(view -> connectTarget.accept(options.target(device.deviceId)));
                     devices.addView(item, layout());
+                    if (!local && useDirectAddress != null && !device.directAddresses.isEmpty() && device.directPort > 0) {
+                        Button address = button("查看 / 使用 IP", false);
+                        address.setOnClickListener(view -> showAddresses(options, device.deviceId));
+                        devices.addView(address, layout());
+                    }
                 }
+            });
+        });
+    }
+
+    private void showAddresses(AndroidRelay.Options options, String id) {
+        if (closed || !active || busy || saved != options) return;
+        busy = true;
+        final int generation = epoch;
+        status.setText("正在核对设备最新地址……");
+        worker.execute(() -> {
+            AndroidRelay.Device result = null;
+            try {
+                for (AndroidRelay.Device device : AndroidRelay.listDevices(getContext(), options, socket -> {
+                    pendingSocket = socket;
+                    if (socket != null && (closed || !active || epoch != generation)) AndroidRelay.close(socket);
+                })) if (device.deviceId.equals(id)) result = device;
+            } catch (Exception ignored) { }
+            final AndroidRelay.Device target = result;
+            ui.post(() -> {
+                busy = false;
+                if (closed || !active || epoch != generation || saved != options) return;
+                if (target == null || target.directAddresses.isEmpty() || target.directPort == 0) {
+                    status.setText("无法取得最新地址；请刷新列表，或使用中转连接。"); return;
+                }
+                status.setText("已取得最新地址；仅可达的内网地址能直连。跨网仍用中转。");
+                String[] addresses = new String[target.directAddresses.size()];
+                for (int i = 0; i < addresses.length; i++) addresses[i] = target.directAddresses.get(i) + ":" + target.directPort;
+                new AlertDialog.Builder(getContext()).setTitle(target.name + " · 选择地址填入直连")
+                    .setItems(addresses, (dialog, index) -> {
+                        if (!closed && active && epoch == generation && saved == options) useDirectAddress.accept(addresses[index]);
+                    }).setNegativeButton("取消", null).show();
             });
         });
     }

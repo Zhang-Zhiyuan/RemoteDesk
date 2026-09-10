@@ -8,7 +8,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationIcon>Assets\RemoteDesk.ico</ApplicationIcon>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.0.6</Version>
+    <Version>1.0.7</Version>
     <RemoteDeskBuildStamp Condition="'$(RemoteDeskBuildStamp)' == ''">$([System.DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))</RemoteDeskBuildStamp>
     <InformationalVersion>$(Version)+remotedesk.$(RemoteDeskBuildStamp)</InformationalVersion>
   </PropertyGroup>

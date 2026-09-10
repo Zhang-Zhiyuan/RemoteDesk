@@ -39,6 +39,14 @@ final class AndroidRelay {
     static final int TIMEOUT_MS = 12000;
     static final int LOOPBACK_BUFFER_BYTES = 16 * 1024;
     static final int COPY_BUFFER_BYTES = 16 * 1024;
+    private static final java.util.concurrent.ScheduledThreadPoolExecutor DIRECTORY_DEADLINES = directoryDeadlines();
+
+    private static java.util.concurrent.ScheduledThreadPoolExecutor directoryDeadlines() {
+        java.util.concurrent.ScheduledThreadPoolExecutor timer = new java.util.concurrent.ScheduledThreadPoolExecutor(
+            1, r -> thread("RelayDirectoryDeadline", r));
+        timer.setRemoveOnCancelPolicy(true);
+        return timer;
+    }
 
     static int hostSendBufferBytes(java.net.InetAddress peer, int directBufferBytes) {
         return peer != null && peer.isLoopbackAddress() ? LOOPBACK_BUFFER_BYTES : directBufferBytes;
@@ -301,8 +309,20 @@ final class AndroidRelay {
     static final class Device {
         final String deviceId, name, platform;
         final boolean busy;
+        final List<String> directAddresses;
+        final int directPort;
         Device(String id, String name, String platform, boolean busy) {
+            this(id, name, platform, busy, java.util.Collections.emptyList(), 0);
+        }
+        Device(String id, String name, String platform, boolean busy, List<String> addresses, int port) {
             this.deviceId = id; this.name = name; this.platform = platform; this.busy = busy;
+            this.directAddresses = AndroidRelayAddresses.normalize(addresses);
+            this.directPort = port > 0 && port <= 65535 ? port : 0;
+        }
+        String addressDisplay() {
+            List<String> values = new ArrayList<>();
+            if (directPort > 0) for (String address : directAddresses) values.add(address + ":" + directPort);
+            return values.isEmpty() ? "未上报 IP（仍可中转连接）" : String.join(" / ", values);
         }
     }
 
@@ -317,23 +337,41 @@ final class AndroidRelay {
     static List<Device> listDevices(android.content.Context context, Options options, Consumer<Socket> socketChanged) throws Exception {
         try (AndroidRelayNetworkSelector.Dial dial = new AndroidRelayNetworkSelector.Dial()) {
             socketChanged.accept(dial);
-            try (SSLSocket socket = AndroidRelayNetworkSelector.connect(context, options, dial)) {
-                socketChanged.accept(socket);
-                JSONArray devices = exchange(socket, request(options, "directory")).optJSONArray("devices");
-                if (devices == null || devices.length() > 512) throw new IOException("中转在线列表无效。");
+            ScheduledFuture<?> deadline = DIRECTORY_DEADLINES.schedule(dial::close, TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            try {
                 List<Device> result = new ArrayList<>();
                 Set<String> seen = new java.util.HashSet<>();
-                for (int i = 0; i < devices.length(); i++) {
-                    JSONObject item = devices.optJSONObject(i);
-                    if (item == null) continue;
-                    try {
-                        String id = UUID.fromString(item.optString("deviceId")).toString();
-                        if (seen.add(id)) result.add(new Device(id, bounded(item.optString("machineName", "未命名设备"), 120),
-                            bounded(item.optString("platform", "未知"), 40), item.optBoolean("busy", false)));
-                    } catch (IllegalArgumentException ignored) { }
+                int offset = 0;
+                for (int page = 0; page < 16; page++) {
+                    dial.checkOpen();
+                    JSONObject response;
+                    try (SSLSocket socket = AndroidRelayNetworkSelector.connect(context, options, dial)) {
+                        dial.add(socket); // Cancellation and the shared deadline also cover page reads.
+                        try { response = exchange(socket, request(options, "directory").put("pageSize", 32).put("offset", offset)); }
+                        finally { dial.release(socket); }
+                    }
+                    JSONArray devices = response.optJSONArray("devices");
+                    if (devices == null || devices.length() > 512) throw new IOException("中转在线列表无效。");
+                    for (int i = 0; i < devices.length(); i++) {
+                        JSONObject item = devices.optJSONObject(i);
+                        if (item == null) continue;
+                        try {
+                            String id = UUID.fromString(item.optString("deviceId")).toString();
+                            if (seen.add(id)) result.add(new Device(id, bounded(item.optString("machineName", "未命名设备"), 120),
+                                bounded(item.optString("platform", "未知"), 40), item.optBoolean("busy", false),
+                                AndroidRelayAddresses.parse(item), AndroidRelayAddresses.port(item)));
+                        } catch (IllegalArgumentException ignored) { }
+                    }
+                    dial.checkOpen();
+                    if (result.size() > 512) throw new IOException("中转在线设备过多。");
+                    if (!response.has("nextOffset") || response.isNull("nextOffset")) return result;
+                    Object next = response.opt("nextOffset");
+                    if (!(next instanceof Integer) || ((Integer) next) != offset + 32 || ((Integer) next) >= 512)
+                        throw new IOException("中转目录分页无效。");
+                    offset = (Integer) next;
                 }
-                return result;
-            }
+                throw new IOException("中转目录分页过多。");
+            } finally { deadline.cancel(false); }
         } finally { socketChanged.accept(null); }
     }
 
@@ -347,24 +385,50 @@ final class AndroidRelay {
         private final int localPort;
         private final String name;
         private final Consumer<String> status;
+        private final java.util.function.Supplier<List<String>> addressProvider;
         private final AtomicBoolean stopped = new AtomicBoolean();
         private final Set<Socket> sockets = ConcurrentHashMap.newKeySet();
         private final Semaphore bridges = new Semaphore(8);
         private final ScheduledExecutorService timers = Executors.newSingleThreadScheduledExecutor(r -> thread("RelayHeartbeat", r));
         private final Thread worker;
+        private volatile Runnable addressHeartbeat;
+        private final AtomicBoolean addressRefreshQueued = new AtomicBoolean();
 
         HostConnector(Options options, int localPort, String name, Consumer<String> status) {
             this(null, options, localPort, name, status);
         }
 
         HostConnector(android.content.Context context, Options options, int localPort, String name, Consumer<String> status) {
+            this(context, options, localPort, name, status, AndroidRelayAddresses::local);
+        }
+
+        HostConnector(android.content.Context context, Options options, int localPort, String name, Consumer<String> status,
+                      java.util.function.Supplier<List<String>> addressProvider) {
             if (localPort < 1 || localPort > 65535) throw new IllegalArgumentException("本机端口无效。");
             this.options = options; this.localPort = localPort; this.name = bounded(name, 120); this.status = status;
+            this.addressProvider = addressProvider;
             this.context = context == null ? null : context.getApplicationContext();
             worker = thread("RelayRegistration", this::run);
         }
 
         void start() { worker.start(); }
+
+        boolean requestAddressRefresh() {
+            if (stopped.get() || addressHeartbeat == null) return false;
+            if (!addressRefreshQueued.compareAndSet(false, true)) return true;
+            try {
+                timers.execute(() -> {
+                    try {
+                        Runnable beat = addressHeartbeat;
+                        if (!stopped.get() && beat != null) beat.run();
+                    } finally { addressRefreshQueued.set(false); }
+                });
+                return true;
+            } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                addressRefreshQueued.set(false);
+                return false;
+            }
+        }
 
         private void track(Socket socket) throws IOException {
             sockets.add(socket);
@@ -409,14 +473,18 @@ final class AndroidRelay {
             AtomicBoolean controlClosed = new AtomicBoolean();
             try {
                 track(socket);
-                exchange(socket, request(options, "host-control").put("deviceId", options.deviceId)
-                    .put("machineName", name).put("platform", "Android"));
+                JSONObject registered = exchange(socket, AndroidRelayAddresses.attach(request(options, "host-control")
+                    .put("deviceId", options.deviceId).put("machineName", name).put("platform", "Android"), localPort, addressProvider.get()));
                 socket.setSoTimeout(45000);
-                report("已上线到中转 " + options.serverAddress + ":" + options.port + " · 本地地址 " + socket.getLocalAddress().getHostAddress());
-                heartbeat = timers.scheduleWithFixedDelay(() -> {
-                    try { write(socket.getOutputStream(), new JSONObject().put("version", 1).put("type", "heartbeat")); }
+                report("已上线到中转 " + options.serverAddress + ":" + options.port + " · 本地地址 " + socket.getLocalAddress().getHostAddress() +
+                    (registered.optBoolean("addressReporting", false) ? " · IP / 端口自动更新已启用" : " · 服务器需更新才能显示 IP"));
+                Runnable beat = () -> {
+                    try { write(socket.getOutputStream(), AndroidRelayAddresses.attach(
+                        new JSONObject().put("version", 1).put("type", "heartbeat"), localPort, addressProvider.get())); }
                     catch (Exception ex) { AndroidRelay.close(socket); }
-                }, 10, 10, TimeUnit.SECONDS);
+                };
+                addressHeartbeat = beat;
+                heartbeat = timers.scheduleWithFixedDelay(beat, 10, 10, TimeUnit.SECONDS);
                 while (!stopped.get()) {
                     JSONObject message = read(socket.getInputStream());
                     if (!"open".equals(message.optString("type"))) continue;
@@ -430,6 +498,7 @@ final class AndroidRelay {
                     }).start();
                 }
             } finally {
+                addressHeartbeat = null;
                 controlClosed.set(true);
                 if (heartbeat != null) heartbeat.cancel(true);
                 for (Socket dataSocket : connectionData) AndroidRelay.close(dataSocket);

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
+import ipaddress
 import json
 import os
 import signal
@@ -34,6 +35,30 @@ WRITE_BUFFER_LOW_BYTES = 16 * 1024
 TCP_NOTSENT_LOWAT_BYTES = 64 * 1024
 BRIDGE_WRITE_TIMEOUT_SECONDS = 30
 STREAM_CLOSE_TIMEOUT_SECONDS = 2
+MAX_DIRECT_ADDRESSES = 8
+
+
+def normalize_address_report(message):
+    """Optional IPv4 hints only: never resolve DNS or dial a reported address."""
+    port, values = message.get("directPort"), message.get("directAddresses")
+    if type(port) is not int or not 1 <= port <= 65535 or not isinstance(values, list):
+        return [], 0
+    addresses = []
+    for value in values[:32]:
+        if not isinstance(value, str) or len(value) > 15:
+            continue
+        try:
+            address = ipaddress.IPv4Address(value)
+        except ValueError:
+            continue
+        if (address.is_loopback or address.is_link_local or address.is_multicast
+                or int(address) >> 24 == 0 or int(address) >> 24 >= 224):
+            continue
+        if str(address) not in addresses:
+            addresses.append(str(address))
+        if len(addresses) == MAX_DIRECT_ADDRESSES:
+            break
+    return addresses, port if addresses else 0
 
 
 @dataclass
@@ -47,6 +72,16 @@ class HostConnection:
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_seen: float = field(default_factory=time.monotonic)
     active_sessions: int = 0
+    direct_addresses: list = field(default_factory=list)
+    direct_port: int = 0
+    address_reported_at: Optional[float] = None
+
+    def update_addresses(self, message):
+        # Missing fields mean a legacy heartbeat; an explicit empty/invalid
+        # report clears old hints instead of advertising a no-longer-owned IP.
+        if "directAddresses" in message or "directPort" in message:
+            self.direct_addresses, self.direct_port = normalize_address_report(message)
+            self.address_reported_at = time.monotonic()
 
 
 @dataclass
@@ -133,7 +168,7 @@ class RelayServer:
             if role == "host-control":
                 await self.handle_host_control(reader, writer, hello)
             elif role == "directory":
-                await self.handle_directory(writer)
+                await self.handle_directory(writer, hello)
             elif role == "viewer":
                 await self.handle_viewer(reader, writer, hello)
             elif role == "host-data":
@@ -180,6 +215,7 @@ class RelayServer:
             reader,
             writer,
         )
+        host.update_addresses(hello)
 
         old_host = None
         async with self.state_lock:
@@ -189,7 +225,7 @@ class RelayServer:
             old_host.writer.close()
         try:
             await self._write_host(
-                host, {"ok": True, "type": "registered", "heartbeatAck": True}
+                host, {"ok": True, "type": "registered", "heartbeatAck": True, "addressReporting": True}
             )
             while True:
                 message = await asyncio.wait_for(
@@ -199,7 +235,8 @@ class RelayServer:
                 if message.get("type") != "heartbeat":
                     raise ValueError("主机控制消息无效")
                 host.last_seen = time.monotonic()
-                await self._write_host(host, {"type": "heartbeat"})
+                host.update_addresses(message)
+                await self._write_host(host, {"type": "heartbeat", "addressReporting": True})
         finally:
             async with self.state_lock:
                 if self.hosts.get(device_id) is host:
@@ -218,7 +255,13 @@ class RelayServer:
                     if not item.completed.done():
                         item.completed.set_result(None)
 
-    async def handle_directory(self, writer: asyncio.StreamWriter) -> None:
+    async def handle_directory(self, writer: asyncio.StreamWriter, request=None) -> None:
+        request = request or {}
+        paged = "pageSize" in request
+        offset, page_size = request.get("offset", 0), request.get("pageSize", 32)
+        if (type(offset) is not int or not 0 <= offset < MAX_CONNECTIONS or
+                type(page_size) is not int or not 1 <= page_size <= 32):
+            raise ValueError("目录分页参数无效")
         now = time.monotonic()
         async with self.state_lock:
             devices = [
@@ -235,13 +278,29 @@ class RelayServer:
                     "lastSeenSeconds": max(
                         0, int(now - host.last_seen)
                     ),
+                    "directAddresses": (list(host.direct_addresses) if host.address_reported_at is not None
+                                        and now - host.address_reported_at < HOST_IDLE_TIMEOUT_SECONDS else []),
+                    "directPort": (host.direct_port if host.address_reported_at is not None
+                                   and now - host.address_reported_at < HOST_IDLE_TIMEOUT_SECONDS else 0),
+                    "addressAgeSeconds": (max(0, int(now - host.address_reported_at))
+                                          if host.address_reported_at is not None else None),
                 }
                 for host in self.hosts.values()
                 if not host.writer.is_closing()
                 and now - host.last_seen < HOST_IDLE_TIMEOUT_SECONDS
             ]
-        devices.sort(key=lambda item: item["machineName"].casefold())
-        await write_json(writer, {"ok": True, "devices": devices})
+        devices.sort(key=lambda item: (item["machineName"].casefold(), item["deviceId"]))
+        if paged:
+            page = devices[offset:offset + page_size]
+            next_offset = offset + page_size if offset + page_size < len(devices) else None
+            await write_json(writer, {"ok": True, "devices": page, "nextOffset": next_offset})
+        else:
+            # Old clients requested an unpaged directory and cannot use IP
+            # metadata. Preserve their previous response size and shape.
+            for device in devices:
+                for key in ("directAddresses", "directPort", "addressAgeSeconds"):
+                    device.pop(key, None)
+            await write_json(writer, {"ok": True, "devices": devices})
 
     async def handle_viewer(
         self,

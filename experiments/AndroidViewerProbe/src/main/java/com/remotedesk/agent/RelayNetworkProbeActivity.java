@@ -41,6 +41,14 @@ public final class RelayNetworkProbeActivity extends Activity {
                     AndroidRelay.Options options = new AndroidRelay.Options(value.getString("serverAddress"),
                         value.getInt("port"), value.getString("accessToken"), value.getString("tlsCertificateSha256"),
                         value.getString("deviceId"), false);
+                    if (value.optBoolean("addressReportTest", false)) {
+                        JSONObject result = addressReportProbe(options);
+                        byte[] reply = result.toString().getBytes(StandardCharsets.UTF_8);
+                        DataOutputStream output = new DataOutputStream(control.getOutputStream());
+                        output.writeInt(reply.length); output.write(reply); output.flush();
+                        runOnUiThread(() -> label.setText("RemoteDesk IP report test passed"));
+                        return;
+                    }
                     JSONArray measurements = new JSONArray();
                     for (int round = 0; round < 3; round++) {
                         long start = System.nanoTime();
@@ -84,6 +92,62 @@ public final class RelayNetworkProbeActivity extends Activity {
                 deleteFile("relay-path-ready.json");
             }
         }, "RelayNetworkProbe").start();
+    }
+
+    private JSONObject addressReportProbe(AndroidRelay.Options configuration) throws Exception {
+        AndroidRelay.Options options = configuration.target(java.util.UUID.randomUUID().toString());
+        java.util.List<String> actual = AndroidRelayAddresses.local();
+        if (actual.isEmpty()) throw new IllegalStateException("No local IPv4 address");
+        java.util.concurrent.atomic.AtomicReference<java.util.List<String>> addresses =
+            new java.util.concurrent.atomic.AtomicReference<>(actual);
+        try (ServerSocket echo = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
+             AndroidRelay.HostConnector host = new AndroidRelay.HostConnector(getApplicationContext(), options,
+                 echo.getLocalPort(), "Owned Android address probe", status -> { }, addresses::get)) {
+            echo.setSoTimeout(30000);
+            Thread echoThread = AndroidRelay.thread("AddressProbeEcho", () -> {
+                try (Socket socket = echo.accept()) {
+                    socket.setSoTimeout(30000);
+                    byte[] buffer = new byte[4096];
+                    for (int count; (count = socket.getInputStream().read(buffer)) > 0;)
+                        socket.getOutputStream().write(buffer, 0, count);
+                } catch (Exception ignored) { }
+            });
+            echoThread.start();
+            host.start();
+            awaitAddresses(options, actual, echo.getLocalPort());
+            JSONArray stages = new JSONArray();
+            try (AndroidRelayNetworkSelector.Dial dial = new AndroidRelayNetworkSelector.Dial();
+                 javax.net.ssl.SSLSocket viewer = AndroidRelayNetworkSelector.connect(getApplicationContext(), options, dial)) {
+                AndroidRelay.exchange(viewer, AndroidRelay.request(options, "viewer").put("deviceId", options.deviceId));
+                for (java.util.List<String> value : java.util.List.of(java.util.Collections.<String>emptyList(), actual)) {
+                    addresses.set(value);
+                    if (!host.requestAddressRefresh()) throw new IllegalStateException("Host not active");
+                    awaitAddresses(options, value, echo.getLocalPort());
+                    byte[] data = "address-change-中文".getBytes(StandardCharsets.UTF_8);
+                    viewer.getOutputStream().write(data);
+                    byte[] reply = new byte[data.length];
+                    new DataInputStream(viewer.getInputStream()).readFully(reply);
+                    if (!java.util.Arrays.equals(data, reply)) throw new IllegalStateException("Session interrupted");
+                    stages.put(new JSONObject().put("advertisedCount", value.size()).put("sameSessionEcho", true));
+                }
+            }
+            echoThread.join(1000);
+            return new JSONObject().put("complete", true).put("platform", "Android")
+                .put("api", android.os.Build.VERSION.SDK_INT).put("localAddresses", new JSONArray(actual))
+                .put("customPort", echo.getLocalPort()).put("stages", stages)
+                .put("scope", "Public relay; native product host/directory; simulated address removal/restoration. No NIC changes, screen or OS input.");
+        }
+    }
+
+    private void awaitAddresses(AndroidRelay.Options options, java.util.List<String> expected, int port) throws Exception {
+        for (int retry = 0; retry < 30; retry++) {
+            for (AndroidRelay.Device device : AndroidRelay.listDevices(getApplicationContext(), options, socket -> { })) {
+                if (device.deviceId.equals(options.deviceId) && device.directAddresses.equals(expected) &&
+                    device.directPort == (expected.isEmpty() ? 0 : port)) return;
+            }
+            Thread.sleep(200);
+        }
+        throw new IllegalStateException("Address record did not update");
     }
 
     private JSONObject singleNetworkCancellationProbe() throws Exception {

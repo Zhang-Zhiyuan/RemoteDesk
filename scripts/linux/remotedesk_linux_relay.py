@@ -37,6 +37,56 @@ LOOPBACK_BUFFER_BYTES = 16 * 1024
 LOOPBACK_READER_LIMIT_BYTES = 16 * 1024
 BRIDGE_WRITE_TIMEOUT_SECONDS = 30
 STREAM_CLOSE_TIMEOUT_SECONDS = 2
+MAX_DIRECT_ADDRESSES = 8
+
+
+def normalize_address_report(message):
+    port, values = message.get("directPort"), message.get("directAddresses")
+    if type(port) is not int or not 1 <= port <= 65535 or not isinstance(values, list):
+        return dict(directAddresses=[], directPort=0)
+    addresses = []
+    for value in values[:32]:
+        if not isinstance(value, str) or len(value) > 15:
+            continue
+        try:
+            address = ipaddress.IPv4Address(value)
+        except ValueError:
+            continue
+        if (address.is_loopback or address.is_link_local or address.is_multicast
+                or int(address) >> 24 == 0 or int(address) >> 24 >= 224):
+            continue
+        if str(address) not in addresses:
+            addresses.append(str(address))
+        if len(addresses) == MAX_DIRECT_ADDRESSES:
+            break
+    return dict(directAddresses=addresses, directPort=port if addresses else 0)
+
+
+def local_direct_addresses():
+    """Read interface IPv4 addresses without DNS, subprocesses or route changes."""
+    addresses = []
+    try:
+        import fcntl
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as control:
+            for _, name in socket.if_nameindex()[:64]:
+                encoded = name.encode("utf-8")
+                if name == "lo" or len(encoded) >= 16:
+                    continue
+                try:
+                    request = struct.pack("256s", encoded)
+                    flags = struct.unpack("H", fcntl.ioctl(control, 0x8913, request)[16:18])[0]
+                    if flags & 1 and not flags & 8:  # IFF_UP, not IFF_LOOPBACK
+                        addresses.append(socket.inet_ntoa(fcntl.ioctl(control, 0x8915, request)[20:24]))
+                except OSError:
+                    continue
+    except (OSError, ImportError, AttributeError):
+        pass
+    return normalize_address_report(dict(directAddresses=sorted(set(addresses)), directPort=56565))["directAddresses"]
+
+
+def direct_address_display(device):
+    report = normalize_address_report(device)
+    return " / ".join(f"{ip}:{report['directPort']}" for ip in report["directAddresses"]) or "未上报（仍可中转连接）"
 
 
 class RelayIdentityError(PermissionError):
@@ -422,27 +472,45 @@ async def hello(reader, writer, options, role, **fields):
 
 
 async def list_devices_async(options):
+    return await asyncio.wait_for(_list_devices_pages(options), TIMEOUT)
+
+
+async def _list_devices_pages(options):
     options = options.validate()
-    reader, writer = await connect_tls(options)
-    try:
-        response = await hello(reader, writer, options, "directory")
+    result, seen, offset = [], set(), 0
+    for _ in range(16):
+        response = await _directory_page(options, offset)
         devices = response.get("devices")
         if not isinstance(devices, list) or len(devices) > 512:
             raise ValueError("中转在线列表无效。")
-        result, seen = [], set()
         for item in devices:
             if not isinstance(item, dict):
                 continue
             try:
                 device_id = str(uuid.UUID(item.get("deviceId", "")))
-            except (ValueError, AttributeError):
+            except (ValueError, AttributeError, TypeError):
                 continue
             if device_id in seen:
                 continue
             seen.add(device_id)
             result.append(dict(deviceId=device_id, machineName=str(item.get("machineName", "未命名设备"))[:120],
-                               platform=str(item.get("platform", "未知"))[:40], busy=item.get("busy") is True))
-        return result
+                               platform=str(item.get("platform", "未知"))[:40], busy=item.get("busy") is True,
+                               **normalize_address_report(item)))
+        if len(result) > 512:
+            raise ValueError("中转在线设备过多。")
+        next_offset = response.get("nextOffset")
+        if next_offset is None:
+            return result
+        if type(next_offset) is not int or next_offset != offset + 32 or next_offset >= 512:
+            raise ValueError("中转目录分页无效。")
+        offset = next_offset
+    raise ValueError("中转目录分页过多。")
+
+
+async def _directory_page(options, offset):
+    reader, writer = await connect_tls(options)
+    try:
+        return await hello(reader, writer, options, "directory", pageSize=32, offset=offset)
     finally:
         await close_writer(writer)
 
@@ -534,6 +602,19 @@ class RelayHostConnector:
         self.stop_event, self.online = threading.Event(), threading.Event()
         self.thread = None
         self.loop = self.task = None
+        self.address_refresh = asyncio.Event()
+
+    def request_address_refresh(self):
+        if self.stop_event.is_set() or self.loop is None or not self.online.is_set():
+            return False
+        try:
+            self.loop.call_soon_threadsafe(self.address_refresh.set)
+            return True
+        except RuntimeError:
+            return False
+
+    def _address_report(self):
+        return normalize_address_report(dict(directAddresses=local_direct_addresses(), directPort=self.local_port))
 
     def _status(self, value):
         with contextlib.suppress(Exception):
@@ -582,17 +663,21 @@ class RelayHostConnector:
         heartbeat = None
         pending = set()
         try:
-            await hello(reader, writer, self.options, "host-control", deviceId=self.options.device_id,
-                        machineName=self.machine_name, platform="Linux")
+            registered = await hello(reader, writer, self.options, "host-control", deviceId=self.options.device_id,
+                        machineName=self.machine_name, platform="Linux", **self._address_report())
             self.online.set()
             source = writer.get_extra_info("sockname")
             self._status(f"已上线到中转 {self.options.server_address}:{self.options.port}" +
-                         (f" · 本地地址 {source[0]}" if source else ""))
+                         (f" · 本地地址 {source[0]}" if source else "") +
+                         (" · IP / 端口自动更新已启用" if registered.get("addressReporting") is True
+                          else " · 服务器需更新才能显示 IP"))
 
             async def beat():
                 while True:
-                    await asyncio.sleep(10)
-                    await write_json(writer, dict(version=1, type="heartbeat"))
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(self.address_refresh.wait(), 10)
+                    self.address_refresh.clear()
+                    await write_json(writer, dict(version=1, type="heartbeat", **self._address_report()))
 
             heartbeat = asyncio.create_task(beat())
             while True:

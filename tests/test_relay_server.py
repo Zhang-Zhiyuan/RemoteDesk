@@ -68,7 +68,7 @@ class RelayServerTests(unittest.IsolatedAsyncioTestCase):
         self.clients.append(writer)
         return reader, writer
 
-    async def register_host(self, device_id: str):
+    async def register_host(self, device_id: str, **report):
         reader, writer = await self.connect()
         await write_json(
             writer,
@@ -80,10 +80,71 @@ class RelayServerTests(unittest.IsolatedAsyncioTestCase):
                 "machineName": "Office-PC",
                 "platform": "Windows",
                 "buildStamp": "20260904000000",
+                **report,
             },
         )
         self.assertTrue((await read_json(reader))["ok"])
         return reader, writer
+
+    async def directory(self):
+        reader, writer = await self.connect()
+        await write_json(writer, dict(version=1, role="directory", token=TOKEN, pageSize=32, offset=0))
+        return (await read_json(reader))["devices"]
+
+    async def test_address_change_and_custom_port_replace_same_device(self):
+        device_id = str(uuid.uuid4())
+        reader, writer = await self.register_host(device_id, directAddresses=["192.0.2.3"], directPort=40565)
+        original = self.relay.hosts[device_id]
+        first = (await self.directory())[0]
+        self.assertEqual(["192.0.2.3"], first["directAddresses"])
+        self.assertEqual(40565, first["directPort"])
+        await write_json(writer, dict(type="heartbeat", directAddresses=["198.51.100.4", "10.1.2.3"], directPort=56565))
+        self.assertTrue((await read_json(reader))["addressReporting"])
+        devices = await self.directory()
+        self.assertEqual(1, len(devices))
+        self.assertEqual(device_id, devices[0]["deviceId"])
+        self.assertEqual(["198.51.100.4", "10.1.2.3"], devices[0]["directAddresses"])
+        self.assertEqual(56565, devices[0]["directPort"])
+        self.assertIs(original, self.relay.hosts[device_id])
+
+    async def test_legacy_host_works_and_stale_address_hints_expire(self):
+        device_id = str(uuid.uuid4())
+        reader, writer = await self.register_host(device_id)
+        first = (await self.directory())[0]
+        self.assertEqual([], first["directAddresses"])
+        self.assertEqual(0, first["directPort"])
+        await write_json(writer, dict(type="heartbeat", directAddresses=["192.0.2.3"], directPort=56565))
+        await read_json(reader)
+        self.relay.hosts[device_id].address_reported_at -= 46
+        await write_json(writer, dict(type="heartbeat"))
+        await read_json(reader)
+        current = (await self.directory())[0]
+        self.assertEqual([], current["directAddresses"])
+        self.assertEqual(0, current["directPort"])
+        self.assertGreaterEqual(current["addressAgeSeconds"], 45)
+
+    async def test_invalid_or_empty_report_clears_hints_without_disconnecting(self):
+        device_id = str(uuid.uuid4())
+        reader, writer = await self.register_host(device_id, directAddresses=["192.0.2.3"], directPort=56565)
+        original = self.relay.hosts[device_id]
+        for report in (dict(directAddresses=[], directPort=56565),
+                       dict(directAddresses=["https://host/", "127.0.0.1", {}], directPort=True)):
+            await write_json(writer, dict(type="heartbeat", **report))
+            await read_json(reader)
+            self.assertEqual([], (await self.directory())[0]["directAddresses"])
+            self.assertIs(original, self.relay.hosts[device_id])
+
+    async def test_new_registration_does_not_inherit_old_ip_and_offline_disappears(self):
+        device_id = str(uuid.uuid4())
+        await self.register_host(device_id, directAddresses=["192.0.2.3"], directPort=56565)
+        _, replacement = await self.register_host(device_id)
+        self.assertEqual([], (await self.directory())[0]["directAddresses"])
+        replacement.close()
+        await replacement.wait_closed()
+        for _ in range(50):
+            if not await self.directory(): break
+            await asyncio.sleep(.01)
+        self.assertEqual([], await self.directory())
 
     async def test_directory_and_opaque_bidirectional_tunnel(self) -> None:
         device_id = str(uuid.uuid4())
@@ -98,6 +159,7 @@ class RelayServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(listing["ok"])
         self.assertEqual(device_id, listing["devices"][0]["deviceId"])
         self.assertEqual("Office-PC", listing["devices"][0]["machineName"])
+        self.assertNotIn("directAddresses", listing["devices"][0])  # Legacy unpaged response.
 
         viewer_reader, viewer_writer = await self.connect()
         await write_json(

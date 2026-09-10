@@ -15,9 +15,13 @@ import remotedesk_linux_relay as relay
 
 
 async def main():
-    options = relay.RelayOptions.from_dict(json.load(sys.stdin)) if "--stdin" in sys.argv else relay.load_settings()
+    config = json.load(sys.stdin) if "--stdin" in sys.argv else {}
+    options = relay.RelayOptions.from_dict(config) if config else relay.load_settings()
     if options is None or options.server_address != "8.138.5.232":
         raise RuntimeError("Installed relay is not the authorized test server")
+    if config.get("addressReportTest") is True:
+        from relay_address_report_probe import run
+        return await run(options)
     rows = []
     for repeat in range(3):
         began = time.monotonic()

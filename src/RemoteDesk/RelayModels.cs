@@ -60,6 +60,12 @@ internal sealed record RelayOnlineDevice(
     bool Busy,
     int LastSeenSeconds)
 {
+    public IReadOnlyList<string> DirectAddresses { get; init; } = [];
+    public int DirectPort { get; init; }
+    public string AddressDisplay => DirectAddresses.Count > 0
+        ? string.Join(" / ", DirectAddresses.Select(address => $"{address}:{DirectPort}"))
+        : "未上报（仍可中继连接）";
+
     public string StatusText => Busy ? "使用中（可挤下线）" : "在线";
 
     public string BuildDisplay =>

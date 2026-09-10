@@ -242,9 +242,40 @@ class LinuxRelayTlsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pinned_directory_and_native_host_registration(self):
         self.assertEqual([], await client.list_devices_async(self.options))
-        await self.start_host()
+        with mock.patch.object(client, "local_direct_addresses", return_value=["192.0.2.3"]):
+            await self.start_host()
         devices = await client.list_devices_async(self.options)
-        self.assertEqual([dict(deviceId=ID, machineName="Owned Linux target", platform="Linux", busy=False)], devices)
+        self.assertEqual([dict(deviceId=ID, machineName="Owned Linux target", platform="Linux", busy=False,
+                              directAddresses=["192.0.2.3"], directPort=self.host.local_port)], devices)
+
+    async def test_address_refresh_does_not_interrupt_active_encrypted_relay_transport(self):
+        with mock.patch.object(client, "local_direct_addresses", return_value=["192.0.2.3"]) as addresses:
+            await self.start_host()
+            original = self.relay.hosts[ID]
+            viewer = await asyncio.to_thread(client.connect_viewer, self.options)
+            try:
+                for values in (["198.51.100.4", "10.1.2.3"], []):
+                    addresses.return_value = values
+                    self.assertTrue(self.host.request_address_refresh())
+                    await self.wait_for(lambda: self.relay.hosts[ID].direct_addresses == values)
+                    devices = await client.list_devices_async(self.options)
+                    self.assertEqual(1, len(devices))
+                    self.assertEqual(values, devices[0]["directAddresses"])
+                    self.assertIs(original, self.relay.hosts[ID])
+                    def exchange():
+                        viewer.sendall(b"same-session")
+                        return viewer.recv(12)
+                    self.assertEqual(b"same-session", await asyncio.to_thread(exchange))
+            finally:
+                viewer.close()
+
+    async def test_old_server_ignores_address_extension_without_breaking_host(self):
+        # Real pinned TLS, but an old implementation's registration/heartbeat response.
+        with mock.patch.object(server.HostConnection, "update_addresses", lambda *_: None):
+            await self.start_host()
+            self.assertEqual([], (await client.list_devices_async(self.options))[0]["directAddresses"])
+            self.assertTrue(self.host.request_address_refresh())
+            self.assertTrue(self.host.online.is_set())
 
     async def test_real_tls_socket_applies_backpressure_policy(self):
         _, writer = await client.connect_tls(self.options)

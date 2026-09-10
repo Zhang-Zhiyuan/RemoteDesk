@@ -12,6 +12,34 @@ namespace RemoteDesk.Tests;
 public sealed class RelayFailureTests
 {
     [Fact]
+    public async Task AddressChangesUseExistingAuthenticatedControlConnection()
+    {
+        using var server = new TestRelay();
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        IReadOnlyList<string> current = ["192.0.2.3"];
+        using var connector = new RelayHostConnector(addressProvider: () => current);
+        await connector.StartAsync(server.Options, 40565, stop.Token);
+        using TcpClient socket = await server.Listener.AcceptTcpClientAsync(stop.Token);
+        using SslStream tls = await server.AuthenticateAsync(socket, stop.Token);
+        using var registration = await RelayTls.ReadJsonAsync(tls, stop.Token);
+        Assert.Equal("192.0.2.3", registration.RootElement.GetProperty("directAddresses")[0].GetString());
+        Assert.Equal(40565, registration.RootElement.GetProperty("directPort").GetInt32());
+        await RelayTls.WriteJsonAsync(tls, new { ok = true, heartbeatAck = true, addressReporting = true }, stop.Token);
+        foreach (var addresses in new IReadOnlyList<string>[] { ["198.51.100.4", "10.1.2.3"], [] })
+        {
+            current = addresses;
+            Assert.True(connector.RequestAddressRefresh());
+            using var heartbeat = await RelayTls.ReadJsonAsync(tls, stop.Token);
+            Assert.Equal("heartbeat", heartbeat.RootElement.GetProperty("type").GetString());
+            Assert.Equal(addresses, heartbeat.RootElement.GetProperty("directAddresses").EnumerateArray().Select(item => item.GetString()));
+            await RelayTls.WriteJsonAsync(tls, new { type = "heartbeat", addressReporting = true }, stop.Token);
+            Assert.False(server.Listener.Pending());
+        }
+        await connector.StopAsync();
+        Assert.False(connector.RequestAddressRefresh());
+    }
+
+    [Fact]
     public async Task DirectoryDeadlineReturnsTimeoutAndAllowsNextRequest()
     {
         using var server = new TestRelay();
@@ -133,6 +161,37 @@ public sealed class RelayFailureTests
         // Accept TCP but never speak TLS. Drain until the timed-out client closes.
         var buffer = new byte[4096];
         while (await client.GetStream().ReadAsync(buffer, stop) != 0) { }
+    }
+
+    [Fact]
+    public async Task DirectoryPaginationUsesOneBoundedRequestAndRejectsRepeatedCursor()
+    {
+        using var server = new TestRelay();
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        async Task Replies(bool malformed)
+        {
+            for (int page = 0; page < (malformed ? 1 : 2); page++)
+            {
+                using TcpClient client = await server.Listener.AcceptTcpClientAsync(stop.Token);
+                using SslStream tls = await server.AuthenticateAsync(client, stop.Token);
+                using var request = await RelayTls.ReadJsonAsync(tls, stop.Token);
+                Assert.Equal(page * 32, request.RootElement.GetProperty("offset").GetInt32());
+                Assert.Equal(32, request.RootElement.GetProperty("pageSize").GetInt32());
+                await RelayTls.WriteJsonAsync(tls, new {
+                    ok = true,
+                    devices = new[] { new { deviceId = Guid.NewGuid().ToString(), machineName = "host", directAddresses = new[] { "192.0.2.3" }, directPort = 40565 } },
+                    nextOffset = malformed ? (int?)0 : page == 0 ? 32 : null
+                }, stop.Token);
+            }
+        }
+        Task healthy = Replies(false);
+        var devices = await RelayTunnelClient.ListDevicesAsync(server.Options, stop.Token);
+        Assert.Equal(2, devices.Count);
+        Assert.All(devices, device => Assert.Equal("192.0.2.3:40565", device.AddressDisplay));
+        await healthy;
+        Task malformed = Replies(true);
+        await Assert.ThrowsAsync<RelayProtocolException>(() => RelayTunnelClient.ListDevicesAsync(server.Options, stop.Token));
+        await malformed;
     }
 
     private static async Task ReplyWithDirectoryAsync(TestRelay server, CancellationToken stop)

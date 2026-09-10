@@ -1301,7 +1301,7 @@ public sealed partial class MainForm : Form
         _relayServerSummaryLabel.Dock = DockStyle.Fill;
         _relayRegisterHostBox = new CheckBox
         {
-            Text = "将这台电脑发布到在线设备列表",
+            Text = "发布本机到在线列表，并自动更新 IP / 端口",
             AutoSize = true,
             Checked = true
         };
@@ -1338,6 +1338,8 @@ public sealed partial class MainForm : Form
 
         _relayConfigureButton = CreatePrimaryButton("配置/更新服务器");
         _relayRefreshButton = CreateSecondaryButton("刷新在线设备");
+        _relayReportAddressButton = CreateSecondaryButton("立即上报本机 IP");
+        _relayAddressButton = CreateSecondaryButton("查看 / 使用 IP");
         _relayConnectButton = CreatePrimaryButton("连接所选设备");
         var configurationActions = new FlowLayoutPanel
         {
@@ -1349,6 +1351,7 @@ public sealed partial class MainForm : Form
         };
         configurationActions.Controls.Add(_relayConfigureButton);
         configurationActions.Controls.Add(_relayRefreshButton);
+        configurationActions.Controls.Add(_relayReportAddressButton);
 
         var configuration = CreateSection(
             "私有公网中继",
@@ -1367,6 +1370,7 @@ public sealed partial class MainForm : Form
             View = View.Details,
             FullRowSelect = true,
             MultiSelect = false,
+            ShowItemToolTips = true,
             HideSelection = false,
             BorderStyle = BorderStyle.None,
             BackColor = SurfaceBackColor,
@@ -1377,6 +1381,7 @@ public sealed partial class MainForm : Form
         _relayDevicesList.Columns.Add("版本", 125);
         _relayDevicesList.Columns.Add("状态", 130);
         _relayDevicesList.Columns.Add("最后响应", 100);
+        _relayDevicesList.Columns.Add("直连 IP / 端口", 270);
         _relayStatusLabel = CreateStatusLine(
             "配置服务器后会显示当前在线的 RemoteDesk 设备。");
         _relayStatusLabel.Dock = DockStyle.Fill;
@@ -1390,6 +1395,7 @@ public sealed partial class MainForm : Form
             Margin = new Padding(0, 10, 0, 0)
         };
         deviceActions.Controls.Add(_relayConnectButton);
+        deviceActions.Controls.Add(_relayAddressButton);
 
         var online = CreateSection(
             "在线设备",
@@ -2231,6 +2237,11 @@ public sealed partial class MainForm : Form
             await ConfigureRelayServerAsync();
         _relayRefreshButton.Click += async (_, _) =>
             await RefreshRelayDevicesAsync(silent: false);
+        _relayReportAddressButton.Click += (_, _) => SetRelayStatus(
+            _relayHostConnector.RequestAddressRefresh()
+                ? "已请求上报本机 IP / 端口；稍后刷新在线设备即可查看。"
+                : "请先启动被控端，并启用本机上线。", MutedTextColor);
+        _relayAddressButton.Click += async (_, _) => await ShowRelayAddressesAsync();
         _relayConnectButton.Click += async (_, _) =>
             await ToggleRelayViewerAsync();
         _relayDevicesList.SelectedIndexChanged += (_, _) =>
@@ -6459,6 +6470,8 @@ public sealed partial class MainForm : Form
         item.SubItems.Add(device.BuildDisplay);
         item.SubItems.Add(isLocal ? "本机（不可自连）" : device.StatusText);
         item.SubItems.Add(device.LastSeenDisplay);
+        item.SubItems.Add(device.AddressDisplay);
+        item.ToolTipText = $"设备 ID：{device.DeviceId}\n{device.AddressDisplay}\n仅可达的地址能直连；跨网请选择中继连接。";
         return item;
     }
 
@@ -6735,6 +6748,10 @@ public sealed partial class MainForm : Form
             configured &&
             !_relayOperationInProgress &&
             !_relayRefreshInProgress;
+        _relayReportAddressButton.Enabled = configured && !_relayOperationInProgress;
+        _relayAddressButton.Enabled = _relayRefreshButton.Enabled &&
+            !_viewerActionInProgress && !_viewerClient.IsConnected && !IsViewerReconnecting() &&
+            GetSelectedRelayDevice() is not null;
         _relayRegisterHostBox.Enabled =
             !_relayOperationInProgress;
         _relayViewerPasswordBox.Enabled =

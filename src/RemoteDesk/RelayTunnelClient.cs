@@ -128,6 +128,24 @@ internal static class RelayTunnelClient
             RelayConnectionOptions options,
             CancellationToken cancellationToken)
     {
+        var result = new Dictionary<string, RelayOnlineDevice>(StringComparer.Ordinal);
+        int offset = 0;
+        for (int page = 0; page < 16; page++)
+        {
+            var response = await ListDevicesPageAsync(options, offset, cancellationToken).ConfigureAwait(false);
+            foreach (var device in response.Devices) result[device.DeviceId] = device;
+            if (result.Count > 512) throw new RelayProtocolException("中继在线设备过多。");
+            if (response.NextOffset is null) return result.Values.ToArray();
+            if (response.NextOffset != offset + 32 || response.NextOffset >= 512)
+                throw new RelayProtocolException("中继目录分页无效。");
+            offset = response.NextOffset.Value;
+        }
+        throw new RelayProtocolException("中继目录分页过多。");
+    }
+
+    private static async Task<(IReadOnlyList<RelayOnlineDevice> Devices, int? NextOffset)> ListDevicesPageAsync(
+        RelayConnectionOptions options, int offset, CancellationToken cancellationToken)
+    {
         options = options.Validate();
         (TcpClient relayClient, SslStream relayStream) =
             await RelayTls.ConnectAsync(options, cancellationToken)
@@ -141,7 +159,9 @@ internal static class RelayTunnelClient
                     {
                         version = 1,
                         role = "directory",
-                        token = options.AccessToken
+                        token = options.AccessToken,
+                        pageSize = 32,
+                        offset
                     },
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -154,7 +174,7 @@ internal static class RelayTunnelClient
             if (!root.TryGetProperty(
                     "devices",
                     out JsonElement devices) ||
-                devices.ValueKind != JsonValueKind.Array)
+                devices.ValueKind != JsonValueKind.Array || devices.GetArrayLength() > 512)
             {
                 throw new RelayProtocolException("中继返回的在线设备列表无效。");
             }
@@ -172,16 +192,25 @@ internal static class RelayTunnelClient
                     continue;
                 }
 
+                var report = RelayAddressReport.Parse(device);
                 result.Add(new RelayOnlineDevice(
                     parsedDeviceId.ToString("D"),
                     GetString(device, "machineName") ?? "未命名设备",
                     GetString(device, "platform") ?? "未知",
                     GetString(device, "buildStamp"),
                     GetBoolean(device, "busy"),
-                    Math.Clamp(GetInteger(device, "lastSeenSeconds"), 0, 3600)));
+                    Math.Clamp(GetInteger(device, "lastSeenSeconds"), 0, 3600))
+                { DirectAddresses = report.Addresses, DirectPort = report.Port });
             }
 
-            return result;
+            int? next = null;
+            if (root.TryGetProperty("nextOffset", out var nextValue) && nextValue.ValueKind != JsonValueKind.Null)
+            {
+                if (nextValue.ValueKind != JsonValueKind.Number || !nextValue.TryGetInt32(out int number))
+                    throw new RelayProtocolException("中继目录分页无效。");
+                next = number;
+            }
+            return (result, next);
         }
     }
 
