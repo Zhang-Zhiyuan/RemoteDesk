@@ -24,6 +24,8 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
+    parser.add_argument("--frames", type=int, choices=(60, 180), default=60)
+    parser.add_argument("--native-only", action="store_true")
     args = parser.parse_args()
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -51,7 +53,8 @@ def main():
         if not launch:
             raise RuntimeError("Native Jetson plugins unavailable")
         results = []
-        for name, width, height in (("native", 1920, 1080), ("scaled", 1280, 720), ("padded", 1024, 768)):
+        cases = (("native", 1920, 1080), ("scaled", 1280, 720), ("padded", 1024, 768))
+        for name, width, height in cases[:1] if args.native_only else cases:
             candidate = host.build_jetson_h264_encoder_command(launch, os.environ["DISPLAY"], 1920, 1080, width, height, 30)
             log = (output / (name + ".log")).open("wb")
             encoder = subprocess.Popen(candidate.command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=log, bufsize=0)
@@ -61,7 +64,7 @@ def main():
             sps = pps = None
             started = time.monotonic()
             try:
-                while len(frames) < 60 and time.monotonic() - started < 8:
+                while len(frames) < args.frames and time.monotonic() - started < max(8, args.frames / 30 + 4):
                     if not select.select([encoder.stdout], [], [], .3)[0]:
                         continue
                     chunk = os.read(encoder.stdout.fileno(), 65536)
@@ -75,17 +78,19 @@ def main():
                         frames.append(encoded)
                         if first_ms is None:
                             first_ms = (time.monotonic() - started) * 1000
+                        if len(frames) == args.frames:
+                            break
                 elapsed = time.monotonic() - started
             finally:
                 node.stop(encoder)
                 encoder.stdout.close()
                 log.close()
-            if len(frames) < 60:
+            if len(frames) != args.frames:
                 raise RuntimeError("Native encoder failed continuous output: " + name)
             stream = output / (name + ".h264")
             stream.write_bytes(b"".join(frames))
             metadata = json.loads(run(["ffprobe", "-v", "error", "-count_frames", "-show_streams", "-of", "json", str(stream)]))["streams"][0]
-            if (metadata["width"], metadata["height"]) != (width, height) or int(metadata["nb_read_frames"]) < 60:
+            if (metadata["width"], metadata["height"]) != (width, height) or int(metadata["nb_read_frames"]) != args.frames:
                 raise RuntimeError("Bitstream geometry/frame count mismatch")
             if metadata.get("color_space") != "bt709":
                 raise RuntimeError("Coded stream lost its explicit BT.709 matrix")

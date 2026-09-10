@@ -29,6 +29,8 @@ internal sealed class RemoteHostServer : IDisposable
             TimeSpan.FromMilliseconds(16_500);
     internal static readonly TimeSpan InitialViewerInfoGracePeriod =
         TimeSpan.FromMilliseconds(50);
+    internal static readonly TimeSpan InitialViewerInfoPreviewGracePeriod =
+        TimeSpan.FromSeconds(2);
     internal static readonly TimeSpan
         InitialViewerCapabilitiesGracePeriod =
             TimeSpan.FromMilliseconds(10);
@@ -904,7 +906,7 @@ internal sealed class RemoteHostServer : IDisposable
             NetworkUtils.ConfigureLowLatencyTcpClient(
                 client,
                 InputReceiveBufferBytes,
-                FrameSendBufferBytes);
+                RelayLoopbackPolicy.HostSendBufferBytes(client.Client.RemoteEndPoint, FrameSendBufferBytes));
 
             try
             {
@@ -970,6 +972,7 @@ internal sealed class RemoteHostServer : IDisposable
                         scalePercent,
                         captureTargetPublicationCoordinator
                             .AdvanceGeneration);
+                    using var sessionPower = WindowsRemoteSessionPowerRequest.TryAcquire(message => Log?.Invoke(message));
                     using var inputInjectionDispatcher =
                         new InputInjectionDispatcher();
                     using var fileTransferReceiver = new FileTransferReceiver(
@@ -2235,6 +2238,7 @@ internal sealed class RemoteHostServer : IDisposable
         await viewerState.WaitForInitialCapabilitiesAsync(
             InitialViewerCapabilitiesGracePeriod,
             cancellationToken);
+        bool initialVideoSelectionPreviewCompleted = false;
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -2463,7 +2467,21 @@ internal sealed class RemoteHostServer : IDisposable
                     return true;
                 },
                 captureLog,
-                cancellationToken);
+                cancellationToken,
+                startupPreviewOnly:
+                    !initialVideoSelectionPreviewCompleted && codecVersion == 0);
+
+            if (!initialVideoSelectionPreviewCompleted && codecVersion == 0)
+            {
+                initialVideoSelectionPreviewCompleted = true;
+                // The first full-quality preview remains immediate. Do not
+                // flood a relay's loopback buffers while the distant viewer's
+                // selection is in flight. Legacy JPEG-only peers which never
+                // send ViewerInfo resume their normal cadence after the grace.
+                await viewerState.WaitForInitialVideoSelectionAsync(
+                    InitialViewerInfoPreviewGracePeriod,
+                    cancellationToken);
+            }
         }
     }
 
@@ -3289,7 +3307,7 @@ internal sealed class RemoteHostServer : IDisposable
                     RemoteVideoCodecs.Jpeg))
             {
                 captureLog(
-                    "正在后台探测 Windows H.264 硬编码；探测期间继续发送 JPEG。");
+                    "正在后台探测 Windows H.264 硬编码；TCP 先发送一张 JPEG 预览，等待硬编码出图。");
                 await RunJpegCaptureLoopAsync(
                     stream,
                     session,
@@ -3312,7 +3330,8 @@ internal sealed class RemoteHostServer : IDisposable
                                 sourceCodecVersion);
                     },
                     captureLog,
-                    cancellationToken);
+                    cancellationToken,
+                    startupPreviewOnly: true);
             }
 
             start = await startupTask.ConfigureAwait(false);
@@ -3482,9 +3501,21 @@ internal sealed class RemoteHostServer : IDisposable
                 metricsWindowStartedAt;
             LowLatencyVideoNetworkSnapshot
                 latestNetworkSnapshot = default;
+            long inputDesktopCheckedAt = 0;
 
             while (!cancellationToken.IsCancellationRequested)
             {
+                if (inputDesktopCheckedAt == 0 || Stopwatch.GetElapsedTime(inputDesktopCheckedAt) >= TimeSpan.FromMilliseconds(200))
+                {
+                    inputDesktopCheckedAt = Stopwatch.GetTimestamp();
+                    if (!WindowsInteractiveDesktopProbe.InspectCurrent().IsAvailable)
+                    {
+                        // DDA/WGC remains attached to Default. Re-enter the outer
+                        // loop so the protected desktop can use its JPEG bridge.
+                        return new H264CaptureLoopResult(H264CaptureLoopExit.SelectionChanged,
+                            Stopwatch.GetElapsedTime(activeRunStartedAt));
+                    }
+                }
                 if (!IsH264SelectionCurrent(
                         captureState,
                         viewerState,
@@ -4235,6 +4266,11 @@ internal sealed class RemoteHostServer : IDisposable
             capture.Backend);
     }
 
+    internal static bool ShouldFinishJpegStartupPreview(
+        bool startupPreviewOnly,
+        bool udpRouteActive) =>
+        startupPreviewOnly && !udpRouteActive;
+
     private static async Task RunJpegCaptureLoopAsync(
         NetworkStream stream,
         SecureSession session,
@@ -4250,7 +4286,8 @@ internal sealed class RemoteHostServer : IDisposable
         LowLatencyVideoHostTransport lowLatencyVideo,
         Func<bool> shouldSwitchToH264,
         Action<string> captureLog,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool startupPreviewOnly = false)
     {
         int initialScalePercent = ChooseInitialAdaptiveScale(
             captureState.CurrentTarget.Bounds,
@@ -4316,6 +4353,8 @@ internal sealed class RemoteHostServer : IDisposable
 
             long frameStartedAt = Stopwatch.GetTimestamp();
             TimeSpan frameInterval = TimeSpan.FromMilliseconds(1000d / adaptiveController.CurrentFps);
+            if (WindowsSecureDesktopClient.IsRequired && frameInterval < TimeSpan.FromMilliseconds(100))
+                frameInterval = TimeSpan.FromMilliseconds(100);
             ScreenCaptureResult capture;
             int sourceTargetGeneration;
             try
@@ -4343,8 +4382,8 @@ internal sealed class RemoteHostServer : IDisposable
                         ? "远端屏幕采集暂时不可用；连接仍保持，" +
                           "恢复后画面和操作会自动继续。"
                         : "远端 Windows 当前处于锁屏、UAC 或安全桌面；" +
-                          "普通用户进程无法读取画面或注入操作。" +
-                          "请在被控端解锁，连接会自动恢复。";
+                          "请在被控端启用“锁屏控制”并以管理员运行 RemoteDesk。" +
+                          "辅助服务恢复或本机解锁后，连接会自动继续。";
                     using (writePriority
                         .BeginControlWritePriority())
                     {
@@ -4456,6 +4495,17 @@ internal sealed class RemoteHostServer : IDisposable
                 continue;
             }
 
+            // Count only a successfully admitted/sent preview, never capture
+            // failures or a frame rejected by a target/control publication
+            // barrier. Normal JPEG and UDP's bounded latest-frame route keep
+            // running; the caller awaits the existing cancellable H.264 probe.
+            if (ShouldFinishJpegStartupPreview(
+                    startupPreviewOnly,
+                    lowLatencyVideo.IsRouteActive))
+            {
+                return;
+            }
+
             double sendMilliseconds = Stopwatch.GetElapsedTime(sendStartedAt).TotalMilliseconds;
 
             framesInWindow++;
@@ -4550,6 +4600,17 @@ internal sealed class RemoteHostServer : IDisposable
         ArgumentNullException.ThrowIfNull(inboundLiveness);
         var inputErrorLog = new InputErrorLogThrottler(InputErrorLogInterval);
         var inputState = new RemoteInputStateTracker();
+        await using var heartbeat = new HostHeartbeatResponder(
+            async pongToken =>
+            {
+                using (writePriority.BeginControlWritePriority())
+                {
+                    await Protocol.WriteMessageAsync(
+                        stream, MessageType.Pong, ReadOnlyMemory<byte>.Empty,
+                        session, writePriority.Lock, pongToken);
+                }
+            }, cancellationToken);
+        cancellationToken = heartbeat.Token;
 
         async Task ProcessControlAsync(
             ReadOnlyMemory<byte> payload,
@@ -4764,16 +4825,7 @@ internal sealed class RemoteHostServer : IDisposable
 
                         break;
                     case MessageType.Ping:
-                        using (writePriority.BeginControlWritePriority())
-                        {
-                            await Protocol.WriteMessageAsync(
-                                stream,
-                                MessageType.Pong,
-                                ReadOnlyMemory<byte>.Empty,
-                                session,
-                                writePriority.Lock,
-                                cancellationToken);
-                        }
+                        heartbeat.Request();
                         break;
                 }
             }
@@ -4786,6 +4838,10 @@ internal sealed class RemoteHostServer : IDisposable
                 inputInjectionDispatcher.ReleaseMouseButton);
             try
             {
+                if (heartbeat.Failure is { } heartbeatFailure)
+                {
+                    clipboardLog($"心跳回复失败：{heartbeatFailure.Message}");
+                }
                 if (releaseResult.AttemptedCount > 0)
                 {
                     clipboardLog(

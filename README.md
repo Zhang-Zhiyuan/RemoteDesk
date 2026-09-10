@@ -10,7 +10,7 @@
 - H.264 硬件编解码，也可以切换到 JPEG 模式；硬件加速取决于设备和驱动。
 - 多屏切换、原始比例显示、文本剪贴板和文件传输。
 - 三端均可新增设备、保存连接、修改备注和删除记录；同一设备的重复记录会自动合并。
-- Windows 支持托盘驻留、开机自启和远端更新。
+- Windows 支持托盘驻留、开机自启、远端更新和可选的锁屏控制。
 
 ## 连接
 
@@ -28,9 +28,9 @@
 
 ## 使用前注意
 
-- Android 被控需要手动授权屏幕录制；要进行点击、拖动等操作，还需开启无障碍服务。
+- Android 8.0 及以上可安装。被控需要录屏授权和无障碍服务；锁屏或重启可能结束录屏，需要重新授权。
 - Linux 推荐使用 X11 / Xorg 桌面，Wayland 暂不支持完整桌面控制。
-- Windows 暂不支持锁屏界面、UAC 安全桌面和 Ctrl+Alt+Del。
+- Windows 锁屏控制需先安装辅助服务并以管理员运行，适用范围见[锁屏控制说明](docs/WindowsLockScreen.md)；不支持首次登录前接管和 Ctrl+Alt+Del。
 - Android 目前只支持接收文件，不能从手机向外发送文件。
 - 请使用不易猜的访问口令。跨公网连接使用中继，不要直接把被控端口暴露到公网。
 
@@ -70,6 +70,6 @@ APK 位于 `src/RemoteDesk.Android/app/build/outputs/apk/debug/`。Linux / macOS
 
 ## 文档
 
-[Android 开发说明](src/RemoteDesk.Android/README.md) · [打包与发布](artifacts/README.md) · [协议说明](docs/RemoteDesk-Protocol.md) · [测试记录](docs/OptimizationRecheck-20260908.md)
+[Android 开发说明](src/RemoteDesk.Android/README.md) · [打包与发布](artifacts/README.md) · [协议说明](docs/RemoteDesk-Protocol.md)
 
 项目许可证尚未确定；第三方依赖的许可见 [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES.md)。

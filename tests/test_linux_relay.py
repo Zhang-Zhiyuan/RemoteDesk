@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import socket
 import ssl
 import struct
 import sys
@@ -14,6 +15,7 @@ import tempfile
 import threading
 import unittest
 import uuid
+from unittest import mock
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -63,6 +65,123 @@ class RelayOptionsTests(unittest.TestCase):
                 self.assertEqual(0o600, path.stat().st_mode & 0o777)
             path.write_text("[]")
             with self.assertRaises(ValueError): client.load_settings(path)
+
+
+class LinuxRelayTransportPolicyTests(unittest.TestCase):
+    def test_limits_unsent_data_without_shrinking_tcp_windows(self):
+        writer = mock.Mock()
+        client.configure_transport(writer)
+        writer.transport.set_write_buffer_limits.assert_called_once_with(high=16384, low=4096)
+        sock = writer.get_extra_info.return_value
+        sock.setsockopt.assert_any_call(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        if hasattr(socket, "TCP_NOTSENT_LOWAT"):
+            sock.setsockopt.assert_any_call(socket.IPPROTO_TCP, socket.TCP_NOTSENT_LOWAT, 16384)
+        self.assertTrue(all(call.args[0] != socket.SOL_SOCKET for call in sock.setsockopt.call_args_list))
+
+    def test_unsupported_socket_options_keep_working_transport(self):
+        writer = mock.Mock()
+        writer.get_extra_info.return_value.setsockopt.side_effect = OSError("unsupported kernel option")
+        client.configure_transport(writer)
+        writer.transport.set_write_buffer_limits.assert_called_once()
+
+    def test_transport_without_socket_still_bounds_plaintext(self):
+        writer = mock.Mock()
+        writer.get_extra_info.return_value = None
+        client.configure_transport(writer)
+        writer.transport.set_write_buffer_limits.assert_called_once()
+
+    def test_only_explicit_loopback_policy_sets_small_fixed_windows(self):
+        sock = mock.Mock()
+        client.configure_loopback_socket(sock)
+        sock.setsockopt.assert_any_call(socket.SOL_SOCKET, socket.SO_RCVBUF, 16384)
+        sock.setsockopt.assert_any_call(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384)
+        sock.setsockopt.assert_any_call(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.assertEqual(16384, client.LOOPBACK_READER_LIMIT_BYTES)
+
+    def test_loopback_unsupported_options_are_best_effort(self):
+        sock = mock.Mock()
+        sock.setsockopt.side_effect = OSError("Unsupported")
+        client.configure_loopback_socket(sock)
+        self.assertEqual(3, sock.setsockopt.call_count)
+
+
+class LinuxRelayCloseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_successful_close_does_not_abort(self):
+        writer = mock.Mock(wait_closed=mock.AsyncMock())
+        await client.close_writer(writer)
+        writer.close.assert_called_once()
+        writer.transport.abort.assert_not_called()
+        await client.close_writer(None)
+
+    async def test_failed_close_aborts_socket(self):
+        writer = mock.Mock(wait_closed=mock.AsyncMock(side_effect=OSError("dead peer")))
+        await client.close_writer(writer)
+        writer.transport.abort.assert_called_once()
+
+    async def test_timeout_aborts_without_poisoning_repeat_close(self):
+        closed = asyncio.get_running_loop().create_future()
+        async def wait_closed():
+            await closed
+        writer = mock.Mock(wait_closed=mock.AsyncMock(side_effect=wait_closed))
+        writer.transport.abort.side_effect = lambda: closed.set_result(None)
+        with mock.patch.object(client, "STREAM_CLOSE_TIMEOUT_SECONDS", .02, create=True):
+            await asyncio.wait_for(client.close_writer(writer), 3)
+        writer.transport.abort.assert_called_once()
+        self.assertFalse(closed.cancelled())
+        await asyncio.wait_for(client.close_writer(writer), 1)
+        self.assertEqual(2, writer.close.call_count)
+        writer.transport.abort.assert_called_once()
+
+    async def test_caller_cancellation_aborts_and_remains_cancellation(self):
+        waiting = asyncio.Event()
+        closed = asyncio.get_running_loop().create_future()
+        async def wait_closed():
+            waiting.set()
+            await closed
+        writer = mock.Mock(wait_closed=mock.AsyncMock(side_effect=wait_closed))
+        writer.transport.abort.side_effect = lambda: closed.set_result(None)
+        task = asyncio.create_task(client.close_writer(writer))
+        await waiting.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        writer.transport.abort.assert_called_once()
+        self.assertFalse(closed.cancelled())
+        await asyncio.wait_for(client.close_writer(writer), 1)
+
+
+class LinuxRelayBridgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stalled_peer_stops_read_ahead_and_closes_both_directions(self):
+        first, second = asyncio.StreamReader(), asyncio.StreamReader()
+        left, right = mock.Mock(), mock.Mock()
+        stalled = asyncio.Event()
+        for writer in (left, right):
+            writer.drain = mock.AsyncMock(side_effect=stalled.wait)
+            writer.wait_closed = mock.AsyncMock()
+        data = os.urandom(client.COPY_BUFFER_BYTES * 3)
+        first.feed_data(data)
+        with mock.patch.object(client, "BRIDGE_WRITE_TIMEOUT_SECONDS", .02):
+            await asyncio.wait_for(client.bridge((first, left), (second, right)), 1)
+        right.write.assert_called_once_with(data[:client.COPY_BUFFER_BYTES])
+        left.write.assert_not_called()
+        self.assertEqual(data[client.COPY_BUFFER_BYTES:], await first.read(len(data)))
+        for writer in (left, right):
+            writer.close.assert_called_once()
+            writer.transport.set_write_buffer_limits.assert_called_once_with(high=16384, low=4096)
+
+    async def test_cancellation_stops_both_copies_and_releases_writers(self):
+        first, second = asyncio.StreamReader(), asyncio.StreamReader()
+        left, right = mock.Mock(), mock.Mock()
+        for writer in (left, right):
+            writer.drain = mock.AsyncMock()
+            writer.wait_closed = mock.AsyncMock()
+        task = asyncio.create_task(client.bridge((first, left), (second, right)))
+        await asyncio.sleep(0)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+        left.close.assert_called_once()
+        right.close.assert_called_once()
 
 
 class LinuxRelayTlsTests(unittest.IsolatedAsyncioTestCase):
@@ -127,12 +246,87 @@ class LinuxRelayTlsTests(unittest.IsolatedAsyncioTestCase):
         devices = await client.list_devices_async(self.options)
         self.assertEqual([dict(deviceId=ID, machineName="Owned Linux target", platform="Linux", busy=False)], devices)
 
+    async def test_real_tls_socket_applies_backpressure_policy(self):
+        _, writer = await client.connect_tls(self.options)
+        try:
+            self.assertEqual((4096, 16384), writer.transport.get_write_buffer_limits())
+            sock = writer.get_extra_info("socket")
+            self.assertEqual(1, sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY))
+            if hasattr(socket, "TCP_NOTSENT_LOWAT"):
+                self.assertEqual(16384, sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NOTSENT_LOWAT))
+        finally:
+            await client.close_writer(writer)
+
+    async def test_local_host_connection_is_loopback_and_bounded_before_connect(self):
+        accepted = asyncio.Event()
+        async def hold(reader, writer):
+            accepted.set()
+            try:
+                await reader.read()
+            finally:
+                await client.close_writer(writer)
+        local = await asyncio.start_server(hold, "127.0.0.1", 0)
+        self.extra_servers.append(local)
+        reader, writer = await client.connect_local_host(local.sockets[0].getsockname()[1])
+        try:
+            await asyncio.wait_for(accepted.wait(), 1)
+            self.assertEqual(16384, reader._limit)
+            sock = writer.get_extra_info("socket")
+            self.assertEqual("127.0.0.1", sock.getpeername()[0])
+            # Linux reports a doubled accounting budget; Windows reports the request.
+            self.assertIn(sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF), (16384, 32768))
+            self.assertIn(sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF), (16384, 32768))
+        finally:
+            await client.close_writer(writer)
+
+    async def test_cancelled_local_connect_closes_owned_socket(self):
+        sock = mock.Mock()
+        with mock.patch.object(client.socket, "socket", return_value=sock), \
+                mock.patch.object(asyncio.get_running_loop(), "sock_connect", side_effect=asyncio.CancelledError):
+            with self.assertRaises(asyncio.CancelledError):
+                await client.connect_local_host(56565)
+        sock.close.assert_called_once()
+
+    async def test_small_bidirectional_messages_do_not_wait_to_fill_buffers(self):
+        await self.start_host()
+        viewer = await asyncio.to_thread(client.connect_viewer, self.options)
+        try:
+            def exchange():
+                viewer.settimeout(2)
+                replies = []
+                for item in (b"x", "\u4e2d\u6587".encode(), b"\x00\xff", b"end"):
+                    viewer.sendall(item)
+                    reply = bytearray()
+                    while len(reply) < len(item):
+                        block = viewer.recv(len(item) - len(reply))
+                        if not block: raise EOFError("Small relay message was truncated")
+                        reply.extend(block)
+                    replies.append(bytes(reply))
+                return replies
+            self.assertEqual([b"x", "\u4e2d\u6587".encode(), b"\x00\xff", b"end"],
+                             await asyncio.wait_for(asyncio.to_thread(exchange), 4))
+        finally:
+            viewer.close()
+
+    async def test_stopping_host_closes_active_tunnel_and_allows_new_registration(self):
+        await self.start_host()
+        viewer = await asyncio.to_thread(client.connect_viewer, self.options)
+        try:
+            await asyncio.to_thread(self.host.close)
+            self.assertFalse(self.host.thread.is_alive())
+            self.assertEqual(b"", await asyncio.wait_for(asyncio.to_thread(viewer.recv, 1), 3))
+            await self.wait_for(lambda: ID not in self.relay.hosts and not self.relay.pending)
+            await self.start_host()
+            self.assertEqual(ID, (await client.list_devices_async(self.options))[0]["deviceId"])
+        finally:
+            viewer.close()
+
     async def test_bidirectional_tunnel_integrity_and_reconnect(self):
         await self.start_host()
         for _ in range(2):
             viewer = await asyncio.to_thread(client.connect_viewer, self.options)
             try:
-                data = os.urandom(131072)
+                data = os.urandom(2 * 1024 * 1024)
                 def exchange():
                     viewer.sendall(data)
                     value = bytearray()

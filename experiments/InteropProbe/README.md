@@ -81,6 +81,11 @@ devices rather than tapping guessed coordinates.
   comparable network/latency benchmarks.
 - Linux reports the actual decoder backend, including fallback. A discovered
   hardware decoder or a few decoded frames do not prove sustained hardware use.
+  `rawStatus` preserves bounded, timestamped diagnostics before UI coalescing;
+  `wireProgress` records complete authenticated message sizes/timing, not their
+  content. These distinguish heartbeat expiry from a subsequent socket EOF.
+  Linux acceptance also requires an open transport and a newly displayed frame
+  in the final five seconds; early frames followed by disconnection do not pass.
 - The Linux probe always allocates its own Xvfb with `-displayfd` and terminates
   only its own children. Existing displays, user desktops and services are not
   stopped. Remote evidence is copied locally and retained remotely for inspection;
@@ -139,6 +144,14 @@ but the captured windows/desktops are isolated test fixtures. They can share a
 LAN while their data path is explicitly forced through the public relay; this
 does not certify two independent ISPs/NATs or a roaming/network-switch scenario.
 
+For an Android H.264 host run, also pass `--require-android-host-h264`: a healthy
+JPEG fallback still counts as basic interoperability, but must not pass a video
+codec qualification. This is separate from `--require-android-h264`, which checks
+the Android **viewer**. Isolated Android host logs are retained as `android-host.log`
+to distinguish late codec negotiation from an encoder/decoder failure. Transient
+directory-query connection/timeouts are recorded and retried only within the
+existing registration deadline; identity and authentication failures still abort.
+
 Keep the Windows test desktop exclusive during input assertions. If the owned
 target is obscured or unexpected characters appear, stop, preserve the failed
 evidence and arrange an exclusive rerun. Never loosen exact-text assertions or
@@ -194,3 +207,26 @@ checks 20 exact Chinese/emoji/ASCII text batches in its own Tk entry while the
 hardware encoder is active. Both close only their own Xvfb/encoder processes.
 The optional Unicode delay override is for recorded A/B diagnostics, not a
 replacement for testing the actual product default.
+
+`../run_feature_audit.py --linux <key-authenticated-user@host> --output <new-directory>`
+checks the actual Windows client against a fresh, owned Linux Xvfb host:
+authentication rejection, capabilities, JPEG/H.264 negotiation, target selection,
+Chinese/emoji clipboard send, duplicate/empty/directory uploads, SHA-256 file return,
+viewer takeover and repeated reconnect. It verifies saved bytes on Linux via SSH.
+The clipboard callback is isolated: no Windows clipboard contents or physical input
+are accessed. Only synthetic files in the allocated test directory are transferred.
+The temporary host/Xvfb stop on exit; reports and owned fixture files are retained.
+
+`desktop-status` reads Windows desktop availability without capture/input. A host
+probe that loses foreground records its desktop/pointer/owned-button geometry and
+stops even if diagnostic writing fails. It never silently refocuses another app.
+
+The explicit `transport` stdin options `optimizeRoute: true`, `routeLeaseAudit:
+true`, and `routeRecovery: true` exercise Windows' configured-relay route optimizer,
+native create/renew/dispose/expiry, and relay reconnection after kernel expiry,
+respectively. They require elevation and no existing TCP connection or dedicated
+route to the authorized relay. They never bypass those guards. `routeRecovery`
+shortens only its test lease to 8 seconds and withholds renewal; it does not disable
+a NIC. All trials dispose their own leases and report route snapshots. The normal
+production lifetime is 90 seconds. No default route, NIC metric, forwarding setting,
+server configuration or remote-desktop input is changed by these probes.

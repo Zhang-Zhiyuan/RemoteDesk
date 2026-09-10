@@ -56,7 +56,13 @@ public final class CodecProbeActivity extends Activity {
                 codecs.put(new JSONObject().put("name", candidate.codecName)
                     .put("hardware", candidate.hardwareAccelerated).put("software", candidate.softwareOnly));
             report.put("candidates", codecs);
-            for (String fixture : new String[] {"static-current-gop1.h264", "static-research-gop30.h264"}) {
+            String[] fixtures = getAssets().list("");
+            check(fixtures != null, "Missing codec fixtures");
+            Arrays.sort(fixtures);
+            int fixtureCount = 0;
+            for (String fixture : fixtures) {
+                if (!fixture.endsWith(".h264")) continue;
+                fixtureCount++;
                 JSONObject row = new JSONObject().put("fixture", fixture);
                 try { testStream(fixture, row); row.put("passed", true); }
                 catch (Throwable failure) { row.put("passed", false); row.put("failure", failure.toString()); }
@@ -70,6 +76,7 @@ public final class CodecProbeActivity extends Activity {
                 report.put("diagnostics", new JSONArray(AndroidSessionLog.snapshot()));
                 save(report);
             }
+            check(fixtureCount > 0, "No H.264 fixtures were packaged");
         } catch (Throwable failure) {
             try { report.put("fatal", failure.toString()); } catch (Exception ignored) { }
         } finally {

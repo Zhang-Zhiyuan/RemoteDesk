@@ -149,16 +149,23 @@ internal sealed class InputInjectionDispatcher : IDisposable
     private bool _disposed;
     private int _workerManagedThreadId;
     private nint _ownedInputDesktop;
+    private readonly WindowsSecureDesktopClient? _secureDesktop;
 
     public InputInjectionDispatcher()
+        : this(new WindowsSecureDesktopClient())
+    {
+    }
+
+    private InputInjectionDispatcher(WindowsSecureDesktopClient secureDesktop)
         : this(
             WindowsInputDesktopNativeApi.Instance,
-            InputInjector.Apply,
-            InputInjector.SendPasteShortcut,
-            InputInjector.ReleaseKey,
-            InputInjector.ReleaseMouseButton,
+            secureDesktop.Apply,
+            secureDesktop.SendPasteShortcut,
+            secureDesktop.ReleaseKey,
+            secureDesktop.ReleaseMouseButton,
             CursorRetryLimit)
     {
+        _secureDesktop = secureDesktop;
     }
 
     internal InputInjectionDispatcher(
@@ -240,6 +247,7 @@ internal sealed class InputInjectionDispatcher : IDisposable
         }
 
         _worker.Join();
+        _secureDesktop?.Dispose();
         nint ownedDesktop = _ownedInputDesktop;
         _ownedInputDesktop = 0;
         if (ownedDesktop != 0)

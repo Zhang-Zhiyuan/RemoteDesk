@@ -85,7 +85,8 @@ final class AndroidViewerChrome {
         composer.setMaxLines(2);
         composer.setFilters(new InputFilter[] { new InputFilter.LengthFilter(AndroidViewerKeyboard.MAX_TEXT_LENGTH) });
         composer.setSaveEnabled(false);
-        composer.setImeOptions(EditorInfo.IME_ACTION_SEND | EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
+        composer.setImeOptions(EditorInfo.IME_ACTION_SEND | EditorInfo.IME_FLAG_NO_EXTRACT_UI |
+            EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
         composer.setPadding(dp(10), dp(6), dp(10), dp(6));
         composer.setBackground(AndroidUiTheme.shape(activity, 0xff21334d, 10, 0xff354d6e, 1));
         composer.setOnEditorActionListener((v, id, event) -> {

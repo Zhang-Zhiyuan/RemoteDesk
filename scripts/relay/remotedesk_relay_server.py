@@ -14,6 +14,7 @@ import hmac
 import json
 import os
 import signal
+import socket
 import ssl
 import sys
 import time
@@ -28,6 +29,11 @@ MAX_PENDING_SESSIONS = 256
 HOST_IDLE_TIMEOUT_SECONDS = 45
 PAIR_TIMEOUT_SECONDS = 12
 COPY_BUFFER_BYTES = 128 * 1024
+WRITE_BUFFER_HIGH_BYTES = 64 * 1024
+WRITE_BUFFER_LOW_BYTES = 16 * 1024
+TCP_NOTSENT_LOWAT_BYTES = 64 * 1024
+BRIDGE_WRITE_TIMEOUT_SECONDS = 30
+STREAM_CLOSE_TIMEOUT_SECONDS = 2
 
 
 @dataclass
@@ -60,12 +66,47 @@ class RelayServer:
         self.port = int(config.get("port", 56567))
         self.cert_file = config["cert_file"]
         self.key_file = config["key_file"]
+        self.tcp_congestion_control = validate_congestion_control(config.get("tcp_congestion_control", ""))
         self.hosts: dict[str, HostConnection] = {}
         self.pending: dict[str, PendingSession] = {}
         self.state_lock = asyncio.Lock()
         self.connection_slots = asyncio.Semaphore(MAX_CONNECTIONS)
+        self.connections: dict[asyncio.Task, asyncio.StreamWriter] = {}
+        self.stopping = False
 
     async def handle_connection(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        if self.stopping:
+            await close_writer(writer)
+            return
+        task = asyncio.current_task()
+        self.connections[task] = writer
+        try:
+            await self._handle_connection(reader, writer)
+        finally:
+            self.connections.pop(task, None)
+
+    async def shutdown(self) -> None:
+        # Python 3.12 Server.wait_closed() also waits for connected clients.
+        # Stop persistent heartbeat/read tasks first, otherwise SIGTERM can
+        # hang until systemd kills the service's perfectly idle connections.
+        self.stopping = True
+        connections = tuple(self.connections.items())
+        for task, writer in connections:
+            writer.close()
+            task.cancel()
+        if connections:
+            _, pending = await asyncio.wait([task for task, _ in connections], timeout=5)
+            for task, writer in connections:
+                if task in pending:
+                    writer.transport.abort()
+                    task.cancel()
+            await asyncio.gather(*(task for task, _ in connections), return_exceptions=True)
+
+    async def _handle_connection(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
@@ -77,6 +118,7 @@ class RelayServer:
             return
         await self.connection_slots.acquire()
         try:
+            configure_transport(writer, self.tcp_congestion_control)
             hello = await asyncio.wait_for(
                 read_json(reader), timeout=10
             )
@@ -320,8 +362,15 @@ async def write_json(writer: asyncio.StreamWriter, value: dict) -> None:
 
 async def close_writer(writer: asyncio.StreamWriter) -> None:
     writer.close()
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(writer.wait_closed(), timeout=2)
+    try:
+        await asyncio.wait_for(writer.wait_closed(), timeout=STREAM_CLOSE_TIMEOUT_SECONDS)
+    except asyncio.CancelledError:
+        writer.transport.abort()
+        raise
+    except Exception:
+        # SSL close_notify can stall on a dead peer. Closing only the writer
+        # leaves its socket alive and makes Server.wait_closed() wait forever.
+        writer.transport.abort()
 
 
 async def write_error(writer: asyncio.StreamWriter, message: str) -> None:
@@ -340,7 +389,9 @@ async def bridge_streams(
             if not data:
                 return
             writer.write(data)
-            await writer.drain()
+            # Bound unsent TLS data independently of TCP's in-flight window.
+            # A stalled peer must not keep both bridge tasks alive forever.
+            await asyncio.wait_for(writer.drain(), BRIDGE_WRITE_TIMEOUT_SECONDS)
 
     tasks = {
         asyncio.create_task(pump(first_reader, second_writer)),
@@ -353,6 +404,33 @@ async def bridge_streams(
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.gather(close_writer(first_writer), close_writer(second_writer))
+
+
+def validate_congestion_control(value: str) -> str:
+    if value not in ("", "cubic", "bbr"):
+        raise ValueError("tcp_congestion_control must be empty, cubic or bbr")
+    return value
+
+
+def configure_transport(writer: asyncio.StreamWriter, congestion_control: str = "") -> None:
+    # SSL transports otherwise permit a large plaintext backlog before drain()
+    # applies backpressure. This changes no encrypted bytes and never drops or
+    # reorders a chunk inside an end-to-end authenticated RemoteDesk message.
+    writer.transport.set_write_buffer_limits(
+        high=WRITE_BUFFER_HIGH_BYTES, low=WRITE_BUFFER_LOW_BYTES)
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        return
+    options = [(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)]
+    if hasattr(socket, "TCP_NOTSENT_LOWAT"):
+        options.append((socket.IPPROTO_TCP, socket.TCP_NOTSENT_LOWAT, TCP_NOTSENT_LOWAT_BYTES))
+    if congestion_control and hasattr(socket, "TCP_CONGESTION"):
+        options.append((socket.IPPROTO_TCP, socket.TCP_CONGESTION, congestion_control.encode("ascii")))
+    for level, name, value in options:
+        # Per-socket only. Older kernels/containers retain their working TCP
+        # implementation; no global sysctl, routing or firewall changes.
+        with contextlib.suppress(OSError, AttributeError, NotImplementedError):
+            sock.setsockopt(level, name, value)
 
 
 def normalize_text(value, fallback: str, max_length: int) -> str:
@@ -397,6 +475,7 @@ def load_config(path: str) -> dict:
     for name in ("cert_file", "key_file"):
         if not isinstance(config.get(name), str) or not config[name]:
             raise ValueError(f"{name} 缺失")
+    validate_congestion_control(config.get("tcp_congestion_control", ""))
     return config
 
 
@@ -422,8 +501,12 @@ async def run(config_path: str) -> None:
             loop.add_signal_handler(sig, stop.set)
     sockets = ", ".join(str(sock.getsockname()) for sock in server.sockets)
     print(f"RemoteDesk relay listening on {sockets}", flush=True)
-    async with server:
+    try:
         await stop.wait()
+    finally:
+        server.close()
+        await relay.shutdown()
+        await server.wait_closed()
 
 
 def main() -> int:

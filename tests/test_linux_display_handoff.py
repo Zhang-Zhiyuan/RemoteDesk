@@ -51,6 +51,50 @@ class DisplayHandoffTests(unittest.TestCase):
             self.assertIsNotNone(app.convert_frame_for_tk(encoded, 64, 40))
         self.assertEqual(["PPM"], formats)
 
+    def test_rgb_frames_do_not_allocate_a_redundant_conversion_copy(self):
+        encoded = self.encoded()
+        with mock.patch.object(self.Image.Image, "convert",
+                               side_effect=AssertionError("RGB copy is redundant")):
+            self.assertIsNotNone(app.convert_frame_for_tk(encoded, 64, 40))
+            self.assertIsNotNone(app.convert_frame_for_tk(encoded, 31, 19))
+
+    def test_copy_elision_keeps_old_pipeline_pixels_at_different_resolutions(self):
+        for image_format in ("JPEG", "PNG"):
+            for source_size, viewport in (((1920, 1080), (1280, 720)),
+                                          ((2560, 1440), (1920, 1080)),
+                                          ((3840, 2160), (1366, 768)),
+                                          ((734, 1600), (900, 600))):
+                with self.subTest(format=image_format, source=source_size, viewport=viewport):
+                    source = self.source.resize(source_size)
+                    buffer = io.BytesIO()
+                    source.save(buffer, format=image_format)
+                    encoded = buffer.getvalue()
+                    with self.Image.open(io.BytesIO(encoded)) as decoded:
+                        old = decoded.convert("RGB").resize(
+                            app.calculate_fitted_image_size(*source_size, *viewport),
+                            self.Image.Resampling.LANCZOS)
+                    current = app.convert_frame_for_tk(encoded, *viewport, *source_size)
+                    self.assertIsNotNone(current)
+                    with self.Image.open(io.BytesIO(current)) as new:
+                        self.assertEqual(old.size, new.size)
+                        self.assertEqual(old.tobytes(), new.tobytes())
+                    old.close()
+                    source.close()
+
+    def test_non_rgb_images_still_convert_correctly(self):
+        for mode, image_format in (("L", "JPEG"), ("CMYK", "JPEG"),
+                                   ("RGBA", "PNG"), ("P", "PNG")):
+            with self.subTest(mode=mode):
+                buffer = io.BytesIO()
+                self.source.convert(mode).save(buffer, format=image_format)
+                encoded = buffer.getvalue()
+                with self.Image.open(io.BytesIO(encoded)) as decoded:
+                    expected = decoded.convert("RGB").tobytes()
+                current = app.convert_frame_for_tk(encoded, 64, 40)
+                self.assertIsNotNone(current)
+                with self.Image.open(io.BytesIO(current)) as new:
+                    self.assertEqual(expected, new.tobytes())
+
     def test_network_dimension_validation_still_precedes_conversion(self):
         with mock.patch.object(app, "convert_frame_with_pillow") as convert:
             self.assertIsNone(app.convert_frame_for_tk(self.encoded(), 64, 40, 32, 20))

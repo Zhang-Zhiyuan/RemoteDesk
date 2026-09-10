@@ -41,6 +41,7 @@ TestResults/
 /artifacts/*
 !/artifacts/README.md
 !/artifacts/RemoteDesk-release-manifest.json
+/output/
 
 # Public release folder: distributables and required Windows companion files only.
 /release/*

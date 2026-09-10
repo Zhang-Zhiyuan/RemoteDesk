@@ -273,7 +273,7 @@ public final class RemoteDeskForegroundService extends Service {
             AndroidRelay.Options options = AndroidRelaySettings.load(this);
             if (options == null || !options.publish) return;
             long generation = relayGeneration;
-            relayHost = new AndroidRelay.HostConnector(options, RemoteDeskProtocol.HOST_PORT,
+            relayHost = new AndroidRelay.HostConnector(getApplicationContext(), options, RemoteDeskProtocol.HOST_PORT,
                 android.os.Build.MODEL, value -> {
                     if (generation == relayGeneration) relayStatus = value;
                 });

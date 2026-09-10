@@ -60,6 +60,8 @@ internal sealed class ScreenCaptureService : IDisposable
     private Rectangle _cachedCaptureBounds;
     private bool _cachedTargetAvailable;
     private long _captureBoundsRefreshedAt;
+    private readonly WindowsSecureDesktopClient _secureDesktop = new();
+    private Rectangle? _secureCaptureBounds;
 
     public ScreenCaptureService(ScreenCaptureTarget target)
     {
@@ -379,6 +381,7 @@ internal sealed class ScreenCaptureService : IDisposable
     internal ScreenCaptureTargetAvailability
         GetTargetAvailability(bool forceRefresh = false)
     {
+        if (TryGetSecureBounds(out Rectangle secureBounds)) return new(true, secureBounds);
         long now = Stopwatch.GetTimestamp();
         if (!forceRefresh &&
             _captureBoundsRefreshedAt != 0 &&
@@ -400,6 +403,7 @@ internal sealed class ScreenCaptureService : IDisposable
             IReadOnlyList<ScreenCaptureTarget> availableTargets)
     {
         ArgumentNullException.ThrowIfNull(availableTargets);
+        if (TryGetSecureBounds(out Rectangle secureBounds)) return new(true, secureBounds);
         ScreenCaptureTargetAvailability availability =
             ResolveTargetAvailability(
                 _target,
@@ -408,6 +412,18 @@ internal sealed class ScreenCaptureService : IDisposable
         _cachedCaptureBounds = availability.Bounds;
         _captureBoundsRefreshedAt = Stopwatch.GetTimestamp();
         return availability;
+    }
+
+    private bool TryGetSecureBounds(out Rectangle bounds)
+    {
+        bounds = default;
+        if (_secureCaptureBounds is not { } secure) return false;
+        if (WindowsSecureDesktopClient.IsRequired) { bounds = secure; return true; }
+        // Re-enumerate Default immediately on unlock; do not retain the
+        // login desktop's possibly rotated dimensions in the normal cache.
+        _secureCaptureBounds = null;
+        _captureBoundsRefreshedAt = 0;
+        return false;
     }
 
     public Rectangle GetCaptureBounds(bool forceRefresh = false)
@@ -427,6 +443,11 @@ internal sealed class ScreenCaptureService : IDisposable
     {
         long captureStartedAt = Stopwatch.GetTimestamp();
         Rectangle bounds = GetCaptureBounds();
+        if (_secureDesktop.TryCapture(bounds, quality, scalePercent, out ScreenCaptureResult secureCapture, _target.Id))
+        {
+            _secureCaptureBounds = secureCapture.Bounds;
+            return secureCapture;
+        }
         Size frameSize = CalculateFrameSize(bounds, scalePercent);
 
         if (frameSize == bounds.Size)
@@ -460,6 +481,7 @@ internal sealed class ScreenCaptureService : IDisposable
 
     public void Dispose()
     {
+        _secureDesktop.Dispose();
         _captureGraphics?.Dispose();
         _captureBitmap?.Dispose();
         _scaledGraphics?.Dispose();

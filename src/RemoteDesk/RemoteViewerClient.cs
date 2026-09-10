@@ -599,7 +599,8 @@ internal sealed class RemoteViewerClient : IDisposable
                     await RelayTunnelClient.ConnectViewerIntoAsync(
                             tcpClient,
                             relayRoute,
-                            connectionAttemptToken)
+                            connectionAttemptToken,
+                            message => Log?.Invoke(message))
                         .ConfigureAwait(false);
                 }
                 NetworkStream stream = tcpClient.GetStream();

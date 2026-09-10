@@ -13,6 +13,7 @@ import base64
 import ctypes
 import ctypes.util
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -309,6 +310,7 @@ LEGACY_FRAME_HEADER_BYTES = struct.calcsize("<iidd")
 MAX_JPEG_FRAME_BYTES = MAX_FRAME_PAYLOAD_BYTES - LEGACY_FRAME_HEADER_BYTES
 FFMPEG_STALE_FRAME_SECONDS = 0.5
 FFMPEG_WARMUP_SECONDS = 0.8
+VIEWER_CODEC_NEGOTIATION_GRACE_SECONDS = 2.0
 H264_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 1.5
 H264_MAX_BUFFER_BYTES = 8 * 1024 * 1024
 H264_STALE_FRAME_SECONDS = 0.5
@@ -617,6 +619,57 @@ class HostPressedInputState:
         return tuple(releases)
 
 
+class HostHeartbeatResponder:
+    """One active + one pending Pong; a slow writer cannot block input reads."""
+
+    def __init__(self, send, on_failure):
+        self.send = send
+        self.on_failure = on_failure
+        self.condition = threading.Condition()
+        self.pending = False
+        self.stopped = False
+        self.thread = None
+
+    def request(self):
+        with self.condition:
+            if self.stopped:
+                return False
+            self.pending = True
+            if self.thread is None:
+                self.thread = threading.Thread(target=self._run, name="RemoteDeskHostPong", daemon=True)
+                self.thread.start()
+            self.condition.notify_all()
+            return True
+
+    def _run(self):
+        try:
+            while True:
+                with self.condition:
+                    while not self.pending and not self.stopped:
+                        self.condition.wait()
+                    if self.stopped:
+                        return
+                    self.pending = False
+                self.send()
+        except Exception:
+            with self.condition:
+                if self.stopped:
+                    return
+                self.stopped = True
+                self.pending = False
+            self.on_failure()
+
+    def close(self):
+        with self.condition:
+            self.stopped = True
+            self.pending = False
+            self.condition.notify_all()
+            thread = self.thread
+        # The session closes its socket before joining, waking a blocked write.
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1)
+
+
 class HostInboundLivenessTracker:
     """Tracks only time spent waiting for one complete authenticated message.
 
@@ -857,6 +910,17 @@ def configure_low_latency_socket(sock: socket.socket, receive_buffer_size: int, 
             sock.setsockopt(option[0], option[1], value)
         except OSError:
             pass
+
+
+def host_send_buffer_bytes(peer_address: str) -> int:
+    try:
+        address = ipaddress.ip_address(peer_address)
+        address = getattr(address, "ipv4_mapped", None) or address
+        if address.is_loopback:
+            return 16 * 1024
+    except ValueError:
+        pass
+    return SOCKET_SEND_BUFFER_BYTES
 
 
 def low_latency_socket_options(receive_buffer_size: int, send_buffer_size: int) -> list[tuple[tuple[int, int], int]]:
@@ -3019,6 +3083,8 @@ class LinuxHostSession:
         )
         self.inbound_liveness = HostInboundLivenessTracker()
         self.inbound_liveness_thread: threading.Thread | None = None
+        self.heartbeat = HostHeartbeatResponder(
+            lambda: self._write_message(MESSAGE_PONG, b""), self._heartbeat_failed)
         self.input_controller = LinuxInputController()
         # Bind the advertised capability to the controller retained by this
         # session.  A transient second probe cannot otherwise advertise input
@@ -3031,6 +3097,8 @@ class LinuxHostSession:
         self.video_lock = threading.Lock()
         self.viewer_video_codecs = VIDEO_CODEC_JPEG
         self.viewer_info_received = False
+        self.startup_jpeg_sent = False
+        self.codec_negotiation_deadline = time.monotonic() + VIEWER_CODEC_NEGOTIATION_GRACE_SECONDS
         self.h264_stream_active = False
         self.last_h264_frame_id: int | None = None
         self.incoming: Any | None = None
@@ -3148,6 +3216,7 @@ class LinuxHostSession:
             ):
                 inbound_liveness_thread.join(timeout=1.0)
             self._stop_return_worker()
+            self.heartbeat.close()
             self._stop_clipboard_worker()
             self._stop_input_thread()
             self._stop_display_size_refresh_thread()
@@ -3225,9 +3294,13 @@ class LinuxHostSession:
         except OSError:
             pass
 
+    def _heartbeat_failed(self):
+        self.session_stop.set()
+        self._interrupt_socket_io()
+
     def _handle_message(self, message_type: int, payload: bytes) -> None:
         if message_type == MESSAGE_PING:
-            self._write_message(MESSAGE_PONG, b"")
+            self.heartbeat.request()
             return
 
         if message_type == MESSAGE_INPUT:
@@ -3325,6 +3398,15 @@ class LinuxHostSession:
             viewer_info_received = self.viewer_info_received
             h264_stream_active = self.h264_stream_active
 
+        # A relay's loopback socket can accept many frames before the distant
+        # viewer's codec selection arrives. One full-quality preview is enough:
+        # a startup JPEG burst otherwise queues ahead of the first H.264 frame
+        # for tens of seconds on a congested uplink. Legacy clients which never
+        # send ViewerInfo resume normal JPEG after this bounded grace period.
+        if (not viewer_info_received and self.startup_jpeg_sent
+                and started < self.codec_negotiation_deadline):
+            return False
+
         if viewer_codecs & VIDEO_CODEC_H264_ANNEX_B:
             h264_frame = self.hardware_h264_capture.read_frame(
                 timeout=min(0.02, 1.0 / self.hardware_h264_capture.fps),
@@ -3356,7 +3438,7 @@ class LinuxHostSession:
                 # Do not interleave JPEG after the first H.264 AU. While the
                 # initial hardware probe runs, JPEG may continue only when the
                 # viewer explicitly advertised it.
-                if h264_stream_active or not viewer_codecs & VIDEO_CODEC_JPEG:
+                if h264_stream_active or not viewer_codecs & VIDEO_CODEC_JPEG or self.startup_jpeg_sent:
                     return False
             else:
                 with self.video_lock:
@@ -3415,6 +3497,7 @@ class LinuxHostSession:
             + frame_bytes
         )
         self._write_message(MESSAGE_FRAME, payload)
+        self.startup_jpeg_sent = True
         return True
 
     def _handle_input(self, payload: bytes) -> None:
@@ -4850,7 +4933,7 @@ def run_admitted_client(
     active_owner = False
     session_closed = threading.Event()
     try:
-        configure_low_latency_socket(client, SOCKET_RECEIVE_BUFFER_BYTES, SOCKET_SEND_BUFFER_BYTES)
+        configure_low_latency_socket(client, SOCKET_RECEIVE_BUFFER_BYTES, host_send_buffer_bytes(address[0]))
         client.settimeout(args.auth_timeout)
         authentication_deadline = time.monotonic() + max(0.1, float(args.auth_timeout))
         session = authenticate_server(

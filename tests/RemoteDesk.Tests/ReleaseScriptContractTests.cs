@@ -5,6 +5,15 @@ namespace RemoteDesk.Tests;
 public sealed class ReleaseScriptContractTests
 {
     [Fact]
+    public void DesktopAndAndroidReleaseVersionsStayAligned()
+    {
+        var project = System.Xml.Linq.XDocument.Parse(ReadRepositoryFile("src", "RemoteDesk", "RemoteDesk.csproj"));
+        string version = project.Descendants("Version").Single().Value;
+        string android = ReadRepositoryFile("src", "RemoteDesk.Android", "app", "build.gradle");
+        Assert.Contains($"versionName \"{version}\"", android);
+    }
+
+    [Fact]
     public void BothLinuxPackagesIncludeThePersistentStartupModule()
     {
         Assert.Contains("remotedesk_linux_startup.py",

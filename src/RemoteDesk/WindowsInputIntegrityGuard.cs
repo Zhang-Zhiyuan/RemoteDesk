@@ -7,8 +7,8 @@ internal static class WindowsInputIntegrityGuard
     internal const string ElevationRequiredMessage =
         "目标窗口的管理员权限高于 RemoteDesk 被控端，" +
         "Windows 已阻止点击或键盘。请在被控端 RemoteDesk 中点击" +
-        "“管理员重启”并确认 UAC；UAC、锁屏等安全桌面仍需在" +
-        "被控端本机确认或解锁。";
+        "“管理员重启”并确认 UAC；如需操作 UAC、锁屏等安全桌面，" +
+        "请另行启用“锁屏控制”辅助服务。";
 
     private const uint ProcessQueryLimitedInformation = 0x1000;
     private const uint TokenQuery = 0x0008;

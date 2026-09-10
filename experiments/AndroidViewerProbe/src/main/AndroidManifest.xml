@@ -7,6 +7,7 @@
     <application android:name="com.remotedesk.agent.ViewerProbeApplication" android:label="RemoteDesk Viewer Test"
         android:allowBackup="false" android:supportsRtl="true" android:theme="@style/ViewerTheme">
         <activity android:name="com.remotedesk.agent.ViewerProbeLauncher" android:exported="true" />
+        <activity android:name="com.remotedesk.agent.RelayNetworkProbeActivity" android:exported="true" />
         <activity android:name="com.remotedesk.agent.DiscoveryProbeActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

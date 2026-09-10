@@ -181,7 +181,8 @@ internal sealed class RemoteViewerWindow : Form
     private int _d3d11TargetRetryCount;
     private int _directPresentationQualified;
     private int _directPresentationQualificationCount;
-    private int _allowDisplayUpscaling = 1;
+    // Fit large desktops, but do not stretch small desktops' text by default.
+    private int _allowDisplayUpscaling;
     private int _pictureBoxHandleAvailable;
     private int _pictureBoxClientWidth;
     private int _pictureBoxClientHeight;
@@ -316,7 +317,7 @@ internal sealed class RemoteViewerWindow : Form
             CreateStatusActionButton("切换屏幕");
         _switchCaptureTargetButton.Visible = false;
         _displayScaleButton =
-            CreateStatusActionButton("1:1 清晰");
+            CreateStatusActionButton("允许放大");
         _fullScreenButton = CreateStatusActionButton("全屏");
         _fileTransferActionsPanel = new FlowLayoutPanel
         {
@@ -1096,8 +1097,8 @@ internal sealed class RemoteViewerWindow : Form
             ref _allowDisplayUpscaling,
             allowUpscaling ? 1 : 0);
         _displayScaleButton.Text = allowUpscaling
-            ? "1:1 清晰"
-            : "适应窗口";
+            ? "禁止放大"
+            : "允许放大";
         UpdatePictureBoxDisplayMode(
             GetRemoteImageSize());
         ConfigureFilePullToolTips();
@@ -1737,9 +1738,10 @@ internal sealed class RemoteViewerWindow : Form
         _toolTip.SetToolTip(
             _displayScaleButton,
             allowDisplayUpscaling
-                ? "当前为适应窗口。点击后，较小画面按 1:1 原始像素居中显示，" +
-                    "避免 1080p 被放大后发虚；大画面仍会等比缩小。"
-                : "当前为 1:1 清晰模式。点击恢复适应窗口并允许放大画面。");
+                ? "当前允许放大以适应窗口。点击后，较小画面按 1:1 原始像素居中显示，" +
+                    "避免被放大后发虚；大画面仍会等比缩小。"
+                : "当前禁止放大：较小画面按原始像素居中，大画面等比缩小。" +
+                    "点击后允许放大以适应窗口；不会改变远端分辨率或编码画质。");
         _toolTip.SetToolTip(
             _fullScreenButton,
             "切换无边框全屏（F11）。4K 在默认窗口会被大幅缩小，" +
@@ -1747,10 +1749,10 @@ internal sealed class RemoteViewerWindow : Form
         _toolTip.SetToolTip(
             _pictureBox,
             _fileDropRegistrationUnavailable
-                ? "操作远端桌面；本机系统拒绝拖放注册，向远端拖入文件已关闭。可切换 1:1 清晰显示，按 F11 可切换全屏。"
+                ? "操作远端桌面；本机系统拒绝拖放注册，向远端拖入文件已关闭。可切换是否放大画面，按 F11 可切换全屏。"
                 : canDragOut
-                ? "操作远端桌面；在远端资源管理器中把文件拖出此窗口，可接续拖放到本机。可切换 1:1 清晰显示，按 F11 可切换全屏。"
-                : "操作远端桌面；可切换 1:1 清晰显示，按 F11 可切换全屏。");
+                ? "操作远端桌面；在远端资源管理器中把文件拖出此窗口，可接续拖放到本机。可切换是否放大画面，按 F11 可切换全屏。"
+                : "操作远端桌面；默认不放大小画面，按 F11 可切换全屏。");
         UpdateStatusToolTip(_statusBar.StatusText);
     }
 
@@ -1766,7 +1768,7 @@ internal sealed class RemoteViewerWindow : Form
         _toolTip.SetToolTip(
             _statusBar,
             $"{copyableStatus}{Environment.NewLine}{Environment.NewLine}" +
-            $"显示：可在适应窗口与 1:1 清晰模式间切换；全屏：F11" +
+            $"显示：可切换是否放大小画面，大画面始终等比缩小；全屏：F11" +
                 "（4K 缩小显示会损失细节）；取回远端文件：" +
                 $"{RemoteFilePullUi.ShortcutText}{dragOutTip}；右键可复制状态或打开接收目录。");
     }

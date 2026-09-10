@@ -23,6 +23,54 @@ import org.junit.Test;
 
 public final class RemoteDeskHostServerTest {
     @Test
+    public void lateViewerInfoCanUpgradeAnAlreadyStartedJpegStream() {
+        AndroidHostSessionState state = new AndroidHostSessionState();
+        assertFalse(RemoteDeskHostServer.shouldStartH264(true, state.viewerVideoCodecs.get()));
+
+        state.viewerVideoCodecs.set(RemoteDeskProtocol.VIDEO_CODEC_JPEG |
+            RemoteDeskProtocol.VIDEO_CODEC_H264_ANNEX_B);
+        state.viewerInfoReceived.set(true);
+
+        assertTrue(RemoteDeskHostServer.shouldStartH264(true, state.viewerVideoCodecs.get()));
+        assertTrue(state.running.get());
+    }
+
+    @Test
+    public void capabilitiesAloneDoNotSelectAnUnadvertisedCodec() {
+        AndroidHostSessionState state = new AndroidHostSessionState();
+        state.viewerCapabilities.set(RemoteDeskProtocol.CAPABILITY_SHORT_GOP_H264);
+        state.viewerCapabilitiesReceived.set(true);
+        assertFalse(RemoteDeskHostServer.shouldStartH264(true, state.viewerVideoCodecs.get()));
+    }
+
+    @Test
+    public void legacyAndExplicitJpegViewersKeepJpegCapture() {
+        assertFalse(RemoteDeskHostServer.shouldStartH264(true, 0));
+        assertFalse(RemoteDeskHostServer.shouldStartH264(true, RemoteDeskProtocol.VIDEO_CODEC_JPEG));
+    }
+
+    @Test
+    public void compatibleCaptureAndRealFallbackCannotRestartH264() {
+        int codecs = RemoteDeskProtocol.VIDEO_CODEC_JPEG | RemoteDeskProtocol.VIDEO_CODEC_H264_ANNEX_B;
+        assertFalse(RemoteDeskHostServer.shouldStartH264(false, codecs));
+        assertFalse(RemoteDeskHostServer.shouldStartH264(false, RemoteDeskProtocol.VIDEO_CODEC_H264_ANNEX_B));
+    }
+
+    @Test
+    public void h264OnlyViewerCanUpgradeAfterTheStartupWait() {
+        assertTrue(RemoteDeskHostServer.shouldStartH264(true, RemoteDeskProtocol.VIDEO_CODEC_H264_ANNEX_B));
+    }
+
+    @Test
+    public void viewerWithdrawalImmediatelyPreventsAJpegUpgrade() {
+        AndroidHostSessionState state = new AndroidHostSessionState();
+        state.viewerVideoCodecs.set(RemoteDeskProtocol.VIDEO_CODEC_H264_ANNEX_B);
+        assertTrue(RemoteDeskHostServer.shouldStartH264(true, state.viewerVideoCodecs.get()));
+        state.viewerVideoCodecs.set(RemoteDeskProtocol.VIDEO_CODEC_JPEG);
+        assertFalse(RemoteDeskHostServer.shouldStartH264(true, state.viewerVideoCodecs.get()));
+    }
+
+    @Test
     public void configureClientSocketForAuthenticationUsesLowLatencyAndTimeout() throws IOException {
         try (Socket socket = new Socket()) {
             RemoteDeskHostServer.configureClientSocketForAuthentication(socket);

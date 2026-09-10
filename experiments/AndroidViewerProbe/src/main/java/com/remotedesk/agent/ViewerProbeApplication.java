@@ -4,7 +4,6 @@ import android.app.Application;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.util.AtomicFile;
 import android.view.View;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -16,6 +15,8 @@ import org.json.JSONObject;
 public final class ViewerProbeApplication extends Application implements Application.ActivityLifecycleCallbacks {
     static RemoteDeskViewerActivity viewer;
     static String lastAction = "launch", failure = "";
+    static int surfaceChanges;
+    private android.view.SurfaceView observedSurface;
     private final Handler handler = new Handler(Looper.getMainLooper());
     @Override public void onCreate() { super.onCreate(); registerActivityLifecycleCallbacks(this); }
     static Object field(Object target, String name) throws Exception {
@@ -32,6 +33,16 @@ public final class ViewerProbeApplication extends Application implements Applica
             AndroidViewerViewport viewport=(AndroidViewerViewport)field(viewer,"viewport");
             AndroidViewerGestures gestures=(AndroidViewerGestures)field(viewer,"gestures");
             View frame=(View)field(viewer,"viewerFrame");
+            android.view.SurfaceView surface=(android.view.SurfaceView)field(viewer,"surfaceView");
+            if (surface != observedSurface) {
+                observedSurface=surface;
+                surface.getHolder().addCallback(new android.view.SurfaceHolder.Callback() {
+                    public void surfaceCreated(android.view.SurfaceHolder holder) {}
+                    public void surfaceDestroyed(android.view.SurfaceHolder holder) {}
+                    public void surfaceChanged(android.view.SurfaceHolder holder, int format, int width, int height) { surfaceChanges++; }
+                });
+            }
+            android.graphics.Rect buffer=surface.getHolder().getSurfaceFrame();
             JSONObject data=new JSONObject().put("action",lastAction).put("failure",failure)
                 .put("status",chrome.status.getText()).put("health",chrome.health.getText())
                 .put("frame",new JSONArray().put(viewport.frameWidth).put(viewport.frameHeight))
@@ -40,7 +51,10 @@ public final class ViewerProbeApplication extends Application implements Applica
                 .put("zoom",viewport.zoom).put("scale",viewport.scale()).put("panX",viewport.panX).put("panY",viewport.panY)
                 .put("trackpad",gestures.trackpad).put("lockedDrag",gestures.lockedDrag)
                 .put("cursor",new JSONArray().put(gestures.cursorX).put(gestures.cursorY))
-                .put("h264",field(viewer,"h264SurfaceActive"));
+                .put("h264",field(viewer,"h264SurfaceActive"))
+                .put("surfaceFrame", new JSONArray().put(buffer.width()).put(buffer.height()))
+                .put("surfaceView", new JSONArray().put(surface.getWidth()).put(surface.getHeight()))
+                .put("surfaceChanges", surfaceChanges);
             data.put("configuration", viewer.getResources().getConfiguration().toString())
                 .put("density",viewer.getResources().getDisplayMetrics().density)
                 .put("healthVisible",chrome.health.getVisibility()).put("hintVisible",chrome.hint.getVisibility())
@@ -48,11 +62,23 @@ public final class ViewerProbeApplication extends Application implements Applica
                 .put("headerPadding",new JSONArray().put(chrome.header.getPaddingTop()).put(chrome.header.getPaddingBottom()))
                 .put("headerParams",chrome.header.getLayoutParams().height);
             Object owner=field(viewer,"connectionOwner");
+            data.put("sampleUptimeMs", android.os.SystemClock.elapsedRealtime());
+            if (owner != null) {
+                Object health = field(owner, "healthTracker");
+                // Observe totals without snapshot(), which advances the real
+                // UI's FPS sampling interval. Read consistently under its lock.
+                synchronized (health) {
+                    data.put("receivedFrames", field(health, "receivedFrameCount"))
+                        .put("presentedFrames", field(health, "presentedFrameCount"))
+                        .put("receivedEncodedBytes", field(health, "receivedEncodedBytes"));
+                }
+            }
             data.put("ownerGeneration",owner==null?0:field(owner,"generation"))
                 .put("geometryReady",owner!=null && (boolean)field(owner,"displayGeometryReady"))
                 .put("surfaceAlpha",((View)field(viewer,"surfaceView")).getAlpha())
                 .put("keyboardEnabled",chrome.keyboard.isEnabled()).put("mouseEnabled",chrome.mouse.isEnabled())
-                .put("draftLength",chrome.composer.length()).put("sendEnabled",chrome.send.isEnabled());
+                .put("draftLength",chrome.composer.length()).put("sendEnabled",chrome.send.isEnabled())
+                .put("composerImeOptions",chrome.composer.getImeOptions());
             if (android.os.Build.VERSION.SDK_INT>=30 && frame.getRootWindowInsets()!=null) {
                 data.put("imeInset",frame.getRootWindowInsets().getInsets(android.view.WindowInsets.Type.ime()).bottom)
                     .put("imeInsetSource","WindowInsets");
@@ -67,15 +93,25 @@ public final class ViewerProbeApplication extends Application implements Applica
                 data.put("imeInset",occluded>display.heightPixels*.15f?occluded:0)
                     .put("imeInsetSource","legacy-visible-frame");
             }
-            AtomicFile file=new AtomicFile(new File(getFilesDir(),"viewer-state.json"));
-            FileOutputStream stream=file.startWrite();
-            try { stream.write(data.toString(2).getBytes(StandardCharsets.UTF_8)); file.finishWrite(stream); }
-            catch(Exception ex){ file.failWrite(stream); throw ex; }
+            // The external reader uses adb/cat, not AtomicFile.openRead(). On
+            // API 26 AtomicFile exposes a briefly empty base file during writes.
+            // Publish only a completely written snapshot via same-directory rename.
+            File temporary=new File(getFilesDir(),"viewer-state.json.tmp");
+            try(FileOutputStream stream=new FileOutputStream(temporary)) {
+                stream.write(data.toString(2).getBytes(StandardCharsets.UTF_8));
+            }
+            java.nio.file.Files.move(temporary.toPath(),new File(getFilesDir(),"viewer-state.json").toPath(),
+                java.nio.file.StandardCopyOption.ATOMIC_MOVE,java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         } catch(Exception ex) { failure=ex.toString(); }
         handler.postDelayed(this::snapshot,300);
     }
     public void onActivityCreated(Activity activity,Bundle state) {
-        if(activity instanceof RemoteDeskViewerActivity){ viewer=(RemoteDeskViewerActivity)activity; handler.postDelayed(this::snapshot,400); }
+        if(activity instanceof RemoteDeskViewerActivity){
+            viewer=(RemoteDeskViewerActivity)activity;
+            surfaceChanges=0;
+            observedSurface=null;
+            handler.postDelayed(this::snapshot,400);
+        }
     }
     public void onActivityDestroyed(Activity activity){if(activity==viewer){viewer=null;handler.removeCallbacksAndMessages(null);}}
     public void onActivityStarted(Activity a){} public void onActivityResumed(Activity a){}

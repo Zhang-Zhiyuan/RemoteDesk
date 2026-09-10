@@ -586,44 +586,59 @@ final class RemoteDeskHostServer {
         AndroidHostSessionState state) throws IOException, GeneralSecurityException {
         waitForViewerInfo(state);
         Set<String> rejectedH264Codecs = new HashSet<>();
-        while (running.get() &&
-            state.running.get() &&
-            !captureSession.isAccessibilityCapture() &&
-            (state.viewerVideoCodecs.get() & RemoteDeskProtocol.VIDEO_CODEC_H264_ANNEX_B) != 0) {
-            H264CaptureResult result = runH264CaptureLoopIfAvailable(
-                output,
-                session,
-                writeLock,
-                state,
-                rejectedH264Codecs);
-            if (result == H264CaptureResult.Completed) {
-                return;
+        boolean allowH264Upgrade = !captureSession.isAccessibilityCapture();
+        while (running.get() && state.running.get()) {
+            if (shouldStartH264(allowH264Upgrade, state.viewerVideoCodecs.get())) {
+                H264CaptureResult result = runH264CaptureLoopIfAvailable(
+                    output,
+                    session,
+                    writeLock,
+                    state,
+                    rejectedH264Codecs);
+                if (result == H264CaptureResult.Completed) {
+                    return;
+                }
+
+                if (result == H264CaptureResult.Restart) {
+                    state.keyFrameRequested.set(false);
+                    continue;
+                }
+
+                // A real encoder failure or viewer-requested fallback stays on
+                // JPEG for this session; never retry a broken codec every frame.
+                allowH264Upgrade = false;
             }
 
-            if (result == H264CaptureResult.Restart) {
-                state.keyFrameRequested.set(false);
-                continue;
-            }
-
-            break;
+            AndroidSessionLog.info("Starting JPEG screen stream.");
+            runJpegCaptureLoop(output, session, writeLock, state, allowH264Upgrade);
         }
+    }
 
-        if ((state.viewerVideoCodecs.get() & RemoteDeskProtocol.VIDEO_CODEC_JPEG) == 0) {
-            throw new IOException("No mutually supported RemoteDesk video codec is available.");
-        }
-
-        AndroidSessionLog.info("Starting JPEG screen stream.");
-        runJpegCaptureLoop(output, session, writeLock, state);
+    static boolean shouldStartH264(boolean allowH264Upgrade, int viewerVideoCodecs) {
+        return allowH264Upgrade &&
+            (viewerVideoCodecs & RemoteDeskProtocol.VIDEO_CODEC_H264_ANNEX_B) != 0;
     }
 
     private void runJpegCaptureLoop(
         OutputStream output,
         RemoteDeskTransport.SecureSession session,
         Object writeLock,
-        AndroidHostSessionState state) throws IOException, GeneralSecurityException {
+        AndroidHostSessionState state,
+        boolean allowH264Upgrade) throws IOException, GeneralSecurityException {
         AdaptiveCaptureController adaptive = new AdaptiveCaptureController(
             state.viewerCapabilities.get());
         while (running.get() && state.running.get()) {
+            // The bounded startup wait is not a codec-selection deadline. Relay
+            // negotiation can arrive after JPEG starts; switch the existing
+            // projection Surface instead of remaining on JPEG until reconnect.
+            int viewerVideoCodecs = state.viewerVideoCodecs.get();
+            if (shouldStartH264(allowH264Upgrade, viewerVideoCodecs)) {
+                AndroidSessionLog.info("Late viewer H.264 negotiation received; upgrading JPEG stream in this session.");
+                return;
+            }
+            if ((viewerVideoCodecs & RemoteDeskProtocol.VIDEO_CODEC_JPEG) == 0) {
+                throw new IOException("No mutually supported RemoteDesk video codec is available.");
+            }
             long startedAt = System.nanoTime();
             long displayGeneration =
                 captureSession.getDisplayConfigurationGeneration();
@@ -895,6 +910,17 @@ final class RemoteDeskHostServer {
         AndroidFileTransferReceiver fileTransferReceiver,
         AndroidFileCompletionCoordinator fileCompletionCoordinator,
         AndroidSessionLivenessTracker inboundLiveness) {
+        AndroidHostHeartbeatResponder heartbeat = new AndroidHostHeartbeatResponder(
+            () -> {
+                if (running.get() && state.running.get()) {
+                    RemoteDeskTransport.writeMessage(
+                        output, RemoteDeskProtocol.MESSAGE_PONG, new byte[0], session, writeLock);
+                }
+            },
+            () -> {
+                state.tryStop();
+                closeQuietly(socket);
+            });
         try {
             while (running.get() && state.running.get()) {
                 long readGeneration = inboundLiveness.beginInboundRead(System.nanoTime());
@@ -905,12 +931,7 @@ final class RemoteDeskHostServer {
                     inboundLiveness.endInboundRead(readGeneration);
                 }
                 if (message.messageType == RemoteDeskProtocol.MESSAGE_PING) {
-                    RemoteDeskTransport.writeMessage(
-                        output,
-                        RemoteDeskProtocol.MESSAGE_PONG,
-                        new byte[0],
-                        session,
-                        writeLock);
+                    heartbeat.request();
                 } else if (message.messageType == RemoteDeskProtocol.MESSAGE_INPUT) {
                     applySessionInput(state, message.payload);
                 } else if (message.messageType == RemoteDeskProtocol.MESSAGE_CONTROL) {
@@ -930,6 +951,7 @@ final class RemoteDeskHostServer {
         } finally {
             state.tryStop();
             closeQuietly(socket);
+            heartbeat.close();
             fileCompletionCoordinator.close();
             fileTransferReceiver.abortActiveTransfer();
         }
@@ -1381,7 +1403,8 @@ final class RemoteDeskHostServer {
 
     private static void trySetSendBufferSize(Socket client) {
         try {
-            client.setSendBufferSize(AndroidVideoStreamSettings.FRAME_SEND_BUFFER_BYTES);
+            client.setSendBufferSize(AndroidRelay.hostSendBufferBytes(client.getInetAddress(),
+                AndroidVideoStreamSettings.FRAME_SEND_BUFFER_BYTES));
         } catch (IOException | RuntimeException ignored) {
         }
     }

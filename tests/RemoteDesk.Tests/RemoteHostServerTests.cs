@@ -8,6 +8,44 @@ namespace RemoteDesk.Tests;
 
 public sealed class RemoteHostServerTests
 {
+    [Theory]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, false)]
+    [InlineData(false, true, false)]
+    public void OnlyTcpStartupPreviewStopsAfterFirstSuccessfulFrame(
+        bool startupPreviewOnly,
+        bool udpRouteActive,
+        bool expected)
+    {
+        Assert.Equal(expected, RemoteHostServer.ShouldFinishJpegStartupPreview(
+            startupPreviewOnly, udpRouteActive));
+    }
+
+    [Fact]
+    public async Task PostPreviewNegotiationWaitEndsWhenExplicitJpegSelectionArrives()
+    {
+        var state = new RemoteHostServer.ViewerSessionState();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        Task waiting = state.WaitForInitialVideoSelectionAsync(
+            RemoteHostServer.InitialViewerInfoPreviewGracePeriod, deadline.Token);
+        Assert.False(waiting.IsCompleted);
+        state.SetSupportedVideoCodecs(RemoteVideoCodecs.Jpeg);
+        await waiting.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.True(state.GetVideoSelection().Version > 0);
+    }
+
+    [Fact]
+    public async Task PostPreviewNegotiationWaitPreservesCancellation()
+    {
+        var state = new RemoteHostServer.ViewerSessionState();
+        using var stop = new CancellationTokenSource();
+        Task waiting = state.WaitForInitialVideoSelectionAsync(
+            RemoteHostServer.InitialViewerInfoPreviewGracePeriod, stop.Token);
+        stop.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting);
+    }
+
     [Fact]
     public void SameCaptureTargetSelectionDoesNotRequirePipelineRestart()
     {

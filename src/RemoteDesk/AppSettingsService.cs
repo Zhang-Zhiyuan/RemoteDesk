@@ -102,6 +102,8 @@ internal sealed class RelaySettings
 
     public bool RegisterThisDevice { get; set; } = true;
 
+    public bool OptimizeNetworkRoute { get; set; } = true;
+
     public ViewerVideoMode VideoMode { get; set; } =
         ViewerVideoMode.Automatic;
 

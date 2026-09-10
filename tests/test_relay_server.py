@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import struct
 import sys
 import unittest
@@ -182,6 +183,33 @@ class RelayServerTests(unittest.IsolatedAsyncioTestCase):
         await write_json(writer, {"type": "heartbeat"})
         self.assertEqual("heartbeat", (await asyncio.wait_for(read_json(reader), 2))["type"])
 
+    async def test_shutdown_closes_idle_host_without_waiting_for_heartbeat_timeout(self) -> None:
+        reader, _ = await self.register_host(str(uuid.uuid4()))
+        self.server.close()
+        await asyncio.wait_for(self.relay.shutdown(), 2)
+        await asyncio.wait_for(self.server.wait_closed(), 2)
+        self.assertEqual(b"", await asyncio.wait_for(reader.read(1), 1))
+        self.assertEqual({}, self.relay.connections)
+        self.assertEqual({}, self.relay.hosts)
+
+    async def test_shutdown_cancels_unfinished_handshake_and_pairing(self) -> None:
+        device_id = str(uuid.uuid4())
+        host_reader, _ = await self.register_host(device_id)
+        _, incomplete_writer = await self.connect()
+        incomplete_writer.write(b"\x00")
+        await incomplete_writer.drain()
+        _, viewer_writer = await self.connect()
+        await write_json(viewer_writer, {
+            "version": 1, "role": "viewer", "token": TOKEN, "deviceId": device_id,
+        })
+        await asyncio.wait_for(read_json(host_reader), 2)
+        self.server.close()
+        await asyncio.wait_for(self.relay.shutdown(), 2)
+        await asyncio.wait_for(self.server.wait_closed(), 2)
+        self.assertEqual({}, self.relay.connections)
+        self.assertEqual({}, self.relay.pending)
+        await self.relay.shutdown()  # Repeated shutdown is harmless.
+
     async def test_connection_cap_rejects_excess_without_queueing(self) -> None:
         self.relay.connection_slots = asyncio.Semaphore(1)
         await self.register_host(str(uuid.uuid4()))
@@ -230,6 +258,73 @@ class RelayServerTests(unittest.IsolatedAsyncioTestCase):
         host_writer.close()
         self.assertFalse((await asyncio.wait_for(read_json(reader), 2))["ok"])
         self.assertEqual({}, self.relay.pending)
+
+    async def test_small_tunnel_messages_do_not_wait_to_fill_a_copy_buffer(self) -> None:
+        # One byte must be forwarded immediately; read(n) is not readexactly(n).
+        first, second = asyncio.StreamReader(), asyncio.StreamReader()
+        left, right = mock.Mock(), mock.Mock()
+        for writer in (left, right):
+            writer.drain = mock.AsyncMock()
+            writer.wait_closed = mock.AsyncMock()
+        task = asyncio.create_task(relay.bridge_streams(first, left, second, right))
+        first.feed_data(b"x")
+        for _ in range(100):
+            if right.write.called:
+                break
+            await asyncio.sleep(.001)
+        right.write.assert_called_once_with(b"x")
+        first.feed_eof()
+        await asyncio.wait_for(task, 1)
+        left.close.assert_called_once()
+        right.close.assert_called_once()
+
+    async def test_stalled_tls_writer_closes_both_directions(self) -> None:
+        first, second = asyncio.StreamReader(), asyncio.StreamReader()
+        left, right = mock.Mock(), mock.Mock()
+        blocked = asyncio.Event()
+        for writer in (left, right):
+            writer.drain = mock.AsyncMock(side_effect=blocked.wait)
+            writer.wait_closed = mock.AsyncMock()
+        first.feed_data(b"unchanged encrypted bytes")
+        with mock.patch.object(relay, "BRIDGE_WRITE_TIMEOUT_SECONDS", .02):
+            await asyncio.wait_for(relay.bridge_streams(first, left, second, right), 1)
+        right.write.assert_called_once_with(b"unchanged encrypted bytes")
+        left.close.assert_called_once()
+        right.close.assert_called_once()
+
+    async def test_tls_close_timeout_aborts_socket_instead_of_leaking_it(self) -> None:
+        writer = mock.Mock()
+        blocked = asyncio.Event()
+        writer.wait_closed = mock.AsyncMock(side_effect=blocked.wait)
+        with mock.patch.object(relay, "STREAM_CLOSE_TIMEOUT_SECONDS", .02):
+            await asyncio.wait_for(relay.close_writer(writer), 1)
+        writer.close.assert_called_once()
+        writer.transport.abort.assert_called_once()
+
+
+class RelayTransportPolicyTests(unittest.TestCase):
+    def test_transport_limits_unsent_data_without_fixing_tcp_window(self):
+        writer = mock.Mock()
+        relay.configure_transport(writer)
+        writer.transport.set_write_buffer_limits.assert_called_once_with(high=64 * 1024, low=16 * 1024)
+        sock = writer.get_extra_info.return_value
+        sock.setsockopt.assert_any_call(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        if hasattr(socket, "TCP_NOTSENT_LOWAT"):
+            sock.setsockopt.assert_any_call(socket.IPPROTO_TCP, socket.TCP_NOTSENT_LOWAT, 64 * 1024)
+        self.assertTrue(all(call.args[0] != socket.SOL_SOCKET for call in sock.setsockopt.call_args_list))
+
+    def test_optional_kernel_features_fall_back_without_breaking_connection(self):
+        writer = mock.Mock()
+        writer.get_extra_info.return_value.setsockopt.side_effect = OSError("unsupported")
+        relay.configure_transport(writer, "bbr")
+        writer.transport.set_write_buffer_limits.assert_called_once()
+
+    def test_invalid_congestion_configuration_is_rejected(self):
+        for value in (None, True, 123, "bbr\n", "unrecognized", {}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                relay.validate_congestion_control(value)
+        for value in ("", "cubic", "bbr"):
+            self.assertEqual(value, relay.validate_congestion_control(value))
 
 
 if __name__ == "__main__":

@@ -2,13 +2,90 @@ package com.remotedesk.agent;
 
 import org.junit.Test;
 import static org.junit.Assert.*;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
 public final class AndroidRelayTest {
+    @Test public void smallHostQueueIsLimitedToLoopback() throws Exception {
+        for (String address : new String[] {"127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1"}) {
+            assertEquals(16384, AndroidRelay.hostSendBufferBytes(java.net.InetAddress.getByName(address), 131072));
+        }
+        for (String address : new String[] {"10.7.163.74", "8.138.5.232", "::ffff:10.7.163.74"}) {
+            assertEquals(131072, AndroidRelay.hostSendBufferBytes(java.net.InetAddress.getByName(address), 131072));
+        }
+        assertEquals(131072, AndroidRelay.hostSendBufferBytes(null, 131072));
+    }
+
+    @Test public void loopbackAdapterBoundsReadAheadAndWrites() throws Exception {
+        try (java.net.Socket socket = new java.net.Socket()) {
+            AndroidRelay.configureLoopbackSocket(socket);
+            assertEquals(16384, socket.getReceiveBufferSize());
+            assertEquals(16384, socket.getSendBufferSize());
+            assertTrue(socket.getTcpNoDelay());
+            assertEquals(16384, AndroidRelay.COPY_BUFFER_BYTES);
+        }
+    }
+
+    @Test public void unsupportedLoopbackOptionsDoNotAbortConnection() throws Exception {
+        try (java.net.Socket socket = new java.net.Socket() {
+            @Override public void setReceiveBufferSize(int size) throws java.net.SocketException { throw new java.net.SocketException(); }
+            @Override public void setSendBufferSize(int size) throws java.net.SocketException { throw new java.net.SocketException(); }
+            @Override public void setTcpNoDelay(boolean value) throws java.net.SocketException { throw new java.net.SocketException(); }
+        }) {
+            AndroidRelay.configureLoopbackSocket(socket);
+        }
+    }
+
     private static final String ID = "4d623300-3405-4513-99c0-ef37df5d1f21";
     private static final String TOKEN = "relay-test-access-key-".repeat(3);
     private static final String PIN = "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD";
+
+    private static final class CountingOutput extends ByteArrayOutputStream {
+        int writes, flushes;
+        @Override public void write(byte[] bytes) throws IOException {
+            writes++;
+            super.write(bytes);
+        }
+        @Override public void flush() { flushes++; }
+    }
+
+    @Test public void jsonLengthAndUtf8PayloadUseOneWrite() throws Exception {
+        for (String json : new String[] {"{\"type\":\"heartbeat\"}", "{\"machineName\":\"广州电脑\"}"}) {
+            byte[] payload = json.getBytes(StandardCharsets.UTF_8);
+            CountingOutput output = new CountingOutput();
+            AndroidRelay.writeJsonPayload(output, payload);
+            assertEquals(1, output.writes);
+            assertEquals(1, output.flushes);
+            ByteBuffer frame = ByteBuffer.wrap(output.toByteArray());
+            assertEquals(payload.length, frame.getInt());
+            byte[] actual = new byte[frame.remaining()];
+            frame.get(actual);
+            assertArrayEquals(payload, actual);
+        }
+    }
+
+    @Test public void invalidJsonSizeDoesNotWriteAnything() {
+        for (int length : new int[] {0, AndroidRelay.MAX_JSON + 1}) {
+            CountingOutput output = new CountingOutput();
+            assertThrows(IOException.class, () -> AndroidRelay.writeJsonPayload(output, new byte[length]));
+            assertEquals(0, output.writes);
+            assertEquals(0, output.flushes);
+            assertEquals(0, output.size());
+        }
+    }
+
+    @Test public void maximumJsonSizeRetainsItsExactFrame() throws Exception {
+        byte[] payload = new byte[AndroidRelay.MAX_JSON];
+        java.util.Arrays.fill(payload, (byte) 'x');
+        CountingOutput output = new CountingOutput();
+        AndroidRelay.writeJsonPayload(output, payload);
+        assertEquals(payload.length + 4, output.size());
+        assertEquals(payload.length, ByteBuffer.wrap(output.toByteArray()).getInt());
+        assertEquals(1, output.writes);
+    }
 
     @Test public void optionsNormalizeWithoutExposingToken() {
         AndroidRelay.Options value = new AndroidRelay.Options(" example.test ", 56567,

@@ -8,6 +8,7 @@ not reused or stopped. This deliberately does not change firewall rules.
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -38,6 +39,23 @@ def require_foreground_phone_target(raw):
     return raw
 
 
+def write_android_endpoint(adb, package, endpoint):
+    if package not in ("com.remotedesk.viewerprobe", "com.remotedesk.relayhostprobe"):
+        raise ValueError("Only isolated diagnostic APK endpoints may be written")
+    path = "files/interop-endpoint.json"
+    # Older adbd versions do not reliably implement exec-in. Use raw shell stdin
+    # with an explicitly quoted inner command, then verify exact bytes before
+    # launching. Never expose credentials through argv, stdout or mismatch logs.
+    run(adb + ["shell", "-T", f"run-as {package} sh -c 'cat > {path}'"], data=endpoint)
+    try:
+        saved = run(adb + ["exec-out", "run-as", package, "cat", path])
+        if saved != endpoint:
+            raise RuntimeError("Diagnostic endpoint write verification failed")
+    except Exception:
+        run(adb + ["shell", "run-as", package, "rm", "-f", path], check=False)
+        raise
+
+
 def required_android_relay_probes(pairs):
     required = {}
     if any(pair.startswith("AndroidTo") for pair in pairs):
@@ -45,6 +63,53 @@ def required_android_relay_probes(pairs):
     if any(pair.endswith("ToAndroid") for pair in pairs):
         required["com.remotedesk.relayhostprobe"] = "experiments/AndroidRelayHostProbe/build/outputs/apk/debug/RemoteDeskAndroidRelayHostProbe-debug.apk"
     return required
+
+
+def android_rendering_evidence(samples):
+    """Require recent, sustained counter growth; one startup FPS is not a pass."""
+    if not samples:
+        return {"continuous": False}
+    last = samples[-1]
+    generation = last.get("ownerGeneration", 0)
+    eligible = [s for s in samples if generation > 0 and s.get("ownerGeneration") == generation
+                and s.get("geometryReady") and not s.get("failure")
+                and all(isinstance(s.get(key), (int, float)) for key in
+                        ("sampleUptimeMs", "receivedFrames", "presentedFrames"))]
+    if len(eligible) < 2 or eligible[-1] is not last:
+        return {"continuous": False}
+    first = eligible[0]
+    recent = [s for s in eligible if last["sampleUptimeMs"] - s["sampleUptimeMs"] <= 5000]
+    monotonic = all(b["sampleUptimeMs"] > a["sampleUptimeMs"] and
+                    b["receivedFrames"] >= a["receivedFrames"] and
+                    b["presentedFrames"] >= a["presentedFrames"]
+                    for a, b in zip(eligible, eligible[1:]))
+    presented = last["presentedFrames"] - first["presentedFrames"]
+    received = last["receivedFrames"] - first["receivedFrames"]
+    recent_presented = last["presentedFrames"] - recent[0]["presentedFrames"]
+    observation = last["sampleUptimeMs"] - first["sampleUptimeMs"]
+    recent_observation = last["sampleUptimeMs"] - recent[0]["sampleUptimeMs"]
+    return dict(continuous=monotonic and last["sampleUptimeMs"] - first["sampleUptimeMs"] >= 5000
+                and presented >= 3 and received >= 3 and recent_presented > 0,
+                presentedDelta=presented, receivedDelta=received, recentPresentedDelta=recent_presented,
+                observationMs=observation,
+                presentedFps=presented * 1000 / observation if monotonic and observation > 0 else 0,
+                recentPresentedFps=recent_presented * 1000 / recent_observation
+                if monotonic and recent_observation > 0 else 0)
+
+
+def rendering_meets_minimum(evidence, minimum_fps):
+    return bool(evidence.get("continuous") and
+                evidence.get("presentedFps", 0) >= minimum_fps and
+                evidence.get("recentPresentedFps", 0) >= minimum_fps)
+
+
+def require_h264_evidence(value, required):
+    # Windows names its encoding, while the Linux protocol uses 2 for H.264.
+    # A responsive JPEG fallback is valid interop, but not a hardware-video pass.
+    value["h264Active"] = value.get("encoding") in ("H264AnnexB", 2)
+    if required:
+        value["complete"] = value.get("complete", False) and value["h264Active"]
+    return value
 
 
 def main():
@@ -56,6 +121,12 @@ def main():
     parser.add_argument("--relay-server", help="Use native product relay transport in every selected direction, never LAN fallback")
     parser.add_argument("--relay-ssh-pin")
     parser.add_argument("--relay-tls-pin")
+    parser.add_argument("--require-android-h264", action="store_true",
+                        help="Android viewer directions must finish with active H.264 presentation")
+    parser.add_argument("--require-android-host-h264", action="store_true",
+                        help="Windows/Linux viewers of Android must finish with active H.264 presentation")
+    parser.add_argument("--min-android-fps", type=float, default=0,
+                        help="Minimum measured overall AND recent Android presentation FPS; 0 checks connectivity only")
     parser.add_argument("--android-host", action="store_true", help="Wait for normal Android host permission setup after desktop tests")
     parser.add_argument("--android-target-package", choices=("com.remotedesk.codecprobe", "com.remotedesk.relayhostprobe"),
                         default="com.remotedesk.codecprobe", help="Owned interaction fixture for an already-running direct Android host; never changes its password")
@@ -63,6 +134,8 @@ def main():
     parser.add_argument("--pairs", nargs="+", choices=("WindowsToLinux", "AndroidToLinux", "LinuxToWindows", "AndroidToWindows", "WindowsToAndroid", "LinuxToAndroid"),
                         default=["WindowsToLinux", "AndroidToLinux", "LinuxToWindows", "AndroidToWindows"])
     args = parser.parse_args()
+    if not math.isfinite(args.min_android_fps) or not 0 <= args.min_android_fps <= 240:
+        parser.error("--min-android-fps must be finite and between 0 and 240")
     if any(pair.endswith("ToAndroid") for pair in args.pairs) and not args.android_host:
         parser.error("Android target directions require --android-host")
     selected = set(args.pairs)
@@ -117,6 +190,10 @@ def main():
             if package in installed and installed[package] != hashes[relative]:
                 raise RuntimeError("Installed diagnostic APK does not match this build: " + package)
     report["selectedPairs"] = sorted(selected)
+    if any("Android" in pair for pair in selected):
+        report["androidDeviceKind"] = "emulator" if args.serial.startswith("emulator-") else "physical phone"
+        if report["androidDeviceKind"] == "emulator":
+            report["scope"] = "Windows/Linux physical machines and Android emulator; owned synthetic OS targets; not Android phone qualification"
     children = []; opened = []; remote = ""
     def emit(message): print(message, flush=True)
     def sh(command, **kw): return run(ssh + [command], **kw)
@@ -127,7 +204,17 @@ def main():
         if not relay_config: return
         deadline = time.monotonic() + 45
         while time.monotonic() < deadline:
-            devices = native_relay.list_devices(native_relay.RelayOptions.from_dict(relay_for(platform)))
+            try:
+                devices = native_relay.list_devices(native_relay.RelayOptions.from_dict(relay_for(platform)))
+            except (ConnectionError, TimeoutError) as error:
+                # Registration can outlive a transient directory-query failure.
+                # Keep evidence and the original bound; identity/auth failures
+                # are not retried or converted into a successful registration.
+                report.setdefault("directoryQueryErrors", []).append(
+                    dict(platform=platform, errorType=type(error).__name__))
+                write_report()
+                time.sleep(1)
+                continue
             own = [device for device in devices if device["deviceId"] == relay_ids[platform]]
             if own:
                 report["directoryEvidence"].append(dict(phase=platform + "Host", devices=own)); write_report(); return
@@ -153,7 +240,7 @@ def main():
         endpoint = json.dumps({"host": relay_config["serverAddress"] if relay_config else host,
                                "port": relay_config["port"] if relay_config else port,
                                "password": password, **route_config(platform)}).encode()
-        run(adb + ["exec-in", "run-as", "com.remotedesk.viewerprobe", "sh", "-c", "cat > files/interop-endpoint.json"], data=endpoint)
+        write_android_endpoint(adb, "com.remotedesk.viewerprobe", endpoint)
         run(adb + ["shell", "am", "start", "-W", "-n", "com.remotedesk.viewerprobe/com.remotedesk.agent.ViewerProbeLauncher"])
         samples = []
         try:
@@ -174,10 +261,16 @@ def main():
             after = read_target()
             (output / (label + ".png")).write_bytes(run(adb + ["exec-out", "screencap", "-p"]))
             (output / (label + "-samples.json")).write_text(json.dumps(samples, ensure_ascii=False, indent=2), encoding="utf-8")
-            moving = any(float(m.group(1)) > 0 for s in samples for m in [re.search(r"FPS\s*([\d.]+)", s.get("health", ""))] if m)
+            rendering = android_rendering_evidence(samples)
+            moving = rendering["continuous"]
             valid_input = after["clicks"] == before["clicks"] + 1 and inserted(before["text"], after["text"], "中文测试😀" + label + "42")
             route_verified = not relay_config or "公网中转" in samples[-1].get("health", "")
-            return {"complete": moving and valid_input and route_verified and not samples[-1]["failure"], "inputVerified": valid_input,
+            h264 = samples[-1].get("h264") is True
+            performance = rendering_meets_minimum(rendering, args.min_android_fps)
+            return {"complete": moving and valid_input and route_verified and not samples[-1]["failure"]
+                    and performance and (not args.require_android_h264 or h264), "inputVerified": valid_input,
+                    "minimumPresentedFps": args.min_android_fps, "performanceQualified": performance,
+                    "renderingEvidence": rendering, "h264Active": h264,
                     "continuousRendering": moving, "target": after, "lastState": samples[-1], "route": route_label,
                     "routeVerified": route_verified}
         finally: run(adb + ["shell", "am", "force-stop", "com.remotedesk.viewerprobe"], check=False)
@@ -192,7 +285,7 @@ def main():
         value["target"] = after; value["route"] = route_label
         value["complete"] = result.returncode == 0 and value.get("complete", False) and value["inputVerified"]
         if (folder / "failure.txt").exists(): value["failure"] = (folder / "failure.txt").read_text()
-        return value
+        return require_h264_evidence(value, args.require_android_host_h264 and platform == "Android")
     def linux_view(label, host, port, target, read_target, platform):
         before = read_target(); directory = remote + "/" + label
         config = dict(host=host, port=port, password=password, button=target["button"], editor=target["editor"], text=label + "中文42", **route_config(platform))
@@ -202,7 +295,7 @@ def main():
         value["inputVerified"] = after["clicks"] == before["clicks"] + 1 and inserted(before["text"], after["text"], config["text"])
         value["target"] = after; value["route"] = route_label
         value["complete"] = value["complete"] and value["inputVerified"]
-        return value
+        return require_h264_evidence(value, args.require_android_host_h264 and platform == "Android")
     try:
         remote = sh("mktemp -d /tmp/remotedesk-interop-XXXXXXXX").decode().strip()
         if not re.fullmatch(r"/tmp/remotedesk-interop-[A-Za-z0-9]{8}", remote): raise RuntimeError("Unexpected staging path")
@@ -219,6 +312,8 @@ def main():
                                      stdin=subprocess.PIPE, stdout=log, stderr=log)
             children.append(child); child.stdin.write(json.dumps({"password": password, **route_config("Linux")}).encode()+b"\n"); child.stdin.close()
             for _ in range(100 if relay_config else 45):
+                if child.poll() is not None:
+                    raise RuntimeError("Linux host exited before becoming ready; see linux-host-process.log and Linux evidence")
                 time.sleep(.5)
                 try: endpoint = remote_json(remote + "/host/endpoint.json"); break
                 except Exception: pass
@@ -271,7 +366,7 @@ def main():
                 package = "com.remotedesk.relayhostprobe"
                 run(adb + ["shell", "run-as", package, "mkdir", "-p", "files"])
                 endpoint = json.dumps(dict(password=password, **route_config("Android"))).encode()
-                run(adb + ["exec-in", "run-as", package, "sh", "-c", "cat > files/interop-endpoint.json"], data=endpoint)
+                write_android_endpoint(adb, package, endpoint)
                 run(adb + ["shell", "am", "start", "-W", "-n", package + "/com.remotedesk.agent.HostProbeLauncher"])
                 emit("ANDROID_HOST_GATE: normal test-app accessibility + Start host + screen-sharing consent required; waiting up to 10 minutes")
                 deadline = time.monotonic() + 600
@@ -321,8 +416,15 @@ def main():
             try: child.wait(timeout=15)
             except subprocess.TimeoutExpired: child.terminate(); child.wait(timeout=5)
         for log in opened: log.close()
-        run(adb + ["shell", "am", "force-stop", "com.remotedesk.viewerprobe"], check=False)
+        if selected & {"AndroidToLinux", "AndroidToWindows"}:
+            run(adb + ["shell", "am", "force-stop", "com.remotedesk.viewerprobe"], check=False)
         if relay_config and args.android_host:
+            try:
+                (output / "android-host.log").write_bytes(run(adb + ["exec-out", "run-as",
+                    "com.remotedesk.relayhostprobe", "cat",
+                    "files/RemoteDeskDiagnostics/remotedesk-android-current.log"]))
+            except Exception as error:
+                report["androidHostLogErrorType"] = type(error).__name__
             run(adb + ["shell", "am", "force-stop", "com.remotedesk.relayhostprobe"], check=False)
         if remote:
             # Keep the bounded remote evidence directory for inspection; cleanup

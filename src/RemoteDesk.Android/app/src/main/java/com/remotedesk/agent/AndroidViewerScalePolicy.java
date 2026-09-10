@@ -30,4 +30,13 @@ final class AndroidViewerScalePolicy {
     static int scaledHeight(int frameHeight, float scale) {
         return Math.max(1, Math.round(frameHeight * scale));
     }
+
+    static boolean shouldResizeSurfaceBuffer(
+        int bufferWidth, int bufferHeight, int frameWidth, int frameHeight) {
+        return frameWidth > 0 && frameHeight > 0 &&
+            frameWidth <= RemoteDeskProtocol.MAX_FRAME_DIMENSION &&
+            frameHeight <= RemoteDeskProtocol.MAX_FRAME_DIMENSION &&
+            (long) frameWidth * frameHeight <= RemoteDeskProtocol.MAX_FRAME_PIXELS &&
+            (bufferWidth != frameWidth || bufferHeight != frameHeight);
+    }
 }

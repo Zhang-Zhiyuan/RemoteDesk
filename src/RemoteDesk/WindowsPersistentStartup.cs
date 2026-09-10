@@ -281,7 +281,7 @@ internal static class WindowsPersistentStartup
         ValidateAcl(directory.GetAccessControl());
     }
 
-    private static void ValidateProtectedFile(string path)
+    internal static void ValidateProtectedFile(string path)
     {
         var file = new FileInfo(path);
         if (!file.Exists || (file.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("常驻程序不存在或是链接。");

@@ -58,6 +58,18 @@ uses the actual visible-window rectangle (excluding system bars), since the IME
 WindowInsets API is available only on API 30+. This is probe telemetry, not a
 change to the production keyboard implementation.
 
+`android_resolution_surface_verify.py --adb <adb> --serial <device> --output
+<fresh-directory> [--expect-native]` compares the Surface buffer dimensions during
+fit, original-pixel viewing, keyboard changes and rotation. The native expectation
+requires the buffer to match the received frame, not the fitted View; the report
+also checks session continuity. This measures geometry and Surface callbacks, not
+objective image sharpness or end-to-end latency. The probe-only `original_size`
+and `fit_size` actions call the same product viewport operations as the menu.
+The landscape keyboard phase also checks that fitted pixels stay the same size
+while the IME is visible, that closing it restores fit, and that the composer
+requests a non-fullscreen IME. The desktop is cropped/panned around the cursor;
+this does not reduce the received resolution or certify every third-party IME.
+
 Fresh system images may display a first-fullscreen tutorial. The verifier only
 acknowledges the identified Android immersive tutorial while the probe owns app
 focus; it does not approve arbitrary dialogs or permissions. `--suite fullscreen`
@@ -79,6 +91,11 @@ commands; the listener stays bound to 127.0.0.1. Screen holds expire after ten
 seconds. A forced drop waits two seconds before accepting the next fixture
 connection, leaving time to verify disabled controls and old input cleanup.
 These tests do not change the phone's Wi-Fi, permissions or system settings.
+
+Probe snapshots use same-directory atomic rename so API 26 external ADB readers
+never see a half-written JSON document. The Windows synthetic peer also retries
+brief sharing violations when replacing its evidence file; it does not truncate
+the previous snapshot or turn that reader/writer race into a fake disconnect.
 
 `experiments/android_scroll_ui_verify.py` adds jitter, batched direction reversal,
 finger replacement and pinch-drift cases in both input modes (37 assertions).
@@ -110,3 +127,14 @@ a new TCP port and use `--phase moved --old-port <previous>` to test confirmed
 relocation and cancellation. Both phases take `--adb`, `--serial`, `--server`
 (the peer's server-state.json) and a fresh `--output` directory. They preserve the
 earlier `Upgrade-Node` history test record and do not clear application data.
+
+Interop snapshots expose cumulative received/presented frame counts and device
+uptime. These are read under the product health tracker lock without advancing
+its FPS sampling window. `run_physical_interop.py` requires at least five seconds
+of same-session counter growth and a recent presented frame; a startup-only FPS
+spike is not continuous rendering. `--require-android-h264` additionally rejects
+a final JPEG fallback. Older reports using only `any(FPS > 0)` cannot prove
+continuous rendering; retain and recheck them instead of treating them as passes.
+Use `--min-android-fps 15` to require both the observed average and recent
+presentation rate to reach 15 FPS. The default (0) checks basic connectivity,
+not smooth video; counter-derived rates are recorded independently of UI labels.

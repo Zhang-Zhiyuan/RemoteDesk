@@ -2490,7 +2490,12 @@ internal sealed class FfmpegDesktopH264Capture : IDisposable
         char[] buffer = new char[1024];
         try
         {
-            while (!_captureCancellation.IsCancellationRequested)
+            // stdout EOF / a failed first frame cancels video reading before
+            // stderr has necessarily delivered the encoder's actual error.
+            // Drain that separate pipe to EOF, including buffered tail chunks.
+            // Fail/Dispose terminate the owned process; diagnostics waiting and
+            // reader shutdown remain bounded and disposal closes the pipe.
+            while (true)
             {
                 int read = await _process.StandardError.ReadAsync(
                     buffer.AsMemory()).ConfigureAwait(false);

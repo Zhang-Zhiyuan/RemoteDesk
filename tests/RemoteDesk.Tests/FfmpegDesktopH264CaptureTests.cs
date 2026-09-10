@@ -3543,6 +3543,35 @@ public sealed class FfmpegDesktopH264CaptureTests
         }
     }
 
+    [Fact]
+    public async Task StdoutFailureStillDrainsBufferedEncoderDiagnosticTail()
+    {
+        // The error pipe becomes readable only AFTER video failure cancels
+        // capture. Its cause is beyond the first 1024-character reader chunk.
+        string diagnostic = new string('x', 2048) + " delayed encoder root cause";
+        FfmpegDesktopH264CaptureStartResult result =
+            await FfmpegDesktopH264Capture.TryStartAsync(
+                CreateOptions(FfmpegDesktopCaptureBackend.GdiGrabBounds),
+                "fake-ffmpeg.exe",
+                (_, _) => FakeFfmpegProcess.FailingAfterOutputEnds(diagnostic),
+                startupTimeout: TimeSpan.FromMilliseconds(500),
+                stallTimeout: TimeSpan.FromSeconds(2),
+                CancellationToken.None);
+
+        Assert.False(result.Started);
+        Assert.Contains("delayed encoder root cause", result.FailureDetail);
+    }
+
+    private sealed class ExitGatedTextReader(string text, Task exit) : StringReader(text)
+    {
+        public override async ValueTask<int> ReadAsync(
+            Memory<char> buffer, CancellationToken cancellationToken = default)
+        {
+            await exit.WaitAsync(cancellationToken);
+            return await base.ReadAsync(buffer, cancellationToken);
+        }
+    }
+
     private sealed class FakeFfmpegProcess :
         IFfmpegDesktopH264Process
     {
@@ -3563,10 +3592,13 @@ public sealed class FfmpegDesktopH264CaptureTests
             bool hasExited,
             TimeSpan waitForExitDelay,
             bool exitOnGracefulRequest,
-            bool exitOnKill)
+            bool exitOnKill,
+            bool delayErrorUntilExit = false)
         {
             _standardOutput = standardOutput;
-            _standardError = new StringReader(standardError);
+            _standardError = delayErrorUntilExit
+                ? new ExitGatedTextReader(standardError, _completion.Task)
+                : new StringReader(standardError);
             _hasExited = hasExited;
             _waitForExitDelay = waitForExitDelay;
             _exitOnGracefulRequest =
@@ -3646,6 +3678,14 @@ public sealed class FfmpegDesktopH264CaptureTests
                 waitForExitDelay: default,
                 exitOnGracefulRequest: true,
                 exitOnKill: true);
+        }
+
+        public static FakeFfmpegProcess FailingAfterOutputEnds(string standardError)
+        {
+            return new FakeFfmpegProcess(
+                new MemoryStream(), standardError, hasExited: false,
+                waitForExitDelay: default, exitOnGracefulRequest: true,
+                exitOnKill: true, delayErrorUntilExit: true);
         }
 
         public bool TryRequestGracefulExit()

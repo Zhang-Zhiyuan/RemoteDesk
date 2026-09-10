@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import time
+from collections import deque
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/linux"))
@@ -65,7 +66,9 @@ def source(output):
 def start_xvfb(output):
     read_fd, write_fd = os.pipe()
     log = (output / "xvfb.log").open("w")
-    child = subprocess.Popen(["Xvfb", "-displayfd", str(write_fd), "-screen", "0", "1920x1080x24",
+    # Keep the owned X server alive when a short probe closes its last client.
+    # A reset would rewrite -displayfd after its parent has closed that pipe.
+    child = subprocess.Popen(["Xvfb", "-noreset", "-displayfd", str(write_fd), "-screen", "0", "1920x1080x24",
                               "-nolisten", "tcp"], pass_fds=(write_fd,), stdout=log, stderr=log)
     os.close(write_fd)
     try:
@@ -90,6 +93,16 @@ def stop(child):
         except subprocess.TimeoutExpired: child.kill(); child.wait(timeout=3)
 
 
+def linux_viewer_continuity(transport_active, first_frame_at, last_frame_at, now):
+    """A startup burst followed by EOF/frozen display is not a live viewer."""
+    age = None if last_frame_at is None else now - last_frame_at
+    return dict(continuous=bool(transport_active and first_frame_at is not None
+                               and last_frame_at is not None
+                               and last_frame_at - first_frame_at >= 5
+                               and 0 <= age <= 5),
+                transportActive=bool(transport_active), lastFrameAgeSeconds=age)
+
+
 def host(config, output):
     children = []
     logs = []
@@ -101,17 +114,23 @@ def host(config, output):
                                           stdout=source_log, stderr=source_log))
         for _ in range(100):
             if (output / "target.json").exists(): break
+            if children[-1].poll() is not None: raise RuntimeError("Synthetic target exited; see source.log")
             time.sleep(.1)
         else: raise RuntimeError("Synthetic target failed")
         with socket.socket() as reservation:
             reservation.bind(("0.0.0.0", 0))
             port = reservation.getsockname()[1]
         log = (output / "host.log").open("w"); logs.append(log)
+        fixture_arguments = []
+        if config.get("featureFixtures") is True:
+            returned_file = output / "return-fixture.txt"
+            returned_file.write_text("RemoteDesk owned return fixture 中文😀\n", encoding="utf-8")
+            fixture_arguments = ["--return-file", str(returned_file)]
         child = subprocess.Popen([sys.executable, "-u", str(ROOT / "scripts/linux/remotedesk_linux_host.py"),
             "--host", "0.0.0.0", "--port", str(port), "--password-fd", "0", "--no-discovery",
             "--display", os.environ["DISPLAY"], "--width", "1920", "--height", "1080", "--fps", "30",
             "--serve-seconds", "1800", "--machine-name", "RemoteDesk-owned-interop-target",
-            "--receive-dir", str(output / "receive")], stdin=subprocess.PIPE, stdout=log, stderr=log,
+            "--receive-dir", str(output / "receive"), *fixture_arguments], stdin=subprocess.PIPE, stdout=log, stderr=log,
             env={**os.environ, "REMOTEDESK_AUTO_INSTALL": "0"})
         children.append(child)
         child.stdin.write(config["password"].encode()); child.stdin.close()
@@ -151,6 +170,32 @@ def viewer(config, output):
               "scope": "physical Linux product ViewerConnection and lossless Tk rendering on owned Xvfb",
               "route": "native public relay TLS/TCP (no UDP/LAN fallback)" if relay_options else "direct LAN"}
     started = time.monotonic()
+    # UI status events are deliberately coalesced by the product. Preserve the
+    # pre-coalescing diagnostics and wire progress separately so a subsequent
+    # EOF cannot hide the heartbeat timeout which actually closed the socket.
+    raw_status = deque(maxlen=512)
+    wire_progress = deque(maxlen=1024)
+    original_event = client._put_event
+    original_read = app.read_message
+    def measured_event(event, value):
+        if event in ("viewer_status", "viewer_error", "viewer_disconnected", "viewer_auth_failed"):
+            raw_status.append(dict(ms=(time.monotonic() - started) * 1000,
+                                   event=event, detail=str(value)))
+        original_event(event, value)
+    def measured_read(sock, session):
+        read_started = time.monotonic()
+        try:
+            kind, payload = original_read(sock, session)
+        except Exception as error:
+            wire_progress.append(dict(ms=(time.monotonic() - started) * 1000,
+                                      error=type(error).__name__))
+            raise
+        wire_progress.append(dict(ms=(time.monotonic() - started) * 1000,
+                                  readMs=(time.monotonic() - read_started) * 1000,
+                                  kind=kind, payloadBytes=len(payload)))
+        return kind, payload
+    client._put_event = measured_event
+    app.read_message = measured_read
     lags = {}
     original_fresh = app.is_h264_submission_fresh
     reserve_failures = []
@@ -169,6 +214,7 @@ def viewer(config, output):
     app.is_h264_submission_fresh = measured_fresh
     previous_hash = None
     photo = None
+    first_frame_at = last_frame_at = None
     def inputs():
         w, h = client.remote_width, client.remote_height
         def click(key):
@@ -183,7 +229,7 @@ def viewer(config, output):
         root.after(1000, text)
         report["inputQueued"] = True
     def pump():
-        nonlocal previous_hash, photo
+        nonlocal previous_hash, photo, first_frame_at, last_frame_at
         try:
             for _ in range(100):
                 try: event, wrapped = events.get_nowait()
@@ -196,6 +242,9 @@ def viewer(config, output):
                     w, h, png, decode_ms, dw, dh, backend = value
                     photo = app.create_tk_frame_photo(png, master=root)
                     image_label.configure(image=photo)
+                    last_frame_at = time.monotonic()
+                    if first_frame_at is None:
+                        first_frame_at = last_frame_at
                     digest = hashlib.sha256(png).digest()
                     if previous_hash is not None and previous_hash != digest: report["changes"] += 1
                     previous_hash = digest
@@ -208,7 +257,11 @@ def viewer(config, output):
                 elif event in ("viewer_status", "viewer_error", "viewer_disconnected"):
                     report["status"].append([event, str(value)])
             if time.monotonic() - started > (90 if relay_options else 28):
-                report["complete"] = report["frames"] >= 30 and report["changes"] >= 5 and report["inputQueued"]
+                report["renderingEvidence"] = linux_viewer_continuity(
+                    not client.stop_event.is_set() and client.sock is not None,
+                    first_frame_at, last_frame_at, time.monotonic())
+                report["complete"] = (report["frames"] >= 30 and report["changes"] >= 5
+                                      and report["inputQueued"] and report["renderingEvidence"]["continuous"])
                 report["encoding"] = client.last_rendered_encoding
                 root.destroy(); return
             root.after(10, pump)
@@ -218,6 +271,10 @@ def viewer(config, output):
         client.start(); root.after(10, pump); root.mainloop()
     finally:
         client.close(); stop(display)
+        client._put_event = original_event
+        app.read_message = original_read
+        report["rawStatus"] = list(raw_status)
+        report["wireProgress"] = list(wire_progress)
         app.is_h264_submission_fresh = original_fresh
         app.H264AnnexBDecoder._try_reserve_correlation = original_reserve
         report["correlationLags"] = lags

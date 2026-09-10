@@ -68,6 +68,7 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
     private MediaCodec codec;
     private MediaCodec frameRenderedCodec;
     private AndroidH264DecoderDiagnostics.DecoderCandidate activeCandidate;
+    private AndroidH264SpsCompatibility spsCompatibility;
     private boolean resetRequested;
     private boolean recoveryNeeded = true;
     private boolean recoveryRequestReported;
@@ -438,7 +439,13 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
             }
 
             inputBuffer.clear();
-            inputBuffer.put(accessUnit.bytes);
+            int previousRewrites = spsCompatibility.rewrittenParameterSetCount();
+            spsCompatibility.putAccessUnit(inputBuffer, accessUnit.bytes);
+            int inputLength = inputBuffer.position();
+            if (previousRewrites == 0 && spsCompatibility.rewrittenParameterSetCount() > 0) {
+                AndroidSessionLog.info("Android 8.0 software AVC compatibility enabled for " +
+                    "zero-reference SPS buffering metadata; coded picture data is unchanged.");
+            }
             if (!isCurrentGeneration(accessUnit.generation, surface)) {
                 return;
             }
@@ -446,7 +453,7 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
             codec.queueInputBuffer(
                 inputIndex,
                 0,
-                accessUnit.bytes.length,
+                inputLength,
                 presentationTimeUs,
                 0);
             renderedOutput |= drainOutputs(
@@ -530,6 +537,7 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
                                 ? candidateCodec
                                 : null;
                             activeCandidate = candidate;
+                            spsCompatibility = new AndroidH264SpsCompatibility(candidate.codecName, Build.VERSION.SDK_INT);
                             nextPresentationTimeUs = 0;
                             consecutiveAccessUnitsWithoutOutput = 0;
                             activeCandidateReported = false;
@@ -1019,6 +1027,7 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
                 frameRenderedCodec = null;
             }
             activeCandidate = null;
+            spsCompatibility = null;
             activeCandidateReported = false;
             activeCandidateStartedAtNanos = 0L;
             activeCodecGeneration = -1;

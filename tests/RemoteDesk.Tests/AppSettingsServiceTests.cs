@@ -5,6 +5,18 @@ namespace RemoteDesk.Tests;
 public sealed class AppSettingsServiceTests
 {
     [Fact]
+    public void RelayRouteOptimizationDefaultsOnAndOptOutIsPersisted()
+    {
+        using var temp = TemporaryDirectory.Create();
+        var service = new AppSettingsService(Path.Combine(temp.Path, "settings.json"));
+        Assert.True(service.Load().Relay.OptimizeNetworkRoute);
+        var settings = service.Load();
+        settings.Relay.OptimizeNetworkRoute = false;
+        Assert.True(service.Save(settings).Success);
+        Assert.False(service.Load().Relay.OptimizeNetworkRoute);
+    }
+
+    [Fact]
     public void SaveReportsDirectoryConflictAndCanRetryAfterItIsRemoved()
     {
         using var temp = TemporaryDirectory.Create();

@@ -1675,7 +1675,11 @@ def convert_frame_with_pillow(
         with image_module.open(io.BytesIO(encoded)) as image:
             if image.size != encoded_size:
                 return None
-            image = image.convert("RGB")
+            # JPEG/FFmpeg frames are normally already RGB. convert("RGB")
+            # would allocate and copy a full source frame even in that case
+            # (especially costly for 4K), without changing any pixels.
+            if image.mode != "RGB":
+                image = image.convert("RGB")
             resampling_owner = getattr(image_module, "Resampling", image_module)
             resample = getattr(resampling_owner, "LANCZOS", 1)
             fitted_size = calculate_fitted_image_size(
@@ -3127,6 +3131,7 @@ class ViewerConnection:
         self.heartbeat_lock = threading.Lock()
         self.heartbeat_active = False
         self.last_ping_sent_at = 0.0
+        self.last_message_received_at = 0.0
         self.awaiting_pong_since: float | None = None
         self.frame_condition = threading.Condition()
         self.pending_frame: tuple[int, int, int, int, int, bytes, float] | None = None
@@ -3537,6 +3542,7 @@ class ViewerConnection:
         with self.heartbeat_lock:
             self.heartbeat_active = True
             self.last_ping_sent_at = activated_at
+            self.last_message_received_at = activated_at
             self.awaiting_pong_since = None
 
     def _deactivate_heartbeat(self) -> None:
@@ -3548,6 +3554,12 @@ class ViewerConnection:
         with self.heartbeat_lock:
             if self.heartbeat_active:
                 self.awaiting_pong_since = None
+
+    def _mark_message_received(self, now: float | None = None) -> None:
+        received_at = time.monotonic() if now is None else now
+        with self.heartbeat_lock:
+            if self.heartbeat_active:
+                self.last_message_received_at = received_at
 
     def _write_heartbeat_ping(self, now: float) -> bool:
         # Record the outstanding probe before the wire write, but never hold
@@ -3635,7 +3647,7 @@ class ViewerConnection:
                 return
 
     def _liveness_step(self, now: float | None = None) -> bool:
-        """Expire an unanswered probe without acquiring ``write_lock``."""
+        """Expire an idle inbound channel without acquiring ``write_lock``."""
 
         if self.stop_event.is_set():
             return False
@@ -3646,6 +3658,9 @@ class ViewerConnection:
                 and self.awaiting_pong_since is not None
                 and current >= self.awaiting_pong_since
                 and current - self.awaiting_pong_since
+                >= VIEWER_HEARTBEAT_TIMEOUT_SECONDS
+                and current >= self.last_message_received_at
+                and current - self.last_message_received_at
                 >= VIEWER_HEARTBEAT_TIMEOUT_SECONDS
             )
             if timed_out:
@@ -4031,6 +4046,13 @@ class ViewerConnection:
                 while not self.stop_event.is_set():
                     try:
                         message_type, payload = read_message(sock, self.session)
+                        # Match Windows/Android: complete authenticated frames,
+                        # clipboard/file messages and Pong all prove inbound
+                        # liveness. On a slow TCP relay Pong can be queued behind
+                        # video; receiving that video must not cause a false
+                        # disconnect. Partial or unauthenticated bytes do not
+                        # refresh this deadline, and Pong state stays separate.
+                        self._mark_message_received()
                         rearm_tcp_quickack(sock)
                     except socket.timeout:
                         continue

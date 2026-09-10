@@ -21,6 +21,16 @@ internal static class Program
         var c = config.RootElement;
         var output = Path.GetFullPath(c.GetProperty("output").GetString()!);
         Directory.CreateDirectory(output);
+        if (args[0] == "secure-desktop") return WindowsSecureDesktopProbe.Run(c.Clone(), output);
+        if (args[0] == "desktop-status")
+        {
+            Save(Path.Combine(output, "desktop.json"), new {
+                desktop = WindowsInteractiveDesktopProbe.InspectCurrent(),
+                foregroundAvailable = GetForegroundWindow() != nint.Zero,
+                scope = "Read-only current Windows desktop availability; no capture or input"
+            });
+            return 0;
+        }
         if (args[0] == "startup-status")
         {
             Save(Path.Combine(output, "status.json"), new
@@ -32,6 +42,7 @@ internal static class Program
             return 0;
         }
         if (args[0] == "transport") return RelayThroughputProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
+        if (args[0] == "features") return FeatureAuditProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "android-lock") return AndroidLockContinuityProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         var cursor = Cursor.Position;
         // Hardware Present correctly reports occlusion when the local monitor
@@ -251,9 +262,16 @@ internal static class Program
         void CheckForeground()
         {
             if (!foregroundGuardArmed || closing || OwnsForeground) return;
-            File.WriteAllText(Path.Combine(output, "failure.txt"),
-                "Safety stop: owned Windows input target lost foreground. No automatic refocus/retry.");
-            Close();
+            GetWindowThreadProcessId(GetForegroundWindow(), out uint foregroundPid);
+            string foregroundProcess = "unavailable";
+            try { if (foregroundPid != 0) { using var process = Process.GetProcessById((int)foregroundPid); foregroundProcess = process.ProcessName; } }
+            catch (Exception error) when (error is ArgumentException or System.ComponentModel.Win32Exception or InvalidOperationException) { }
+            try { File.WriteAllText(Path.Combine(output, "failure.txt"),
+                "Safety stop: owned Windows input target lost foreground. No automatic refocus/retry. " +
+                $"Foreground process: {foregroundProcess} (PID {foregroundPid}); pointer={Cursor.Position}; " +
+                $"ownedBounds={Bounds}; expectedButton={button.RectangleToScreen(button.ClientRectangle)}; " +
+                $"desktop={WindowsInteractiveDesktopProbe.InspectCurrent()}."); }
+            finally { Close(); }
         }
         public Target(JsonElement config, string output)
         {

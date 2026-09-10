@@ -146,6 +146,7 @@ final class AndroidRelayPanel extends LinearLayout {
                 pin.getText().toString(), deviceId, publish.isChecked());
             AndroidRelaySettings.save(getContext(), options);
             saved = options; epoch++; devices.removeAllViews();
+            AndroidRelay.close(pendingSocket);
             applyHostSettings();
             status.setText("配置已加密保存；本机上线仍需要启动被控端。");
             refresh();
@@ -173,7 +174,7 @@ final class AndroidRelayPanel extends LinearLayout {
             List<AndroidRelay.Device> result = null;
             String identityError = null;
             try {
-                result = AndroidRelay.listDevices(options, socket -> {
+                result = AndroidRelay.listDevices(getContext(), options, socket -> {
                     pendingSocket = socket;
                     if (socket != null && (!active || closed || epoch != generation)) AndroidRelay.close(socket);
                 });

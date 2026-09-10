@@ -117,6 +117,8 @@ public final class RemoteDeskViewerActivity extends Activity {
     private volatile AndroidH264SurfaceDecoder h264Decoder;
     private int frameWidth;
     private int frameHeight;
+    private int surfaceBufferWidth;
+    private int surfaceBufferHeight;
     private volatile boolean h264SurfaceActive;
     private WifiManager.WifiLock viewerWifiLock;
     private DecodedViewerFrame displayedFrame;
@@ -322,7 +324,9 @@ public final class RemoteDeskViewerActivity extends Activity {
         if (chrome == null) return;
         if (open && !inputReady(connectionOwner)) { toast("等待可控制的远端画面"); return; }
         releaseViewerGesture();
+        viewport.keyboard(open);
         chrome.keyboard(open);
+        refreshInteraction();
         android.view.inputmethod.InputMethodManager ime =
             (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
         if (open) {
@@ -724,13 +728,22 @@ public final class RemoteDeskViewerActivity extends Activity {
         ViewerConnectionOwner owner = null;
         Socket connectedSocket = null;
         try {
-            connectedSocket = relayOptions == null ? new Socket() : AndroidRelay.newSocket(relayOptions);
+            if (relayOptions == null) connectedSocket = new Socket();
+            else {
+                try (AndroidRelayNetworkSelector.Dial dial = new AndroidRelayNetworkSelector.Dial()) {
+                    pendingConnectionSocket = dial;
+                    if (!running.get()) throw new IOException("连接已取消。");
+                    connectedSocket = AndroidRelayNetworkSelector.connect(getApplicationContext(), relayOptions,
+                        dial, RemoteDeskViewerActivity::configureViewerSocket);
+                }
+            }
             pendingConnectionSocket = connectedSocket;
             if (!running.get()) throw new IOException("连接已取消。");
             configureViewerSocket(connectedSocket);
             connectedSocket.setSoTimeout(AUTHENTICATION_TIMEOUT_MILLIS);
             if (relayOptions == null) connectedSocket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MILLIS);
-            else AndroidRelay.connectViewer((javax.net.ssl.SSLSocket) connectedSocket, relayOptions);
+            else AndroidRelay.exchange(connectedSocket,
+                AndroidRelay.request(relayOptions, "viewer").put("deviceId", relayOptions.deviceId));
             if (!running.get()) throw new IOException("连接已取消。");
             RemoteDeskTransport.SecureSession connectedSession =
                 RemoteDeskTransport.authenticateClient(
@@ -1472,6 +1485,19 @@ public final class RemoteDeskViewerActivity extends Activity {
 
     private void updateH264SurfaceLayout() {
         if (videoLayer == null || viewerFrame == null || frameWidth <= 0 || frameHeight <= 0) return;
+        ViewerConnectionOwner owner = connectionOwner;
+        if (surfaceView != null && owner != null &&
+            owner.presentation.encoding() == RemoteDeskProtocol.FRAME_ENCODING_H264_ANNEX_B &&
+            AndroidViewerScalePolicy.shouldResizeSurfaceBuffer(
+                surfaceBufferWidth, surfaceBufferHeight, frameWidth, frameHeight)) {
+            // Keep decoder output independent of the fitted View dimensions.
+            // Only a new source resolution changes the buffer; zoom, keyboard
+            // and window resizing are compositor transforms, not new buffers.
+            // All callers run on the SurfaceView's UI thread.
+            surfaceView.getHolder().setFixedSize(frameWidth, frameHeight);
+            surfaceBufferWidth = frameWidth;
+            surfaceBufferHeight = frameHeight;
+        }
         boolean newFrameSize = viewport.frameWidth != frameWidth || viewport.frameHeight != frameHeight;
         if (newFrameSize) releaseViewerGesture();
         viewport.geometry(viewerFrame.getWidth(), viewerFrame.getHeight(), frameWidth, frameHeight);

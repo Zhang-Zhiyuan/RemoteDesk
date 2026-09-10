@@ -1,4 +1,4 @@
-# 构建产物与历史清单
+# 打包与发布
 
 本目录只跟踪本说明和 `RemoteDesk-release-manifest.json`。缓存、签名材料、
 截图、设备配置和私有诊断报告保留在本地。供用户下载的成品放在根目录
@@ -16,13 +16,11 @@ Linux 系统 Python/ARM64 安装见 [Linux-SystemPackage](../docs/Linux-SystemPa
 需要发布时，先在最终源码上重新构建、验证，再将 Windows EXE 及必要附带文件、
 Android APK 和 Linux 安装包整理到 `release/`。该目录不放日志、中间产物和旧版备份。
 
-## 历史记录
+## 发布清单
 
-随源码保留的 [发布清单](RemoteDesk-release-manifest.json) 只记录历史 1.0.0
-制品的工具链和 SHA-256，不对应当前源码快照。最新 Linux 优化和 Android 1.0.1
-不能用该清单冒充共同版本的完整发布包。
+随包更新的 [发布清单](RemoteDesk-release-manifest.json) 记录构建所用的源码提交、
+工具链和各成品的 SHA-256。核对版本时以清单中的 `sourceRevision` 和文件哈希为准，
+不以文件修改时间判断。发布后的开发提交不代表下载包已经更新。
 
 旧文档中的 `artifacts/...` 是本地历史证据路径，不是公开下载链接。
-原始测试证据和旧开发历史仍保留在本地，未将含个人设备信息的目录上传。
-当前源码的实测范围与尚未覆盖项见
-[最新复核报告](../docs/OptimizationRecheck-20260908.md)。
+原始测试证据和旧开发历史保留在本地，不上传含个人设备信息的目录。

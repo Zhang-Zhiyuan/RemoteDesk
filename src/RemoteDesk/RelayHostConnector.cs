@@ -178,7 +178,8 @@ internal sealed class RelayHostConnector : IDisposable
             }
 
             PublishStatus(
-                $"已上线到中继 {options.ServerAddress}:{options.Port}");
+                $"已上线到中继 {options.ServerAddress}:{options.Port} · 本地端点 " +
+                RelayNetworkPathSelector.DescribeLocalEndpoint(relayClient.Client.LocalEndPoint));
             Task heartbeat = RunHeartbeatAsync(
                 relayStream,
                 writeLock,
@@ -298,10 +299,7 @@ internal sealed class RelayHostConnector : IDisposable
         var localClient = new TcpClient();
         using var handshake = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         handshake.CancelAfter(TimeSpan.FromSeconds(10));
-        NetworkUtils.ConfigureLowLatencyTcpClient(
-            localClient,
-            32 * 1024,
-            RemoteViewerClient.FrameReceiveBufferBytes);
+        RelayLoopbackPolicy.Configure(localClient);
         try
         {
             await localClient.ConnectAsync(
@@ -322,7 +320,8 @@ internal sealed class RelayHostConnector : IDisposable
         {
             (relayClient, relayStream) = await RelayTls.ConnectAsync(
                     options,
-                    handshake.Token)
+                    handshake.Token,
+                    dataTunnel: true)
                 .ConfigureAwait(false);
             await RelayTls.WriteJsonAsync(
                     relayStream,

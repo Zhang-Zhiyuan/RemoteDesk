@@ -16,6 +16,24 @@ import remotedesk_protocol_probe as wire
 import remotedesk_linux_host as host
 
 
+def save_snapshot(path, value, retry_seconds=.5):
+    """Keep telemetry atomic even while Windows ADB-test readers hold it open."""
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    deadline = time.monotonic() + retry_seconds
+    while True:
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError:
+            # Windows readers may briefly deny rename/delete sharing. Do not
+            # disconnect the synthetic peer for that transient evidence race,
+            # or truncate the last complete snapshot as a workaround.
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.01)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--fixtures", required=True)
@@ -54,9 +72,7 @@ def main():
     save_lock = threading.Lock()
     def save():
         with save_lock:
-            temp = output / "server-state.tmp"
-            temp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-            temp.replace(output / "server-state.json")
+            save_snapshot(output / "server-state.json", report)
     listener = socket.socket(); listener.bind(("127.0.0.1",0)); listener.listen(2); listener.settimeout(1)
     report["port"] = listener.getsockname()[1]; save()
     discovery = None
@@ -130,6 +146,7 @@ def main():
                                 save()
                     except Exception as error:
                         report["lastReaderEnd"]=type(error).__name__
+                        report["lastReaderMessage"]=str(error)
                     finally: stopped.set()
                 thread=threading.Thread(target=reader,daemon=True); thread.start()
                 index=0

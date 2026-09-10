@@ -4,7 +4,6 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.DataInputStream;
-import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -38,6 +37,20 @@ final class AndroidRelay {
     static final int PORT = 56567;
     static final int MAX_JSON = 65536;
     static final int TIMEOUT_MS = 12000;
+    static final int LOOPBACK_BUFFER_BYTES = 16 * 1024;
+    static final int COPY_BUFFER_BYTES = 16 * 1024;
+
+    static int hostSendBufferBytes(java.net.InetAddress peer, int directBufferBytes) {
+        return peer != null && peer.isLoopbackAddress() ? LOOPBACK_BUFFER_BYTES : directBufferBytes;
+    }
+
+    // Called only for our private 127.0.0.1 host adapter. Never shrink the
+    // public TLS socket's receive window: that path needs WAN autotuning.
+    static void configureLoopbackSocket(Socket socket) {
+        try { socket.setReceiveBufferSize(LOOPBACK_BUFFER_BYTES); } catch (IOException | RuntimeException ignored) { }
+        try { socket.setSendBufferSize(LOOPBACK_BUFFER_BYTES); } catch (IOException | RuntimeException ignored) { }
+        try { socket.setTcpNoDelay(true); } catch (IOException | RuntimeException ignored) { }
+    }
 
     static final class IdentityFailure extends SecurityException {
         IdentityFailure(boolean certificate, Throwable cause) {
@@ -105,7 +118,7 @@ final class AndroidRelay {
     // A private self-signed relay is trusted by an exact, user-provided SHA-256
     // leaf-certificate pin, checked before any access token is transmitted.
     @android.annotation.SuppressLint("CustomX509TrustManager")
-    static SSLSocket newSocket(Options options) throws Exception {
+    private static SSLContext tlsContext(Options options) throws Exception {
         SSLContext context = SSLContext.getInstance("TLS");
         context.init(null, new TrustManager[] { new X509TrustManager() {
             public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
@@ -121,7 +134,14 @@ final class AndroidRelay {
                 catch (Exception ex) { throw new CertificateException("中转 TLS 身份校验失败。"); }
             }
         } }, null);
-        SSLSocket socket = (SSLSocket) context.getSocketFactory().createSocket();
+        return context;
+    }
+
+    static SSLSocket newSocket(Options options) throws Exception {
+        return configureTlsSocket((SSLSocket) tlsContext(options).getSocketFactory().createSocket());
+    }
+
+    private static SSLSocket configureTlsSocket(SSLSocket socket) throws Exception {
         List<String> protocols = new ArrayList<>();
         for (String protocol : socket.getSupportedProtocols()) {
             if (protocol.equals("TLSv1.2") || protocol.equals("TLSv1.3")) protocols.add(protocol);
@@ -131,9 +151,94 @@ final class AndroidRelay {
         return socket;
     }
 
+    static SSLSocket connectBoundSocket(Options options, android.net.Network network,
+            AndroidRelayNetworkSelector.Dial dial, Consumer<Socket> configure) throws Exception {
+        java.net.InetAddress[] resolved = network == null
+            ? java.net.InetAddress.getAllByName(options.serverAddress) : network.getAllByName(options.serverAddress);
+        List<java.net.InetAddress> addresses = relayAddresses(resolved, network != null);
+        return connectAddresses(addresses, dial, (address, tcpTimeout) -> {
+            Socket raw = new Socket();
+            SSLSocket socket = null;
+            try {
+                dial.add(raw);
+                raw.setTcpNoDelay(true);
+                configure.accept(raw);
+                if (network != null) network.bindSocket(raw);
+                dial.checkOpen();
+                raw.connect(new InetSocketAddress(address, options.port), tcpTimeout);
+                // Retain hostname/SNI and pinning for every DNS address. Failed
+                // addresses never receive a relay token or application role.
+                socket = (SSLSocket) tlsContext(options).getSocketFactory()
+                    .createSocket(raw, options.serverAddress, options.port, true);
+                dial.replace(raw, socket);
+                configureTlsSocket(socket);
+                socket.setSoTimeout(TIMEOUT_MS);
+                startPinnedHandshake(socket);
+                dial.checkOpen();
+                return socket;
+            } catch (Exception failure) {
+                if (socket != null) dial.release(socket);
+                dial.release(raw);
+                throw failure;
+            }
+        });
+    }
+
+    @FunctionalInterface interface AddressConnector<T> {
+        T connect(java.net.InetAddress address, int tcpTimeout) throws Exception;
+    }
+
+    static <T> T connectAddresses(List<java.net.InetAddress> addresses,
+            AndroidRelayNetworkSelector.Dial dial, AddressConnector<T> connector) throws Exception {
+        Exception failure = null;
+        // A dead first AAAA/A record must not consume the whole dial. The outer
+        // selector still enforces one deadline across DNS, TCP and all TLS attempts.
+        int tcpTimeout = addresses.size() > 1 ? Math.min(TIMEOUT_MS, 2500) : TIMEOUT_MS;
+        for (java.net.InetAddress address : addresses) {
+            dial.checkOpen();
+            try { return connector.connect(address, tcpTimeout); }
+            catch (Exception next) { if (failure == null || next instanceof IdentityFailure) failure = next; }
+        }
+        throw failure == null ? new java.net.UnknownHostException("中转域名没有可用地址。") : failure;
+    }
+
+    static List<java.net.InetAddress> relayAddresses(java.net.InetAddress[] resolved, boolean alternative) throws IOException {
+        List<java.net.InetAddress> addresses = new ArrayList<>();
+        for (java.net.InetAddress address : resolved) {
+            if (alternative) {
+                // Optional cross-network probes are public IPv4 only, matching
+                // desktop clients. Mixed public/private DNS keeps system routing.
+                if (!(address instanceof java.net.Inet4Address)) continue;
+                byte[] b = address.getAddress();
+                int first = b[0] & 255, second = b[1] & 255;
+                if (address.isAnyLocalAddress() || address.isLoopbackAddress() || address.isSiteLocalAddress() ||
+                    address.isLinkLocalAddress() || first == 0 || first >= 224 || first == 100 && second >= 64 && second <= 127)
+                    throw new IOException("内网中转地址沿用系统路由。");
+            }
+            if (!addresses.contains(address)) addresses.add(address);
+        }
+        // Retain a fallback from each family even if DNS returns many records
+        // from the first family. No more than four addresses are tried per dial.
+        List<java.net.InetAddress> ordered = new ArrayList<>();
+        boolean ipv4 = !addresses.isEmpty() && addresses.get(0) instanceof java.net.Inet4Address;
+        while (!addresses.isEmpty() && ordered.size() < 4) {
+            int index = 0;
+            for (int i = 0; i < addresses.size(); i++) {
+                if ((addresses.get(i) instanceof java.net.Inet4Address) == ipv4) { index = i; break; }
+            }
+            ordered.add(addresses.remove(index));
+            ipv4 = !ipv4;
+        }
+        return ordered;
+    }
+
     static void connect(SSLSocket socket, Options options) throws Exception {
         socket.setSoTimeout(TIMEOUT_MS);
         socket.connect(new InetSocketAddress(options.serverAddress, options.port), TIMEOUT_MS);
+        startPinnedHandshake(socket);
+    }
+
+    private static void startPinnedHandshake(SSLSocket socket) throws Exception {
         try { socket.startHandshake(); }
         catch (SSLHandshakeException ex) {
             if (isIdentityFailure(ex)) throw new IdentityFailure(true, ex);
@@ -159,13 +264,17 @@ final class AndroidRelay {
     }
 
     static void write(OutputStream output, JSONObject value) throws Exception {
-        byte[] bytes = value.toString().getBytes(StandardCharsets.UTF_8);
+        writeJsonPayload(output, value.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
+    static void writeJsonPayload(OutputStream output, byte[] bytes) throws IOException {
         if (bytes.length < 1 || bytes.length > MAX_JSON) throw new IOException("中转握手消息过大。");
+        // Keep the length and JSON in one TLS record/write instead of creating
+        // an extra tiny packet for every relay heartbeat and handshake.
+        byte[] frame = java.nio.ByteBuffer.allocate(4 + bytes.length).putInt(bytes.length).put(bytes).array();
         synchronized (output) {
-            DataOutputStream data = new DataOutputStream(output);
-            data.writeInt(bytes.length);
-            data.write(bytes);
-            data.flush();
+            output.write(frame);
+            output.flush();
         }
     }
 
@@ -202,23 +311,29 @@ final class AndroidRelay {
     }
 
     static List<Device> listDevices(Options options, Consumer<Socket> socketChanged) throws Exception {
-        try (SSLSocket socket = newSocket(options)) {
-            socketChanged.accept(socket);
-            connect(socket, options);
-            JSONArray devices = exchange(socket, request(options, "directory")).optJSONArray("devices");
-            if (devices == null || devices.length() > 512) throw new IOException("中转在线列表无效。");
-            List<Device> result = new ArrayList<>();
-            Set<String> seen = new java.util.HashSet<>();
-            for (int i = 0; i < devices.length(); i++) {
-                JSONObject item = devices.optJSONObject(i);
-                if (item == null) continue;
-                try {
-                    String id = UUID.fromString(item.optString("deviceId")).toString();
-                    if (seen.add(id)) result.add(new Device(id, bounded(item.optString("machineName", "未命名设备"), 120),
-                        bounded(item.optString("platform", "未知"), 40), item.optBoolean("busy", false)));
-                } catch (IllegalArgumentException ignored) { }
+        return listDevices(null, options, socketChanged);
+    }
+
+    static List<Device> listDevices(android.content.Context context, Options options, Consumer<Socket> socketChanged) throws Exception {
+        try (AndroidRelayNetworkSelector.Dial dial = new AndroidRelayNetworkSelector.Dial()) {
+            socketChanged.accept(dial);
+            try (SSLSocket socket = AndroidRelayNetworkSelector.connect(context, options, dial)) {
+                socketChanged.accept(socket);
+                JSONArray devices = exchange(socket, request(options, "directory")).optJSONArray("devices");
+                if (devices == null || devices.length() > 512) throw new IOException("中转在线列表无效。");
+                List<Device> result = new ArrayList<>();
+                Set<String> seen = new java.util.HashSet<>();
+                for (int i = 0; i < devices.length(); i++) {
+                    JSONObject item = devices.optJSONObject(i);
+                    if (item == null) continue;
+                    try {
+                        String id = UUID.fromString(item.optString("deviceId")).toString();
+                        if (seen.add(id)) result.add(new Device(id, bounded(item.optString("machineName", "未命名设备"), 120),
+                            bounded(item.optString("platform", "未知"), 40), item.optBoolean("busy", false)));
+                    } catch (IllegalArgumentException ignored) { }
+                }
+                return result;
             }
-            return result;
         } finally { socketChanged.accept(null); }
     }
 
@@ -227,6 +342,7 @@ final class AndroidRelay {
 
     /** Bounded, cancellable product registration and loopback host-data integration. */
     static final class HostConnector implements AutoCloseable {
+        private final android.content.Context context;
         private final Options options;
         private final int localPort;
         private final String name;
@@ -238,8 +354,13 @@ final class AndroidRelay {
         private final Thread worker;
 
         HostConnector(Options options, int localPort, String name, Consumer<String> status) {
+            this(null, options, localPort, name, status);
+        }
+
+        HostConnector(android.content.Context context, Options options, int localPort, String name, Consumer<String> status) {
             if (localPort < 1 || localPort > 65535) throw new IllegalArgumentException("本机端口无效。");
             this.options = options; this.localPort = localPort; this.name = bounded(name, 120); this.status = status;
+            this.context = context == null ? null : context.getApplicationContext();
             worker = thread("RelayRegistration", this::run);
         }
 
@@ -252,6 +373,17 @@ final class AndroidRelay {
 
         private void release(Socket socket) { sockets.remove(socket); AndroidRelay.close(socket); }
         private void report(String value) { try { status.accept(value); } catch (RuntimeException ignored) { } }
+
+        private SSLSocket openConnectedSocket() throws Exception {
+            try (AndroidRelayNetworkSelector.Dial dial = new AndroidRelayNetworkSelector.Dial()) {
+                track(dial);
+                try {
+                    SSLSocket socket = AndroidRelayNetworkSelector.connect(context, options, dial);
+                    track(socket);
+                    return socket;
+                } finally { sockets.remove(dial); }
+            }
+        }
 
         private void run() {
             int failures = 0;
@@ -271,17 +403,16 @@ final class AndroidRelay {
         }
 
         private void control() throws Exception {
-            SSLSocket socket = newSocket(options);
+            SSLSocket socket = openConnectedSocket();
             ScheduledFuture<?> heartbeat = null;
             Set<Socket> connectionData = ConcurrentHashMap.newKeySet();
             AtomicBoolean controlClosed = new AtomicBoolean();
             try {
                 track(socket);
-                connect(socket, options);
                 exchange(socket, request(options, "host-control").put("deviceId", options.deviceId)
                     .put("machineName", name).put("platform", "Android"));
                 socket.setSoTimeout(45000);
-                report("已上线到中转 " + options.serverAddress + ":" + options.port);
+                report("已上线到中转 " + options.serverAddress + ":" + options.port + " · 本地地址 " + socket.getLocalAddress().getHostAddress());
                 heartbeat = timers.scheduleWithFixedDelay(() -> {
                     try { write(socket.getOutputStream(), new JSONObject().put("version", 1).put("type", "heartbeat")); }
                     catch (Exception ex) { AndroidRelay.close(socket); }
@@ -312,12 +443,11 @@ final class AndroidRelay {
             try {
                 track(local); connectionData.add(local);
                 if (controlClosed.get()) return;
-                local.setTcpNoDelay(true);
+                configureLoopbackSocket(local);
                 local.connect(new InetSocketAddress("127.0.0.1", localPort), TIMEOUT_MS);
-                remote = newSocket(options);
+                remote = openConnectedSocket();
                 track(remote); connectionData.add(remote);
                 if (controlClosed.get()) return;
-                connect(remote, options);
                 exchange(remote, request(options, "host-data").put("deviceId", options.deviceId).put("sessionId", sessionId));
                 remote.setSoTimeout(0);
                 SSLSocket peer = remote;
@@ -335,7 +465,7 @@ final class AndroidRelay {
 
         private static void pump(Socket from, Socket to) {
             try {
-                byte[] buffer = new byte[65536];
+                byte[] buffer = new byte[COPY_BUFFER_BYTES];
                 InputStream input = from.getInputStream();
                 OutputStream output = to.getOutputStream();
                 for (int count; (count = input.read(buffer)) != -1;) { output.write(buffer, 0, count); output.flush(); }

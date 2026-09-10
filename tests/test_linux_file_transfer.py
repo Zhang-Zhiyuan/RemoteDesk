@@ -901,7 +901,10 @@ class LinuxReturnStatusTests(unittest.TestCase):
                 # A reader-thread Ping can still be handled while the system
                 # clipboard utility is blocked on its owner worker.
                 session._write_message = mock.Mock()
+                session.heartbeat = host.HostHeartbeatResponder(
+                    lambda: session._write_message(protocol.MESSAGE_PONG, b""), mock.Mock())
                 session._handle_message(protocol.MESSAGE_PING, b"")
+                self.assertTrue(self._wait_until(lambda: session._write_message.call_count == 1))
                 session._write_message.assert_called_once_with(
                     protocol.MESSAGE_PONG,
                     b"",
@@ -914,6 +917,8 @@ class LinuxReturnStatusTests(unittest.TestCase):
                 )
         finally:
             allow_clipboard.set()
+            if hasattr(session, "heartbeat"):
+                session.heartbeat.close()
             session._stop_clipboard_worker()
 
     def test_clipboard_queue_is_bounded_and_preserves_set_get_order(self) -> None:
@@ -1498,6 +1503,9 @@ class LinuxReturnStatusTests(unittest.TestCase):
                         completed_terminal.set()
 
             session._handle_input = lambda _payload: input_received.set()
+            session.heartbeat = host.HostHeartbeatResponder(
+                lambda: session._write_message(protocol.MESSAGE_PONG, b""), mock.Mock())
+            self.addCleanup(session.heartbeat.close)
 
             with (
                 mock.patch.object(host, "read_message", side_effect=fake_read_message),

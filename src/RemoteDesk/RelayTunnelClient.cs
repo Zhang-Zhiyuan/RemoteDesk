@@ -14,12 +14,13 @@ internal static class RelayTunnelClient
     public static async Task ConnectViewerIntoAsync(
         TcpClient viewerClient,
         RelayConnectionOptions options,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<string>? diagnostic = null)
     {
         ArgumentNullException.ThrowIfNull(viewerClient);
         options = options.Validate();
         (TcpClient relayClient, SslStream relayStream) =
-            await RelayTls.ConnectAsync(options, cancellationToken)
+            await RelayTls.ConnectAsync(options, cancellationToken, dataTunnel: true)
                 .ConfigureAwait(false);
         TcpListener? loopbackListener = null;
         TcpClient? bridgeClient = null;
@@ -42,22 +43,29 @@ internal static class RelayTunnelClient
                 .ConfigureAwait(false);
             RelayTls.EnsureSuccess(response.RootElement);
 
+            try
+            {
+                diagnostic?.Invoke("中继本地端点：" +
+                    RelayNetworkPathSelector.DescribeLocalEndpoint(relayClient.Client.LocalEndPoint));
+            }
+            catch { /* Optional diagnostics must not prevent a tunnel from connecting. */ }
+
             loopbackListener = new TcpListener(IPAddress.Loopback, 0);
+            loopbackListener.Server.ReceiveBufferSize = RelayLoopbackPolicy.BufferBytes;
+            loopbackListener.Server.SendBufferSize = RelayLoopbackPolicy.BufferBytes;
             loopbackListener.Start(1);
             int port = ((IPEndPoint)loopbackListener.LocalEndpoint).Port;
             Task<TcpClient> acceptTask =
                 loopbackListener.AcceptTcpClientAsync(cancellationToken)
                     .AsTask();
+            RelayLoopbackPolicy.Configure(viewerClient);
             await viewerClient.ConnectAsync(
                     IPAddress.Loopback,
                     port,
                     cancellationToken)
                 .ConfigureAwait(false);
             bridgeClient = await acceptTask.ConfigureAwait(false);
-            NetworkUtils.ConfigureLowLatencyTcpClient(
-                bridgeClient,
-                RemoteViewerClient.FrameReceiveBufferBytes,
-                32 * 1024);
+            RelayLoopbackPolicy.Configure(bridgeClient);
 
             Guid bridgeId = Guid.NewGuid();
             Task bridge = RelayStreamBridge.RunAsync(

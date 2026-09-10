@@ -1009,6 +1009,30 @@ public sealed class RemoteViewerWindowTests
     }
 
     [Theory]
+    [InlineData(1280, 720, 1920, 1080, 1280, 720)]
+    [InlineData(1920, 1080, 3840, 2160, 1920, 1080)]
+    [InlineData(3840, 2160, 1920, 1080, 1920, 1080)]
+    [InlineData(2560, 1440, 1366, 768, 1365, 768)]
+    [InlineData(734, 1600, 1920, 1080, 495, 1080)]
+    [InlineData(3440, 1440, 1920, 1080, 1920, 804)]
+    public void MixedResolutionDisplayAndHardwareInputGeometryStayAligned(
+        int sourceWidth, int sourceHeight, int viewWidth, int viewHeight,
+        int expectedWidth, int expectedHeight)
+    {
+        Size source = new(sourceWidth, sourceHeight);
+        Size viewport = new(viewWidth, viewHeight);
+        Rectangle displayed = RemoteViewerWindow.CalculateDisplayedImageRectangle(
+            new Rectangle(Point.Empty, viewport), source, allowUpscaling: false);
+        var hardware = D3D11HwndVideoPresenter.CalculateGeometry(
+            new Rectangle(Point.Empty, source), viewport,
+            D3D11HwndVideoScaleMode.FitWithoutUpscaling);
+
+        Assert.Equal(new Size(expectedWidth, expectedHeight), displayed.Size);
+        Assert.Equal(displayed, hardware.Destination);
+        Assert.True(displayed.Width <= sourceWidth && displayed.Height <= sourceHeight);
+    }
+
+    [Theory]
     [InlineData(1920, 1080, 1920, 1080, " | 显示 1:1")]
     [InlineData(1920, 1080, 1900, 1069, " | 显示 0.99x 缩小")]
     [InlineData(1920, 1080, 1940, 1091, " | 显示 1.01x 放大")]
@@ -1172,7 +1196,7 @@ public sealed class RemoteViewerWindowTests
     }
 
     [Fact]
-    public void DisplayScaleToggleSwitchesBetweenFitAndNativePixels()
+    public void DisplayScaleDefaultsToNoUpscalingAndCanOptIntoWindowFit()
     {
         using var client = new RemoteViewerClient();
         using var window =
@@ -1186,10 +1210,18 @@ public sealed class RemoteViewerWindowTests
                 remoteFilePullEnabled: false,
                 isAndroidRemote: false);
 
+        Assert.False(
+            window.AllowDisplayUpscalingForEntityTests);
+        Assert.Equal(
+            "允许放大",
+            window.DisplayScaleButtonForEntityTests.Text);
+
+        window.ToggleDisplayScaleMode();
+
         Assert.True(
             window.AllowDisplayUpscalingForEntityTests);
         Assert.Equal(
-            "1:1 清晰",
+            "禁止放大",
             window.DisplayScaleButtonForEntityTests.Text);
 
         window.ToggleDisplayScaleMode();
@@ -1197,15 +1229,7 @@ public sealed class RemoteViewerWindowTests
         Assert.False(
             window.AllowDisplayUpscalingForEntityTests);
         Assert.Equal(
-            "适应窗口",
-            window.DisplayScaleButtonForEntityTests.Text);
-
-        window.ToggleDisplayScaleMode();
-
-        Assert.True(
-            window.AllowDisplayUpscalingForEntityTests);
-        Assert.Equal(
-            "1:1 清晰",
+            "允许放大",
             window.DisplayScaleButtonForEntityTests.Text);
     }
 

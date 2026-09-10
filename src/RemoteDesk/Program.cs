@@ -5,6 +5,10 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        // SYSTEM modes must never initialize the normal UI, network host,
+        // updater, clipboard or user settings.
+        if (WindowsSecureDesktopService.TryHandleCommand(args)) return;
+        if (WindowsSecureDesktopInstallation.TryHandleCommand(args)) return;
         long applicationStartedAt =
             System.Diagnostics.Stopwatch.GetTimestamp();
         int? previousProcessId =

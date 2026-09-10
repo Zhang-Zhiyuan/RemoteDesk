@@ -24,13 +24,17 @@ android {
 dependencies { compileOnly "androidx.annotation:annotation:1.10.0" }
 
 def fixtureDirectory = providers.gradleProperty("fixtureDir")
-tasks.register("prepareProbeAssets", Copy) {
+def fixtureNames = providers.gradleProperty("fixtureNames")
+    .orElse("static-current-gop1.h264,static-research-gop30.h264").get().split(",").toList()
+if (fixtureNames.any { !(it ==~ /[A-Za-z0-9_-]+\.h264/) })
+    throw new GradleException("fixtureNames must contain comma-separated .h264 basenames")
+tasks.register("prepareProbeAssets", Sync) {
     from(fixtureDirectory.map { file(it) })
-    include "static-current-gop1.h264", "static-research-gop30.h264"
+    include fixtureNames
     into layout.buildDirectory.dir("generated/probe-assets")
     doFirst {
         if (!fixtureDirectory.isPresent()) throw new GradleException("Pass -PfixtureDir=<VideoQualityProbe output directory>")
-        ["static-current-gop1.h264", "static-research-gop30.h264"].each {
+        fixtureNames.each {
             if (!new File(file(fixtureDirectory.get()), it).isFile()) throw new GradleException("Missing fixture: " + it)
         }
     }

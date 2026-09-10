@@ -127,12 +127,17 @@ public sealed class NetworkDiscoveryTests
         udpSink.Client.Bind(new IPEndPoint(IPAddress.Loopback, 0));
         int discoveryPort = ((IPEndPoint)udpSink.Client.LocalEndPoint!).Port;
 
+        // Test localhost resolution, not physical NIC enumeration/broadcast.
+        // A 150 ms budget flakes during concurrent Release publishing before
+        // DNS even starts, especially on machines with virtual adapters.
         IReadOnlyList<DiscoveredHost> hosts = await NetworkDiscoveryService.DiscoverAsync(
-            TimeSpan.FromMilliseconds(150),
+            TimeSpan.FromSeconds(1),
             timeout.Token,
             ["localhost"],
             discoveryPort,
-            hostPort);
+            hostPort,
+            includeDirectedTcpProbes: false,
+            includeBroadcast: false);
 
         await acceptTask;
         Assert.Contains(hosts, item =>

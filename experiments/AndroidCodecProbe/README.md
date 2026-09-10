@@ -37,6 +37,15 @@ not an instrumentation-test runner, a 60 FPS benchmark or an end-to-end remote
 session. A codec's reported hardware flag on an emulator does not prove physical
 Android hardware acceleration. The JSON also retains product diagnostic messages.
 
+To test a different actual encoder, pass `-PfixtureNames=jetson-native.h264`
+(or comma-separated basenames) together with its `fixtureDir`. Each stream must
+still contain exactly 180 complete, AUD-delimited 1920x1080 frames of the same
+light-left/dark-right chart; acceptance thresholds are unchanged. The assets task
+removes stale generated fixtures, and the report identifies every tested file.
+`jetson_encoder_probe.py --frames 180 --native-only` records a fresh compatible
+chart on its own Xvfb. Copy its `native.h264` to the selected fixture basename;
+do not label repeated frames or a software re-encode as a native capture.
+
 Export the report before removing only the temporary package:
 
 ```powershell

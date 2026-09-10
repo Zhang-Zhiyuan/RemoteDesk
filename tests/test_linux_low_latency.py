@@ -138,6 +138,9 @@ class LinuxLowLatencyPolicyTests(unittest.TestCase):
         )
         pongs: list[tuple[int, bytes]] = []
         session._write_message = lambda kind, payload: pongs.append((kind, payload))
+        # This test concerns inbound liveness, not background reply scheduling.
+        session.heartbeat = SimpleNamespace(
+            request=lambda: session._write_message(host.MESSAGE_PONG, b""))
         ping_count = 12
 
         def next_ping(_sock: object, _session: object) -> tuple[int, bytes]:
@@ -980,6 +983,74 @@ class LinuxLowLatencyPolicyTests(unittest.TestCase):
         jpeg.pause.assert_called_once_with()
         self.assertTrue(session.h264_stream_active)
         self.assertEqual(9, session.last_h264_frame_id)
+
+    @staticmethod
+    def startup_preview_session():
+        session = host.LinuxHostSession.__new__(host.LinuxHostSession)
+        session.video_lock = threading.Lock()
+        session.geometry_lock = threading.Lock()
+        session.viewer_video_codecs = host.VIDEO_CODEC_JPEG
+        session.viewer_info_received = False
+        session.startup_jpeg_sent = False
+        session.codec_negotiation_deadline = float("inf")
+        session.h264_stream_active = False
+        session.last_h264_frame_id = None
+        session.continuous_frame_ready = True
+        session.last_continuous_frame_id = None
+        session.continuous_capture = mock.Mock(fps=30.0)
+        session.continuous_capture.read_frame.return_value = (640, 360, b"\xff\xd8full-quality\xff\xd9", 1)
+        session.hardware_h264_capture = mock.Mock(fps=30.0)
+        session.hardware_h264_capture.read_frame.return_value = None
+        session.hardware_h264_capture.is_running.return_value = False
+        session.hardware_h264_capture.is_starting.return_value = True
+        session._write_message = mock.Mock()
+        return session
+
+    def test_startup_sends_one_unchanged_jpeg_until_codec_negotiation(self):
+        session = self.startup_preview_session()
+        self.assertTrue(session._send_frame())
+        for _ in range(60):
+            self.assertFalse(session._send_frame())
+        session._write_message.assert_called_once()
+        message_type, payload = session._write_message.call_args.args
+        self.assertEqual(host.MESSAGE_FRAME, message_type)
+        self.assertTrue(payload.endswith(b"\xff\xd8full-quality\xff\xd9"))
+        session.continuous_capture.read_frame.assert_called_once()
+
+    def test_old_client_without_viewer_info_resumes_jpeg_after_grace(self):
+        session = self.startup_preview_session()
+        self.assertTrue(session._send_frame())
+        session.codec_negotiation_deadline = 0
+        self.assertTrue(session._send_frame())
+        self.assertTrue(session._send_frame())
+        self.assertEqual(3, session._write_message.call_count)
+
+    def test_explicit_jpeg_selection_never_throttles_normal_stream(self):
+        session = self.startup_preview_session()
+        session.viewer_info_received = True
+        for _ in range(5): self.assertTrue(session._send_frame())
+        self.assertEqual(5, session._write_message.call_count)
+
+    def test_hardware_startup_does_not_queue_more_jpeg_behind_preview(self):
+        session = self.startup_preview_session()
+        self.assertTrue(session._send_frame())
+        session.viewer_info_received = True
+        session.viewer_video_codecs |= host.VIDEO_CODEC_H264_ANNEX_B
+        for _ in range(60): self.assertFalse(session._send_frame())
+        session._write_message.assert_called_once()
+        session.hardware_h264_capture.is_starting.return_value = False
+        self.assertTrue(session._send_frame())
+        self.assertEqual(2, session._write_message.call_count)
+
+    def test_h264_can_start_directly_without_waiting_for_a_jpeg_preview(self):
+        session = self.startup_preview_session()
+        session.viewer_info_received = True
+        session.viewer_video_codecs |= host.VIDEO_CODEC_H264_ANNEX_B
+        session.hardware_h264_capture.read_frame.return_value = host.H264EncodedFrame(
+            640, 360, 3, b"\x00\x00\x01\x65\x88", 1, "owned-test")
+        self.assertTrue(session._send_frame())
+        self.assertEqual(host.MESSAGE_VIDEO_FRAME, session._write_message.call_args.args[0])
+        session.continuous_capture.read_frame.assert_not_called()
 
     def test_h264_only_session_fails_when_all_hardware_encoders_are_exhausted(self) -> None:
         hardware = mock.Mock()
@@ -2484,6 +2555,7 @@ Available hardware decoders:
                     - app.VIEWER_HEARTBEAT_TIMEOUT_SECONDS
                     - 1.0
                 )
+                viewer.last_message_received_at = viewer.awaiting_pong_since
             viewer.liveness_thread.start()
 
             self.assertTrue(viewer.stop_event.wait(timeout=0.5))
@@ -2835,6 +2907,62 @@ Available hardware decoders:
             if event == "viewer_status"
         ]
         self.assertTrue(any("heartbeat timed out" in text for text in statuses))
+
+    def test_authenticated_messages_keep_slow_relay_alive_while_pong_is_queued(self):
+        viewer = app.ViewerConnection("127.0.0.1", 56565, "1", queue.Queue(), 1)
+        viewer.sock = mock.Mock()
+        viewer.session = object()
+        viewer._activate_heartbeat(0.0)
+        with mock.patch.object(app, "write_message"):
+            self.assertTrue(viewer._heartbeat_step(5.0))
+            for now in range(10, 91, 5):
+                viewer._mark_message_received(float(now))
+                self.assertTrue(viewer._heartbeat_step(float(now)))
+        self.assertFalse(viewer.stop_event.is_set())
+        # Complete authenticated traffic proves inbound liveness, but does not
+        # fabricate a Pong or clear its separate outstanding-probe state.
+        self.assertEqual(5.0, viewer.awaiting_pong_since)
+        self.assertTrue(viewer._liveness_step(107.9))
+        self.assertFalse(viewer._liveness_step(108.0))
+        viewer.sock.shutdown.assert_called_once()
+
+    def test_unanswered_probe_still_expires_after_last_authenticated_message(self):
+        viewer = app.ViewerConnection("127.0.0.1", 56565, "1", queue.Queue(), 1)
+        viewer.sock = mock.Mock()
+        viewer.session = object()
+        viewer._activate_heartbeat(0.0)
+        with mock.patch.object(app, "write_message"):
+            self.assertTrue(viewer._heartbeat_step(5.0))
+        viewer._mark_message_received(20.0)
+        self.assertTrue(viewer._liveness_step(37.99))
+        self.assertFalse(viewer._liveness_step(38.0))
+
+    def test_late_authenticated_message_does_not_reactivate_stopped_heartbeat(self):
+        viewer = app.ViewerConnection("127.0.0.1", 56565, "1", queue.Queue(), 1)
+        viewer._activate_heartbeat(0.0)
+        viewer._deactivate_heartbeat()
+        viewer._mark_message_received(50.0)
+        self.assertFalse(viewer.heartbeat_active)
+        self.assertEqual(0.0, viewer.last_message_received_at)
+
+    def test_only_complete_authenticated_reads_refresh_viewer_liveness(self):
+        for reads, expected in (([EOFError()], 0),
+                                ([protocol.ProtocolError("invalid authentication tag")], 0),
+                                ([(protocol.MESSAGE_FRAME, b"authenticated fixture"), EOFError()], 1)):
+            with self.subTest(expected=expected, error=type(reads[-1]).__name__):
+                viewer = app.ViewerConnection("127.0.0.1", 56565, "1", queue.Queue(), 1)
+                sock = mock.MagicMock()
+                sock.__enter__.return_value = sock
+                with (mock.patch.object(app, "find_ffmpeg", return_value=None),
+                      mock.patch.object(app.socket, "create_connection", return_value=sock),
+                      mock.patch.object(app, "authenticate", return_value=object()),
+                      mock.patch.object(app, "configure_low_latency_socket"),
+                      mock.patch.object(app, "read_message", side_effect=reads),
+                      mock.patch.object(viewer, "_send_control"),
+                      mock.patch.object(viewer, "_handle_frame"),
+                      mock.patch.object(viewer, "_mark_message_received", wraps=viewer._mark_message_received) as mark):
+                    viewer._run()
+                self.assertEqual(expected, mark.call_count)
 
     def test_viewer_close_stops_heartbeat_without_late_writes(self) -> None:
         viewer = app.ViewerConnection(

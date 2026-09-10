@@ -27,6 +27,12 @@ public final class ViewerProbeReceiver extends BroadcastReceiver {
             else if("mode".equals(action)) chrome.mode.performClick();
             else if("keyboard".equals(action)) chrome.keyboard.performClick();
             else if("drag".equals(action)) chrome.drag.performClick();
+            else if("original_size".equals(action) || "fit_size".equals(action)) {
+                AndroidViewerViewport viewport=(AndroidViewerViewport)ViewerProbeApplication.field(viewer,"viewport");
+                if("original_size".equals(action)) viewport.originalSize(); else viewport.reset();
+                java.lang.reflect.Method refresh=viewer.getClass().getDeclaredMethod("refreshInteraction");
+                refresh.setAccessible(true); refresh.invoke(viewer);
+            }
             else if("send_text".equals(action)) {
                 android.view.inputmethod.InputConnection connection=chrome.composer.onCreateInputConnection(new android.view.inputmethod.EditorInfo());
                 connection.setComposingText("zhongwen",1);
