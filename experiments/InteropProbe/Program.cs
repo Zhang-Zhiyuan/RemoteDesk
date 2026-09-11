@@ -74,7 +74,7 @@ internal static class Program
         File.Move(path + ".tmp", path, true);
     }
 
-    static RelayConnectionOptions? RelayOptions(JsonElement config)
+    internal static RelayConnectionOptions? RelayOptions(JsonElement config)
     {
         if (!config.TryGetProperty("relay", out var value)) return null;
         return new RelayConnectionOptions(value.GetProperty("serverAddress").GetString()!, value.GetProperty("port").GetInt32(),

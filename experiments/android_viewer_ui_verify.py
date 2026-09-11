@@ -11,6 +11,7 @@ import re
 import subprocess
 import time
 import xml.etree.ElementTree as ET
+from android_viewer_fixture_server import save_snapshot
 
 PACKAGE = "com.remotedesk.viewerprobe"
 
@@ -70,9 +71,9 @@ def main():
             raise RuntimeError("Start the synthetic peer with --allow-test-controls")
         command_file=Path(args.server).resolve().parent / "fixture-command.json"
         sequence=time.time_ns()
-        temporary=command_file.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"sequence":sequence,"action":name}),encoding="utf-8")
-        temporary.replace(command_file)
+        # The Windows peer can be reading the previous command during replace.
+        # Reuse the bounded atomic-snapshot retry, never truncate its live file.
+        save_snapshot(command_file, {"sequence":sequence,"action":name})
         deadline=time.monotonic()+5
         while time.monotonic()<deadline:
             if any(c["sequence"]==sequence for c in server()["commands"]):

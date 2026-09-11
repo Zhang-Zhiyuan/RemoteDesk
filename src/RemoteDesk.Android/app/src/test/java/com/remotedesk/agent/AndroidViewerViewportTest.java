@@ -43,7 +43,8 @@ public class AndroidViewerViewportTest {
     @Test public void transientEmptyAndClampedImeLayoutsDoNotLosePixelSize() {
         AndroidViewerViewport v=viewport(); v.originalSize(); v.keyboard(true);
         v.geometry(0,0,1920,1080); assertNull(v.point(0,0,false));
-        v.geometry(1000,20,1920,1080); assertEquals(8,v.zoom,0);
+        v.geometry(1000,20,1920,1080); assertEquals(1,v.scale(),.0001);
+        assertTrue(v.zoom > AndroidViewerViewport.MAX_ZOOM);
         v.geometry(1000,180,1920,1080); assertEquals(1,v.scale(),.0001);
         v.geometry(1000,20,1920,1080); v.keyboard(false);
         v.geometry(1000,1000,1920,1080); assertEquals(1,v.scale(),.0001);
@@ -74,5 +75,46 @@ public class AndroidViewerViewportTest {
         v.zoomAt(2,100,Float.POSITIVE_INFINITY);
         assertEquals(1,v.zoom,0); assertEquals(0,v.panX,0); assertEquals(0,v.panY,0);
         assertNotNull(v.point(500,500,true));
+    }
+
+    @Test public void nativePixelsRemainReachableOnSmallScreensAndLargeSources() {
+        for (int[] source : new int[][] {{1920,1080}, {3840,2160}, {7680,4320}, {1080,2400}}) {
+            AndroidViewerViewport v=new AndroidViewerViewport();
+            v.geometry(320,180,source[0],source[1]); v.originalSize();
+            assertEquals(1,v.scale(),.0001);
+            v.reset(); v.zoomAt(999,160,90);
+            assertTrue(v.scale() >= 1f);
+            assertTrue(v.scale() <= AndroidViewerViewport.MAX_ZOOM);
+        }
+    }
+
+    @Test public void tinyLandscapeKeyboardKeepsNativePixelsAndInverseInputMapping() {
+        AndroidViewerViewport v=new AndroidViewerViewport();
+        v.geometry(640,234,1920,1080); v.originalSize(); v.keyboard(true);
+        v.geometry(640,42,1920,1080);
+        assertEquals(1,v.scale(),.0001);
+        v.zoomAt(1,320,21); // A neutral gesture must not snap back to 8x fit.
+        assertEquals(1,v.scale(),.0001);
+        v.reveal(1440,900);
+        assertArrayEquals(new int[]{1440,900}, v.point(v.left()+1440*v.scale(), v.top()+900*v.scale(),true));
+        v.keyboard(false); v.geometry(640,234,1920,1080);
+        assertEquals(1,v.scale(),.0001);
+    }
+
+    @Test public void verySmallImeAlsoRetainsMagnificationAboveNativePixels() {
+        AndroidViewerViewport v=viewport(); v.originalSize(); v.zoomAt(2,500,500);
+        v.keyboard(true); v.geometry(1000,20,1920,1080);
+        assertEquals(2,v.scale(),.0001);
+        v.zoomAt(1,500,10); assertEquals(2,v.scale(),.0001);
+        v.keyboard(false); v.geometry(1000,1000,1920,1080);
+        assertEquals(2,v.scale(),.0001);
+        v.reset(); assertEquals(1,v.zoom,0);
+    }
+
+    @Test public void nativeSelectionAndPinchWithEmptyLayoutStayFinite() {
+        AndroidViewerViewport v=viewport(); v.originalSize(); v.keyboard(true);
+        v.geometry(0,0,1920,1080); v.originalSize(); v.zoomAt(Float.MAX_VALUE,0,0);
+        assertTrue(Float.isFinite(v.zoom)); assertEquals(0,v.scale(),0);
+        v.geometry(320,42,1920,1080); assertEquals(1,v.scale(),.0001);
     }
 }

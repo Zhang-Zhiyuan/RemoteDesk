@@ -52,9 +52,11 @@ internal static class FeatureAuditProbe
             while (!condition() && watch.Elapsed.TotalSeconds < 35) await Task.Delay(100, token);
             if (!condition()) throw new TimeoutException("Expected peer state did not arrive");
         }
-        Task Connect(RemoteViewerClient target, string password) => target.ConnectAsync(
-            config.GetProperty("host").GetString()!, config.GetProperty("port").GetInt32(),
-            password, ViewerVideoMode.StableJpeg, token);
+        RelayConnectionOptions? relay = Program.RelayOptions(config);
+        Task Connect(RemoteViewerClient target, string password) => relay is null
+            ? target.ConnectAsync(config.GetProperty("host").GetString()!, config.GetProperty("port").GetInt32(),
+                password, ViewerVideoMode.StableJpeg, token)
+            : target.ConnectViaRelayAsync(relay, password, ViewerVideoMode.StableJpeg, token);
         string password = config.GetProperty("password").GetString()!;
         try
         {
@@ -124,7 +126,8 @@ internal static class FeatureAuditProbe
             await client.DisconnectAsync();
             Program.Save(Path.Combine(output, "features.json"), new {
                 complete = failure == null, failure, checks, frames, jpeg, h264,
-                scope = "Actual Windows product client to owned physical Linux Xvfb; no Windows capture/input or local clipboard mutation"
+                scope = "Actual Windows product client to owned physical Linux Xvfb; no Windows capture/input or local clipboard mutation",
+                route = relay is null ? "direct LAN" : "native public relay TLS/TCP; no LAN fallback"
             });
         }
         return failure == null ? 0 : 1;

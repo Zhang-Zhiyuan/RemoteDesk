@@ -11,21 +11,47 @@ from pathlib import Path
 import re
 import secrets
 import subprocess
+import sys
 import tarfile
 import time
+import uuid
 from run_physical_interop import ROOT, WINDOWS, run
+
+
+def read_relay_config(reader):
+    """Read a bounded, already-approved relay identity before spawning children."""
+    sys.path.insert(0, str(ROOT / "scripts/linux"))
+    from remotedesk_linux_relay import RelayOptions
+    try:
+        raw = reader.readline(16385)
+        if len(raw) > 16384:
+            raise ValueError()
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError()
+        # Never reuse/replace an installed host's registration identity.
+        value["deviceId"] = str(uuid.uuid4())
+        value["publish"] = True
+        return RelayOptions.from_dict(value).to_dict()
+    except (TypeError, ValueError, AttributeError, OverflowError):
+        raise ValueError("Invalid relay configuration on stdin; contents omitted") from None
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--linux", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--relay-stdin", action="store_true",
+                        help="Read verified serverAddress/port/accessToken/tlsCertificateSha256 JSON on stdin; never deploys or falls back to LAN")
     args = parser.parse_args()
+    relay = read_relay_config(sys.stdin) if args.relay_stdin else None
+    route = dict(relay=relay) if relay else {}
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=False)
     ssh_options = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5"]
     ssh = ["ssh", *ssh_options, args.linux]
-    report = {"complete": False, "scope": "Actual Windows product client to physical Linux host on fresh owned Xvfb"}
+    report = {"complete": False, "scope": "Actual Windows product client to physical Linux host on fresh owned Xvfb",
+              "route": "native public relay TLS/TCP; no LAN fallback" if relay else "direct LAN"}
     remote = ""
     child = None
     log = None
@@ -48,7 +74,7 @@ def main():
         log = (output / "host-process.log").open("wb")
         child = subprocess.Popen(ssh + [f"python3 -u {remote}/experiments/interop_linux_node.py host --output {remote}/host"],
                                  stdin=subprocess.PIPE, stdout=log, stderr=log)
-        child.stdin.write(json.dumps(dict(password=password, featureFixtures=True)).encode() + b"\n")
+        child.stdin.write(json.dumps(dict(password=password, featureFixtures=True, **route)).encode() + b"\n")
         child.stdin.close()
         endpoint = None
         for _ in range(70):
@@ -60,7 +86,7 @@ def main():
         if not endpoint or not re.fullmatch(r":\d+", endpoint["display"]):
             raise RuntimeError("Owned Linux Xvfb endpoint is unavailable")
         report["endpoint"] = endpoint
-        config = dict(host=args.linux.split("@")[-1], port=endpoint["port"], password=password, output=str(output / "client"))
+        config = dict(host=args.linux.split("@")[-1], port=endpoint["port"], password=password, output=str(output / "client"), **route)
         result = subprocess.run([str(WINDOWS), "features"], input=json.dumps(config).encode(), capture_output=True, timeout=260)
         print(result.stdout.decode(errors="replace"), flush=True)
         # Read only files from this newly allocated test host. Never touch the

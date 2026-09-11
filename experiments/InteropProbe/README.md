@@ -217,6 +217,15 @@ The clipboard callback is isolated: no Windows clipboard contents or physical in
 are accessed. Only synthetic files in the allocated test directory are transferred.
 The temporary host/Xvfb stop on exit; reports and owned fixture files are retained.
 
+Add `--relay-stdin` to run this same feature audit through an existing authorized
+public relay. Supply one JSON line on stdin with `serverAddress`, `port`,
+`accessToken` and the previously verified `tlsCertificateSha256`; never put the
+token in command arguments or a checked-in file. The harness validates the input
+before spawning SSH, generates a fresh test device ID and passes credentials only
+through child pipes. It does not deploy/restart the relay, reuse an installed
+device's registration, change routes or fall back to LAN. The report identifies
+the selected transport; file verification still uses key-authenticated SSH.
+
 `desktop-status` reads Windows desktop availability without capture/input. A host
 probe that loses foreground records its desktop/pointer/owned-button geometry and
 stops even if diagnostic writing fails. It never silently refocuses another app.

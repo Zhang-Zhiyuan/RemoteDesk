@@ -20,7 +20,7 @@ final class AndroidViewerViewport {
         if (newSource) reset();
         else if (keepPixelSize) {
             retainedScale = previousScale;
-            if (baseScale() > 0f) zoom = clamp(previousScale / baseScale(), 1f, MAX_ZOOM);
+            if (baseScale() > 0f) zoom = clamp(previousScale / baseScale(), 1f, maximumZoom());
         }
         constrain();
     }
@@ -39,6 +39,15 @@ final class AndroidViewerViewport {
     }
 
     float scale() { return baseScale() * zoom; }
+    private float maximumZoom() {
+        float base = baseScale();
+        if (base <= 0f) return MAX_ZOOM;
+        // Eight times the fitted thumbnail can still be smaller than 1:1 on
+        // a high-resolution desktop or a tiny landscape IME viewport. Keep
+        // native pixels and an already selected magnification reachable;
+        // this changes only the local transform, never the source resolution.
+        return Math.max(MAX_ZOOM, Math.max(1f, retainedScale) / base);
+    }
     float left() { return (viewWidth - frameWidth * scale()) / 2f + panX; }
     float top() { return (viewHeight - frameHeight * scale()) / 2f + panY; }
     void reset() {
@@ -48,7 +57,9 @@ final class AndroidViewerViewport {
     }
 
     void originalSize() {
-        if (baseScale() > 0f) zoom = Math.min(MAX_ZOOM, 1f / baseScale());
+        float base = baseScale();
+        if (base <= 0f) return; // Keep the last valid intent during a layout gap.
+        zoom = 1f / base;
         panX = panY = 0f;
         constrain();
         rememberUserScale();
@@ -57,7 +68,7 @@ final class AndroidViewerViewport {
     void zoomAt(float factor, float x, float y) {
         if (!Float.isFinite(factor) || factor <= 0 || !Float.isFinite(x) || !Float.isFinite(y) || scale() <= 0) return;
         float previous = zoom;
-        zoom = clamp(zoom * factor, 1f, MAX_ZOOM);
+        zoom = clamp(zoom * factor, 1f, maximumZoom());
         float ratio = zoom / previous;
         panX = x - viewWidth / 2f - (x - viewWidth / 2f - panX) * ratio;
         panY = y - viewHeight / 2f - (y - viewHeight / 2f - panY) * ratio;
