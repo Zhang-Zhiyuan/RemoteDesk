@@ -6,6 +6,14 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public final class AndroidInputInjectorTest {
+    @Test public void typingAndNextClickWaitForThePreviousClickToFinish() {
+        assertTrue(AndroidInputInjector.requiresCompletedPointerRelease(7));
+        assertTrue(AndroidInputInjector.requiresCompletedPointerRelease(5));
+        assertTrue(AndroidInputInjector.requiresCompletedPointerRelease(2));
+        assertFalse(AndroidInputInjector.requiresCompletedPointerRelease(1));
+        assertFalse(AndroidInputInjector.requiresCompletedPointerRelease(3));
+        assertFalse(AndroidInputInjector.requiresCompletedPointerRelease(6));
+    }
     @Test
     public void keyboardAndTextInputsDoNotRequireFrameGeometry() {
         assertFalse(AndroidInputInjector.requiresFrameGeometry(AndroidInputInjector.INPUT_KEY_DOWN));

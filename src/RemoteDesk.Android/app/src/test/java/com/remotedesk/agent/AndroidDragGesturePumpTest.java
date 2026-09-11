@@ -12,6 +12,73 @@ import java.util.concurrent.TimeUnit;
 import org.junit.Test;
 
 public final class AndroidDragGesturePumpTest {
+    @Test public void pendingReleaseWaitsForPhysicalCompletionWithoutCanceling() throws Exception {
+        FakeDispatcher dispatcher = new FakeDispatcher();
+        AndroidDragGesturePump pump = new AndroidDragGesturePump(dispatcher);
+        pump.beginSession(1, 2);
+        pump.end(1, 2);
+        CountDownLatch started = new CountDownLatch(1), finished = new CountDownLatch(1);
+        boolean[] passed = {false};
+        Thread worker = new Thread(() -> {
+            started.countDown();
+            passed[0] = pump.awaitPendingRelease(1000);
+            finished.countDown();
+        });
+        worker.start();
+        assertTrue(started.await(1, TimeUnit.SECONDS));
+        assertFalse(finished.await(40, TimeUnit.MILLISECONDS));
+        dispatcher.completeNext();
+        assertTrue(finished.await(1, TimeUnit.SECONDS));
+        worker.join(1000);
+        assertTrue(passed[0]);
+        assertEquals(0, dispatcher.resetCount);
+    }
+
+    @Test public void heldDragDoesNotBlockOrReleaseForTyping() {
+        FakeDispatcher dispatcher = new FakeDispatcher();
+        AndroidDragGesturePump pump = new AndroidDragGesturePump(dispatcher);
+        pump.beginSession(1, 2);
+        pump.move(3, 4);
+        assertTrue(pump.awaitPendingRelease(0));
+        assertTrue(pump.snapshot().acceptingInput);
+        assertFalse(pump.snapshot().releasePending);
+    }
+
+    @Test public void timedOutReleaseDoesNotPretendThatClickWasApplied() {
+        FakeDispatcher dispatcher = new FakeDispatcher();
+        AndroidDragGesturePump pump = new AndroidDragGesturePump(dispatcher);
+        pump.beginSession(1, 2);
+        pump.end(1, 2);
+        assertFalse(pump.awaitPendingRelease(0));
+        assertTrue(pump.snapshot().active);
+        assertEquals(0, dispatcher.resetCount);
+        dispatcher.completeNext();
+        assertTrue(pump.awaitPendingRelease(0));
+    }
+
+    @Test public void canceledReleaseDoesNotAuthorizeFollowingText() throws Exception {
+        FakeDispatcher dispatcher = new FakeDispatcher();
+        AndroidDragGesturePump pump = new AndroidDragGesturePump(dispatcher);
+        pump.beginSession(1, 2);
+        pump.end(1, 2);
+        CountDownLatch started = new CountDownLatch(1);
+        boolean[] passed = {true};
+        Thread worker = new Thread(() -> { started.countDown(); passed[0] = pump.awaitPendingRelease(1000); });
+        worker.start();
+        assertTrue(started.await(1, TimeUnit.SECONDS));
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+        while (worker.getState() != Thread.State.TIMED_WAITING && System.nanoTime() < deadline) Thread.yield();
+        assertEquals(Thread.State.TIMED_WAITING, worker.getState());
+        dispatcher.cancelNext();
+        worker.join(1000);
+        assertFalse(worker.isAlive());
+        assertFalse(passed[0]);
+    }
+
+    @Test(expected = IllegalArgumentException.class) public void negativeReleaseWaitIsRejected() {
+        new AndroidDragGesturePump(new FakeDispatcher()).awaitPendingRelease(-1);
+    }
+
     @Test
     public void highFrequencyMovesCollapseToTheLatestPointAndNeverOverlap() {
         FakeDispatcher dispatcher = new FakeDispatcher();

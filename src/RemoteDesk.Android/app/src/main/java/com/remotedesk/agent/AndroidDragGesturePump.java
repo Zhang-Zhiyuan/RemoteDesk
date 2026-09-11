@@ -240,6 +240,26 @@ final class AndroidDragGesturePump {
         }
     }
 
+    /** Wait only for an already requested release; never cancel a held drag. */
+    boolean awaitPendingRelease(long timeoutMillis) {
+        if (timeoutMillis < 0) throw new IllegalArgumentException("timeout must not be negative");
+        long deadline = System.nanoTime() + timeoutMillis * 1_000_000L;
+        synchronized (lock) {
+            if (!active || !releasePending) return true;
+            long expectedGeneration = generation;
+            while (active && generation == expectedGeneration) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) return false;
+                try { lock.wait(Math.max(1L, remaining / 1_000_000L)); }
+                catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+            return !active && generation == expectedGeneration;
+        }
+    }
+
     private Segment preparePendingSegmentLocked(
         boolean willContinue,
         boolean first) {

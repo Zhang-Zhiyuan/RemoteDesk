@@ -575,7 +575,8 @@ final class RemoteDeskHostServer {
                 state.lastFrameHeight.get(),
                 captureSession.getSourceWidth(),
                 captureSession.getSourceHeight(),
-                state.gestureState);
+                state.gestureState,
+                () -> running.get() && state.running.get());
         }
     }
 

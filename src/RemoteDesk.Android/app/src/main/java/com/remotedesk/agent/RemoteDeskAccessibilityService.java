@@ -157,37 +157,49 @@ public final class RemoteDeskAccessibilityService extends AccessibilityService {
     }
 
     static boolean performGlobalActionFromAnyThread(int action) {
+        return performGlobalActionFromAnyThread(action, () -> true);
+    }
+
+    static boolean performGlobalActionFromAnyThread(int action, java.util.function.BooleanSupplier authorized) {
         RemoteDeskAccessibilityService service = instance;
         if (service == null) {
             return false;
         }
 
         return service.mainHandler.post(() -> {
-            if (instance != service) return;
+            if (instance != service || !authorized.getAsBoolean()) return;
             try { service.performGlobalAction(action); }
             catch (RuntimeException ex) { AndroidSessionLog.error("Accessibility global action failed.", ex); }
         });
     }
 
     static boolean inputTextFromAnyThread(String text) {
+        return inputTextFromAnyThread(text, () -> true);
+    }
+
+    static boolean inputTextFromAnyThread(String text, java.util.function.BooleanSupplier authorized) {
         RemoteDeskAccessibilityService service = instance;
         if (service == null || text == null || text.isEmpty()) {
             return false;
         }
 
         return service.mainHandler.post(() -> {
-            if (instance == service) service.replaceFocusedText(text, false);
+            if (instance == service && authorized.getAsBoolean()) service.replaceFocusedText(text, false);
         });
     }
 
     static boolean deleteTextBeforeCursorFromAnyThread() {
+        return deleteTextBeforeCursorFromAnyThread(() -> true);
+    }
+
+    static boolean deleteTextBeforeCursorFromAnyThread(java.util.function.BooleanSupplier authorized) {
         RemoteDeskAccessibilityService service = instance;
         if (service == null) {
             return false;
         }
 
         return service.mainHandler.post(() -> {
-            if (instance == service) service.replaceFocusedText("", true);
+            if (instance == service && authorized.getAsBoolean()) service.replaceFocusedText("", true);
         });
     }
 

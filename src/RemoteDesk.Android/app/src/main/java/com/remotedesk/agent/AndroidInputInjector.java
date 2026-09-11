@@ -61,7 +61,12 @@ final class AndroidInputInjector {
         int sourceWidth,
         int sourceHeight,
         GestureState gestureState) {
-        if (gestureState == null) {
+        return apply(payload, frameWidth, frameHeight, sourceWidth, sourceHeight, gestureState, () -> true);
+    }
+
+    static boolean apply(byte[] payload, int frameWidth, int frameHeight, int sourceWidth, int sourceHeight,
+            GestureState gestureState, java.util.function.BooleanSupplier authorized) {
+        if (gestureState == null || !authorized.getAsBoolean()) {
             return false;
         }
         if (!isEnabled() ||
@@ -75,12 +80,21 @@ final class AndroidInputInjector {
         int frameY = readInt32LittleEndian(payload, 6);
         int data = readInt32LittleEndian(payload, 10);
 
+        // TCP can deliver a click and following typing together after network
+        // backpressure. Posting an accessibility gesture is not its completion:
+        // wait on the input worker so characters cannot precede the focus change.
+        if (requiresCompletedPointerRelease(kind) && !gestureState.awaitPendingRelease()) {
+            AndroidSessionLog.info("Prior pointer release did not complete; subsequent input was not injected.");
+            return false;
+        }
+        if (!authorized.getAsBoolean()) return false;
+
         if (kind == INPUT_TEXT) {
-            return dispatchTextInput(data);
+            return dispatchTextInput(data, authorized);
         }
 
         if (kind == INPUT_KEY_DOWN) {
-            return dispatchKeyAction(data);
+            return dispatchKeyAction(data, authorized);
         }
 
         if (kind == INPUT_KEY_UP) {
@@ -148,6 +162,10 @@ final class AndroidInputInjector {
         return kind != INPUT_TEXT &&
             kind != INPUT_KEY_DOWN &&
             kind != INPUT_KEY_UP;
+    }
+
+    static boolean requiresCompletedPointerRelease(int kind) {
+        return kind == INPUT_TEXT || kind == INPUT_KEY_DOWN || kind == INPUT_MOUSE_DOWN;
     }
 
     private static boolean beginTouch(GestureState state, PointF point) {
@@ -219,32 +237,32 @@ final class AndroidInputInjector {
         return RemoteDeskAccessibilityService.dispatchGestureFromAnyThread(gesture);
     }
 
-    private static boolean dispatchKeyAction(int virtualKey) {
+    private static boolean dispatchKeyAction(int virtualKey, java.util.function.BooleanSupplier authorized) {
         switch (virtualKey) {
             case VK_BACK:
-                return RemoteDeskAccessibilityService.deleteTextBeforeCursorFromAnyThread();
+                return RemoteDeskAccessibilityService.deleteTextBeforeCursorFromAnyThread(authorized);
             case VK_ESCAPE:
-                return RemoteDeskAccessibilityService.performGlobalActionFromAnyThread(AccessibilityService.GLOBAL_ACTION_BACK);
+                return RemoteDeskAccessibilityService.performGlobalActionFromAnyThread(AccessibilityService.GLOBAL_ACTION_BACK, authorized);
             case VK_HOME:
-                return RemoteDeskAccessibilityService.performGlobalActionFromAnyThread(AccessibilityService.GLOBAL_ACTION_HOME);
+                return RemoteDeskAccessibilityService.performGlobalActionFromAnyThread(AccessibilityService.GLOBAL_ACTION_HOME, authorized);
             case VK_F12:
-                return RemoteDeskAccessibilityService.performGlobalActionFromAnyThread(AccessibilityService.GLOBAL_ACTION_RECENTS);
+                return RemoteDeskAccessibilityService.performGlobalActionFromAnyThread(AccessibilityService.GLOBAL_ACTION_RECENTS, authorized);
             case VK_F11:
-                return RemoteDeskAccessibilityService.performGlobalActionFromAnyThread(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS);
+                return RemoteDeskAccessibilityService.performGlobalActionFromAnyThread(AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS, authorized);
             case VK_TAB:
-                return RemoteDeskAccessibilityService.performGlobalActionFromAnyThread(AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS);
+                return RemoteDeskAccessibilityService.performGlobalActionFromAnyThread(AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS, authorized);
             default:
                 return false;
         }
     }
 
-    private static boolean dispatchTextInput(int codePoint) {
+    private static boolean dispatchTextInput(int codePoint, java.util.function.BooleanSupplier authorized) {
         if (!Character.isValidCodePoint(codePoint) || isUnsupportedTextControl(codePoint)) {
             return false;
         }
 
         return RemoteDeskAccessibilityService.inputTextFromAnyThread(
-            new String(Character.toChars(codePoint)));
+            new String(Character.toChars(codePoint)), authorized);
     }
 
     private static boolean isUnsupportedTextControl(int codePoint) {
@@ -300,6 +318,14 @@ final class AndroidInputInjector {
 
         boolean closeGracefully(long timeoutMillis) {
             return pump.cancelAndAwaitIdle(timeoutMillis);
+        }
+
+        boolean awaitPendingRelease() {
+            AndroidDragGesturePump.Snapshot snapshot = pump.snapshot();
+            if (!snapshot.active || !snapshot.releasePending) return true;
+            // Completion callbacks run on the main thread; never block it.
+            if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) return false;
+            return pump.awaitPendingRelease(500);
         }
     }
 
