@@ -62,7 +62,10 @@ CONTROL_FILE_TRANSFER_STATUS = 11
 CONTROL_DEVICE_INFO = 12
 CONTROL_DEVICE_IDENTITY_REQUEST = 33
 CONTROL_DEVICE_IDENTITY = 34
+CONTROL_FILE_TRANSFER_RECEIPT = 35
 CAPABILITY_DEVICE_IDENTITY = 1 << 22
+CAPABILITY_CLIPBOARD_PASTE_SHORTCUT = 1 << 23
+CAPABILITY_FILE_TRANSFER_RECEIPT = 1 << 24
 CONTROL_VIEWER_INFO = 13
 CONTROL_VIDEO_KEY_FRAME_REQUEST = 14
 CONTROL_FILE_TRANSFER_REQUEST_CLIPBOARD_FILES = 18
@@ -174,6 +177,7 @@ CAPABILITIES = [
     (1 << 19, "HighFrameRateH264"),
     (1 << 20, "AuthenticatedUdpHeartbeat"),
     (1 << 21, "HighQualityJpeg"),
+    (1 << 23, "ClipboardPasteShortcut"),
 ]
 
 RESERVED_FILE_NAMES = {
@@ -414,7 +418,7 @@ class Cursor:
             value = raw.decode("utf-8")
         except UnicodeDecodeError as ex:
             raise ProtocolError("control string is not valid UTF-8") from ex
-        if len(value) > max_chars:
+        if len(value.encode("utf-16-le")) // 2 > max_chars:
             raise ProtocolError("control string is too large")
         return value
 
@@ -768,6 +772,13 @@ def encode_file_transfer_status(success: bool, message: str) -> bytes:
     )
 
 
+def encode_file_transfer_receipt(transfer_id: str, success: bool, message: str) -> bytes:
+    validate_control_string(transfer_id)
+    return (bytes([CONTROL_FILE_TRANSFER_RECEIPT]) + encode_dotnet_string(transfer_id)
+            + (b"\x01" if success else b"\x00")
+            + encode_bounded_dotnet_string(message, "File save result updated."))
+
+
 def encode_file_transfer_request_clipboard_files() -> bytes:
     return bytes([CONTROL_FILE_TRANSFER_REQUEST_CLIPBOARD_FILES])
 
@@ -798,7 +809,7 @@ def encode_file_transfer_clipboard_files_preview(
 
 
 def encode_dotnet_string(text: str, max_chars: int = MAX_CONTROL_STRING_CHARS) -> bytes:
-    if len(text) > max_chars:
+    if len(text.encode("utf-16-le")) // 2 > max_chars:
         raise ProtocolError("control string is too large")
     raw = text.encode("utf-8")
     return encode_7bit_int(len(raw)) + raw
@@ -806,7 +817,8 @@ def encode_dotnet_string(text: str, max_chars: int = MAX_CONTROL_STRING_CHARS) -
 
 def encode_bounded_dotnet_string(text: str | None, fallback: str) -> bytes:
     normalized = (text or "").strip() or fallback
-    return encode_dotnet_string(normalized[:MAX_CONTROL_STRING_CHARS])
+    bounded = normalized.encode("utf-16-le")[:MAX_CONTROL_STRING_CHARS * 2].decode("utf-16-le", errors="ignore")
+    return encode_dotnet_string(bounded)
 
 
 def encode_7bit_int(value: int) -> bytes:
@@ -828,7 +840,7 @@ def capability_names(capabilities: int) -> list[str]:
     return names
 
 
-def decode_control(payload: bytes) -> dict[str, Any]:
+def decode_control(payload: bytes, *, include_clipboard_text: bool = False) -> dict[str, Any]:
     if not payload or len(payload) > MAX_CONTROL_PAYLOAD_BYTES:
         raise ProtocolError("invalid control payload length")
 
@@ -883,7 +895,12 @@ def decode_control(payload: bytes) -> dict[str, Any]:
     elif kind == CONTROL_CLIPBOARD_SET_TEXT:
         message["text"] = cursor.read_dotnet_string(MAX_CLIPBOARD_TEXT_CHARS)
     elif kind == CONTROL_CLIPBOARD_TEXT:
-        message["textLength"] = len(cursor.read_dotnet_string(MAX_CLIPBOARD_TEXT_CHARS))
+        text = cursor.read_dotnet_string(MAX_CLIPBOARD_TEXT_CHARS)
+        message["textLength"] = len(text)
+        # Diagnostic probes must not print the user's clipboard. Only an
+        # interactive viewer explicitly opts in to receiving the actual text.
+        if include_clipboard_text:
+            message["text"] = text
     elif kind in (CONTROL_FILE_TRANSFER_START, CONTROL_REMOTE_UPDATE_START):
         message["transferId"] = cursor.read_dotnet_string()
         message["fileName"] = cursor.read_dotnet_string()
@@ -941,6 +958,10 @@ def decode_control(payload: bytes) -> dict[str, Any]:
         pass
     elif kind == CONTROL_FILE_TRANSFER_REJECT_CLIPBOARD_FILES:
         pass
+    elif kind == CONTROL_FILE_TRANSFER_RECEIPT:
+        message["transferId"] = cursor.read_dotnet_string()
+        message["success"] = cursor.read_bool()
+        message["statusMessage"] = cursor.read_dotnet_string()
     elif kind == CONTROL_CLIPBOARD_STATUS or kind == CONTROL_FILE_TRANSFER_STATUS:
         message["success"] = cursor.read_bool()
         message["statusMessage"] = cursor.read_dotnet_string()

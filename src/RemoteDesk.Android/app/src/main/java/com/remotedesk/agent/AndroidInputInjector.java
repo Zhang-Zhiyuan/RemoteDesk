@@ -93,14 +93,12 @@ final class AndroidInputInjector {
             return dispatchTextInput(data, authorized);
         }
 
-        if (kind == INPUT_KEY_DOWN) {
+        if (kind == INPUT_KEY_DOWN || kind == INPUT_KEY_UP) {
+            int shortcut = gestureState.clipboardKeys.key(data, kind == INPUT_KEY_DOWN);
+            if (shortcut != 0)
+                return RemoteDeskAccessibilityService.clipboardActionFromAnyThread(shortcut, authorized);
+            if (AndroidClipboardShortcutState.isModifier(data) || kind == INPUT_KEY_UP) return true;
             return dispatchKeyAction(data, authorized);
-        }
-
-        if (kind == INPUT_KEY_UP) {
-            // Android global/focused-field actions are committed on key-down;
-            // consuming key-up here keeps the reliable wire pair harmless.
-            return true;
         }
 
         if (!requiresFrameGeometry(kind)) {
@@ -297,6 +295,7 @@ final class AndroidInputInjector {
     }
 
     static final class GestureState {
+        final AndroidClipboardShortcutState clipboardKeys = new AndroidClipboardShortcutState();
         private final AndroidDragGestureDispatcher dispatcher =
             new AndroidDragGestureDispatcher();
         private final AndroidDragGesturePump pump =
@@ -309,14 +308,17 @@ final class AndroidInputInjector {
         }
 
         void reset() {
+            clipboardKeys.reset();
             pump.cancel();
         }
 
         void forceReset() {
+            clipboardKeys.reset();
             pump.forceCancel();
         }
 
         boolean closeGracefully(long timeoutMillis) {
+            clipboardKeys.reset();
             return pump.cancelAndAwaitIdle(timeoutMillis);
         }
 

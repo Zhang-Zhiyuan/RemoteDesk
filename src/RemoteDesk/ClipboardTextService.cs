@@ -18,13 +18,23 @@ internal static class ClipboardTextService
         return RunStaAsync(() => RunClipboardOperationWithRetries(ReadClipboardText));
     }
 
-    public static Task SetTextAsync(string text)
+    public static Task SetTextAsync(string text) => SetTextAsync(text, static () => true);
+
+    internal static async Task SetTextAsync(string text, Func<bool> isCurrent)
     {
-        return RunStaAsync(() => RunClipboardOperationWithRetries<object?>(() =>
+        using var lifetime = new CancellationTokenSource();
+        CancellationToken token = lifetime.Token;
+        try
         {
-            SetClipboardText(text);
-            return null;
-        }));
+            await RunStaAsync(() => RunClipboardOperationWithRetries<object?>(() =>
+            {
+                token.ThrowIfCancellationRequested();
+                if (!isCurrent()) throw new OperationCanceledException("剪贴板请求已失效，未修改本机内容。");
+                SetClipboardText(text);
+                return null;
+            }));
+        }
+        finally { lifetime.Cancel(); } // A timed-out queued STA operation must not write later.
     }
 
     public static Task<IReadOnlyList<string>> GetFileDropListAsync()

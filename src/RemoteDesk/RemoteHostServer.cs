@@ -5313,6 +5313,8 @@ internal sealed class RemoteHostServer : IDisposable
         CancellationToken cancellationToken)
     {
         RemoteControlMessage control = RemoteMessageCodec.DecodeControl(payload);
+        bool sendFileReceipts = viewerState.Capabilities.HasFlag(RemoteDeviceCapabilities.FileTransferReceipt) &&
+            viewerState.PendingRemoteUpdateTransferId != control.TransferId;
         switch (control.Kind)
         {
             case RemoteControlKind.SelectCaptureTarget:
@@ -5462,7 +5464,8 @@ internal sealed class RemoteHostServer : IDisposable
                     session,
                     writeLock,
                     cancellationToken,
-                    () => viewerState.PendingRemoteUpdateTransferId = null);
+                    () => viewerState.PendingRemoteUpdateTransferId = null,
+                    sendFileReceipts ? control : null);
                 break;
             case RemoteControlKind.RemoteUpdateStart:
                 if (viewerState.HasPendingClipboardFileReturnPlan ||
@@ -5499,7 +5502,8 @@ internal sealed class RemoteHostServer : IDisposable
                     session,
                     writeLock,
                     cancellationToken,
-                    () => viewerState.PendingRemoteUpdateTransferId = null);
+                    () => viewerState.PendingRemoteUpdateTransferId = null,
+                    sendFileReceipts ? control : null);
                 break;
             case RemoteControlKind.FileTransferChecksum:
                 await HandleFileTransferOperationAsync(
@@ -5513,7 +5517,8 @@ internal sealed class RemoteHostServer : IDisposable
                     session,
                     writeLock,
                     cancellationToken,
-                    () => viewerState.PendingRemoteUpdateTransferId = null);
+                    () => viewerState.PendingRemoteUpdateTransferId = null,
+                    sendFileReceipts ? control : null);
                 break;
             case RemoteControlKind.FileTransferCancel:
                 if (string.Equals(viewerState.PendingRemoteUpdateTransferId, control.TransferId, StringComparison.Ordinal))
@@ -5528,7 +5533,8 @@ internal sealed class RemoteHostServer : IDisposable
                     session,
                     writeLock,
                     cancellationToken,
-                    () => viewerState.PendingRemoteUpdateTransferId = null);
+                    () => viewerState.PendingRemoteUpdateTransferId = null,
+                    sendFileReceipts ? control : null);
                 break;
             case RemoteControlKind.FileTransferComplete:
                 await HandleFileTransferOperationAsync(
@@ -5543,7 +5549,8 @@ internal sealed class RemoteHostServer : IDisposable
                     session,
                     writeLock,
                     cancellationToken,
-                    () => viewerState.PendingRemoteUpdateTransferId = null);
+                    () => viewerState.PendingRemoteUpdateTransferId = null,
+                    sendFileReceipts ? control : null);
                 break;
             case RemoteControlKind.FileDropPasteBegin:
                 await HandleFileTransferOperationAsync(
@@ -5623,6 +5630,7 @@ internal sealed class RemoteHostServer : IDisposable
                     cancellationToken);
                 break;
             case RemoteControlKind.FileTransferStatus:
+            case RemoteControlKind.FileTransferReceipt:
                 HandlePeerFileTransferStatus(control, viewerState, clipboardLog);
                 break;
             case RemoteControlKind.ViewerInfo:
@@ -6087,14 +6095,18 @@ internal sealed class RemoteHostServer : IDisposable
         SecureSession session,
         SemaphoreSlim writeLock,
         CancellationToken cancellationToken,
-        Action? onActiveTransferAborted = null)
+        Action? onActiveTransferAborted = null,
+        RemoteControlMessage? receiptControl = null)
     {
         try
         {
             string? message = await operation();
             if (!string.IsNullOrWhiteSpace(message))
             {
-                await SendFileTransferStatusAsync(stream, session, writeLock, true, message, cancellationToken);
+                byte[] payload = receiptControl is { Kind: RemoteControlKind.FileTransferComplete or RemoteControlKind.FileTransferCancel, TransferId: { } id }
+                    ? RemoteMessageCodec.EncodeFileTransferReceipt(id, receiptControl.Kind == RemoteControlKind.FileTransferComplete, message)
+                    : RemoteMessageCodec.EncodeFileTransferStatus(true, message);
+                await Protocol.WriteMessageAsync(stream, MessageType.Control, payload, session, writeLock, cancellationToken);
             }
         }
         catch (Exception ex) when (RemoteFileTransfer.IsRecoverableTransferException(ex))
@@ -6104,7 +6116,11 @@ internal sealed class RemoteHostServer : IDisposable
                 onActiveTransferAborted?.Invoke();
             }
 
-            await SendFileTransferStatusAsync(stream, session, writeLock, false, $"文件传输失败：{ex.Message}", cancellationToken);
+            string error = $"文件传输失败：{ex.Message}";
+            byte[] payload = receiptControl?.TransferId is { } id
+                ? RemoteMessageCodec.EncodeFileTransferReceipt(id, false, error)
+                : RemoteMessageCodec.EncodeFileTransferStatus(false, error);
+            await Protocol.WriteMessageAsync(stream, MessageType.Control, payload, session, writeLock, cancellationToken);
         }
     }
 
@@ -6883,7 +6899,7 @@ internal sealed class RemoteHostServer : IDisposable
     {
         try
         {
-            await ClipboardTextService.SetTextAsync(text);
+            await ClipboardTextService.SetTextAsync(text, () => !cancellationToken.IsCancellationRequested);
             clipboardLog("控制端已写入远程文本剪贴板。");
             byte[] payload = RemoteMessageCodec.EncodeClipboardStatus(true, "已写入远程剪贴板");
             await Protocol.WriteMessageAsync(stream, MessageType.Control, payload, session, writeLock, cancellationToken);

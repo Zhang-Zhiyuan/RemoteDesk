@@ -11,11 +11,11 @@ public sealed partial class MainForm
         RelayOnlineDevice? selected = GetSelectedRelayDevice();
         string? selection = selected is null || !IsRelayConfigured() ? null :
             RelayDeviceKeys.Scope(CreateRelayOptions(selected.DeviceId)) + ":" + selected.DeviceId;
+        _relayViewerPasswordBox.PlaceholderText = selected is null ? "先选择在线设备" : $"{selected.MachineName} 的设备密钥";
         if (selection == _relayKeySelection) return; // Keep edits during periodic directory refresh.
         _relayKeySelection = selection;
         _relayViewerPasswordBox.Text = selection is null ? "" : AppSettingsService.UnprotectSecret(
             RelayDeviceKeys.Find(_settings.Relay.DeviceKeys, CreateRelayOptions(selected!.DeviceId))) ?? "";
-        _relayViewerPasswordBox.PlaceholderText = selected is null ? "先选择在线设备" : $"{selected.MachineName} 的设备密钥";
     }
 
     private string? RequestRelayDeviceKey(RelayOnlineDevice selected)

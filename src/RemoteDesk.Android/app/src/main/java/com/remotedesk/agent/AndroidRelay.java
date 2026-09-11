@@ -343,6 +343,8 @@ final class AndroidRelay {
 
     static final class Device {
         final String deviceId, name, platform;
+        final String sharedName, originalName, namingUnavailableReason;
+        final boolean canRename;
         final boolean busy;
         final List<String> directAddresses;
         final int directPort;
@@ -350,7 +352,13 @@ final class AndroidRelay {
             this(id, name, platform, busy, java.util.Collections.emptyList(), 0);
         }
         Device(String id, String name, String platform, boolean busy, List<String> addresses, int port) {
+            this(id, name, platform, busy, addresses, port, "", name, false, AndroidRelayDeviceName.UNSUPPORTED);
+        }
+        Device(String id, String name, String platform, boolean busy, List<String> addresses, int port,
+               String sharedName, String originalName, boolean canRename, String namingUnavailableReason) {
             this.deviceId = id; this.name = name; this.platform = platform; this.busy = busy;
+            this.sharedName = sharedName; this.originalName = originalName; this.canRename = canRename;
+            this.namingUnavailableReason = namingUnavailableReason;
             this.directAddresses = AndroidRelayAddresses.normalize(addresses);
             this.directPort = port > 0 && port <= 65535 ? port : 0;
         }
@@ -394,7 +402,12 @@ final class AndroidRelay {
                             String id = UUID.fromString(item.optString("deviceId")).toString();
                             if (seen.add(id)) result.add(new Device(id, bounded(item.optString("machineName", "未命名设备"), 120),
                                 bounded(item.optString("platform", "未知"), 40), item.optBoolean("busy", false),
-                                AndroidRelayAddresses.parse(item), AndroidRelayAddresses.port(item)));
+                                AndroidRelayAddresses.parse(item), AndroidRelayAddresses.port(item),
+                                bounded(item.optString("sharedName", ""), 80),
+                                bounded(item.optString("originalMachineName", item.optString("machineName", "")), 120),
+                                Boolean.TRUE.equals(response.opt("deviceNaming")),
+                                response.optString("deviceNamingError", "").isEmpty() ? AndroidRelayDeviceName.UNSUPPORTED :
+                                    AndroidRelayDeviceName.errorMessage(response.optString("deviceNamingError"))));
                         } catch (IllegalArgumentException ignored) { }
                     }
                     dial.checkOpen();
@@ -412,6 +425,33 @@ final class AndroidRelay {
 
     @FunctionalInterface interface DirectoryConnector<T extends Socket> {
         T connect(AndroidRelayNetworkSelector.Dial page) throws Exception;
+    }
+
+    static void renameDevice(android.content.Context context, Options options, String name,
+                             Consumer<Socket> socketChanged) throws Exception {
+        String normalized = AndroidRelayDeviceName.normalize(name);
+        try (AndroidRelayNetworkSelector.Dial dial = new AndroidRelayNetworkSelector.Dial()) {
+            socketChanged.accept(dial);
+            ScheduledFuture<?> deadline = DIRECTORY_DEADLINES.schedule(dial::close, TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            try (SSLSocket socket = connectDirectoryPage(dial,
+                    page -> AndroidRelayNetworkSelector.connect(context, options, page))) {
+                // Read naming errors explicitly; directory's generic offline error hides storage/upgrade failures.
+                write(socket.getOutputStream(), request(options, "rename-device").put("deviceId", options.deviceId).put("name", normalized));
+                JSONObject response = read(socket.getInputStream());
+                verifyNameReply(response, options.deviceId, normalized);
+                dial.checkOpen();
+            } finally { deadline.cancel(false); }
+        } finally { socketChanged.accept(null); }
+    }
+
+    static void verifyNameReply(JSONObject response, String id, String name) throws Exception {
+        if (!Boolean.TRUE.equals(response.opt("ok"))) {
+            String error = response.optString("error", "共享名称保存失败，请刷新在线列表核对后重试。");
+            if (error.contains("访问密钥")) throw new IdentityFailure(false, null);
+            throw new IOException(AndroidRelayDeviceName.errorMessage(error));
+        }
+        if (!id.equals(response.optString("deviceId")) || !name.equals(response.optString("sharedName", null)))
+            throw new IOException("中继未确认此设备的名称，请刷新在线列表核对后重试。");
     }
 
     static <T extends Socket> T connectDirectoryPage(AndroidRelayNetworkSelector.Dial directory,

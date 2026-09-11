@@ -1,5 +1,6 @@
 from dataclasses import replace
 from pathlib import Path
+import queue
 import sys
 import tempfile
 import unittest
@@ -106,6 +107,60 @@ class RelayWorkflowTkTests(unittest.TestCase):
             self.ui._show_relay_directory([device]); self.root.update()
             self.assertEqual((B,), self.ui.relay_list.selection())
             self.assertEqual('editing-this-device-key', self.ui.relay_password.get())
+
+    def select_named_fixture(self):
+        self.ui.events = queue.Queue()
+        self.ui._show_relay_directory([dict(deviceId=B, machineName='共享工作机', originalMachineName='Original PC',
+            sharedName='共享工作机', canRename=True, platform='Windows', busy=False)])
+        with mock.patch.object(relay, 'load_device_key', return_value='owned-key'):
+            self.ui.relay_list.selection_set(B)
+            self.root.update()
+
+    def test_shared_name_button_targets_uuid_and_explains_other_clients_visibility(self):
+        self.select_named_fixture()
+        with mock.patch.object(app.simpledialog, 'askstring', return_value='广州工作站') as dialog, \
+                mock.patch.object(app.threading, 'Thread') as worker:
+            self.ui.relay_rename_button.invoke()
+        self.assertIn('同一服务器', dialog.call_args.args[1])
+        self.assertEqual('共享工作机', dialog.call_args.kwargs['initialvalue'])
+        self.assertTrue(self.ui.relay_renaming)
+        with mock.patch.object(relay, 'rename_device') as rename:
+            worker.call_args.kwargs['target']()
+        rename.assert_called_once_with(replace(SAVED, device_id=B), '广州工作站')
+        kind, payload = self.ui.events.get_nowait()
+        self.assertEqual('relay_rename', kind)
+        with mock.patch.object(self.ui, '_refresh_relay') as refresh:
+            self.ui._complete_relay_rename(payload)
+        refresh.assert_called_once()
+        self.assertFalse(self.ui.relay_renaming)
+
+    def test_cancel_and_changed_server_never_send_a_name(self):
+        self.select_named_fixture()
+        def changed(*_args, **_kwargs):
+            self.ui.relay_options = replace(SAVED, server_address='other.test')
+            return 'wrong-target'
+        for reply in (None, changed):
+            with mock.patch.object(app.simpledialog, 'askstring', **({'side_effect': reply} if callable(reply) else {'return_value': reply})), \
+                    mock.patch.object(app.threading, 'Thread') as worker:
+                self.ui._rename_relay_device()
+            worker.assert_not_called()
+
+    def test_failed_save_populates_warning_and_never_claims_success(self):
+        self.select_named_fixture()
+        self.ui.relay_renaming = True
+        with mock.patch.object(app.messagebox, 'showwarning') as warning, mock.patch.object(self.ui, '_refresh_relay') as refresh:
+            self.ui._complete_relay_rename((self.ui.relay_refresh_generation, SAVED, 'fixture disk full'))
+        warning.assert_called_once()
+        refresh.assert_not_called()
+        self.assertIn('未确认保存', self.ui.relay_status.cget('text'))
+
+    def test_legacy_server_is_visible_with_actionable_update_notice(self):
+        self.select_named_fixture()
+        self.ui.relay_devices[B]['canRename'] = False
+        with mock.patch.object(app.messagebox, 'showinfo') as notice, mock.patch.object(app.simpledialog, 'askstring') as dialog:
+            self.ui._rename_relay_device()
+        self.assertIn('更新服务器', notice.call_args.args[1])
+        dialog.assert_not_called()
 
 
 if __name__ == '__main__': unittest.main()

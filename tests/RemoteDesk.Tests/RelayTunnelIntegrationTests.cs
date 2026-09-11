@@ -103,6 +103,23 @@ public sealed class RelayTunnelIntegrationTests
                 devices,
                 device => device.DeviceId == deviceId);
 
+            RelayOnlineDevice originalDevice = Assert.Single(devices, device => device.DeviceId == deviceId);
+            Assert.True(originalDevice.CanRename);
+            await RelayTunnelClient.RenameDeviceAsync(options, "  广州工作站 🖥  ", timeout.Token);
+            var otherClient = options with { DeviceId = Guid.NewGuid().ToString("D") };
+            RelayOnlineDevice named = Assert.Single(await RelayTunnelClient.ListDevicesAsync(otherClient, timeout.Token));
+            Assert.Equal("广州工作站 🖥", named.MachineName);
+            Assert.Equal("广州工作站 🖥", named.SharedName);
+            Assert.Equal(originalDevice.MachineName, named.OriginalMachineName);
+            Assert.True(File.Exists(Path.Combine(testDirectory, "device-names.json")));
+            await Assert.ThrowsAsync<RelayAccessDeniedException>(() => RelayTunnelClient.RenameDeviceAsync(
+                options with { AccessToken = new string('f', 64) }, "不可修改", timeout.Token));
+            Assert.Equal("广州工作站 🖥", Assert.Single(await RelayTunnelClient.ListDevicesAsync(otherClient, timeout.Token)).SharedName);
+            await RelayTunnelClient.RenameDeviceAsync(options, "", timeout.Token);
+            RelayOnlineDevice restored = Assert.Single(await RelayTunnelClient.ListDevicesAsync(otherClient, timeout.Token));
+            Assert.Equal(originalDevice.MachineName, restored.MachineName);
+            Assert.Empty(restored.SharedName);
+
             Task<TcpClient> acceptTask =
                 localListener.AcceptTcpClientAsync(
                     timeout.Token).AsTask();

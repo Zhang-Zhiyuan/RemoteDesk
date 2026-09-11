@@ -390,6 +390,12 @@ final class RemoteDeskTransport {
         return output.toByteArray();
     }
 
+    static byte[] encodeClipboardSetText(String text) throws IOException {
+        byte[] payload = encodeClipboardText(text);
+        payload[0] = (byte) RemoteDeskProtocol.CONTROL_CLIPBOARD_SET_TEXT;
+        return payload;
+    }
+
     static byte[] encodeClipboardStatus(boolean success, String message) throws IOException {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         output.write(RemoteDeskProtocol.CONTROL_CLIPBOARD_STATUS);
@@ -403,6 +409,61 @@ final class RemoteDeskTransport {
         output.write(RemoteDeskProtocol.CONTROL_FILE_TRANSFER_STATUS);
         output.write(success ? 1 : 0);
         writeBoundedString(output, message, "文件传输状态已更新。");
+        return output.toByteArray();
+    }
+
+    static byte[] encodeFileTransferReceipt(String transferId, boolean success, String message) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        output.write(RemoteDeskProtocol.CONTROL_FILE_TRANSFER_RECEIPT);
+        writeBoundedString(output, transferId, "");
+        output.write(success ? 1 : 0);
+        writeBoundedString(output, message, "文件保存结果已更新。");
+        return output.toByteArray();
+    }
+
+    static byte[] encodeFileTransferStart(String id, String name, long length) throws IOException {
+        validateFileLength(length);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        output.write(RemoteDeskProtocol.CONTROL_FILE_TRANSFER_START);
+        writeString(output, id, MAX_CONTROL_STRING_CHARS);
+        writeString(output, name, MAX_CONTROL_STRING_CHARS);
+        writeInt64LittleEndian(output, length);
+        return output.toByteArray();
+    }
+
+    static byte[] encodeFileTransferChunk(String id, long offset, byte[] bytes, int length) throws IOException {
+        validateFileChunk(offset, length);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        output.write(RemoteDeskProtocol.CONTROL_FILE_TRANSFER_CHUNK);
+        writeString(output, id, MAX_CONTROL_STRING_CHARS);
+        writeInt64LittleEndian(output, offset);
+        writeInt32LittleEndian(output, length);
+        output.write(bytes, 0, length);
+        return output.toByteArray();
+    }
+
+    static byte[] encodeFileTransferComplete(String id) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        output.write(RemoteDeskProtocol.CONTROL_FILE_TRANSFER_COMPLETE);
+        writeString(output, id, MAX_CONTROL_STRING_CHARS);
+        return output.toByteArray();
+    }
+
+    static byte[] encodeFileTransferChecksum(String id, String checksum) throws IOException {
+        validateSha256Hex(checksum);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        output.write(RemoteDeskProtocol.CONTROL_FILE_TRANSFER_CHECKSUM);
+        writeString(output, id, MAX_CONTROL_STRING_CHARS);
+        writeString(output, "SHA256", MAX_CONTROL_STRING_CHARS);
+        writeString(output, checksum, MAX_CONTROL_STRING_CHARS);
+        return output.toByteArray();
+    }
+
+    static byte[] encodeFileTransferCancel(String id, String reason) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        output.write(RemoteDeskProtocol.CONTROL_FILE_TRANSFER_CANCEL);
+        writeString(output, id, MAX_CONTROL_STRING_CHARS);
+        writeBoundedString(output, reason, "发送端取消");
         return output.toByteArray();
     }
 
@@ -628,13 +689,17 @@ final class RemoteDeskTransport {
                 break;
             case RemoteDeskProtocol.CONTROL_CLIPBOARD_STATUS:
             case RemoteDeskProtocol.CONTROL_FILE_TRANSFER_STATUS:
+            case RemoteDeskProtocol.CONTROL_FILE_TRANSFER_RECEIPT:
+                if (kind == RemoteDeskProtocol.CONTROL_FILE_TRANSFER_RECEIPT) {
+                    transferId = cursor.readString(MAX_CONTROL_STRING_CHARS);
+                }
                 boolean success = cursor.readUnsignedByte() != 0;
                 String statusMessage = cursor.readString(MAX_CONTROL_STRING_CHARS);
                 cursor.ensureFullyRead();
                 return new ControlMessage(
                     kind,
                     null,
-                    null,
+                    transferId,
                     null,
                     0,
                     0,

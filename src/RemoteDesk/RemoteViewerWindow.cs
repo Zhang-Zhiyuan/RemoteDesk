@@ -6815,6 +6815,7 @@ internal sealed class RemoteViewerWindow : Form
 
     private async Task DropFilesToRemoteAsync(IReadOnlyList<string> files, Point? remotePoint)
     {
+        long fileGeneration = _client.InputConnectionGeneration;
         if (_dragFileTransferInProgress)
         {
             return;
@@ -6836,6 +6837,7 @@ internal sealed class RemoteViewerWindow : Form
                 files,
                 pasteAtRemoteDropTarget);
             if (!ConfirmOutgoingFileTransfer(
+                fileGeneration,
                 preview,
                 "确认拖放文件",
                 pasteAtRemoteDropTarget
@@ -6849,6 +6851,7 @@ internal sealed class RemoteViewerWindow : Form
             if (_inputEnabled && remotePoint is { } point)
             {
                 await FocusRemoteDropTargetAsync(point, pasteAtRemoteDropTarget);
+                EnsureFileTargetCurrent(fileGeneration);
             }
 
             OnUi(() => SetStatus(
@@ -6878,10 +6881,11 @@ internal sealed class RemoteViewerWindow : Form
                     ? SuccessTextColor
                     : MutedTextColor;
             OnUi(() => SetStatus(status, color));
+            if (result.FailedFiles > 0) ShowFileTransferFailure(result.FailureMessage ?? status);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or ObjectDisposedException)
         {
-            OnUi(() => SetStatus($"拖放文件失败：{ex.Message}", DangerTextColor));
+            ShowFileTransferFailure(ex.Message);
         }
         finally
         {
@@ -6915,9 +6919,11 @@ internal sealed class RemoteViewerWindow : Form
 
     private async Task PasteClipboardToRemoteAsync(KeyEventArgs shortcutArgs)
     {
+        long clipboardGeneration = _client.InputConnectionGeneration;
         try
         {
             IReadOnlyList<string> clipboardFiles = await ClipboardTextService.GetFileDropListAsync();
+            if (_client.InputConnectionGeneration != clipboardGeneration) return;
             if (clipboardFiles.Count > 0)
             {
                 await PasteClipboardFilesToRemoteAsync(clipboardFiles);
@@ -6925,6 +6931,7 @@ internal sealed class RemoteViewerWindow : Form
             }
 
             string text = await ClipboardTextService.GetTextAsync();
+            if (_client.InputConnectionGeneration != clipboardGeneration) return;
             if (string.IsNullOrEmpty(text))
             {
                 OnUi(() => SetStatus("本机剪贴板没有可输入的文本", MutedTextColor));
@@ -6947,6 +6954,13 @@ internal sealed class RemoteViewerWindow : Form
                 }
             }
 
+            if (_client.InputConnectionGeneration != clipboardGeneration) return;
+            if (_clipboardTextEnabled && !clipboardSynced)
+            {
+                OnUi(() => SetStatus("远端未确认写入剪贴板，未触发粘贴；请检查连接后重试", DangerTextColor));
+                return;
+            }
+
             if (!_inputEnabled)
             {
                 string syncOnlyStatus = clipboardSynced
@@ -6963,7 +6977,7 @@ internal sealed class RemoteViewerWindow : Form
                 return;
             }
 
-            if (clipboardSynced && !_isAndroidRemote && TryCreateRemotePasteTriggerCommandSequence(
+            if (clipboardSynced && (!_isAndroidRemote || _client.SupportsRemoteClipboardPasteShortcut) && TryCreateRemotePasteTriggerCommandSequence(
                 shortcutArgs,
                 out RemoteInputCommand[] pasteCommands))
             {
@@ -7010,6 +7024,7 @@ internal sealed class RemoteViewerWindow : Form
 
     private async Task PasteClipboardFilesToRemoteAsync(IReadOnlyList<string> clipboardFiles)
     {
+        long fileGeneration = _client.InputConnectionGeneration;
         if (!_filePasteEnabled)
         {
             OnUi(() => SetStatus("远程设备未声明文件接收能力，无法粘贴文件", MutedTextColor));
@@ -7024,6 +7039,7 @@ internal sealed class RemoteViewerWindow : Form
                 clipboardFiles,
                 pasteAtRemoteTarget);
             if (!ConfirmOutgoingFileTransfer(
+                fileGeneration,
                 preview,
                 "确认粘贴文件",
                 pasteAtRemoteTarget
@@ -7062,10 +7078,11 @@ internal sealed class RemoteViewerWindow : Form
                     ? SuccessTextColor
                     : MutedTextColor;
             OnUi(() => SetStatus(status, color));
+            if (result.FailedFiles > 0) ShowFileTransferFailure(result.FailureMessage ?? status);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or ObjectDisposedException)
         {
-            OnUi(() => SetStatus($"粘贴文件失败：{ex.Message}", DangerTextColor));
+            ShowFileTransferFailure(ex.Message);
         }
     }
 
@@ -7090,22 +7107,41 @@ internal sealed class RemoteViewerWindow : Form
     }
 
     private bool ConfirmOutgoingFileTransfer(
+        long expectedGeneration,
         FileTransferConfirmationPreview preview,
         string title,
         string actionText)
     {
+        EnsureFileTargetCurrent(expectedGeneration);
         if (preview.Plan.Files.Count == 0)
         {
             OnUi(() => SetStatus("没有可传输的文件", MutedTextColor));
             return false;
         }
 
-        return FileTransferConfirmation.Confirm(
+        bool confirmed = FileTransferConfirmation.Confirm(
             this,
             title,
             actionText,
             preview.Items,
             preview.Note);
+        EnsureFileTargetCurrent(expectedGeneration);
+        return confirmed;
+    }
+
+    private void EnsureFileTargetCurrent(long generation)
+    {
+        if (!_client.IsConnected || _client.InputConnectionGeneration != generation)
+            throw new IOException("连接已改变，原文件确认已失效，请在当前连接重新选择文件。");
+    }
+
+    private void ShowFileTransferFailure(string message)
+    {
+        OnUi(() => {
+            if (IsDisposed || Disposing) return;
+            SetStatus(message, DangerTextColor);
+            MessageBox.Show(this, message, "文件传输未完成", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        });
     }
 
     internal static string FormatClipboardFilePasteStatus(

@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
@@ -92,6 +93,7 @@ internal sealed class RemoteViewerClient : IDisposable
             RemoteDeviceCapabilities.LowLatencyUdpVideoXorFec;
     private const RemoteDeviceCapabilities LocalViewerBaselineCapabilities =
         RemoteDeviceCapabilities.FileChecksum |
+        RemoteDeviceCapabilities.FileTransferReceipt |
         RemoteDeviceCapabilities.FileTransferCancel |
         RemoteDeviceCapabilities.FileTransferPreview |
         RemoteDeviceCapabilities.LowLatencyUdpVideo |
@@ -134,6 +136,8 @@ internal sealed class RemoteViewerClient : IDisposable
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly SemaphoreSlim _inputSignal = new(0, 1);
     private readonly SemaphoreSlim _fileTransferLock = new(1, 1);
+    private readonly ConcurrentDictionary<string, TaskCompletionSource<RemoteControlMessage>> _fileReceipts = new();
+    internal TimeSpan FileSaveConfirmationTimeout { get; set; } = TimeSpan.FromSeconds(120);
     private readonly FileTransferReceiver _incomingFileReceiver;
     private readonly object _connectionStateLock = new();
     private readonly object _connectedChangedQueueLock = new();
@@ -337,6 +341,9 @@ internal sealed class RemoteViewerClient : IDisposable
 
     internal bool SupportsRemoteClipboardSequenceTracking =>
         _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.ClipboardSequenceTracking);
+
+    internal bool SupportsRemoteClipboardPasteShortcut =>
+        _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.ClipboardPasteShortcut);
 
     internal long InputConnectionGeneration
     {
@@ -846,11 +853,11 @@ internal sealed class RemoteViewerClient : IDisposable
             .FirstOrDefault();
     }
 
-    private bool IsCurrentConnection(CancellationTokenSource ownerConnection)
+    private bool IsCurrentConnection(CancellationTokenSource? ownerConnection)
     {
         lock (_connectionStateLock)
         {
-            return ReferenceEquals(_cancellationTokenSource, ownerConnection);
+            return ownerConnection is not null && ReferenceEquals(_cancellationTokenSource, ownerConnection);
         }
     }
 
@@ -1419,15 +1426,19 @@ internal sealed class RemoteViewerClient : IDisposable
 
     public async Task SendLocalClipboardToRemoteAsync()
     {
+        CancellationTokenSource? owner = _cancellationTokenSource;
         string text = await ClipboardTextService.GetTextAsync();
+        if (!IsCurrentConnection(owner)) return;
         if (string.IsNullOrEmpty(text))
         {
             ClipboardStatusReceived?.Invoke("本机剪贴板没有文本。");
             return;
         }
 
-        await SendClipboardTextToRemoteAsync(text, "已发送本机文本剪贴板。");
+        await SendClipboardTextToRemoteAsync(text, "已写入远端文本剪贴板。");
     }
+
+    private readonly ClipboardRequestTracker _clipboardRequests = new();
 
     public async Task<bool> SendClipboardTextToRemoteAsync(string text, string? successMessage = null)
     {
@@ -1437,24 +1448,66 @@ internal sealed class RemoteViewerClient : IDisposable
             return false;
         }
 
-        if (await SendControlAsync(RemoteMessageCodec.EncodeClipboardSetText(text)))
+        byte[] payload = RemoteMessageCodec.EncodeClipboardSetText(text);
+        CancellationTokenSource? owner = _cancellationTokenSource;
+        ClipboardRequestTracker.Request? request = _clipboardRequests.Begin(InputConnectionGeneration, read: false);
+        if (request is null)
         {
-            ClipboardStatusReceived?.Invoke(successMessage ?? "已发送文本剪贴板到远程。");
-            return true;
+            ClipboardStatusReceived?.Invoke("上一项剪贴板操作仍在等待远端，请稍后重试；长时间无响应请重连。");
+            return false;
         }
-
-        ClipboardStatusReceived?.Invoke("连接已断开，无法发送文本剪贴板。");
-        return false;
+        if (!await SendControlAsync(payload, owner))
+        {
+            _clipboardRequests.Take(request.Generation, textReply: false, success: false)?.Completion.TrySetResult(false);
+            ClipboardStatusReceived?.Invoke("连接已断开，无法发送文本剪贴板。");
+            return false;
+        }
+        bool success = await WaitForClipboardReplyAsync(request, owner);
+        if (success && IsCurrentConnection(owner))
+            ClipboardStatusReceived?.Invoke(successMessage ?? "已写入远端文本剪贴板。");
+        return success && IsCurrentConnection(owner);
     }
 
     public async Task ReadRemoteClipboardAsync(bool notifyRequest = true)
     {
-        if (await SendControlAsync(RemoteMessageCodec.EncodeClipboardGetText()))
+        CancellationTokenSource? owner = _cancellationTokenSource;
+        ClipboardRequestTracker.Request? request = _clipboardRequests.Begin(
+            InputConnectionGeneration, read: true, ClipboardTextService.ReadClipboardSequenceNumber());
+        if (request is null)
+        {
+            if (notifyRequest) ClipboardStatusReceived?.Invoke("上一项剪贴板操作仍在等待远端，请稍后重试；长时间无响应请重连。");
+            return;
+        }
+        if (await SendControlAsync(RemoteMessageCodec.EncodeClipboardGetText(), owner))
         {
             if (notifyRequest)
             {
                 ClipboardStatusReceived?.Invoke("已请求读取远程文本剪贴板。");
             }
+            _ = WaitForClipboardReplyAsync(request, owner);
+        }
+        else
+        {
+            _clipboardRequests.Take(request.Generation, textReply: false, success: false)?.Completion.TrySetResult(false);
+        }
+    }
+
+    private async Task<bool> WaitForClipboardReplyAsync(ClipboardRequestTracker.Request request, CancellationTokenSource? owner)
+    {
+        try
+        {
+            return await request.Completion.Task.WaitAsync(TimeSpan.FromMilliseconds(
+                ClipboardRequestTracker.TimeoutMilliseconds), owner?.Token ?? new CancellationToken(true));
+        }
+        catch (TimeoutException)
+        {
+            if (IsCurrentConnection(owner))
+                ClipboardStatusReceived?.Invoke("等待远端剪贴板超时：未覆盖本机内容，也未触发粘贴。请稍后重试或重新连接。");
+            return false;
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
+        {
+            return false;
         }
     }
 
@@ -1933,6 +1986,7 @@ internal sealed class RemoteViewerClient : IDisposable
         int sentFiles = 0;
         int failedFiles = 0;
         int archivedDirectories = 0;
+        string? failureMessage = null;
         foreach (RemoteFilePasteItem item in plan.TransferItems)
         {
             ownerConnection.Token.ThrowIfCancellationRequested();
@@ -1951,6 +2005,7 @@ internal sealed class RemoteViewerClient : IDisposable
             {
                 failedFiles++;
                 string fileName = RemoteFileTransfer.GetTransferDisplayName(item.Path);
+                failureMessage ??= $"{fileName}：{ex.Message}";
                 FileTransferStatusReceived?.Invoke(
                     false,
                     $"{failurePrefix}：{(string.IsNullOrWhiteSpace(fileName) ? item.Path : fileName)} - {ex.Message}");
@@ -1967,7 +2022,8 @@ internal sealed class RemoteViewerClient : IDisposable
             plan.SkippedDirectories,
             plan.SkippedMissing,
             plan.Truncated,
-            archivedDirectories);
+            archivedDirectories,
+            failureMessage);
     }
 
     private async Task<bool> SendTransferItemToRemoteCoreAsync(
@@ -2071,6 +2127,9 @@ internal sealed class RemoteViewerClient : IDisposable
         bool transferStarted = false;
         bool sendChecksum = _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.FileChecksum);
         bool sendCancel = _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.FileTransferCancel);
+        bool requireReceipt = !remoteUpdate && _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.FileTransferReceipt);
+        var receipt = new TaskCompletionSource<RemoteControlMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (requireReceipt) _fileReceipts[transferId] = receipt;
         using IncrementalHash? checksum = sendChecksum
             ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256)
             : null;
@@ -2100,6 +2159,8 @@ internal sealed class RemoteViewerClient : IDisposable
             {
                 while (offset < fileLength)
                 {
+                    if (requireReceipt && receipt.Task.IsCompletedSuccessfully && !receipt.Task.Result.Success)
+                        throw new IOException(receipt.Task.Result.StatusMessage ?? "远端拒绝接收文件。");
                     int bytesToRead = (int)Math.Min(
                         RemoteMessageCodec.RecommendedFileTransferChunkBytes,
                         fileLength - offset);
@@ -2164,6 +2225,21 @@ internal sealed class RemoteViewerClient : IDisposable
                 remoteUpdate
                     ? $"远程更新包已发送，等待被控端校验并重启：{fileName}"
                     : $"文件已发送，等待被控端保存：{fileName}");
+            if (requireReceipt)
+            {
+                RemoteControlMessage result;
+                try
+                {
+                    result = await receipt.Task.WaitAsync(FileSaveConfirmationTimeout, cancellationToken);
+                }
+                catch (TimeoutException ex)
+                {
+                    throw new IOException("等待远端保存确认超时，文件可能已保存，请检查接收目录后再重试。", ex);
+                }
+                if (!result.Success) throw new IOException(result.StatusMessage ?? "远端保存文件失败。");
+                if (!IsCurrentConnection(ownerConnection)) throw new IOException("连接已切换，文件传输已结束。");
+                FileTransferStatusReceived?.Invoke(true, result.StatusMessage ?? $"远端已保存：{fileName}");
+            }
         }
         catch (Exception ex) when (transferStarted && RemoteFileTransfer.IsRecoverableTransferException(ex))
         {
@@ -2173,6 +2249,10 @@ internal sealed class RemoteViewerClient : IDisposable
                 ownerConnection,
                 sendCancel);
             throw;
+        }
+        finally
+        {
+            _fileReceipts.TryRemove(transferId, out _);
         }
     }
 
@@ -2779,25 +2859,41 @@ internal sealed class RemoteViewerClient : IDisposable
 
                 break;
             case RemoteControlKind.ClipboardText:
+                var clipboardRequest = _clipboardRequests.Take(inputConnectionGeneration, textReply: true, success: true);
+                if (clipboardRequest is null) break;
                 try
                 {
-                    await ClipboardTextService.SetTextAsync(control.Text ?? string.Empty);
+                    if (string.IsNullOrEmpty(control.Text))
+                    {
+                        ClipboardStatusReceived?.Invoke("远端没有可读取的文本，本机剪贴板保持不变。");
+                        break;
+                    }
+                    await ClipboardTextService.SetTextAsync(control.Text, () =>
+                        IsCurrentConnection(ownerConnection) && !ownerConnection.IsCancellationRequested &&
+                        _clipboardRequests.CanApply(clipboardRequest, ClipboardTextService.ReadClipboardSequenceNumber()));
                     ClipboardStatusReceived?.Invoke("已读取远程剪贴板到本机。");
+                    clipboardRequest.Completion.TrySetResult(true);
+                }
+                catch (OperationCanceledException)
+                {
+                    ClipboardStatusReceived?.Invoke("剪贴板请求已过期，或本机已复制新内容；未覆盖本机剪贴板。");
                 }
                 catch (Exception ex)
                 {
                     ClipboardStatusReceived?.Invoke($"写入本机剪贴板失败：{ex.Message}");
                 }
+                finally { clipboardRequest.Completion.TrySetResult(false); }
 
                 break;
             case RemoteControlKind.ClipboardStatus:
                 string clipboardStatus =
                     control.StatusMessage ??
                     "剪贴板操作已完成。";
-                if (CaptureTargetAvailabilityStatusCodec.TryParse(
+                bool isCaptureTargetStatus = CaptureTargetAvailabilityStatusCodec.TryParse(
                         clipboardStatus,
                         out CaptureTargetAvailabilityStatusData
-                            captureTargetStatus) &&
+                            captureTargetStatus);
+                if (isCaptureTargetStatus &&
                     IsCurrentConnection(ownerConnection) &&
                     IsCurrentInputConnectionGeneration(
                         inputConnectionGeneration))
@@ -2815,10 +2911,20 @@ internal sealed class RemoteViewerClient : IDisposable
                     CaptureTargetAvailabilityChanged?.Invoke(
                         update);
                 }
+                if (!isCaptureTargetStatus)
+                {
+                    var reply = _clipboardRequests.Take(inputConnectionGeneration, textReply: false, control.Success);
+                    reply?.Completion.TrySetResult(control.Success && !reply.Expired);
+                    if (reply is not null && control.Success) break;
+                }
 
                 // Preserve the original compatibility event even when a
                 // modern Windows UI also consumes the dedicated target event.
                 ClipboardStatusReceived?.Invoke(clipboardStatus);
+                break;
+            case RemoteControlKind.FileTransferReceipt:
+                if (control.TransferId is { } receiptId && _fileReceipts.TryGetValue(receiptId, out var pendingReceipt))
+                    pendingReceipt.TrySetResult(control);
                 break;
             case RemoteControlKind.FileTransferStatus:
                 string transferStatus = control.StatusMessage ?? "文件传输状态已更新。";
@@ -2956,7 +3062,7 @@ internal sealed class RemoteViewerClient : IDisposable
             case RemoteControlKind.FileTransferStart:
                 await HandleIncomingFileTransferOperationAsync(
                     () => Task.FromResult<string?>(BeginRegularIncomingFileTransfer(control)),
-                    ownerConnection);
+                    ownerConnection, control);
                 break;
             case RemoteControlKind.RemoteUpdateStart:
                 await HandleIncomingFileTransferOperationAsync(
@@ -2977,7 +3083,7 @@ internal sealed class RemoteViewerClient : IDisposable
 
                         return null;
                     },
-                    ownerConnection);
+                    ownerConnection, control);
                 break;
             case RemoteControlKind.FileTransferChecksum:
                 await HandleIncomingFileTransferOperationAsync(
@@ -2986,20 +3092,20 @@ internal sealed class RemoteViewerClient : IDisposable
                         _incomingFileReceiver.SetExpectedChecksum(control);
                         return Task.FromResult<string?>(null);
                     },
-                    ownerConnection);
+                    ownerConnection, control);
                 break;
             case RemoteControlKind.FileTransferCancel:
                 ClearPendingSelfUpdateTransferIfMatches(control.TransferId);
                 await HandleIncomingFileTransferOperationAsync(
                     () => Task.FromResult<string?>(_incomingFileReceiver.Cancel(control)),
-                    ownerConnection);
+                    ownerConnection, control);
                 break;
             case RemoteControlKind.FileTransferComplete:
                 await HandleIncomingFileTransferOperationAsync(
                     async () => await CompleteIncomingFileTransferOrSelfUpdateAsync(
                         control,
                         ownerConnection.Token),
-                    ownerConnection);
+                    ownerConnection, control);
                 break;
             case RemoteControlKind.FileTransferClipboardFilesPreview:
                 await HandleRemoteClipboardFilePreviewAsync(control, ownerConnection);
@@ -3409,12 +3515,15 @@ internal sealed class RemoteViewerClient : IDisposable
 
     private async Task HandleIncomingFileTransferOperationAsync(
         Func<Task<string?>> operation,
-        CancellationTokenSource ownerConnection)
+        CancellationTokenSource ownerConnection,
+        RemoteControlMessage? receiptControl = null)
     {
         if (!IsCurrentConnection(ownerConnection))
         {
             return;
         }
+
+        if (!_remoteCapabilities.HasFlag(RemoteDeviceCapabilities.FileTransferReceipt)) receiptControl = null;
 
         try
         {
@@ -3428,7 +3537,9 @@ internal sealed class RemoteViewerClient : IDisposable
             {
                 FileTransferStatusReceived?.Invoke(true, message);
                 await TrySendControlFromReceiveLoopAsync(
-                    RemoteMessageCodec.EncodeFileTransferStatus(true, message),
+                    receiptControl is { Kind: RemoteControlKind.FileTransferComplete or RemoteControlKind.FileTransferCancel, TransferId: { } id }
+                        ? RemoteMessageCodec.EncodeFileTransferReceipt(id, receiptControl.Kind == RemoteControlKind.FileTransferComplete, message)
+                        : RemoteMessageCodec.EncodeFileTransferStatus(true, message),
                     ownerConnection);
             }
         }
@@ -3447,7 +3558,9 @@ internal sealed class RemoteViewerClient : IDisposable
             string message = $"接收远端文件失败：{ex.Message}";
             FileTransferStatusReceived?.Invoke(false, message);
             await TrySendControlFromReceiveLoopAsync(
-                RemoteMessageCodec.EncodeFileTransferStatus(false, message),
+                receiptControl?.TransferId is { } id
+                    ? RemoteMessageCodec.EncodeFileTransferReceipt(id, false, message)
+                    : RemoteMessageCodec.EncodeFileTransferStatus(false, message),
                 ownerConnection);
         }
     }

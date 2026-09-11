@@ -20,13 +20,15 @@ import socket
 import ssl
 import sys
 import time
+import tempfile
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path
 
 
-RELAY_RELEASE_VERSION = "1.0.8"
+RELAY_RELEASE_VERSION = "1.0.9"
 # Capture once when this process loads, not when an installer replaces the file.
 RELAY_SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
@@ -42,6 +44,57 @@ TCP_NOTSENT_LOWAT_BYTES = 64 * 1024
 BRIDGE_WRITE_TIMEOUT_SECONDS = 30
 STREAM_CLOSE_TIMEOUT_SECONDS = 2
 MAX_DIRECT_ADDRESSES = 8
+MAX_DEVICE_NAMES = 4096
+MAX_DEVICE_NAMES_BYTES = 1024 * 1024
+
+
+def normalize_shared_name(value):
+    if not isinstance(value, str):
+        raise ValueError("设备名称必须是文字。")
+    name = value.strip()
+    if (len(name.encode("utf-16-le")) > 160 or
+            any(unicodedata.category(c) in ("Cc", "Cf", "Cs", "Zl", "Zp") for c in name)):
+        raise ValueError("名称过长或包含不可显示字符，请使用不超过 80 个字符的单行名称。")
+    return name
+
+
+def load_device_names(path):
+    if path.is_symlink():
+        raise ValueError("设备命名文件不能是符号链接。")
+    if not path.exists():
+        return {}
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_DEVICE_NAMES_BYTES + 1)
+    if len(raw) > MAX_DEVICE_NAMES_BYTES:
+        raise ValueError("设备命名文件过大。")
+    data = json.loads(raw)
+    if (not isinstance(data, dict) or data.get("version") != 1 or
+            not isinstance(data.get("names"), dict) or len(data["names"]) > MAX_DEVICE_NAMES):
+        raise ValueError("设备命名文件格式无效。")
+    result = {}
+    for device_id, name in data["names"].items():
+        result[normalize_device_id(device_id)] = normalize_shared_name(name)
+    return result
+
+
+def save_device_names(path, names):
+    """Replace only this metadata file; never rewrite tokens or TLS settings."""
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError("设备命名文件不是普通文件。")
+    raw = json.dumps({"version": 1, "names": names}, ensure_ascii=False).encode("utf-8")
+    if len(raw) > MAX_DEVICE_NAMES_BYTES:
+        raise ValueError("设备命名记录过多。")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".device-names-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
 
 
 def normalize_address_report(message):
@@ -111,6 +164,15 @@ class RelayServer:
         self.hosts: dict[str, HostConnection] = {}
         self.pending: dict[str, PendingSession] = {}
         self.state_lock = asyncio.Lock()
+        self.names_lock = asyncio.Lock()
+        self.names_path = Path(config.get("device_names_file") or Path(self.cert_file).parent / "device-names.json")
+        self.names_error = None
+        try:
+            self.device_names = load_device_names(self.names_path)
+        except (OSError, ValueError) as error:
+            self.device_names = {}
+            self.names_error = "设备命名记录无法读取，请检查服务器存储；原文件未修改。"
+            print(self.names_error, file=sys.stderr, flush=True)
         self.connection_slots = asyncio.Semaphore(MAX_CONNECTIONS)
         self.connections: dict[asyncio.Task, asyncio.StreamWriter] = {}
         self.stopping = False
@@ -175,6 +237,8 @@ class RelayServer:
                 await self.handle_host_control(reader, writer, hello)
             elif role == "directory":
                 await self.handle_directory(writer, hello)
+            elif role == "rename-device":
+                await self.handle_rename_device(writer, hello)
             elif role == "viewer":
                 await self.handle_viewer(reader, writer, hello)
             elif role == "host-data":
@@ -278,7 +342,9 @@ class RelayServer:
             devices = [
                 {
                     "deviceId": host.device_id,
-                    "machineName": host.machine_name,
+                    "machineName": self.device_names.get(host.device_id) or host.machine_name,
+                    "originalMachineName": host.machine_name,
+                    "sharedName": self.device_names.get(host.device_id, ""),
                     "platform": host.platform,
                     "buildStamp": host.build_stamp,
                     "busy": host.active_sessions > 0
@@ -304,14 +370,48 @@ class RelayServer:
         if paged:
             page = devices[offset:offset + page_size]
             next_offset = offset + page_size if offset + page_size < len(devices) else None
-            await write_json(writer, {"ok": True, "devices": page, "nextOffset": next_offset})
+            await write_json(writer, {"ok": True, "devices": page, "nextOffset": next_offset,
+                                      "deviceNaming": self.names_error is None,
+                                      "deviceNamingError": self.names_error or ""})
         else:
             # Old clients requested an unpaged directory and cannot use IP
             # metadata. Preserve their previous response size and shape.
             for device in devices:
-                for key in ("directAddresses", "directPort", "addressAgeSeconds"):
+                for key in ("directAddresses", "directPort", "addressAgeSeconds", "originalMachineName", "sharedName"):
                     device.pop(key, None)
             await write_json(writer, {"ok": True, "devices": devices})
+
+    async def handle_rename_device(self, writer, request):
+        device_id = normalize_device_id(request.get("deviceId"))
+        name = normalize_shared_name(request.get("name"))
+        if self.names_error:
+            raise ValueError(self.names_error)
+        async with self.names_lock:
+            async with self.state_lock:
+                if device_id not in self.hosts and device_id not in self.device_names:
+                    raise ValueError("设备已离线或不存在，请刷新在线列表后重试。")
+            updated = dict(self.device_names)
+            if name:
+                updated[device_id] = name
+            else:
+                updated.pop(device_id, None)
+            if len(updated) > MAX_DEVICE_NAMES:
+                raise ValueError("已达到设备命名数量上限。")
+            if updated != self.device_names:
+                try:
+                    save = asyncio.get_running_loop().run_in_executor(None, save_device_names, self.names_path, updated)
+                    try:
+                        await asyncio.shield(save)
+                    except asyncio.CancelledError:
+                        # A disconnected/shutting-down handler must not release the
+                        # lock while its atomic file replacement is still running.
+                        await save
+                        self.device_names = updated
+                        raise
+                except (OSError, ValueError) as error:
+                    raise ValueError("设备名称保存失败，请检查服务器磁盘和目录权限；原名称未更改。") from error
+                self.device_names = updated
+        await write_json(writer, {"ok": True, "deviceId": device_id, "sharedName": name})
 
     async def handle_viewer(
         self,

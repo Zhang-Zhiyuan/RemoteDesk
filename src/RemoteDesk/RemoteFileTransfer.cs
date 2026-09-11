@@ -28,7 +28,8 @@ internal readonly record struct RemoteFilePasteResult(
     int SkippedDirectories,
     int SkippedMissing,
     bool Truncated,
-    int ArchivedDirectories = 0);
+    int ArchivedDirectories = 0,
+    string? FailureMessage = null);
 
 internal readonly record struct RemoteFileDropPasteResult(
     RemoteFilePasteResult TransferResult,

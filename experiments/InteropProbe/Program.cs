@@ -13,6 +13,8 @@ internal static class Program
     static int Main(string[] args)
     {
         Console.InputEncoding = System.Text.Encoding.UTF8;
+        if (args.Length > 0 && args[0] == "clipboard-isolated") return ClipboardSystemProbe.Run();
+        if (args.Length > 0 && args[0] == "file-relay-isolated") return ClipboardSystemProbe.Run(relayFiles: true);
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         // Surface UI-thread failures as evidence, not an unattended modal dialog.
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
@@ -21,6 +23,8 @@ internal static class Program
         var c = config.RootElement;
         var output = Path.GetFullPath(c.GetProperty("output").GetString()!);
         Directory.CreateDirectory(output);
+        if (args[0] == "relay-windows-update") return RelayWindowsUpdateProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
+        if (args[0] == "relay-names") return RelayNamesProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "secure-desktop") return WindowsSecureDesktopProbe.Run(c.Clone(), output);
         if (args[0] == "desktop-status")
         {

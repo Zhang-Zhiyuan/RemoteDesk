@@ -33,7 +33,7 @@ public sealed class FileTransferConfirmationTests
                 Assert.Equal(filePath, item.SourcePath);
                 Assert.Equal("one.txt", item.TransferName);
                 Assert.Equal(3, item.SizeBytes);
-                Assert.Contains(@"Downloads\RemoteDeskReceived\one.txt", item.DestinationPath, StringComparison.Ordinal);
+                Assert.Contains("接收目录/one.txt", item.DestinationPath, StringComparison.Ordinal);
             },
             item =>
             {
@@ -41,7 +41,7 @@ public sealed class FileTransferConfirmationTests
                 Assert.Equal(directoryPath, item.SourcePath);
                 Assert.Equal("folder.zip", item.TransferName);
                 Assert.Equal(4, item.SizeBytes);
-                Assert.Contains(@"Downloads\RemoteDeskReceived\folder.zip", item.DestinationPath, StringComparison.Ordinal);
+                Assert.Contains("接收目录/folder.zip", item.DestinationPath, StringComparison.Ordinal);
             });
     }
 

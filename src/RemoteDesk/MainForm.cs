@@ -305,6 +305,7 @@ public sealed partial class MainForm : Form
 
             await StartHostAutomaticallyAsync(
                 _resumeHostAfterUpdate);
+            await MigrateLegacyStartupAsync();
             await DiscoverHostsAsync(silent: true);
             await RefreshRelayDevicesAsync(silent: true);
             _relayRefreshTimer.Start();
@@ -1416,6 +1417,9 @@ public sealed partial class MainForm : Form
         };
         deviceActions.Controls.Add(_relayConnectButton);
         deviceActions.Controls.Add(_relayAddressButton);
+        _relayRenameButton = CreateSecondaryButton("共享名称");
+        _relayRenameButton.Click += async (_, _) => await RenameRelayDeviceAsync();
+        deviceActions.Controls.Add(_relayRenameButton);
 
         var online = CreateSection(
             "在线设备",
@@ -3503,11 +3507,7 @@ public sealed partial class MainForm : Form
         try
         {
             _startWithWindowsBox.Enabled = false;
-            if (WindowsPersistentStartup.GetStatus().IsInstalled && !WindowsProcessElevation.IsCurrentProcessElevated())
-                await WindowsPersistentStartup.ChangeAsync(_startWithWindowsBox.Checked
-                    ? WindowsPersistentStartup.EnableArgument : WindowsPersistentStartup.DisableArgument);
-            else
-                StartupService.SetEnabled(_startWithWindowsBox.Checked);
+            await StartupService.SetEnabledAsync(_startWithWindowsBox.Checked);
             if (_isClosing || IsDisposed) return;
             StartupRegistrationStatus status = StartupService.GetStatus();
             _settings.App.StartWithWindows = status.IsRegistered;
@@ -6391,20 +6391,6 @@ public sealed partial class MainForm : Form
             _autoStartHostBox.Checked = _settings.Host.AutoStart;
             _allowRemoteStartBox.Checked = _settings.Host.AllowRemoteStart;
             StartupRegistrationStatus startupStatus = StartupService.GetStatus();
-            if (StartupService.IsOrphanedRegistration(startupStatus))
-            {
-                try
-                {
-                    StartupService.SetEnabled(true);
-                    startupStatus = StartupService.GetStatus();
-                    AppendHostLog("已修复失效的开机启动路径，登录后会自动启动到托盘。");
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or System.Security.SecurityException)
-                {
-                    AppendHostLog($"修复开机启动路径失败：{ex.Message}");
-                }
-            }
-
             ApplyStartupRegistrationStatus(startupStatus);
             _minimizeToTrayBox.Checked = _settings.App.MinimizeToTray;
             SetSelectedScalePercent(_settings.Host.ScalePercent);
@@ -6448,13 +6434,13 @@ public sealed partial class MainForm : Form
         }
         if (!status.IsRegistered)
         {
-            SetToolTip(_startWithWindowsBox, "当前 Windows 用户登录后自动启动 RemoteDesk。");
+            SetToolTip(_startWithWindowsBox, "勾选后安装受保护的自启动副本，当前用户登录时以管理员权限启动到托盘；不保存 Windows 密码。");
             return;
         }
 
         if (status.TargetsCurrentExecutable)
         {
-            SetToolTip(_startWithWindowsBox, "当前 Windows 用户登录后会自动启动这个 RemoteDesk 副本到托盘。");
+            SetToolTip(_startWithWindowsBox, "旧版启动项需要迁移为管理员自启动；若自动迁移失败，可取消勾选后重新勾选，或使用“设置登录后自动可控”。");
             return;
         }
 
@@ -6837,6 +6823,7 @@ public sealed partial class MainForm : Form
             !_relayOperationInProgress &&
             !_relayRefreshInProgress;
         _relayReportAddressButton.Enabled = configured && !_relayOperationInProgress;
+        _relayRenameButton.Enabled = _relayRefreshButton.Enabled && GetSelectedRelayDevice() is not null;
         _relayAddressButton.Enabled = _relayRefreshButton.Enabled &&
             !_viewerActionInProgress && !_viewerClient.IsConnected && !IsViewerReconnecting() &&
             GetSelectedRelayDevice() is not null;
@@ -7167,6 +7154,7 @@ public sealed partial class MainForm : Form
 
     private async Task SendFileAsync()
     {
+        long fileGeneration = _viewerClient.InputConnectionGeneration;
         if (!CanConnectedViewer(RemoteDeviceCapabilities.FileReceive))
         {
             SetViewerStatus("远程设备未声明文件接收能力。", MutedTextColor);
@@ -7193,6 +7181,7 @@ public sealed partial class MainForm : Form
                 maxFiles: 1,
                 FileTransferConfirmation.FormatRemoteReceiveDestination);
             if (!ConfirmOutgoingFileTransfer(
+                fileGeneration,
                 preview,
                 "确认发送文件",
                 "即将发送以下文件到被控端。"))
@@ -7203,13 +7192,14 @@ public sealed partial class MainForm : Form
 
             _sendFileButton.Enabled = false;
             SetViewerStatus("正在准备发送文件...", MutedTextColor);
-            await _viewerClient.SendFilePastePlanToRemoteAsync(preview.Plan, "发送文件失败");
+            RemoteFilePasteResult result = await _viewerClient.SendFilePastePlanToRemoteAsync(preview.Plan, "发送文件失败");
+            if (result.FailedFiles > 0) ShowFileTransferFailure(result.FailureMessage ?? "部分文件未能发送，请检查接收目录。");
         }
         catch (Exception ex)
         {
             if (!_isClosing && !IsDisposed)
             {
-                SetViewerStatus($"发送文件失败：{ex.Message}", DangerColor);
+                ShowFileTransferFailure(ex.Message);
             }
         }
         finally
@@ -7428,6 +7418,7 @@ public sealed partial class MainForm : Form
 
     private async Task PasteClipboardFilesFromMainAsync()
     {
+        long fileGeneration = _viewerClient.InputConnectionGeneration;
         if (_pastingClipboardFilesFromMain)
         {
             return;
@@ -7458,6 +7449,7 @@ public sealed partial class MainForm : Form
                 MaxClipboardFilePasteCount,
                 FileTransferConfirmation.FormatRemoteReceiveDestination);
             if (!ConfirmOutgoingFileTransfer(
+                fileGeneration,
                 preview,
                 "确认粘贴文件",
                 "即将把本机剪贴板文件发送到被控端。"))
@@ -7475,6 +7467,7 @@ public sealed partial class MainForm : Form
                     ? SuccessTextColor
                     : MutedTextColor;
             SetViewerStatus(status, statusColor);
+            if (result.FailedFiles > 0) ShowFileTransferFailure(result.FailureMessage ?? status);
         }
         catch (Exception ex) when (ex is TimeoutException or
             System.Runtime.InteropServices.ExternalException or
@@ -7485,7 +7478,7 @@ public sealed partial class MainForm : Form
         {
             if (!_isClosing && !IsDisposed)
             {
-                SetViewerStatus($"粘贴文件失败：{ex.Message}", DangerColor);
+                ShowFileTransferFailure(ex.Message);
             }
         }
         finally
@@ -7518,22 +7511,39 @@ public sealed partial class MainForm : Form
     }
 
     private bool ConfirmOutgoingFileTransfer(
+        long expectedGeneration,
         FileTransferConfirmationPreview preview,
         string title,
         string actionText)
     {
+        EnsureFileTargetCurrent(expectedGeneration);
         if (preview.Plan.Files.Count == 0)
         {
             SetViewerStatus("没有可传输的文件。", MutedTextColor);
             return false;
         }
 
-        return FileTransferConfirmation.Confirm(
+        bool confirmed = FileTransferConfirmation.Confirm(
             this,
             title,
             actionText,
             preview.Items,
             preview.Note);
+        EnsureFileTargetCurrent(expectedGeneration);
+        return confirmed;
+    }
+
+    private void EnsureFileTargetCurrent(long generation)
+    {
+        if (!_viewerClient.IsConnected || _viewerClient.InputConnectionGeneration != generation)
+            throw new IOException("连接已改变，原文件确认已失效，请在当前连接重新选择文件。");
+    }
+
+    private void ShowFileTransferFailure(string message)
+    {
+        if (_isClosing || IsDisposed) return;
+        SetViewerStatus(message, DangerColor);
+        MessageBox.Show(this, message, "文件传输未完成", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
     private bool ConfirmRemoteClipboardFileTransfer(

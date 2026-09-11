@@ -113,6 +113,9 @@ public final class RemoteDeskViewerActivity extends Activity {
     private volatile Socket socket;
     private volatile RemoteDeskTransport.SecureSession session;
     private volatile ViewerConnectionOwner connectionOwner;
+    private static final int PICK_TRANSFER_FILE = 701;
+    private ViewerConnectionOwner filePickerOwner;
+    private android.app.AlertDialog fileProgressDialog;
     private volatile Socket pendingConnectionSocket;
     private volatile AndroidH264SurfaceDecoder h264Decoder;
     private int frameWidth;
@@ -344,7 +347,25 @@ public final class RemoteDeskViewerActivity extends Activity {
         rootLayout.post(this::updateViewerToolbarLayout);
     }
 
+    private final AtomicLong localClipboardRevision = new AtomicLong();
+    private boolean clipboardForeground;
+    private android.content.ClipboardManager localClipboard;
+    private final android.content.ClipboardManager.OnPrimaryClipChangedListener clipboardChanged =
+        () -> localClipboardRevision.incrementAndGet();
+
     private boolean sendKeyboard(String text, int... keys) {
+        if (text == null && keys.length == 2 && keys[0] == 0x11) {
+            if (keys[1] == 0x56) return requestClipboard(false, true, false);
+            if (keys[1] == 0x43 || keys[1] == 0x58) {
+                if (!sendKeyboardRaw(null, keys)) return false;
+                requestClipboard(true, false, true);
+                return true;
+            }
+        }
+        return sendKeyboardRaw(text, keys);
+    }
+
+    private boolean sendKeyboardRaw(String text, int... keys) {
         ViewerConnectionOwner owner = connectionOwner;
         if (!inputReady(owner)) { toast("当前仅观看或连接尚未就绪"); return false; }
         boolean queued;
@@ -362,7 +383,7 @@ public final class RemoteDeskViewerActivity extends Activity {
     private void showViewerMenu() {
         releaseViewerGesture();
         String[] choices = { "画面缩放（" + Math.round(viewport.zoom * 100) + "%）", "画质：" +
-            (preferJpegClarity ? "文字清晰 JPEG" : "流畅 H.264 自动"), "全屏显示", "屏幕方向", "手势帮助", "连接诊断", "断开连接…" };
+            (preferJpegClarity ? "文字清晰 JPEG" : "流畅 H.264 自动"), "全屏显示", "屏幕方向", "手势帮助", "连接诊断", "文字剪贴板", "发送文件…", "断开连接…" };
         new android.app.AlertDialog.Builder(this).setTitle("远控工具")
             .setItems(choices, (dialog, which) -> {
                 if (which == 0) showZoomOptions();
@@ -375,8 +396,206 @@ public final class RemoteDeskViewerActivity extends Activity {
                     .setMessage("触控板：单指滑动推动鼠标，不会跳到手指位置；轻触左键，连续轻触双击，长按后滑动拖拽。\n\n直接触摸：点哪里，鼠标就到哪里并点击；单指滑动拖拽。底部模式按钮可切换并记住选择。\n\n两种模式均支持双指平行上下滑动，让远端网页或列表滚动。触控板模式先把鼠标移到要滚动的区域。\n\n双指轻触：右键；双指开合：只缩放本地画面，缩放中可平移。\n\n鼠标面板可锁定拖动，再点一次释放。失焦、切换模式和退出时会释放拖动。\n\n键盘：先点选远端输入框，使用手机输入法编辑后点发送；快捷键直接作用于远端。")
                     .setPositiveButton("知道了", null).show();
                 else if (which == 5) showDiagnostics();
+                else if (which == 6) showClipboardMenu();
+                else if (which == 7) pickTransferFile();
                 else confirmDisconnect();
             }).show();
+    }
+
+    private void pickTransferFile() {
+        ViewerConnectionOwner owner = connectionOwner;
+        if (owner == null || !isCurrentConnectionOwner(owner) ||
+            (owner.remoteCapabilities.get() & RemoteDeskProtocol.CAPABILITY_FILE_RECEIVE) == 0) {
+            toast("当前未连接，或远端不支持接收文件"); return;
+        }
+        if (!owner.fileBusy.compareAndSet(false, true)) { toast("已有文件正在准备或传输"); return; }
+        filePickerOwner = owner;
+        try {
+            android.content.Intent intent = new android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(android.content.Intent.CATEGORY_OPENABLE);
+            intent.setType("*/*");
+            intent.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivityForResult(intent, PICK_TRANSFER_FILE);
+        } catch (RuntimeException ex) {
+            owner.fileBusy.set(false); filePickerOwner = null;
+            showFileResult(owner, false, "无法打开系统文件选择器：" + MainActivity.formatExceptionMessage(ex));
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != PICK_TRANSFER_FILE) return;
+        ViewerConnectionOwner owner = filePickerOwner;
+        filePickerOwner = null;
+        if (owner == null) return;
+        if (resultCode != RESULT_OK || data == null || data.getData() == null || !isCurrentConnectionOwner(owner)) {
+            owner.fileBusy.set(false); return;
+        }
+        android.net.Uri uri = data.getData();
+        try {
+            owner.fileExecutor.execute(() -> {
+                try {
+                    String name = "file";
+                    long size = -1;
+                    try (android.database.Cursor cursor = getContentResolver().query(uri,
+                        new String[] { android.provider.OpenableColumns.DISPLAY_NAME, android.provider.OpenableColumns.SIZE }, null, null, null)) {
+                        if (cursor != null && cursor.moveToFirst()) {
+                            int nameColumn = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                            int sizeColumn = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE);
+                            if (nameColumn >= 0 && !cursor.isNull(nameColumn)) name = cursor.getString(nameColumn);
+                            if (sizeColumn >= 0 && !cursor.isNull(sizeColumn)) size = cursor.getLong(sizeColumn);
+                        }
+                    }
+                    if (size < 0) {
+                        try (android.content.res.AssetFileDescriptor descriptor = getContentResolver().openAssetFileDescriptor(uri, "r")) {
+                            if (descriptor != null) size = descriptor.getLength();
+                        }
+                    }
+                    if (size < 0) throw new IOException("这个文件未提供大小，请先下载到手机本地再选择发送");
+                    if (size > AndroidFileSender.MAX_BYTES) throw new IOException("单个文件不能超过 1 GB");
+                    name = name.replaceAll("[\\\\/\\p{Cntrl}]", "_");
+                    if (name.isEmpty() || name.length() > 240) throw new IOException("文件名为空或过长，请重命名后再发送");
+                    final String fileName = name;
+                    final long fileSize = size;
+                    runOnUiThread(() -> confirmFileUpload(owner, uri, fileName, fileSize));
+                } catch (Exception ex) {
+                    owner.fileBusy.set(false);
+                    showFileResult(owner, false, MainActivity.formatExceptionMessage(ex));
+                }
+            });
+        } catch (RuntimeException closed) { owner.fileBusy.set(false); }
+    }
+
+    private void confirmFileUpload(ViewerConnectionOwner owner, android.net.Uri uri, String name, long size) {
+        if (!isCurrentConnectionOwner(owner) || isFinishing() || isDestroyed()) { owner.fileBusy.set(false); return; }
+        new android.app.AlertDialog.Builder(this).setTitle("确认发送文件")
+            .setMessage("文件：" + name + "\n大小：" + android.text.format.Formatter.formatFileSize(this, size) +
+                "\n设备：" + owner.remoteMachineName + "\n连接：" + (relayOptions == null ? "IP 直连" : "公网中继") +
+                "\n保存到：远端接收目录（重名自动改名，不覆盖原文件）\n\n完成后显示实际保存位置。")
+            .setNegativeButton("取消", (dialog, which) -> owner.fileBusy.set(false))
+            .setOnCancelListener(dialog -> owner.fileBusy.set(false))
+            .setPositiveButton("发送", (dialog, which) -> startFileUpload(owner, uri, name, size)).show();
+    }
+
+    private void startFileUpload(ViewerConnectionOwner owner, android.net.Uri uri, String name, long size) {
+        if (!isCurrentConnectionOwner(owner)) { owner.fileBusy.set(false); toast("连接已切换，请重新选择文件"); return; }
+        AndroidFileSender sender = new AndroidFileSender();
+        owner.fileSender = sender;
+        android.app.AlertDialog progress = new android.app.AlertDialog.Builder(this).setTitle("发送文件")
+            .setMessage("准备发送：" + name).setCancelable(false)
+            .setNegativeButton("取消传输", (dialog, which) -> sender.cancel()).create();
+        fileProgressDialog = progress;
+        progress.show();
+        try {
+            owner.fileExecutor.execute(() -> {
+                boolean success = false;
+                String result;
+                try (java.io.InputStream input = getContentResolver().openInputStream(uri)) {
+                    if (input == null) throw new IOException("无法读取已选文件");
+                    result = sender.send(input, name, size, owner.remoteCapabilities.get(), payload -> {
+                        if (!sendControlMessageIfCurrent(owner, payload)) throw new IOException("连接已结束");
+                    }, () -> isCurrentConnectionOwner(owner), message -> runOnUiThread(() -> {
+                        if (isCurrentConnectionOwner(owner) && progress.isShowing()) progress.setMessage(message);
+                    }));
+                    success = true;
+                } catch (Exception ex) { result = MainActivity.formatExceptionMessage(ex); }
+                finally { owner.fileBusy.set(false); owner.fileSender = null; }
+                boolean done = success;
+                String message = result;
+                runOnUiThread(() -> {
+                    progress.dismiss();
+                    if (fileProgressDialog == progress) fileProgressDialog = null;
+                    showFileResult(owner, done, message);
+                });
+            });
+        } catch (RuntimeException closed) { progress.dismiss(); owner.fileBusy.set(false); owner.fileSender = null; }
+    }
+
+    private void showFileResult(ViewerConnectionOwner owner, boolean success, String message) {
+        runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed() || !isCurrentConnectionOwner(owner)) return;
+            updateStatus(owner, message);
+            new android.app.AlertDialog.Builder(this).setTitle(success ? "文件传输结果" : "文件未完成传输")
+                .setMessage(message).setPositiveButton("知道了", null).show();
+        });
+    }
+
+    private void showClipboardMenu() {
+        new android.app.AlertDialog.Builder(this).setTitle("文字剪贴板")
+            .setItems(new String[] { "发送手机剪贴板到远端", "取回远端文字到手机", "粘贴手机文字到远端输入框" },
+                (dialog, which) -> requestClipboard(which == 1, which == 2, false)).show();
+    }
+
+    private boolean requestClipboard(boolean read, boolean paste, boolean afterCopy) {
+        ViewerConnectionOwner owner = connectionOwner;
+        if (owner == null || !isCurrentConnectionOwner(owner) ||
+            (owner.remoteCapabilities.get() & RemoteDeskProtocol.CAPABILITY_CLIPBOARD_TEXT) == 0) {
+            toast("连接尚未就绪，或远端未提供文本剪贴板功能"); return false;
+        }
+        if (paste && !inputReady(owner)) { toast("当前仅观看，不能粘贴到远端输入框"); return false; }
+        byte[] payload;
+        try {
+            if (read) payload = new byte[] { RemoteDeskProtocol.CONTROL_CLIPBOARD_GET_TEXT };
+            else {
+                String text = AndroidClipboardText.getText(this);
+                if (text.isEmpty()) { toast("手机剪贴板没有文字，未修改远端"); return false; }
+                payload = RemoteDeskTransport.encodeClipboardSetText(text);
+            }
+        } catch (Exception failure) { toast("无法读取手机剪贴板：" + failure.getMessage()); return false; }
+        AndroidViewerClipboard.Request request = owner.clipboard.begin(read, localClipboardRevision.get(), SystemClock.elapsedRealtime());
+        if (request == null) { toast("上一项剪贴板操作仍在等待远端，请稍后重试；长时间无响应请重连"); return false; }
+        long inputGeneration = owner.inputCapabilityGeneration.get();
+        try {
+            owner.clipboardExecutor.execute(() -> exchangeClipboard(owner, request, payload, paste, afterCopy, inputGeneration));
+            return true;
+        } catch (RuntimeException closed) { owner.clipboard.finish(request, false); return false; }
+    }
+
+    private void exchangeClipboard(ViewerConnectionOwner owner, AndroidViewerClipboard.Request request,
+            byte[] payload, boolean paste, boolean afterCopy, long inputGeneration) {
+        boolean sent = false;
+        try {
+            if (!owner.inputQueue.awaitIdle(1500)) {
+                updateStatus(owner, "输入队列仍忙，未执行剪贴板操作，请重试。"); return;
+            }
+            if (afterCopy) Thread.sleep(550);
+            if (!isCurrentConnectionOwner(owner)) return;
+            sent = true;
+            if (!sendControlMessageIfCurrent(owner, payload)) return;
+            long remaining = Math.max(0, request.deadlineMillis - SystemClock.elapsedRealtime());
+            if (!request.completed.await(remaining, TimeUnit.MILLISECONDS)) {
+                updateStatus(owner, "等待远端剪贴板超时，未覆盖手机内容或触发粘贴；可重新连接后重试。"); return;
+            }
+            if (!request.success || !isCurrentConnectionOwner(owner) || SystemClock.elapsedRealtime() >= request.deadlineMillis) return;
+            if (request.read) {
+                runOnUiThread(() -> {
+                    if (!isCurrentConnectionOwner(owner)) return;
+                    if (request.text.isEmpty()) { updateStatus(owner, "远端没有可读取的文字，手机剪贴板保持不变。"); return; }
+                    try {
+                        AndroidClipboardText.setText(this, request.text, () -> clipboardForeground &&
+                            isCurrentConnectionOwner(owner) && owner.clipboard.canApply(request, localClipboardRevision.get(), SystemClock.elapsedRealtime()));
+                        updateStatus(owner, "已将远端文字复制到手机剪贴板。");
+                    } catch (Exception failure) {
+                        updateStatus(owner, "未覆盖手机剪贴板：请求已过期、手机已复制新内容，或应用已切到后台。请返回后重试。");
+                    }
+                });
+            } else if (paste) {
+                runOnUiThread(() -> {
+                    if (!isCurrentConnectionOwner(owner) || owner.inputCapabilityGeneration.get() != inputGeneration) return;
+                    if ("Android".equalsIgnoreCase(owner.remotePlatform) &&
+                        (owner.remoteCapabilities.get() & RemoteDeskProtocol.CAPABILITY_CLIPBOARD_PASTE_SHORTCUT) == 0) {
+                        updateStatus(owner, "文字已写入远端剪贴板；此旧版 Android 请长按输入框粘贴，或更新远端后使用快捷粘贴。"); return;
+                    }
+                    if (sendKeyboardRaw(null, 0x11, 0x56))
+                        updateStatus(owner, "已写入远端剪贴板，并请求在当前输入框粘贴。");
+                });
+            } else updateStatus(owner, "已写入远端文本剪贴板。");
+        } catch (InterruptedException stopped) {
+            Thread.currentThread().interrupt();
+        } catch (Exception failure) {
+            updateStatus(owner, "剪贴板传输失败，未触发粘贴；请检查连接后重试。");
+        } finally { owner.clipboard.finish(request, sent); }
     }
 
     private void showOrientationOptions() {
@@ -583,13 +802,28 @@ public final class RemoteDeskViewerActivity extends Activity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        clipboardForeground = true;
+        localClipboardRevision.incrementAndGet();
+        if (localClipboard == null) {
+            localClipboard = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (localClipboard != null) localClipboard.addPrimaryClipChangedListener(clipboardChanged);
+        }
+    }
+
+    @Override
     protected void onPause() {
+        clipboardForeground = false;
+        localClipboardRevision.incrementAndGet();
         releaseViewerGesture();
         super.onPause();
     }
 
     @Override
     protected void onDestroy() {
+        if (fileProgressDialog != null) { fileProgressDialog.dismiss(); fileProgressDialog = null; }
+        if (localClipboard != null) localClipboard.removePrimaryClipChangedListener(clipboardChanged);
         clearFullscreenBackHandler();
         running.set(false);
         unregisterDefaultNetworkCallback();
@@ -942,6 +1176,7 @@ public final class RemoteDeskViewerActivity extends Activity {
             RemoteDeskTransport.ControlMessage control = RemoteDeskTransport.decodeControl(message.payload);
             if (control.kind == RemoteDeskProtocol.CONTROL_DEVICE_INFO) {
                 owner.remoteMachineName = control.machineName;
+                owner.remotePlatform = control.platform;
                 boolean identitySupported = (control.capabilities & RemoteDeskProtocol.CAPABILITY_DEVICE_IDENTITY) != 0;
                 if (identitySupported && !owner.identityRequested) {
                     owner.identityRequested = true;
@@ -975,6 +1210,8 @@ public final class RemoteDeskViewerActivity extends Activity {
                     chrome.screens.setEnabled(captureTargets.length > 0 &&
                         (owner.remoteCapabilities.get() & RemoteDeskProtocol.CAPABILITY_CAPTURE_TARGET_SELECTION) != 0);
                 });
+            } else if (control.kind == RemoteDeskProtocol.CONTROL_CLIPBOARD_TEXT) {
+                owner.clipboard.receive(true, true, control.text, SystemClock.elapsedRealtime());
             } else if (control.kind == RemoteDeskProtocol.CONTROL_DEVICE_IDENTITY && owner.identityRequested) {
                 if (!historyRecorded && recordHistory != null) {
                     historyRecorded = true;
@@ -1026,10 +1263,18 @@ public final class RemoteDeskViewerActivity extends Activity {
                         control.statusMessage.trim().isEmpty()
                             ? "被控端当前无法接受新的查看连接。"
                             : control.statusMessage.trim());
+            } else if (control.kind == RemoteDeskProtocol.CONTROL_FILE_TRANSFER_RECEIPT) {
+                AndroidFileSender sender = owner.fileSender;
+                if (sender != null) sender.receive(control);
             } else if (control.statusMessage != null) {
-                updateStatus(
-                    owner,
-                    AndroidViewerStatusText.forDisplay(control.statusMessage));
+                boolean clipboardReply = false;
+                if (control.kind == RemoteDeskProtocol.CONTROL_CLIPBOARD_STATUS &&
+                    !control.statusMessage.contains(AndroidViewerStatusText.CAPTURE_TARGET_TRAILER_PREFIX))
+                    clipboardReply = owner.clipboard.receive(false, control.success, "", SystemClock.elapsedRealtime());
+                // The operation worker reports success after consuming the ack.
+                // Do not race it with the raw host trailer/status on the UI queue.
+                if (!clipboardReply || !control.success)
+                    updateStatus(owner, AndroidViewerStatusText.forDisplay(control.statusMessage));
             }
             return;
         }
@@ -1335,18 +1580,18 @@ public final class RemoteDeskViewerActivity extends Activity {
                 break;
             }
 
-            if (!AndroidViewerInputCapabilityPolicy.isCurrentCommand(
-                    canSendRemoteInput(owner),
-                    command.inputCapabilityGeneration,
-                    owner.inputCapabilityGeneration.get())) {
-                continue;
-            }
-            if (command.kind == RemoteDeskProtocol.INPUT_MOUSE_MOVE &&
-                command.mouseRouteGeneration != owner.mouseRouteGeneration.get()) {
-                continue;
-            }
-
             try {
+                if (!AndroidViewerInputCapabilityPolicy.isCurrentCommand(
+                        canSendRemoteInput(owner),
+                        command.inputCapabilityGeneration,
+                        owner.inputCapabilityGeneration.get())) {
+                    continue;
+                }
+                if (command.kind == RemoteDeskProtocol.INPUT_MOUSE_MOVE &&
+                    command.mouseRouteGeneration != owner.mouseRouteGeneration.get()) {
+                    continue;
+                }
+
                 RemoteDeskTransport.writeMessage(
                     owner.socket.getOutputStream(),
                     RemoteDeskProtocol.MESSAGE_INPUT,
@@ -1373,7 +1618,7 @@ public final class RemoteDeskViewerActivity extends Activity {
                     closeConnectionOwner(owner);
                 }
                 return;
-            }
+            } finally { owner.inputQueue.completeSend(); }
         }
     }
 
@@ -2031,6 +2276,9 @@ public final class RemoteDeskViewerActivity extends Activity {
 
             owner.inputExecutor.shutdownNow();
             owner.controlExecutor.shutdownNow();
+            owner.clipboardExecutor.shutdownNow();
+            if (owner.fileSender != null) owner.fileSender.cancel();
+            owner.fileExecutor.shutdownNow();
             owner.heartbeatExecutor.shutdownNow();
             if (owner.decoder != null) {
                 owner.decoder.close();
@@ -2276,6 +2524,9 @@ public final class RemoteDeskViewerActivity extends Activity {
     static int advertisedViewerCapabilities(
         List<AndroidH264DecoderDiagnostics.DecoderCandidate> decoderCandidates) {
         return AndroidH264DecoderPolicy.advertisedViewerCapabilities(decoderCandidates) |
+            RemoteDeskProtocol.CAPABILITY_FILE_CHECKSUM |
+            RemoteDeskProtocol.CAPABILITY_FILE_TRANSFER_CANCEL |
+            RemoteDeskProtocol.CAPABILITY_FILE_TRANSFER_RECEIPT |
             RemoteDeskProtocol.CAPABILITY_LOW_LATENCY_UDP_VIDEO |
             RemoteDeskProtocol.CAPABILITY_UDP_VIDEO_CONGESTION_FEEDBACK |
             RemoteDeskProtocol.CAPABILITY_LOW_LATENCY_UDP_VIDEO_XOR_FEC |
@@ -2369,6 +2620,12 @@ public final class RemoteDeskViewerActivity extends Activity {
     private final class ViewerConnectionOwner {
         boolean identityRequested;
         String remoteMachineName = "";
+        String remotePlatform = "";
+        final AndroidViewerClipboard clipboard = new AndroidViewerClipboard();
+        final ExecutorService clipboardExecutor = Executors.newSingleThreadExecutor();
+        final ExecutorService fileExecutor = Executors.newSingleThreadExecutor();
+        final AtomicBoolean fileBusy = new AtomicBoolean();
+        volatile AndroidFileSender fileSender;
         final long generation;
         final Socket socket;
         final RemoteDeskTransport.SecureSession session;

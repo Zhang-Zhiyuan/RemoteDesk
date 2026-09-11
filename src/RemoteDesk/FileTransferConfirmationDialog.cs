@@ -54,12 +54,12 @@ internal static class FileTransferConfirmation
 
     public static string FormatRemoteReceiveDestination(string transferName)
     {
-        return $"被控端 Downloads\\RemoteDeskReceived\\{transferName}{RenameSuffix}";
+        return $"被控端接收目录/{transferName}{RenameSuffix}；保存完成后显示实际位置";
     }
 
     public static string FormatRemoteDropPasteDestination(string transferName)
     {
-        return $"被控端当前位置；若目标不接受粘贴，则保存到 Downloads\\RemoteDeskReceived\\{transferName}{RenameSuffix}";
+        return $"被控端当前位置；若目标不接受粘贴，则保留在接收目录/{transferName}{RenameSuffix}";
     }
 
     public static string FormatLocalReceiveDestination(string transferName)

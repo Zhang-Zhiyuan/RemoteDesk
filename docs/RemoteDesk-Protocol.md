@@ -170,6 +170,8 @@ Device capabilities are an `Int32` bitmask in `DeviceInfo`; viewer-selected capa
 - `1 << 20`: authenticated UDP heartbeat support
 - `1 << 21`: high-quality JPEG desktop-text profile
 - `1 << 22`: negotiated stable installation identity
+- `1 << 23`: native Ctrl+V clipboard paste (Android accessibility input)
+- `1 << 24`: correlated file-save receipts (`FileTransferReceipt`, control kind `35`)
 
 When a host advertises bit 22, an authenticated viewer may send control kind
 `33` (`DeviceIdentityRequest`, no fields). The host replies with kind `34`
@@ -257,6 +259,24 @@ updated capability only after mpv confirms both non-copy hardware decode and
 native GPU-surface presentation; it withdraws the bit if that path fails.
 Unknown/older viewers therefore remain at 30 FPS. A Windows software GDI
 capture fallback is also capped at 30 FPS even when bit 19 was negotiated.
+
+## Text clipboard interoperability
+
+Clipboard controls retain their legacy wire format: `4` requests text, `5`
+writes text, `6` returns text, and `7` acknowledges a write or reports a
+clipboard failure. Text is UTF-8 with a .NET 7-bit byte-length prefix; the
+256,000-character limit counts UTF-16 code units on all three platforms.
+Clipboard text is never silently truncated.
+
+Viewers allow one outstanding clipboard operation per physical connection.
+Pasting waits for a successful write acknowledgement. An eight-second timeout
+does not authorize paste or local replacement; its reply slot is retained
+until the late response is drained, or the connection is replaced. Empty,
+unsolicited, stale and superseded text replies do not clear the local clipboard.
+The capture-target status trailer in kind `7` is not a clipboard acknowledgement.
+Android bit 23 is advertised only when input accessibility is available; older
+Android hosts may require long-press paste. Android background clipboard read
+restrictions are reported as failures, not empty successful reads.
 
 ## Low-latency UDP video v1
 
@@ -542,6 +562,31 @@ Sender sequence:
 3. Optional `FileTransferChecksum`: transfer id, algorithm `SHA256`, lowercase hex digest.
 4. `FileTransferComplete`: transfer id.
 
+Receivers advertising `FileTransferReceipt` send control `35` only to viewers
+that also advertise this capability: transfer id (bounded .NET string), success
+(Boolean), message (bounded .NET string). Success means checksum verification,
+file closure and final publication/rename have completed, not merely that bytes
+were received. Start/chunk/checksum/publication errors use a negative receipt for
+that same id. Cancellation is never a successful save. Android's asynchronous
+publication queue carries the id through to the final callback.
+
+New viewer uploaders wait up to 120 seconds after COMPLETE for that file's save
+receipt. Unrelated or late ids do not complete another transfer. Disconnect and
+cancel end the wait. A timeout means the save outcome is unknown; it does not
+prove that no file exists. Legacy peers keep kind `11` status messages and must
+not be represented as providing verified save completion. Remote app updates
+retain their separate existing restart/status workflow.
+
+File and text clipboard controls use the same authenticated encrypted session
+over both direct TCP and opaque relay tunnels. No additional public file port
+or server-side file storage is required. File selection/preview confirmation is
+on the initiating device; authenticated unattended receivers save to the receive
+directory with safe, non-overwriting names. Confirmation is invalidated if its
+connection is replaced. Android uploads use the system document picker (one
+document, up to 1 GiB); providers without a known stream length must first
+download the document locally. This is distinct from remotely reading another
+Android application's file clipboard, which is not supported.
+
 If `FileTransferCancel` was negotiated, a sender that fails after `FileTransferStart` should send `FileTransferCancel` with the same transfer id and a short reason. Receivers should delete the temporary `*.rdtransfer` file immediately.
 
 When returning files from the controlled side to the viewer, a peer that sees `FileTransferPreview` in `ViewerCapabilities` should send `FileTransferClipboardFilesPreview` before any `FileTransferStart`. The preview contains one row per file/folder with item type, original path, transfer file name, byte size, destination hint, and optional note. Actual file bytes must wait for `FileTransferConfirmClipboardFiles`; `FileTransferRejectClipboardFiles` cancels the pending return list.
@@ -565,6 +610,27 @@ Windows controlled hosts advertise `RemoteUpdate` when the running canonical `Re
 If the remote build stamp is newer than the viewer build stamp, the viewer sends `RemoteUpdatePackageRequest` with no payload. A Windows host that supports `RemoteUpdate` replies by sending its current `RemoteDesk.exe` back to the viewer as `RemoteUpdateStart`, again followed by the normal file-transfer sequence. Before scheduling installation, a signed receiver requires a valid trusted Authenticode signature, the same signer public key as its current executable, and a strictly newer build stamp. An unsigned receiver uses personal-LAN mode and accepts only another unsigned RemoteDesk with a strictly newer valid build stamp; a signed-but-invalid file is not treated as unsigned. Equal-version, downgrade, and signed/unsigned mode-crossing packages are rejected.
 
 After the update package is saved and verified, the host pins its SHA-256 and, for signed mode, signer-certificate SHA-256, starts a separate updater process, sends a final status, and exits. The updater revalidates the hash plus the selected signed/unsigned mode before and after moving the package into place, retains the old executable as a temporary `.old` backup, and starts the new `RemoteDesk.exe --tray`. It removes the backup only after verifying the new process path, listening-port ownership, and loopback `RDK1` handshake; otherwise it restores and health-checks the old executable. Unsigned personal-LAN mode relies on the existing password-authenticated encrypted session and provides integrity/build-order checks, not public publisher identity.
+
+## Private relay shared names
+
+The relay's length-prefixed TLS JSON protocol accepts an authenticated v1 request with
+`role: "rename-device"`, the existing relay `token`, the target UUID in `deviceId`, and
+`name`. A trimmed empty name removes the shared label; other names must be single-line,
+at most 80 UTF-16 units and contain no Unicode control/format/surrogate or line/paragraph separator characters.
+The target must be currently registered or already have a stored label. This changes only
+directory metadata, never an operating-system name, device credential, or session identity.
+Any client enrolled with the same relay credentials may rename a device.
+
+Success is sent only after atomic persistence: `ok: true`, canonical `deviceId`, and
+`sharedName`. Clients require all three to match before reporting success. A timeout is
+ambiguous (the reply may have been lost); clients ask the user to refresh and verify.
+
+Paged directory replies advertise `deviceNaming` and an optional `deviceNamingError`.
+Each device includes `sharedName` and `originalMachineName`; the existing `machineName`
+field contains the effective shared-or-original name, so older clients also see labels.
+An absent/false capability disables editing with an update/storage explanation. Labels
+are keyed by installation UUID, persist independently of registrations/addresses, and
+survive relay restarts. There is no push notification: clients reread the directory.
 
 ## Discovery
 

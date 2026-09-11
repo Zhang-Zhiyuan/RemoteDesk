@@ -125,4 +125,41 @@ public sealed class StartupServiceTests
 
         Assert.True(StartupService.IsOrphanedRegistration(status, _ => true));
     }
+
+    [Theory]
+    [InlineData(true, false, "--install-persistent-startup")]
+    [InlineData(true, true, "--enable-persistent-startup")]
+    [InlineData(false, true, "--disable-persistent-startup")]
+    [InlineData(false, false, null)]
+    public async Task StartupChangesUseApprovedAdministratorTaskInsteadOfCreatingRunEntry(
+        bool enabled, bool installed, string? expected)
+    {
+        var operations = new List<string>();
+        int removed = 0;
+        await StartupService.ApplyChangeAsync(enabled, installed,
+            operation => { operations.Add(operation); return Task.CompletedTask; }, () => removed++);
+        Assert.Equal(expected is null ? Array.Empty<string>() : [expected], operations);
+        Assert.Equal(!enabled && !installed ? 1 : 0, removed);
+    }
+
+    [Fact]
+    public async Task FailedMigrationLeavesLegacyRegistrationIntact()
+    {
+        bool removed = false;
+        await Assert.ThrowsAsync<IOException>(() => StartupService.ApplyChangeAsync(true, false,
+            _ => Task.FromException(new IOException("fixture install failure")), () => removed = true));
+        Assert.False(removed);
+    }
+
+    [Fact]
+    public void MigrationRequiresExistingOptInAndPreservesOtherValidCopies()
+    {
+        Assert.False(StartupService.ShouldMigrateLegacyRegistration(StartupRegistrationStatus.Disabled));
+        var current = StartupService.EvaluateRegistration(StartupService.BuildRegistrationCommand(CurrentExecutable), CurrentExecutable);
+        Assert.True(StartupService.ShouldMigrateLegacyRegistration(current));
+        Assert.False(StartupService.ShouldMigrateLegacyRegistration(current with { IsPersistent = true }));
+        var other = StartupService.EvaluateRegistration("\"D:\\Portable\\RemoteDesk.exe\" --tray", CurrentExecutable);
+        Assert.False(StartupService.ShouldMigrateLegacyRegistration(other, _ => true));
+        Assert.True(StartupService.ShouldMigrateLegacyRegistration(other, _ => false));
+    }
 }

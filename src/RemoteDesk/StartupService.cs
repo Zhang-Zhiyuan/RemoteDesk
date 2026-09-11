@@ -37,15 +37,27 @@ internal static class StartupService
         return GetStatus().IsRegistered;
     }
 
-    public static void SetEnabled(bool enabled)
+    public static Task SetEnabledAsync(bool enabled)
     {
-        if (WindowsPersistentStartup.GetStatus().IsInstalled)
-        {
-            WindowsPersistentStartup.SetEnabled(enabled);
-            return;
-        }
-        SetRegistryEnabled(enabled);
+        return ApplyChangeAsync(enabled, WindowsPersistentStartup.GetStatus().IsInstalled,
+            WindowsPersistentStartup.ChangeAsync, () => SetRegistryEnabled(false));
     }
+
+    internal static Task ApplyChangeAsync(bool enabled, bool persistentInstalled,
+        Func<string, Task> changePersistent, Action removeLegacyRegistration)
+    {
+        // requireAdministrator executables need the approved highest-privilege
+        // logon task. Never create a new HKCU Run entry for an elevated app.
+        if (enabled) return changePersistent(persistentInstalled
+            ? WindowsPersistentStartup.EnableArgument : WindowsPersistentStartup.InstallArgument);
+        if (persistentInstalled) return changePersistent(WindowsPersistentStartup.DisableArgument);
+        removeLegacyRegistration();
+        return Task.CompletedTask;
+    }
+
+    internal static bool ShouldMigrateLegacyRegistration(StartupRegistrationStatus status,
+        Func<string, bool>? pathExists = null) => status.IsRegistered && !status.IsPersistent &&
+        (status.TargetsCurrentExecutable || IsOrphanedRegistration(status, pathExists));
 
     internal static void SetRegistryEnabled(bool enabled)
     {

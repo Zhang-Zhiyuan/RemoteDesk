@@ -28,6 +28,10 @@ final class AndroidFileCompletionCoordinator implements AutoCloseable {
             long generation,
             String message,
             Throwable failure);
+
+        default void publishTransfer(long generation, String transferId, String message, Throwable failure) {
+            publish(generation, message, failure);
+        }
     }
 
     // The desktop paste workflow permits a batch of up to 32 files and sends
@@ -69,13 +73,17 @@ final class AndroidFileCompletionCoordinator implements AutoCloseable {
     }
 
     boolean offer(Operation operation, Runnable discardPending) {
+        return offer(null, operation, discardPending);
+    }
+
+    boolean offer(String transferId, Operation operation, Runnable discardPending) {
         if (operation == null || closed.get()) {
             runDiscard(discardPending);
             return false;
         }
 
         PendingCompletion pending =
-            new PendingCompletion(operation, discardPending);
+            new PendingCompletion(transferId, operation, discardPending);
         try {
             executor.execute(pending);
             return true;
@@ -85,7 +93,7 @@ final class AndroidFileCompletionCoordinator implements AutoCloseable {
         }
     }
 
-    private void runOperation(Operation operation) {
+    private void runOperation(String transferId, Operation operation) {
         String message = null;
         Throwable failure = null;
         try {
@@ -99,7 +107,7 @@ final class AndroidFileCompletionCoordinator implements AutoCloseable {
         }
 
         try {
-            owner.publish(generation, message, failure);
+            owner.publishTransfer(generation, transferId, message, failure);
         } catch (RuntimeException ex) {
             AndroidSessionLog.error(
                 "Android file completion callback failed.",
@@ -163,11 +171,13 @@ final class AndroidFileCompletionCoordinator implements AutoCloseable {
     }
 
     private final class PendingCompletion implements Runnable {
+        private final String transferId;
         private final Operation operation;
         private final Runnable discardPending;
         private final AtomicBoolean claimed = new AtomicBoolean();
 
-        PendingCompletion(Operation operation, Runnable discardPending) {
+        PendingCompletion(String transferId, Operation operation, Runnable discardPending) {
+            this.transferId = transferId;
             this.operation = operation;
             this.discardPending = discardPending;
         }
@@ -175,7 +185,7 @@ final class AndroidFileCompletionCoordinator implements AutoCloseable {
         @Override
         public void run() {
             if (claimed.compareAndSet(false, true)) {
-                runOperation(operation);
+                runOperation(transferId, operation);
             }
         }
 

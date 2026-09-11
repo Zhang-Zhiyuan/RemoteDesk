@@ -373,7 +373,8 @@ public final class RemoteDeskHostServerTest {
 
         assertTrue(status.startsWith("远端剪贴板没有可回传文件"));
         assertTrue(status.contains("Android"));
-        assertTrue(status.contains("当前仅支持 Windows 向 Android 发送文件"));
+        assertTrue(status.contains("更多 → 发送文件"));
+        assertTrue(status.contains("主动选择"));
     }
 
     private static final class ThrowingOptionalSocket extends Socket {

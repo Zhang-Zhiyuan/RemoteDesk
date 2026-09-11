@@ -331,6 +331,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
+StateDirectory=remotedesk-relay-names
+StateDirectoryMode=0700
 ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -392,7 +394,8 @@ def deploy(source, port, proposed_token):
         raise DeploymentError("Running relay has no readable configuration; refusing to replace it.")
     config = dict(previous or {})
     config.update(access_token=previous["access_token"] if previous else proposed_token,
-                  bind=config.get("bind", "0.0.0.0"), port=port, cert_file=str(CERT), key_file=str(KEY))
+                  bind=config.get("bind", "0.0.0.0"), port=port, cert_file=str(CERT), key_file=str(KEY),
+                  device_names_file="/var/lib/remotedesk-relay-names/device-names.json")
     config_data = CONFIG.read_bytes() if previous == config else json_bytes(config)
     desired_unit = unit_bytes()
     changed = (incoming != installed or previous != config or not UNIT.exists() or UNIT.read_bytes() != desired_unit)

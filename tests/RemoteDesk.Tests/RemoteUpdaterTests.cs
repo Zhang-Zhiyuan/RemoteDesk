@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Security.Cryptography;
 using Xunit;
 
 namespace RemoteDesk.Tests;
@@ -254,6 +256,73 @@ public sealed class RemoteUpdaterTests
             "recovery files retained when present",
             script,
             StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UpdaterUsesOnlyProtectedWindowsPowerShellModulesWithoutChangingParentEnvironment()
+    {
+        string? before = Environment.GetEnvironmentVariable("PSModulePath");
+        ProcessStartInfo info = RemoteUpdater.CreateWindowsPowerShellStartInfo(AppContext.BaseDirectory);
+        string expected = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            "System32", "WindowsPowerShell", "v1.0", "Modules");
+        Assert.Equal(expected, info.Environment["PSModulePath"]);
+        Assert.Equal(before, Environment.GetEnvironmentVariable("PSModulePath"));
+        Assert.False(info.UseShellExecute);
+        Assert.True(info.CreateNoWindow);
+        Assert.True(Path.IsPathFullyQualified(info.FileName));
+    }
+
+    [Fact]
+    public async Task WindowsPowerShellActuallyLoadsHashSignatureAndNetworkHealthCmdlets()
+    {
+        // Execute a read-only check through exactly the child-process environment
+        // used by the updater. Calling powershell via pwsh's native invocation
+        // would hide the bug because pwsh silently repairs PSModulePath itself.
+        ProcessStartInfo info = RemoteUpdater.CreateWindowsPowerShellStartInfo(AppContext.BaseDirectory);
+        info.RedirectStandardOutput = true;
+        info.RedirectStandardError = true;
+        string fixture = typeof(RemoteUpdater).Assembly.Location;
+        info.Environment["REMOTEDESK_UPDATER_FIXTURE_FILE"] = fixture;
+        info.ArgumentList.Add("-NoProfile");
+        info.ArgumentList.Add("-NonInteractive");
+        info.ArgumentList.Add("-Command");
+        info.ArgumentList.Add("""
+            $ErrorActionPreference = 'Stop'
+            if ($PSVersionTable.PSVersion.Major -ne 5) { throw 'Expected Windows PowerShell 5.1' }
+            Write-Output ('HASH=' + (Get-FileHash -LiteralPath $env:REMOTEDESK_UPDATER_FIXTURE_FILE -Algorithm SHA256).Hash)
+            Write-Output ('SIGNATURE=' + (Get-AuthenticodeSignature -LiteralPath $env:REMOTEDESK_UPDATER_FIXTURE_FILE).Status)
+            if ((Get-Command Get-NetTCPConnection -ErrorAction Stop).Name -ne 'Get-NetTCPConnection') { throw 'Missing health cmdlet' }
+            Write-Output 'HEALTH_CMDLET_READY'
+            """);
+        using Process process = Process.Start(info)!;
+        Task<string> output = process.StandardOutput.ReadToEndAsync();
+        Task<string> error = process.StandardError.ReadToEndAsync();
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+            await process.WaitForExitAsync(timeout.Token);
+            string actual = await output;
+            Assert.True(process.ExitCode == 0, await error);
+            using var input = File.OpenRead(fixture);
+            Assert.Contains("HASH=" + Convert.ToHexString(SHA256.HashData(input)), actual, StringComparison.Ordinal);
+            Assert.Contains("SIGNATURE=NotSigned", actual, StringComparison.Ordinal);
+            Assert.Contains("HEALTH_CMDLET_READY", actual, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (!process.HasExited) { process.Kill(); await process.WaitForExitAsync(); }
+        }
+    }
+
+    [Fact]
+    public void EarlyPackageFailureStillHasTheRollbackWorkingDirectory()
+    {
+        string script = RemoteUpdater.CreateUpdaterScript();
+        int initialize = script.IndexOf("$targetDirectory = Split-Path -Parent $TargetPath", StringComparison.Ordinal);
+        int waitForExit = script.IndexOf("waiting for process $ProcessId to exit", StringComparison.Ordinal);
+        Assert.True(initialize >= 0 && initialize < waitForExit);
+        Assert.Equal(1, CountOccurrences(script, "$targetDirectory = Split-Path -Parent $TargetPath"));
+        Assert.Contains("package verification could not run:", script, StringComparison.Ordinal);
     }
 
     private static int CountOccurrences(

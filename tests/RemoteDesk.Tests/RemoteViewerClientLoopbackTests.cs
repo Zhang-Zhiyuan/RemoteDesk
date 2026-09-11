@@ -3276,6 +3276,10 @@ public sealed class RemoteViewerClientLoopbackTests
             }
 
             phaseResult.TrySetResult(requests);
+            // This marker is also a real clipboard request: drain its response
+            // before advertising the end of the file-return phase.
+            await Protocol.WriteMessageAsync(stream, MessageType.Control,
+                RemoteMessageCodec.EncodeClipboardText(string.Empty), session, writeLock, cancellationToken);
             await Protocol.WriteMessageAsync(
                 stream,
                 MessageType.Control,
@@ -5238,6 +5242,7 @@ public sealed class RemoteViewerClientLoopbackTests
 
         using SecureSession session = authentication.Session!;
         RemoteVideoCodecs viewerCodecs = RemoteVideoCodecs.None;
+        using var clipboardWriteLock = new SemaphoreSlim(1, 1);
         var inputs = new List<RemoteInputCommand>();
         var controls = new List<RemoteControlMessage>();
         bool controlArrivedBeforeInputFlush = false;
@@ -5269,6 +5274,10 @@ public sealed class RemoteViewerClientLoopbackTests
                         }
 
                         controls.Add(control);
+                        if (control.Kind == RemoteControlKind.ClipboardSetText)
+                            await Protocol.WriteMessageAsync(stream, MessageType.Control,
+                                RemoteMessageCodec.EncodeClipboardStatus(true, "Clipboard updated."),
+                                session, clipboardWriteLock, cancellationToken);
                     }
 
                     break;

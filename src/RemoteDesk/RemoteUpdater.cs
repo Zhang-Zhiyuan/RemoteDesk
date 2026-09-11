@@ -203,6 +203,8 @@ internal static class RemoteUpdater
         $ErrorActionPreference = 'Stop'
         $installedUpdate = $false
         $started = $null
+        # Rollback needs this even when package verification fails before installation.
+        $targetDirectory = Split-Path -Parent $TargetPath
         $effectiveRestartArgument = @($RestartArgument)
         if ($ResumeHostAfterUpdate) {
             $effectiveRestartArgument += '--resume-host-after-update'
@@ -261,6 +263,7 @@ internal static class RemoteUpdater
                     [StringComparison]::OrdinalIgnoreCase)
             }
             catch {
+                Write-RemoteDeskUpdateLog "package verification could not run: $($_.Exception.Message)"
                 return $false
             }
         }
@@ -549,7 +552,6 @@ internal static class RemoteUpdater
                 throw "update package changed or no longer matches the approved signature mode"
             }
 
-            $targetDirectory = Split-Path -Parent $TargetPath
             if (-not (Test-Path -LiteralPath $targetDirectory -PathType Container)) {
                 throw "target directory is missing: $targetDirectory"
             }
@@ -707,13 +709,7 @@ internal static class RemoteUpdater
         string expectedSignerCertificateSha256,
         bool authenticodeRequired)
     {
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = GetPowerShellExecutablePath(),
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            WorkingDirectory = targetDirectory
-        };
+        var startInfo = CreateWindowsPowerShellStartInfo(targetDirectory);
         startInfo.ArgumentList.Add("-NoProfile");
         startInfo.ArgumentList.Add("-ExecutionPolicy");
         startInfo.ArgumentList.Add("Bypass");
@@ -748,6 +744,24 @@ internal static class RemoteUpdater
 
         return Process.Start(startInfo)
             ?? throw new InvalidOperationException("启动远程更新脚本失败。");
+    }
+
+    internal static ProcessStartInfo CreateWindowsPowerShellStartInfo(string workingDirectory)
+    {
+        string executable = GetPowerShellExecutablePath();
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = executable,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = workingDirectory
+        };
+        // A GUI launched from pwsh can retain PowerShell 7's PSModulePath.
+        // Windows PowerShell 5.1 then fails to load hash/signature/NetTCPIP cmdlets.
+        // Use only the protected built-in modules for this privileged helper;
+        // never change the caller's or the user's global environment.
+        startInfo.Environment["PSModulePath"] = Path.Combine(Path.GetDirectoryName(executable)!, "Modules");
+        return startInfo;
     }
 
     private static void ValidatePackagePath(string packagePath, string targetPath)
@@ -799,7 +813,7 @@ internal static class RemoteUpdater
             }
         }
 
-        return "powershell.exe";
+        throw new InvalidOperationException("系统 Windows PowerShell 不可用，远程更新未启动；现有程序保持运行。");
     }
 
     private static void EnsureDirectoryWritable(string directory)

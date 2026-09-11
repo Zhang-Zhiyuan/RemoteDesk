@@ -17,7 +17,17 @@ public final class ViewerProbeReceiver extends BroadcastReceiver {
         try {
             AndroidViewerChrome chrome=(AndroidViewerChrome)ViewerProbeApplication.field(viewer,"chrome");
             View frame=(View)ViewerProbeApplication.field(viewer,"viewerFrame");
-            if ("gesture_case".equals(action)) {
+            if ("clipboard_seed".equals(action)) {
+                AndroidClipboardText.setText(viewer, "手机复制中文😀\r\n第二行\t缩进\n");
+            } else if ("clipboard_snapshot".equals(action)) {
+                String text = AndroidClipboardText.getText(viewer);
+                byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                StringBuilder hash = new StringBuilder();
+                for (byte value : digest) hash.append(String.format(java.util.Locale.ROOT, "%02x", value & 255));
+                java.nio.file.Files.write(new java.io.File(context.getFilesDir(), "clipboard-sha256.txt").toPath(),
+                    hash.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            } else if ("gesture_case".equals(action)) {
                 AndroidViewerGestures gestures=(AndroidViewerGestures)ViewerProbeApplication.field(viewer,"gestures");
                 gestures.cancel(); gestures.viewport.reset(); gestures.mode(intent.getBooleanExtra("trackpad",true)); gestures.centerCursor();
                 gestureCase(frame, intent.getStringExtra("case"));

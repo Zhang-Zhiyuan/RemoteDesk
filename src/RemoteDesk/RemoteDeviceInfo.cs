@@ -33,7 +33,9 @@ internal enum RemoteDeviceCapabilities
     HighFrameRateH264 = 1 << 19,
     AuthenticatedUdpHeartbeat = 1 << 20,
     HighQualityJpeg = 1 << 21,
-    DeviceIdentity = 1 << 22
+    DeviceIdentity = 1 << 22,
+    ClipboardPasteShortcut = 1 << 23,
+    FileTransferReceipt = 1 << 24
 }
 
 internal static class RemoteDevicePlatforms
@@ -104,6 +106,7 @@ internal static class RemoteDeviceCapabilityInfo
             RemoteDeviceCapabilities.FileDropPaste |
             RemoteDeviceCapabilities.FileSend |
             RemoteDeviceCapabilities.FileChecksum |
+            RemoteDeviceCapabilities.FileTransferReceipt |
             RemoteDeviceCapabilities.FileTransferCancel |
             RemoteDeviceCapabilities.FileTransferPreview |
             RemoteDeviceCapabilities.ClipboardSequenceTracking |

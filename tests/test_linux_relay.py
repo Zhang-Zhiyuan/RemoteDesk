@@ -246,6 +246,8 @@ class LinuxRelayTlsTests(unittest.IsolatedAsyncioTestCase):
             await self.start_host()
         devices = await client.list_devices_async(self.options)
         self.assertEqual([dict(deviceId=ID, machineName="Owned Linux target", platform="Linux", busy=False,
+                              sharedName='', originalMachineName='Owned Linux target', canRename=True,
+                              namingUnavailableReason=client.NAMING_UNAVAILABLE,
                               directAddresses=["192.0.2.3"], directPort=self.host.local_port)], devices)
 
     async def test_address_refresh_does_not_interrupt_active_encrypted_relay_transport(self):

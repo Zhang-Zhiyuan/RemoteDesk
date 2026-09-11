@@ -64,6 +64,10 @@ internal sealed record RelayOnlineDevice(
 {
     public IReadOnlyList<string> DirectAddresses { get; init; } = [];
     public int DirectPort { get; init; }
+    public string SharedName { get; init; } = "";
+    public string OriginalMachineName { get; init; } = "";
+    public bool CanRename { get; init; }
+    public string NamingUnavailableReason { get; init; } = RelayDeviceName.UnsupportedMessage;
     public string AddressDisplay => DirectAddresses.Count > 0
         ? string.Join(" / ", DirectAddresses.Select(address => $"{address}:{DirectPort}"))
         : "未上报（仍可中继连接）";
@@ -78,6 +82,39 @@ internal sealed record RelayOnlineDevice(
         : string.Create(
             CultureInfo.CurrentCulture,
             $"{LastSeenSeconds} 秒前");
+}
+
+internal static class RelayDeviceName
+{
+    public const string UnsupportedMessage = "此中继服务器尚不支持共享命名，请先点击“部署 / 更新服务器”，再刷新在线列表。";
+    public const string InvalidMessage = "请使用不超过 80 个字符的单行名称，不要包含控制字符。";
+
+    public static string Normalize(string name)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        name = name.Trim();
+        if (name.Length > 80) throw new ArgumentException(InvalidMessage);
+        for (int i = 0; i < name.Length; i++)
+        {
+            UnicodeCategory category = char.GetUnicodeCategory(name, i);
+            if (category is UnicodeCategory.Control or UnicodeCategory.Format or UnicodeCategory.Surrogate
+                or UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator)
+                throw new ArgumentException(InvalidMessage);
+            if (char.IsHighSurrogate(name[i])) i++; // Valid supplementary character; counted as two UTF-16 units.
+        }
+        return name;
+    }
+
+    public static string ErrorMessage(string detail)
+    {
+        if (detail.Contains("未知的中继连接类型")) return UnsupportedMessage;
+        if (detail.Contains("无法读取")) return "服务器的设备命名记录无法读取，请检查服务器存储；原文件未修改。";
+        if (detail.Contains("保存失败")) return "设备名称保存失败，请检查服务器磁盘和目录权限；原名称未更改。";
+        if (detail.Contains("已离线") || detail.Contains("不存在")) return "设备已离线或不存在，请刷新在线列表后重试。";
+        if (detail.Contains("上限")) return "已达到服务器的设备命名数量上限。";
+        if (detail.Contains("名称") && (detail.Contains("80") || detail.Contains("文字"))) return InvalidMessage;
+        return "共享名称保存失败，请刷新在线列表核对后重试。";
+    }
 }
 
 internal static class RelayDeviceSelectionPolicy

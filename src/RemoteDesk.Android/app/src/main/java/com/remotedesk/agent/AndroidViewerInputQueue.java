@@ -12,6 +12,7 @@ final class AndroidViewerInputQueue implements AutoCloseable {
     private int activeReleaseLimit;
     private final ArrayDeque<Command> commands = new ArrayDeque<>();
     private boolean closed;
+    private int inFlight;
 
     AndroidViewerInputQueue(int capacity) {
         if (capacity <= 0 || capacity > Integer.MAX_VALUE - RELEASE_RESERVE_CAPACITY) {
@@ -77,6 +78,7 @@ final class AndroidViewerInputQueue implements AutoCloseable {
     synchronized void discardAll() {
         commands.clear();
         activeReleaseLimit = hardCapacity;
+        notifyAll();
     }
 
     synchronized Command take() throws InterruptedException {
@@ -84,7 +86,24 @@ final class AndroidViewerInputQueue implements AutoCloseable {
             wait();
         }
 
-        return poll();
+        Command command = poll();
+        if (command != null) inFlight++;
+        return command;
+    }
+
+    synchronized void completeSend() {
+        if (inFlight > 0) inFlight--;
+        notifyAll();
+    }
+
+    synchronized boolean awaitIdle(long timeoutMillis) throws InterruptedException {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+        while (!closed && (!commands.isEmpty() || inFlight != 0)) {
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) return false;
+            java.util.concurrent.TimeUnit.NANOSECONDS.timedWait(this, remaining);
+        }
+        return !closed;
     }
 
     synchronized Command poll() {

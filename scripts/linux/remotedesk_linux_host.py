@@ -47,6 +47,7 @@ from remotedesk_protocol_probe import (
     CAPABILITY_CLIPBOARD_TEXT,
     CAPABILITY_FILE_CHECKSUM,
     CAPABILITY_FILE_RECEIVE,
+    CAPABILITY_FILE_TRANSFER_RECEIPT,
     CAPABILITY_FILE_SEND,
     CAPABILITY_FILE_TRANSFER_CANCEL,
     CAPABILITY_FILE_TRANSFER_PREVIEW,
@@ -67,6 +68,7 @@ from remotedesk_protocol_probe import (
     CONTROL_FILE_TRANSFER_REQUEST_CLIPBOARD_FILES,
     CONTROL_FILE_TRANSFER_START,
     CONTROL_FILE_TRANSFER_STATUS,
+    CONTROL_FILE_TRANSFER_RECEIPT,
     CONTROL_SELECT_CAPTURE_TARGET,
     CONTROL_VIDEO_KEY_FRAME_REQUEST,
     CONTROL_VIEWER_CAPABILITIES,
@@ -110,6 +112,7 @@ from remotedesk_protocol_probe import (
     encode_file_transfer_complete,
     encode_file_transfer_start,
     encode_file_transfer_status,
+    encode_file_transfer_receipt,
     encode_session_rejected,
     encode_video_frame,
     read_message,
@@ -145,6 +148,7 @@ BASE_HOST_CAPABILITIES = (
     CAPABILITY_REMOTE_DESKTOP
     | CAPABILITY_CLIPBOARD_TEXT
     | CAPABILITY_FILE_RECEIVE
+    | CAPABILITY_FILE_TRANSFER_RECEIPT
     | CAPABILITY_CAPTURE_TARGET_SELECTION
     | CAPABILITY_FILE_SEND
     | CAPABILITY_FILE_CHECKSUM
@@ -3356,7 +3360,7 @@ class LinuxHostSession:
         elif kind == CONTROL_FILE_TRANSFER_REJECT_CLIPBOARD_FILES:
             if not self._cancel_return_operations("远端文件回传已取消。"):
                 log("Linux has no pending return files to cancel.")
-        elif kind == CONTROL_FILE_TRANSFER_STATUS:
+        elif kind in (CONTROL_FILE_TRANSFER_STATUS, CONTROL_FILE_TRANSFER_RECEIPT):
             status_message = str(control.get("statusMessage") or "")
             log(f"viewer status: {status_message}")
             if not bool(control.get("success")):
@@ -3695,6 +3699,8 @@ class LinuxHostSession:
                 operation = self.clipboard_queue.popleft()
 
             try:
+                if not self._clipboard_session_is_active():
+                    continue
                 if operation.kind == CONTROL_CLIPBOARD_GET_TEXT:
                     text = read_clipboard_text()
                     if not self._clipboard_session_is_active():
@@ -3773,7 +3779,7 @@ class LinuxHostSession:
                 receive_budget,
             )
         except (ProtocolError, OSError, EOFError, ValueError) as ex:
-            self._safe_status(False, f"Linux file transfer start failed: {ex}")
+            self._safe_file_receipt(payload, False, f"Linux file transfer start failed: {ex}")
             return
         previous = self.incoming
         self.incoming = replacement
@@ -3786,7 +3792,7 @@ class LinuxHostSession:
 
     def _handle_file_transfer_chunk(self, payload: bytes) -> None:
         if self.incoming is None:
-            self._safe_status(False, "Linux file transfer failed: file chunk without active transfer")
+            self._safe_file_receipt(payload, False, "Linux file transfer failed: file chunk without active transfer")
             return
         transfer = self.incoming
         try:
@@ -3794,11 +3800,11 @@ class LinuxHostSession:
         except (ProtocolError, OSError, EOFError, ValueError) as ex:
             if not transfer.active:
                 self.incoming = None
-            self._safe_status(False, f"Linux file transfer failed: {ex}")
+            self._safe_file_receipt(payload, False, f"Linux file transfer failed: {ex}")
 
     def _handle_file_transfer_checksum(self, payload: bytes) -> None:
         if self.incoming is None:
-            self._safe_status(False, "Linux file transfer failed: file checksum without active transfer")
+            self._safe_file_receipt(payload, False, "Linux file transfer failed: file checksum without active transfer")
             return
         transfer = self.incoming
         try:
@@ -3806,11 +3812,11 @@ class LinuxHostSession:
         except (ProtocolError, OSError, EOFError, ValueError) as ex:
             if not transfer.active:
                 self.incoming = None
-            self._safe_status(False, f"Linux file transfer failed: {ex}")
+            self._safe_file_receipt(payload, False, f"Linux file transfer failed: {ex}")
 
     def _handle_file_transfer_cancel(self, payload: bytes) -> None:
         if self.incoming is None:
-            self._safe_status(False, "Linux file transfer failed: file cancellation without active transfer")
+            self._safe_file_receipt(payload, False, "Linux file transfer failed: file cancellation without active transfer")
             return
         transfer = self.incoming
         try:
@@ -3818,14 +3824,14 @@ class LinuxHostSession:
         except (ProtocolError, OSError, EOFError, ValueError) as ex:
             if not transfer.active:
                 self.incoming = None
-            self._safe_status(False, f"Linux file transfer failed: {ex}")
+            self._safe_file_receipt(payload, False, f"Linux file transfer failed: {ex}")
             return
         self.incoming = None
-        self._safe_status(True, f"Linux file transfer cancelled: {reason}")
+        self._safe_file_receipt(payload, False, f"Linux file transfer cancelled: {reason}")
 
     def _handle_file_transfer_complete(self, payload: bytes) -> None:
         if self.incoming is None:
-            self._safe_status(False, "Linux file transfer failed: file completion without active transfer")
+            self._safe_file_receipt(payload, False, "Linux file transfer failed: file completion without active transfer")
             return
         transfer = self.incoming
         try:
@@ -3833,11 +3839,21 @@ class LinuxHostSession:
         except (ProtocolError, OSError, EOFError, ValueError) as ex:
             if not transfer.active:
                 self.incoming = None
-            self._safe_status(False, f"Linux file transfer failed: {ex}")
+            self._safe_file_receipt(payload, False, f"Linux file transfer failed: {ex}")
             return
         else:
             self.incoming = None
-            self._safe_status(True, f"File saved to Linux: {completed['path']}")
+            self._safe_file_receipt(payload, True, f"文件已保存到 Linux： {completed['path']}")
+
+    def _safe_file_receipt(self, payload: bytes, success: bool, message: str) -> None:
+        if not getattr(self, "viewer_capabilities", 0) & CAPABILITY_FILE_TRANSFER_RECEIPT:
+            self._safe_status(success, message)
+            return
+        transfer_id = decode_control(payload).get("transferId", "")
+        try:
+            self._write_control(encode_file_transfer_receipt(transfer_id, success, message))
+        except (OSError, ProtocolError):
+            pass
 
     def _send_requested_files(self) -> None:
         self._start_return_worker()
@@ -4592,20 +4608,24 @@ def read_clipboard_text() -> str | None:
         if not shutil.which(command[0]):
             continue
         try:
-            result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=2)
+            result = subprocess.run(command, check=False, capture_output=True, timeout=2)
             if result.returncode == 0:
-                return result.stdout
+                return result.stdout.decode("utf-8")
         except Exception:
             continue
     return None
 
 
 def write_clipboard_text(text: str) -> bool:
-    for command in (["xclip", "-selection", "clipboard"], ["xsel", "-ib"]):
+    commands = []
+    if os.environ.get("WAYLAND_DISPLAY"):
+        commands.append(["wl-copy", "--type", "text/plain;charset=utf-8"])
+    commands.extend((["xclip", "-selection", "clipboard", "-in", "-target", "UTF8_STRING"], ["xsel", "-ib"]))
+    for command in commands:
         if not shutil.which(command[0]):
             continue
         try:
-            result = subprocess.run(command, input=text, text=True, check=False, timeout=2)
+            result = subprocess.run(command, input=text.encode("utf-8"), check=False, timeout=2)
             if result.returncode == 0:
                 return True
         except Exception:

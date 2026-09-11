@@ -130,7 +130,8 @@ internal enum RemoteControlKind : byte
     LowLatencyVideoStopped = 31,
     SessionRejected = 32,
     DeviceIdentityRequest = 33,
-    DeviceIdentity = 34
+    DeviceIdentity = 34,
+    FileTransferReceipt = 35
 }
 
 internal sealed record LowLatencyVideoOffer(
@@ -861,6 +862,18 @@ internal static class RemoteMessageCodec
         return output.ToArray();
     }
 
+    public static byte[] EncodeFileTransferReceipt(string transferId, bool success, string message)
+    {
+        ValidateControlString(transferId);
+        using var output = new MemoryStream();
+        using var writer = new BinaryWriter(output, Encoding.UTF8);
+        writer.Write((byte)RemoteControlKind.FileTransferReceipt);
+        writer.Write(transferId);
+        writer.Write(success);
+        WriteBoundedString(writer, message, "文件保存结果已更新。");
+        return output.ToArray();
+    }
+
     public static byte[] EncodeSessionRejected(string message)
     {
         using var output = new MemoryStream();
@@ -927,6 +940,11 @@ internal static class RemoteMessageCodec
                 Array.Empty<CaptureTargetInfo>(),
                 null,
                 null,
+                Success: reader.ReadBoolean(),
+                StatusMessage: ReadBoundedString(reader)),
+            RemoteControlKind.FileTransferReceipt => new RemoteControlMessage(
+                kind, [], null, null,
+                TransferId: ReadBoundedString(reader),
                 Success: reader.ReadBoolean(),
                 StatusMessage: ReadBoundedString(reader)),
             RemoteControlKind.FileTransferChecksum => DecodeFileTransferChecksum(reader, kind),

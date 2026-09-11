@@ -454,6 +454,11 @@ final class RemoteDeskHostServer {
                     long expectedGeneration,
                     String message,
                     Throwable failure) {
+                    publishTransfer(expectedGeneration, null, message, failure);
+                }
+
+                @Override
+                public void publishTransfer(long expectedGeneration, String transferId, String message, Throwable failure) {
                     publishFileCompletion(
                         expectedGeneration,
                         state,
@@ -461,6 +466,7 @@ final class RemoteDeskHostServer {
                         output,
                         session,
                         writeLock,
+                        transferId,
                         message,
                         failure);
                 }
@@ -487,6 +493,7 @@ final class RemoteDeskHostServer {
         OutputStream output,
         RemoteDeskTransport.SecureSession session,
         Object writeLock,
+        String transferId,
         String message,
         Throwable failure) {
         if (!isCurrentSessionOwner(generation, state, socket)) {
@@ -512,10 +519,11 @@ final class RemoteDeskHostServer {
             if (!isCurrentSessionOwner(generation, state, socket)) {
                 return;
             }
-            sendFileTransferStatus(
+            sendFileReceipt(
                 output,
                 session,
                 writeLock,
+                transferId,
                 success,
                 statusMessage);
         } catch (IOException | GeneralSecurityException ex) {
@@ -986,6 +994,7 @@ final class RemoteDeskHostServer {
         AndroidHostSessionState state,
         Socket sessionSocket) throws IOException, GeneralSecurityException {
         RemoteDeskTransport.ControlMessage control = RemoteDeskTransport.decodeControl(payload);
+        boolean receipts = (state.viewerCapabilities.get() & RemoteDeskProtocol.CAPABILITY_FILE_TRANSFER_RECEIPT) != 0;
         switch (control.kind) {
             case RemoteDeskProtocol.CONTROL_DEVICE_IDENTITY_REQUEST:
                 RemoteDeskTransport.writeMessage(output, RemoteDeskProtocol.MESSAGE_CONTROL,
@@ -995,16 +1004,17 @@ final class RemoteDeskHostServer {
                 sendClipboardText(output, session, writeLock);
                 break;
             case RemoteDeskProtocol.CONTROL_CLIPBOARD_SET_TEXT:
-                setClipboardText(control.text, output, session, writeLock);
+                setClipboardText(control.text, output, session, writeLock,
+                    () -> running.get() && state.running.get() && !sessionSocket.isClosed());
                 break;
             case RemoteDeskProtocol.CONTROL_FILE_TRANSFER_START:
-                handleFileTransferStart(control, output, session, writeLock, fileTransferReceiver);
+                handleFileTransferStart(control, output, session, writeLock, fileTransferReceiver, receipts);
                 break;
             case RemoteDeskProtocol.CONTROL_FILE_TRANSFER_CHUNK:
-                handleFileTransferChunk(control, output, session, writeLock, fileTransferReceiver);
+                handleFileTransferChunk(control, output, session, writeLock, fileTransferReceiver, receipts);
                 break;
             case RemoteDeskProtocol.CONTROL_FILE_TRANSFER_CHECKSUM:
-                handleFileTransferChecksum(control, output, session, writeLock, fileTransferReceiver);
+                handleFileTransferChecksum(control, output, session, writeLock, fileTransferReceiver, receipts);
                 break;
             case RemoteDeskProtocol.CONTROL_FILE_TRANSFER_COMPLETE:
                 handleFileTransferComplete(
@@ -1013,10 +1023,10 @@ final class RemoteDeskHostServer {
                     session,
                     writeLock,
                     fileTransferReceiver,
-                    fileCompletionCoordinator);
+                    fileCompletionCoordinator, receipts);
                 break;
             case RemoteDeskProtocol.CONTROL_FILE_TRANSFER_CANCEL:
-                handleFileTransferCancel(control, output, session, writeLock, fileTransferReceiver);
+                handleFileTransferCancel(control, output, session, writeLock, fileTransferReceiver, receipts);
                 break;
             case RemoteDeskProtocol.CONTROL_FILE_TRANSFER_REQUEST_CLIPBOARD_FILES:
                 sendFileTransferStatus(
@@ -1178,9 +1188,9 @@ final class RemoteDeskHostServer {
         String text,
         OutputStream output,
         RemoteDeskTransport.SecureSession session,
-        Object writeLock) throws IOException, GeneralSecurityException {
+        Object writeLock, java.util.function.BooleanSupplier authorized) throws IOException, GeneralSecurityException {
         try {
-            AndroidClipboardText.setText(appContext, text);
+            AndroidClipboardText.setText(appContext, text, authorized);
             sendClipboardStatus(output, session, writeLock, true, "已写入 Android 剪贴板");
         } catch (Exception ex) {
             AndroidSessionLog.error("Writing Android clipboard failed.", ex);
@@ -1207,13 +1217,13 @@ final class RemoteDeskHostServer {
         OutputStream output,
         RemoteDeskTransport.SecureSession session,
         Object writeLock,
-        AndroidFileTransferReceiver fileTransferReceiver) throws IOException, GeneralSecurityException {
+        AndroidFileTransferReceiver fileTransferReceiver, boolean receipts) throws IOException, GeneralSecurityException {
         String message;
         try {
             message = fileTransferReceiver.start(control);
         } catch (Exception ex) {
             AndroidSessionLog.error("Android file receive failed at start.", ex);
-            sendFileTransferStatus(output, session, writeLock, false, "Android 文件接收失败：" + ex.getMessage());
+            sendFileReceipt(output, session, writeLock, receipts ? control.transferId : null, false, "Android 文件接收失败：" + ex.getMessage());
             return;
         }
 
@@ -1226,12 +1236,12 @@ final class RemoteDeskHostServer {
         OutputStream output,
         RemoteDeskTransport.SecureSession session,
         Object writeLock,
-        AndroidFileTransferReceiver fileTransferReceiver) throws IOException, GeneralSecurityException {
+        AndroidFileTransferReceiver fileTransferReceiver, boolean receipts) throws IOException, GeneralSecurityException {
         try {
             fileTransferReceiver.writeChunk(control);
         } catch (Exception ex) {
             AndroidSessionLog.error("Android file receive failed while writing chunk.", ex);
-            sendFileTransferStatus(output, session, writeLock, false, "Android 文件接收失败：" + ex.getMessage());
+            sendFileReceipt(output, session, writeLock, receipts ? control.transferId : null, false, "Android 文件接收失败：" + ex.getMessage());
         }
     }
 
@@ -1241,7 +1251,7 @@ final class RemoteDeskHostServer {
         RemoteDeskTransport.SecureSession session,
         Object writeLock,
         AndroidFileTransferReceiver fileTransferReceiver,
-        AndroidFileCompletionCoordinator fileCompletionCoordinator)
+        AndroidFileCompletionCoordinator fileCompletionCoordinator, boolean receipts)
         throws IOException, GeneralSecurityException {
         AndroidFileTransferReceiver.PreparedCompletion preparedCompletion;
         try {
@@ -1253,10 +1263,11 @@ final class RemoteDeskHostServer {
             AndroidSessionLog.error(
                 "Android file receive failed while preparing completion.",
                 ex);
-            sendFileTransferStatus(
+            sendFileReceipt(
                 output,
                 session,
                 writeLock,
+                receipts ? control.transferId : null,
                 false,
                 "Android 文件接收失败：" +
                     MainActivity.formatExceptionMessage(ex));
@@ -1264,6 +1275,7 @@ final class RemoteDeskHostServer {
         }
 
         boolean scheduled = fileCompletionCoordinator.offer(
+            receipts ? control.transferId : null,
             cancellationSignal -> fileTransferReceiver.publishCompletion(
                 preparedCompletion,
                 cancellationSignal::isCancelled),
@@ -1272,10 +1284,11 @@ final class RemoteDeskHostServer {
             return;
         }
 
-        sendFileTransferStatus(
+        sendFileReceipt(
             output,
             session,
             writeLock,
+            receipts ? control.transferId : null,
             false,
             "Android 文件完成队列繁忙，传输已取消");
     }
@@ -1285,12 +1298,12 @@ final class RemoteDeskHostServer {
         OutputStream output,
         RemoteDeskTransport.SecureSession session,
         Object writeLock,
-        AndroidFileTransferReceiver fileTransferReceiver) throws IOException, GeneralSecurityException {
+        AndroidFileTransferReceiver fileTransferReceiver, boolean receipts) throws IOException, GeneralSecurityException {
         try {
             fileTransferReceiver.setExpectedChecksum(control);
         } catch (Exception ex) {
             AndroidSessionLog.error("Android file receive failed while setting checksum.", ex);
-            sendFileTransferStatus(output, session, writeLock, false, "Android 文件接收失败：" + ex.getMessage());
+            sendFileReceipt(output, session, writeLock, receipts ? control.transferId : null, false, "Android 文件接收失败：" + ex.getMessage());
         }
     }
 
@@ -1299,18 +1312,18 @@ final class RemoteDeskHostServer {
         OutputStream output,
         RemoteDeskTransport.SecureSession session,
         Object writeLock,
-        AndroidFileTransferReceiver fileTransferReceiver) throws IOException, GeneralSecurityException {
+        AndroidFileTransferReceiver fileTransferReceiver, boolean receipts) throws IOException, GeneralSecurityException {
         String message;
         try {
             message = fileTransferReceiver.cancel(control);
         } catch (Exception ex) {
             AndroidSessionLog.error("Android file receive failed while cancelling.", ex);
-            sendFileTransferStatus(output, session, writeLock, false, "Android 文件取消失败：" + ex.getMessage());
+            sendFileReceipt(output, session, writeLock, receipts ? control.transferId : null, false, "Android 文件取消失败：" + ex.getMessage());
             return;
         }
 
         AndroidSessionLog.info(message);
-        sendFileTransferStatus(output, session, writeLock, true, message);
+        sendFileReceipt(output, session, writeLock, receipts ? control.transferId : null, false, message);
     }
 
     private void sendFileTransferStatus(
@@ -1325,6 +1338,13 @@ final class RemoteDeskHostServer {
             RemoteDeskTransport.encodeFileTransferStatus(success, message),
             session,
             writeLock);
+    }
+
+    private void sendFileReceipt(OutputStream output, RemoteDeskTransport.SecureSession session,
+        Object writeLock, String transferId, boolean success, String message) throws IOException, GeneralSecurityException {
+        RemoteDeskTransport.writeMessage(output, RemoteDeskProtocol.MESSAGE_CONTROL,
+            transferId == null ? RemoteDeskTransport.encodeFileTransferStatus(success, message)
+                : RemoteDeskTransport.encodeFileTransferReceipt(transferId, success, message), session, writeLock);
     }
 
     private static void closeQuietly(ServerSocket socket) {
@@ -1354,6 +1374,7 @@ final class RemoteDeskHostServer {
         int capabilities = RemoteDeskProtocol.CAPABILITY_REMOTE_DESKTOP |
             RemoteDeskProtocol.CAPABILITY_CLIPBOARD_TEXT |
             RemoteDeskProtocol.CAPABILITY_FILE_RECEIVE |
+            RemoteDeskProtocol.CAPABILITY_FILE_TRANSFER_RECEIPT |
             RemoteDeskProtocol.CAPABILITY_FILE_CHECKSUM |
             RemoteDeskProtocol.CAPABILITY_FILE_TRANSFER_CANCEL |
             RemoteDeskProtocol.CAPABILITY_LOW_LATENCY_UDP_VIDEO |
@@ -1365,6 +1386,7 @@ final class RemoteDeskHostServer {
             AndroidH264CapabilityPolicy.hostCapabilities(encoderReport);
         if (inputEnabled) {
             capabilities |= RemoteDeskProtocol.CAPABILITY_INPUT_CONTROL;
+            capabilities |= RemoteDeskProtocol.CAPABILITY_CLIPBOARD_PASTE_SHORTCUT;
             capabilities |= RemoteDeskProtocol.CAPABILITY_LOW_LATENCY_UDP_MOUSE_INPUT;
         }
 
@@ -1373,7 +1395,7 @@ final class RemoteDeskHostServer {
 
     static String formatUnsupportedFileReturnStatus() {
         return "远端剪贴板没有可回传文件。Android 系统不允许被控服务可靠读取其它应用复制的文件；" +
-            "当前仅支持 Windows 向 Android 发送文件。";
+            "可在手机的远控会话中打开“更多 → 发送文件”，主动选择要发送的文件。";
     }
 
     static void configureClientSocketForAuthentication(Socket client) throws IOException {

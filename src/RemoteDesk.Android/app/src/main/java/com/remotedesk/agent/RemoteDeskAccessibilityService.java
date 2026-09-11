@@ -188,6 +188,38 @@ public final class RemoteDeskAccessibilityService extends AccessibilityService {
         });
     }
 
+    static boolean clipboardActionFromAnyThread(int virtualKey, java.util.function.BooleanSupplier authorized) {
+        RemoteDeskAccessibilityService service = instance;
+        if (service == null) return false;
+        return service.mainHandler.post(() -> {
+            if (instance == service && authorized.getAsBoolean()) service.performClipboardAction(virtualKey);
+        });
+    }
+
+    @SuppressWarnings("deprecation")
+    private void performClipboardAction(int virtualKey) {
+        AccessibilityNodeInfo node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+        if (node == null) return;
+        try {
+            if (!node.refresh() || !node.isFocused()) return;
+            if (virtualKey != 0x56 && node.isPassword()) return;
+            if (virtualKey == 0x41) {
+                CharSequence text = node.getText();
+                if (text == null || node.isShowingHintText()) return;
+                Bundle arguments = new Bundle();
+                arguments.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0);
+                arguments.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, text.length());
+                node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, arguments);
+            } else {
+                int action = virtualKey == 0x56 ? AccessibilityNodeInfo.ACTION_PASTE :
+                    virtualKey == 0x58 ? AccessibilityNodeInfo.ACTION_CUT : AccessibilityNodeInfo.ACTION_COPY;
+                node.performAction(action);
+            }
+        } catch (RuntimeException failure) {
+            AndroidSessionLog.error("Focused clipboard action failed.", failure);
+        } finally { node.recycle(); }
+    }
+
     static boolean deleteTextBeforeCursorFromAnyThread() {
         return deleteTextBeforeCursorFromAnyThread(() -> true);
     }

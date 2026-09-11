@@ -2072,6 +2072,7 @@ if (-not $LinuxOnly) {
         throw "Publishing the required self-contained win-x64 single-file package failed with exit code $LASTEXITCODE. Remote update replaces only RemoteDesk.exe, so a framework-dependent fallback cannot be released safely."
     }
     $windowsExecutable = Join-Path $windowsOutput "RemoteDesk.exe"
+    & (Join-Path $PSScriptRoot "Test-WindowsAdministratorManifest.ps1") -Path $windowsExecutable
     if (-not [string]::IsNullOrWhiteSpace(
             $WindowsSigningCertificateThumbprint)) {
         Write-Step "Signing Windows executable with Authenticode"

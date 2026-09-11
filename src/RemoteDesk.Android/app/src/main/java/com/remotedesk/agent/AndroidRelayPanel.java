@@ -40,6 +40,8 @@ final class AndroidRelayPanel extends LinearLayout {
     private volatile boolean closed, active;
     private volatile Socket pendingSocket;
     private boolean busy;
+    private boolean nameDialogOpen;
+    private AlertDialog nameDialog;
     private volatile int epoch;
     private long lastRefresh;
     private final Runnable ticker = new Runnable() {
@@ -380,7 +382,7 @@ final class AndroidRelayPanel extends LinearLayout {
     private void setStatus(String message) { status.setText(panelStatus.display(message)); }
 
     private void refresh() {
-        if (!active || closed || busy || setupBusy || saved == null) return;
+        if (!active || closed || busy || setupBusy || nameDialogOpen || saved == null) return;
         busy = true; lastRefresh = System.currentTimeMillis();
         final int generation = epoch;
         final AndroidRelay.Options options = saved;
@@ -423,6 +425,12 @@ final class AndroidRelayPanel extends LinearLayout {
                         return true;
                     });
                     devices.addView(item, layout());
+                    Button rename = button("共享名称", false);
+                    rename.setContentDescription("共享名称 · " + device.name);
+                    rename.setOnClickListener(view -> {
+                        if (epoch == generation) showNameDialog(options, device);
+                    });
+                    devices.addView(rename, layout());
                     if (!local && useDirectAddress != null && !device.directAddresses.isEmpty() && device.directPort > 0) {
                         Button address = button("查看 / 使用 IP", false);
                         address.setOnClickListener(view -> showAddresses(options, device.deviceId));
@@ -464,12 +472,79 @@ final class AndroidRelayPanel extends LinearLayout {
         });
     }
 
+    private void showNameDialog(AndroidRelay.Options options, AndroidRelay.Device device) {
+        if (closed || !active || busy || setupBusy || nameDialogOpen || saved != options) return;
+        if (!device.canRename) {
+            new AlertDialog.Builder(getContext()).setTitle("共享名称").setMessage(device.namingUnavailableReason)
+                .setPositiveButton("知道了", null).show();
+            return;
+        }
+        final int generation = epoch;
+        // field(...) also attaches to the server configuration. This input
+        // belongs only to the dialog and must not acquire a second parent.
+        EditText input = new EditText(getContext());
+        input.setHint("输入共享名称（可留空）");
+        input.setSaveEnabled(false);
+        AndroidUiTheme.styleInput(getContext(), input);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        input.setSingleLine(true);
+        input.setFilters(new android.text.InputFilter[] {new android.text.InputFilter.LengthFilter(80)});
+        input.setText(device.sharedName);
+        input.selectAll();
+        LinearLayout body = new LinearLayout(getContext());
+        body.setOrientation(VERTICAL);
+        int padding = Math.round(20 * getResources().getDisplayMetrics().density);
+        body.setPadding(padding, 0, padding, 0);
+        body.addView(AndroidUiTheme.createSectionSubtitle(getContext(),
+            "保存在中继服务器，使用同一服务器的所有设备可见。\n不更改系统名称或设备密钥；清空可恢复系统原名。\n系统原名：" + device.originalName), layout());
+        body.addView(input, layout());
+        AlertDialog dialog = new AlertDialog.Builder(getContext()).setTitle("共享名称 · " + device.name)
+            .setView(body).setNegativeButton("取消", null).setPositiveButton("保存并同步", null).create();
+        nameDialogOpen = true;
+        nameDialog = dialog;
+        dialog.setOnDismissListener(ignored -> { nameDialogOpen = false; if (nameDialog == dialog) nameDialog = null; });
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+            if (closed || !active || setupBusy || saved != options || epoch != generation) { dialog.dismiss(); return; }
+            String name;
+            try { name = AndroidRelayDeviceName.normalize(input.getText().toString()); }
+            catch (IllegalArgumentException error) { input.setError(error.getMessage()); return; }
+            dialog.dismiss();
+            busy = true;
+            setStatus("正在保存共享名称……");
+            worker.execute(() -> {
+                String error = null;
+                try {
+                    AndroidRelay.renameDevice(getContext(), options.target(device.deviceId), name, socket -> {
+                        pendingSocket = socket;
+                        if (socket != null && (closed || !active || epoch != generation)) AndroidRelay.close(socket);
+                    });
+                } catch (Exception failure) {
+                    error = failure instanceof java.net.SocketException || failure instanceof java.net.SocketTimeoutException
+                        ? "保存名称的连接中断或超时，请刷新在线列表核对后重试。" : failure.getMessage();
+                    if (error == null || error.isEmpty()) error = "共享名称保存失败，请刷新在线列表核对后重试。";
+                }
+                final String failure = error;
+                ui.post(() -> {
+                    busy = false;
+                    if (closed || !active || epoch != generation || saved != options) return;
+                    if (failure != null) {
+                        setStatus("共享名称未确认保存，请刷新列表核对。");
+                        new AlertDialog.Builder(getContext()).setTitle("共享名称保存失败").setMessage(failure)
+                            .setPositiveButton("知道了", null).show();
+                    } else refresh();
+                });
+            });
+        }));
+        dialog.show();
+    }
+
     void active(boolean enabled) {
         if (active == enabled && !closed) return;
         active = enabled; epoch++;
         ui.removeCallbacks(ticker);
         if (enabled) { lastRefresh = 0; ui.post(ticker); }
         else {
+            if (nameDialog != null) nameDialog.dismiss();
             AndroidRelay.close(pendingSocket);
             if (setupBusy) { setSetupBusy(false); setStatus("配置已暂停，原配置未更改；可重新保存连接。"); }
         }

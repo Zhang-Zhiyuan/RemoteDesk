@@ -143,6 +143,39 @@ internal static class RelayTunnelClient
         throw new RelayProtocolException("中继目录分页过多。");
     }
 
+    public static async Task RenameDeviceAsync(RelayConnectionOptions options, string name,
+        CancellationToken cancellationToken, TimeSpan? requestTimeout = null)
+    {
+        options = options.Validate();
+        name = RelayDeviceName.Normalize(name);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(requestTimeout ?? TimeSpan.FromSeconds(12));
+        try
+        {
+            (TcpClient client, SslStream stream) = await RelayTls.ConnectAsync(options, timeout.Token).ConfigureAwait(false);
+            using (client)
+            using (stream)
+            {
+                await RelayTls.WriteJsonAsync(stream, new { version = 1, role = "rename-device",
+                    token = options.AccessToken, deviceId = options.DeviceId, name }, timeout.Token).ConfigureAwait(false);
+                using JsonDocument response = await RelayTls.ReadJsonAsync(stream, timeout.Token).ConfigureAwait(false);
+                if (!GetBoolean(response.RootElement, "ok"))
+                {
+                    if ((GetString(response.RootElement, "error") ?? "").Contains("访问密钥"))
+                        RelayTls.EnsureSuccess(response.RootElement);
+                    throw new RelayProtocolException(RelayDeviceName.ErrorMessage(GetString(response.RootElement, "error") ?? ""));
+                }
+                if (GetString(response.RootElement, "deviceId") != options.DeviceId ||
+                    GetString(response.RootElement, "sharedName") != name)
+                    throw new RelayProtocolException("中继未确认此设备的名称，请刷新在线列表核对后重试。");
+            }
+        }
+        catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw RelayTls.CreateConnectionDeadlineError(error, "保存名称超时，请刷新在线列表核对后重试。");
+        }
+    }
+
     private static async Task<(IReadOnlyList<RelayOnlineDevice> Devices, int? NextOffset)> ListDevicesPageAsync(
         RelayConnectionOptions options, int offset, CancellationToken cancellationToken)
     {
@@ -200,7 +233,14 @@ internal static class RelayTunnelClient
                     GetString(device, "buildStamp"),
                     GetBoolean(device, "busy"),
                     Math.Clamp(GetInteger(device, "lastSeenSeconds"), 0, 3600))
-                { DirectAddresses = report.Addresses, DirectPort = report.Port });
+                {
+                    DirectAddresses = report.Addresses, DirectPort = report.Port,
+                    SharedName = GetString(device, "sharedName") ?? "",
+                    OriginalMachineName = GetString(device, "originalMachineName") ?? GetString(device, "machineName") ?? "",
+                    CanRename = GetBoolean(root, "deviceNaming"),
+                    NamingUnavailableReason = string.IsNullOrEmpty(GetString(root, "deviceNamingError"))
+                        ? RelayDeviceName.UnsupportedMessage : RelayDeviceName.ErrorMessage(GetString(root, "deviceNamingError")!)
+                });
             }
 
             int? next = null;

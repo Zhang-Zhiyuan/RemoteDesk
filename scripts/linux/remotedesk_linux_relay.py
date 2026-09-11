@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import uuid
+import unicodedata
 
 MAX_JSON = 65536
 TIMEOUT = 12
@@ -597,6 +598,60 @@ async def list_devices_async(options):
     return await _relay_deadline(_list_devices_pages(options))
 
 
+NAMING_UNAVAILABLE = "此中继服务器尚不支持共享命名，请先更新服务器，再刷新在线列表。"
+
+
+def naming_error_message(detail):
+    # Return known messages, never echo arbitrary relay text (which may contain credentials).
+    detail = str(detail)
+    if "未知的中继连接类型" in detail:
+        return NAMING_UNAVAILABLE
+    if "无法读取" in detail:
+        return "服务器的设备命名记录无法读取，请检查服务器存储；原文件未修改。"
+    if "保存失败" in detail:
+        return "设备名称保存失败，请检查服务器磁盘和目录权限；原名称未更改。"
+    if "已离线" in detail or "不存在" in detail:
+        return "设备已离线或不存在，请刷新在线列表后重试。"
+    if "上限" in detail:
+        return "已达到服务器的设备命名数量上限。"
+    if "名称" in detail and ("80" in detail or "文字" in detail):
+        return "请使用不超过 80 个字符的单行名称，不要包含控制字符。"
+    return "共享名称保存失败，请刷新在线列表核对后重试。"
+
+
+def normalize_device_name(name):
+    if not isinstance(name, str):
+        raise ValueError("设备名称必须是文字。")
+    name = name.strip()
+    if (any(unicodedata.category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"} for char in name)
+            or len(name.encode("utf-16-le")) > 160):
+        raise ValueError("请使用不超过 80 个字符的单行名称，不要包含控制字符。")
+    return name
+
+
+async def rename_device_async(options, name):
+    options, name = options.validate(), normalize_device_name(name)
+    async def send():
+        reader, writer = await connect_tls(options)
+        try:
+            await write_json(writer, dict(version=1, role="rename-device", token=options.access_token,
+                                          deviceId=options.device_id, name=name))
+            result = await read_json(reader)
+            if result.get('ok') is not True:
+                if "访问密钥" in str(result.get('error', '')):
+                    ensure_success(result)
+                raise ConnectionError(naming_error_message(result.get('error', '')))
+            if result.get("deviceId") != options.device_id or result.get("sharedName") != name:
+                raise ValueError("中继未确认此设备的名称，请刷新在线列表核对后重试。")
+        finally:
+            await close_writer(writer)
+    return await _relay_deadline(send())
+
+
+def rename_device(options, name):
+    return asyncio.run(rename_device_async(options, name))
+
+
 async def _list_devices_pages(options):
     options = options.validate()
     result, seen, offset = [], set(), 0
@@ -617,6 +672,11 @@ async def _list_devices_pages(options):
             seen.add(device_id)
             result.append(dict(deviceId=device_id, machineName=str(item.get("machineName", "未命名设备"))[:120],
                                platform=str(item.get("platform", "未知"))[:40], busy=item.get("busy") is True,
+                               sharedName=str(item.get("sharedName", ""))[:80],
+                               originalMachineName=str(item.get("originalMachineName", item.get("machineName", "")))[:120],
+                               canRename=response.get("deviceNaming") is True,
+                               namingUnavailableReason=(naming_error_message(response['deviceNamingError'])
+                                                        if response.get('deviceNamingError') else NAMING_UNAVAILABLE),
                                **normalize_address_report(item)))
         if len(result) > 512:
             raise ValueError("中转在线设备过多。")
