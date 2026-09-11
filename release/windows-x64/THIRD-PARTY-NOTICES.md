@@ -15,7 +15,7 @@ following MIT-licensed packages:
   Copyright (c) .NET Foundation and Contributors,
   <https://github.com/dotnet/runtime>
 
-RemoteDesk's Windows private-relay auto-provisioning path uses these
+RemoteDesk's Windows private-relay login and auto-provisioning paths use these
 MIT-licensed packages:
 
 - SSH.NET 2026.0.0 — SSH and SFTP client,
@@ -36,10 +36,23 @@ the Ubuntu build environment:
   3-clause BSD license, <https://github.com/pyca/cryptography>
 - cffi / `_cffi_backend`, distributed under the MIT license,
   <https://github.com/python-cffi/cffi>
+- Paramiko, distributed under LGPL 2.1 or later,
+  <https://github.com/paramiko/paramiko>
+- PyNaCl and bcrypt, distributed under Apache License 2.0,
+  <https://github.com/pyca/pynacl>, <https://github.com/pyca/bcrypt>
+- six, distributed under the MIT license, <https://github.com/benjaminp/six>
+- libsodium, distributed under the ISC license, <https://github.com/jedisct1/libsodium>
 
 The Linux packaging script copies the exact distribution copyright and license
 files for these bundled runtime packages into `third-party-licenses/` alongside
 this notice.
+
+RemoteDesk Android uses JSch 2.28.6 (mwiede fork) for one-time SSH server login,
+under its BSD-style license: <https://github.com/mwiede/jsch>.
+Copyright (c) 2002-2015 Atsuhiko Yamanaka, JCraft,Inc.
+The full notice is included in the APK at
+`assets/third-party-licenses/JSch-LICENSE.txt` and in the source tree at
+`src/RemoteDesk.Android/app/src/main/assets/third-party-licenses/JSch-LICENSE.txt`.
 
 The Windows package includes an optional companion installer for the Gyan
 FFmpeg 8.1.2 release essentials build. The FFmpeg binary is not bundled with
