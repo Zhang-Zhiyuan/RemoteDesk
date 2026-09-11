@@ -144,7 +144,7 @@ public final class AndroidRelayTest {
     @Test public void certificateFailureNamesRelayIdentityInsteadOfRemotePassword() {
         AndroidRelay.IdentityFailure failure = new AndroidRelay.IdentityFailure(true, new java.security.cert.CertificateException("untrusted details"));
         String display = AndroidViewerStatusText.connectionFailure(failure);
-        assertTrue(display.contains("证书指纹"));
+        assertTrue(display.contains("服务器身份"));
         assertFalse(display.contains("口令"));
         assertFalse(display.contains("untrusted details"));
         assertFalse(AndroidViewerReconnectPolicy.isRetryable(failure));

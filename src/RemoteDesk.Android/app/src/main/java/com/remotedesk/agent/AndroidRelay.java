@@ -62,7 +62,7 @@ final class AndroidRelay {
 
     static final class IdentityFailure extends SecurityException {
         IdentityFailure(boolean certificate, Throwable cause) {
-            super(certificate ? "中转 TLS 身份校验失败，请核实证书指纹。" : "中转访问密钥被拒绝，请检查中转配置。", cause);
+            super(certificate ? "中转服务器身份与已保存的信息不符，请核实是否更换或重装过服务器；原配置未更改。" : "中转访问密钥被拒绝，请检查中转配置。", cause);
         }
     }
 
@@ -72,21 +72,13 @@ final class AndroidRelay {
         final boolean publish;
 
         Options(String server, int port, String token, String pin, String deviceId, boolean publish) {
-            this.serverAddress = server == null ? "" : server.trim();
-            this.accessToken = token == null ? "" : token.trim();
+            this.serverAddress = checkedServer(server, port);
+            this.accessToken = checkedToken(token);
             this.tlsCertificateSha256 = normalizePin(pin);
-            if (this.serverAddress.isEmpty() || this.serverAddress.length() > 253 ||
-                this.serverAddress.matches(".*[\\s/@\\\\].*") || port < 1 || port > 65535) {
-                throw new IllegalArgumentException("中转服务器地址或端口无效。");
-            }
-            if (this.accessToken.length() < 32 || this.accessToken.length() > 4096) {
-                throw new IllegalArgumentException("中转共享访问密钥无效。");
-            }
             if (!this.tlsCertificateSha256.matches("[0-9A-F]{64}")) {
                 throw new IllegalArgumentException("中转 TLS 指纹应为 64 位 SHA-256。");
             }
-            try { this.deviceId = UUID.fromString(deviceId.trim()).toString(); }
-            catch (RuntimeException ex) { throw new IllegalArgumentException("中转设备 ID 无效。"); }
+            this.deviceId = checkedDeviceId(deviceId);
             this.port = port;
             this.publish = publish;
         }
@@ -110,6 +102,25 @@ final class AndroidRelay {
         }
 
         @Override public String toString() { return "RelayOptions(" + serverAddress + ":" + port + ", <redacted>)"; }
+    }
+
+    static String checkedServer(String server, int port) {
+        String value = server == null ? "" : server.trim();
+        if (value.isEmpty() || value.length() > 253 || value.matches(".*[\\s/@\\\\].*") || port < 1 || port > 65535)
+            throw new IllegalArgumentException("中转服务器地址或端口无效。");
+        return value;
+    }
+
+    static String checkedToken(String token) {
+        String value = token == null ? "" : token.trim();
+        if (value.length() < 32 || value.length() > 4096)
+            throw new IllegalArgumentException("中转共享访问密钥无效。");
+        return value;
+    }
+
+    static String checkedDeviceId(String deviceId) {
+        try { return UUID.fromString(deviceId.trim()).toString(); }
+        catch (RuntimeException ex) { throw new IllegalArgumentException("中转设备 ID 无效。"); }
     }
 
     static String normalizePin(String pin) {
@@ -161,8 +172,16 @@ final class AndroidRelay {
 
     static SSLSocket connectBoundSocket(Options options, android.net.Network network,
             AndroidRelayNetworkSelector.Dial dial, Consumer<Socket> configure) throws Exception {
+        return connectBoundSocket(options.serverAddress, options.port, tlsContext(options), network, dial, configure);
+    }
+
+    // Shared socket plumbing only. Normal relay connections always enter via the
+    // strict Options overload above; enrollment uses a separate, credential-free
+    // observer and closes its socket before any trust decision or token write.
+    static SSLSocket connectBoundSocket(String serverAddress, int port, SSLContext context,
+            android.net.Network network, AndroidRelayNetworkSelector.Dial dial, Consumer<Socket> configure) throws Exception {
         java.net.InetAddress[] resolved = network == null
-            ? java.net.InetAddress.getAllByName(options.serverAddress) : network.getAllByName(options.serverAddress);
+            ? java.net.InetAddress.getAllByName(serverAddress) : network.getAllByName(serverAddress);
         List<java.net.InetAddress> addresses = relayAddresses(resolved, network != null);
         return connectAddresses(addresses, dial, (address, tcpTimeout) -> {
             Socket raw = new Socket();
@@ -173,11 +192,11 @@ final class AndroidRelay {
                 configure.accept(raw);
                 if (network != null) network.bindSocket(raw);
                 dial.checkOpen();
-                raw.connect(new InetSocketAddress(address, options.port), tcpTimeout);
+                raw.connect(new InetSocketAddress(address, port), tcpTimeout);
                 // Retain hostname/SNI and pinning for every DNS address. Failed
                 // addresses never receive a relay token or application role.
-                socket = (SSLSocket) tlsContext(options).getSocketFactory()
-                    .createSocket(raw, options.serverAddress, options.port, true);
+                socket = (SSLSocket) context.getSocketFactory()
+                    .createSocket(raw, serverAddress, port, true);
                 dial.replace(raw, socket);
                 configureTlsSocket(socket);
                 socket.setSoTimeout(TIMEOUT_MS);
@@ -345,8 +364,8 @@ final class AndroidRelay {
                 for (int page = 0; page < 16; page++) {
                     dial.checkOpen();
                     JSONObject response;
-                    try (SSLSocket socket = AndroidRelayNetworkSelector.connect(context, options, dial)) {
-                        dial.add(socket); // Cancellation and the shared deadline also cover page reads.
+                    try (SSLSocket socket = connectDirectoryPage(dial,
+                            pageDial -> AndroidRelayNetworkSelector.connect(context, options, pageDial))) {
                         try { response = exchange(socket, request(options, "directory").put("pageSize", 32).put("offset", offset)); }
                         finally { dial.release(socket); }
                     }
@@ -373,6 +392,24 @@ final class AndroidRelay {
                 throw new IOException("中转目录分页过多。");
             } finally { deadline.cancel(false); }
         } finally { socketChanged.accept(null); }
+    }
+
+    @FunctionalInterface interface DirectoryConnector<T extends Socket> {
+        T connect(AndroidRelayNetworkSelector.Dial page) throws Exception;
+    }
+
+    static <T extends Socket> T connectDirectoryPage(AndroidRelayNetworkSelector.Dial directory,
+            DirectoryConnector<T> connector) throws Exception {
+        // The network race closes its own Dial after detaching its winner. The
+        // directory deadline must survive that race and own every response/page.
+        try (AndroidRelayNetworkSelector.Dial page = new AndroidRelayNetworkSelector.Dial()) {
+            directory.add(page);
+            try {
+                T socket = connector.connect(page);
+                directory.replace(page, socket); // Also closes a late winner if the outer request was canceled.
+                return socket;
+            } finally { directory.release(page); }
+        }
     }
 
     private static String bounded(String text, int length) { return text.substring(0, Math.min(text.length(), length)); }
