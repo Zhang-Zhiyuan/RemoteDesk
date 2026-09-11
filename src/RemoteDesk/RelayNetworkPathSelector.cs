@@ -180,6 +180,18 @@ internal sealed class RelayNetworkPathSelector
             throw errors.OfType<AuthenticationException>().FirstOrDefault() ??
                 errors.FirstOrDefault() ?? new IOException("没有可用的中继网络路径。");
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // A dead route may outlive a completed pin rejection on another
+            // route. Carry that observed failure through the shared deadline,
+            // while preserving OperationCanceledException for explicit cancel.
+            AuthenticationException? rejected = errors.OfType<AuthenticationException>().FirstOrDefault() ??
+                pending.Keys.Where(task => task.IsFaulted)
+                    .SelectMany(task => task.Exception!.InnerExceptions)
+                    .OfType<AuthenticationException>().FirstOrDefault();
+            if (rejected is null) throw;
+            throw new OperationCanceledException("中继线路选择已取消。", rejected, cancellationToken);
+        }
         finally
         {
             stop.Cancel();

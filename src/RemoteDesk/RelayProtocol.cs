@@ -36,11 +36,17 @@ internal static class RelayTls
             catch { connection.Dispose(); throw; }
             return (connection.Client, connection.Stream);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new TimeoutException("连接中继服务器超时，请检查地址、端口和云安全组。");
+            throw CreateConnectionDeadlineError(error);
         }
     }
+
+    internal static Exception CreateConnectionDeadlineError(OperationCanceledException error,
+        string timeoutMessage = "连接中继服务器超时，请检查地址、端口和云安全组。") =>
+        error.InnerException is AuthenticationException rejected
+            ? new AuthenticationException("中继连接未通过证书指纹校验，请核对服务器配置或网络。", rejected)
+            : new TimeoutException(timeoutMessage, error);
 
     internal sealed class RelayTlsConnection(TcpClient client, SslStream stream) : IDisposable
     {

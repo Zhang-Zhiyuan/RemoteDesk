@@ -74,6 +74,60 @@ public sealed class RelayNetworkPathSelectorTests
     }
 
     [Fact]
+    public async Task DeadlineRetainsObservedPinFailureWithoutHidingCallerCancellation()
+    {
+        using var stop = new CancellationTokenSource();
+        var pinFailure = new AuthenticationException("owned fixture pin rejection");
+        Task attempt = RelayNetworkPathSelector.RaceAsync<Connection>([null, Wifi],
+            (path, token) => path is null ? Task.FromException<Connection>(pinFailure) : Unresponsive(token),
+            TimeSpan.Zero, stop.Token);
+        stop.Cancel();
+        var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => attempt);
+        Assert.Equal(stop.Token, error.CancellationToken);
+        Assert.Same(pinFailure, error.InnerException);
+
+        static async Task<Connection> Unresponsive(CancellationToken token)
+        {
+            await Task.Delay(Timeout.Infinite, token);
+            return new Connection();
+        }
+    }
+
+    [Fact]
+    public void InternalConnectionDeadlineReportsKnownPinRejection()
+    {
+        var rejected = new AuthenticationException("pin rejected");
+        var cancelled = new OperationCanceledException("deadline", rejected);
+        var error = Assert.IsType<AuthenticationException>(RelayTls.CreateConnectionDeadlineError(cancelled));
+        Assert.Same(rejected, error.InnerException);
+        Assert.Contains("证书指纹", error.Message);
+    }
+
+    [Fact]
+    public void DeadlineWithoutPinEvidenceRemainsANetworkTimeout()
+    {
+        var error = new OperationCanceledException();
+        var timeout = Assert.IsType<TimeoutException>(RelayTls.CreateConnectionDeadlineError(error));
+        Assert.Same(error, timeout.InnerException);
+    }
+
+    [Fact]
+    public void DirectoryDeadlineKeepsItsOwnActionableMessageUnlessPinWasRejected()
+    {
+        const string message = "读取在线设备超时";
+        Assert.Equal(message, RelayTls.CreateConnectionDeadlineError(new OperationCanceledException(), message).Message);
+        Assert.IsType<AuthenticationException>(RelayTls.CreateConnectionDeadlineError(
+            new OperationCanceledException("deadline", new AuthenticationException("pin rejected")), message));
+    }
+
+    [Fact]
+    public void InterruptedHandshakeIsNotMistakenForPinRejection()
+    {
+        var network = new IOException("peer reset TLS", new AuthenticationException("peer fatal alert"));
+        Assert.IsType<TimeoutException>(RelayTls.CreateConnectionDeadlineError(new OperationCanceledException("deadline", network)));
+    }
+
+    [Fact]
     public async Task PreferredFailureStartsFallbackWithoutWaitingForHeadStart()
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(2));

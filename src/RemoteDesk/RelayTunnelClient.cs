@@ -117,9 +117,9 @@ internal static class RelayTunnelClient
         {
             return await ListDevicesCoreAsync(options, timeout.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new TimeoutException("读取在线设备超时，请检查中继端口和云安全组。");
+            throw RelayTls.CreateConnectionDeadlineError(error, "读取在线设备超时，请检查中继端口和云安全组。");
         }
     }
 
