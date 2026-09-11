@@ -28,6 +28,7 @@ final class AndroidRelayPanel extends LinearLayout {
     private final Consumer<String> useDirectAddress;
     private final LinearLayout content, devices;
     private final TextView status, hostStatus;
+    private final AndroidRelayPanelStatus panelStatus = new AndroidRelayPanelStatus();
     private final EditText server, port, token, pin;
     private final CheckBox publish;
     private final Button saveButton, cancelSetupButton;
@@ -105,12 +106,12 @@ final class AndroidRelayPanel extends LinearLayout {
         Button report = button("立即上报本机 IP", false);
         report.setOnClickListener(view -> {
             if (!RemoteDeskForegroundService.isServiceRunning()) {
-                status.setText("请先启动本机被控端并启用中转上线。");
+                setStatus("请先启动本机被控端并启用中转上线。");
                 return;
             }
             getContext().startService(new Intent(getContext(), RemoteDeskForegroundService.class)
                 .putExtra(RemoteDeskForegroundService.EXTRA_REPORT_ADDRESS, true));
-            status.setText("已请求上报；稍后刷新在线设备可核对地址。");
+            setStatus("已请求上报；稍后刷新在线设备可核对地址。");
         });
         content.addView(report, layout());
         devices = new LinearLayout(context);
@@ -133,12 +134,12 @@ final class AndroidRelayPanel extends LinearLayout {
                 server.setText(saved.serverAddress); port.setText(String.format(java.util.Locale.ROOT, "%d", saved.port));
                 token.setText(saved.accessToken);
                 publish.setChecked(saved.publish);
-                status.setText(R.string.relay_saved_private);
+                setStatus(R.string.relay_saved_private);
             } else {
                 port.setText(String.format(java.util.Locale.ROOT, "%d", AndroidRelay.PORT));
-                status.setText("请填写服务器配置；录屏和无障碍授权仍需正常开启。");
+                setStatus("请填写服务器配置；录屏和无障碍授权仍需正常开启。");
             }
-        } catch (Exception ex) { status.setText("中转配置无法读取，请重新配置服务器。"); }
+        } catch (Exception ex) { setStatus("中转配置无法读取，请重新配置服务器。"); }
     }
 
     private LayoutParams layout() {
@@ -178,6 +179,7 @@ final class AndroidRelayPanel extends LinearLayout {
 
     private void save() {
         if (closed || !active || setupBusy) return;
+        panelStatus.beginSetup();
         try {
             if (deviceId == null) deviceId = AndroidRelaySettings.localDeviceId(getContext());
             String portText = port.getText().toString().trim();
@@ -194,7 +196,7 @@ final class AndroidRelayPanel extends LinearLayout {
                 else verifyAndSave(draft.options(knownPin), generation);
                 return;
             }
-            status.setText("正在连接服务器，获取身份信息……尚未发送共享密钥。");
+            setStatus("正在连接服务器，获取身份信息……尚未发送共享密钥。");
             worker.execute(() -> {
                 try {
                     String discovered = AndroidRelayEnrollment.discover(draft.server, draft.port,
@@ -205,12 +207,12 @@ final class AndroidRelayPanel extends LinearLayout {
                 } catch (Exception ex) { setupFailed(generation, "无法连接服务器，请检查地址、端口和网络；原配置未更改。"); }
             });
         } catch (NumberFormatException ex) {
-            status.setText(R.string.relay_invalid_port);
+            showSetupFailure(getContext().getString(R.string.relay_invalid_port));
         } catch (IllegalArgumentException ex) {
-            status.setText(ex.getMessage());
+            showSetupFailure(ex.getMessage());
         } catch (Exception ex) {
             setSetupBusy(false);
-            status.setText("无法开始配置，请检查本机存储状态后重试。");
+            showSetupFailure("无法开始配置，请检查本机存储状态后重试。");
         }
     }
 
@@ -233,16 +235,17 @@ final class AndroidRelayPanel extends LinearLayout {
         ui.post(() -> {
             if (!setupCurrent(generation)) return;
             setSetupBusy(false);
-            status.setText(message);
+            showSetupFailure(message);
         });
     }
 
     private void cancelSetup() {
+        panelStatus.beginSetup();
         epoch++;
         AndroidRelay.close(pendingSocket);
         if (trustDialog != null) { trustDialog.dismiss(); trustDialog = null; }
         setSetupBusy(false);
-        status.setText("已取消，原配置未更改。");
+        setStatus("已取消，原配置未更改。");
     }
 
     private void confirmIdentity(AndroidRelayEnrollment.Draft draft, String identity, int generation, boolean replacement) {
@@ -265,7 +268,7 @@ final class AndroidRelayPanel extends LinearLayout {
 
     private void verifyAndSave(AndroidRelay.Options options, int generation) {
         if (!setupCurrent(generation)) return;
-        status.setText("正在验证服务器和共享访问密钥……");
+        setStatus("正在验证服务器和共享访问密钥……");
         worker.execute(() -> {
             try {
                 // Reconnect with the exact accepted identity. The observation
@@ -282,11 +285,11 @@ final class AndroidRelayPanel extends LinearLayout {
                         devices.removeAllViews();
                         setSetupBusy(false);
                         applyHostSettings();
-                        status.setText("连接成功，服务器身份和配置已保存；下次自动连接。");
+                        setStatus("连接成功，服务器身份和配置已保存；下次自动连接。");
                         refresh();
                     } catch (Exception ex) {
                         setSetupBusy(false);
-                        status.setText("连接成功，但本机无法保存配置，请检查存储后重试。");
+                        showSetupFailure("连接成功，但本机无法保存配置，请检查存储后重试。");
                     }
                 });
             } catch (AndroidRelay.IdentityFailure ex) { setupFailed(generation, ex.getMessage()); }
@@ -302,16 +305,24 @@ final class AndroidRelayPanel extends LinearLayout {
             token.setText(""); pin.setText(""); server.setText("");
             AndroidRelay.close(pendingSocket);
             applyHostSettings();
-            status.setText("中转配置已清除。");
-        } catch (Exception ex) { status.setText("配置清除失败，请重试。"); }
+            setStatus("中转配置已清除。");
+        } catch (Exception ex) { showSetupFailure("配置清除失败，请重试。"); }
     }
+
+    private void showSetupFailure(String message) {
+        panelStatus.failed(message);
+        setStatus("");
+    }
+
+    private void setStatus(int resourceId) { setStatus(getContext().getString(resourceId)); }
+    private void setStatus(String message) { status.setText(panelStatus.display(message)); }
 
     private void refresh() {
         if (!active || closed || busy || setupBusy || saved == null) return;
         busy = true; lastRefresh = System.currentTimeMillis();
         final int generation = epoch;
         final AndroidRelay.Options options = saved;
-        devices.removeAllViews(); status.setText("正在读取在线设备……");
+        devices.removeAllViews(); setStatus("正在读取在线设备……");
         worker.execute(() -> {
             List<AndroidRelay.Device> result = null;
             String identityError = null;
@@ -329,11 +340,11 @@ final class AndroidRelayPanel extends LinearLayout {
                 if (closed || !active) return;
                 if (epoch != generation) { refresh(); return; }
                 if (online == null) {
-                    if (safeIdentityError != null) status.setText(safeIdentityError);
-                    else status.setText(R.string.relay_directory_failed);
+                    if (safeIdentityError != null) setStatus(safeIdentityError);
+                    else setStatus(R.string.relay_directory_failed);
                     return;
                 }
-                status.setText(getContext().getString(R.string.relay_online_count, online.size()));
+                setStatus(getContext().getString(R.string.relay_online_count, online.size()));
                 for (AndroidRelay.Device device : online) {
                     boolean local = device.deviceId.equals(deviceId);
                     Button item = button(device.name + " · " + device.platform + "\n" +
@@ -356,7 +367,7 @@ final class AndroidRelayPanel extends LinearLayout {
         if (closed || !active || busy || setupBusy || saved != options) return;
         busy = true;
         final int generation = epoch;
-        status.setText("正在核对设备最新地址……");
+        setStatus("正在核对设备最新地址……");
         worker.execute(() -> {
             AndroidRelay.Device result = null;
             try {
@@ -370,9 +381,9 @@ final class AndroidRelayPanel extends LinearLayout {
                 busy = false;
                 if (closed || !active || epoch != generation || saved != options) return;
                 if (target == null || target.directAddresses.isEmpty() || target.directPort == 0) {
-                    status.setText("无法取得最新地址；请刷新列表，或使用中转连接。"); return;
+                    setStatus("无法取得最新地址；请刷新列表，或使用中转连接。"); return;
                 }
-                status.setText("已取得最新地址；仅可达的内网地址能直连。跨网仍用中转。");
+                setStatus("已取得最新地址；仅可达的内网地址能直连。跨网仍用中转。");
                 String[] addresses = new String[target.directAddresses.size()];
                 for (int i = 0; i < addresses.length; i++) addresses[i] = target.directAddresses.get(i) + ":" + target.directPort;
                 new AlertDialog.Builder(getContext()).setTitle(target.name + " · 选择地址填入直连")
@@ -390,7 +401,7 @@ final class AndroidRelayPanel extends LinearLayout {
         else {
             AndroidRelay.close(pendingSocket);
             if (trustDialog != null) { trustDialog.dismiss(); trustDialog = null; }
-            if (setupBusy) { setSetupBusy(false); status.setText("配置已暂停，原配置未更改；可重新保存连接。"); }
+            if (setupBusy) { setSetupBusy(false); setStatus("配置已暂停，原配置未更改；可重新保存连接。"); }
         }
     }
 
