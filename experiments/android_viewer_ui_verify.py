@@ -16,6 +16,24 @@ from android_viewer_fixture_server import save_snapshot
 PACKAGE = "com.remotedesk.viewerprobe"
 
 
+class StableLayout:
+    """Wait out actual IME/layout animation without relaxing any UI assertion."""
+    def __init__(self, seconds):
+        self.seconds = seconds
+        self.signature = None
+        self.since = None
+
+    def ready(self, value, now):
+        signature = tuple(tuple(value.get(key, ())) for key in
+                          ("frame", "viewport", "dock", "keyboardPanel")) + (
+                              value.get("keyboard"), value.get("imeInset"),
+                              value.get("scale"), value.get("ownerGeneration"))
+        if signature != self.signature:
+            self.signature = signature
+            self.since = now
+        return now - self.since >= self.seconds
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--adb", required=True)
@@ -51,13 +69,14 @@ def main():
         if not condition and not args.record_failures:
             raise AssertionError(name + ": " + str(detail))
 
-    def wait(predicate, seconds=12):
+    def wait(predicate, seconds=12, stable_seconds=0):
         end = time.monotonic() + seconds
+        stable = StableLayout(stable_seconds)
         while time.monotonic() < end:
             data = state()
             if data.get("failure"):
                 raise RuntimeError(data["failure"])
-            if predicate(data):
+            if predicate(data) and stable.ready(data, time.monotonic()):
                 return data
             time.sleep(.3)
         raise TimeoutError(str(data))
@@ -152,7 +171,7 @@ def main():
         tap("继续控制")
         check("UI operations preserve the TCP session", server()["sessions"] == session, {"start":session,"end":server()["sessions"]})
         action("portrait"); photo("final-portrait")
-        tap("键盘"); keyboard = wait(lambda s: s["keyboard"] and s["imeInset"] > 0)
+        tap("键盘"); keyboard = wait(lambda s: s["keyboard"] and s["imeInset"] > 0, stable_seconds=.6)
         check("Portrait keyboard preserves a visible desktop", keyboard["viewport"][3]-keyboard["viewport"][1] >= 64*keyboard["density"], keyboard["viewport"])
         photo("keyboard-portrait"); tap("收起")
 
@@ -243,7 +262,7 @@ def main():
         tap("更多"); tap("画面缩放", prefix=True); tap("原始像素 1:1")
         check("Original size means one source pixel per physical pixel", abs(state()["scale"]-1) < .01, state()["scale"])
 
-        tap("键盘"); keyboard = wait(lambda s: s["keyboard"] and s["imeInset"] > 0)
+        tap("键盘"); keyboard = wait(lambda s: s["keyboard"] and s["imeInset"] > 0, stable_seconds=.6)
         check("Native IME leaves composer above keyboard", keyboard["keyboardPanel"][3] <= keyboard["dock"][3] and keyboard["keyboardPanel"][3] > keyboard["keyboardPanel"][1], keyboard)
         check("Landscape keyboard preserves a visible desktop", keyboard["viewport"][3]-keyboard["viewport"][1] >= 32*keyboard["density"], keyboard["viewport"])
         check("Keyboard resize keeps original pixels readable", abs(keyboard["scale"]-1) < .01, keyboard["scale"])
