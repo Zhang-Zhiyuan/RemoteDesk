@@ -93,6 +93,59 @@ class RelayIdentityError(PermissionError):
     pass
 
 
+def _checked_endpoint(server_address, port):
+    host = server_address.strip()
+    if not host or len(host) > 253 or any(c.isspace() for c in host) or any(c in host for c in '/@\\'):
+        raise ValueError("请填写中转服务器主机名或 IP，不要包含协议或路径。")
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError("中转端口无效。")
+    return host, port
+
+
+def _checked_pin(pin):
+    pin = re.sub(r"[:\s-]", "", pin).upper()
+    if not re.fullmatch(r"[0-9A-F]{64}", pin):
+        raise ValueError("服务器身份指纹格式无效。")
+    return pin
+
+
+@dataclass(frozen=True, repr=False)
+class RelayEnrollmentDraft:
+    server_address: str
+    port: int
+    access_token: str
+    device_id: str
+    publish: bool = True
+
+    def __repr__(self):
+        return "RelayEnrollmentDraft(<redacted>)"
+
+    def validate(self):
+        host, port = _checked_endpoint(self.server_address, self.port)
+        token = self.access_token.strip()
+        if not 32 <= len(token) <= 4096:
+            raise ValueError("中转访问密钥无效（不是远控口令）。")
+        try:
+            device = str(uuid.UUID(self.device_id.strip()))
+        except (ValueError, AttributeError) as error:
+            raise ValueError("中转设备 ID 无效。") from error
+        return replace(self, server_address=host, port=port, access_token=token, device_id=device)
+
+    def same_endpoint(self, saved):
+        return saved is not None and self.server_address.casefold() == saved.server_address.casefold() and self.port == saved.port
+
+    def known_pin(self, saved, manual_pin=""):
+        if manual_pin.strip():
+            return _checked_pin(manual_pin)
+        return saved.tls_certificate_sha256 if self.same_endpoint(saved) else None
+
+    def replaces_identity(self, saved, pin):
+        return self.same_endpoint(saved) and _checked_pin(pin) != saved.tls_certificate_sha256
+
+    def with_pin(self, pin):
+        return RelayOptions(self.server_address, self.port, self.access_token, pin, self.device_id, self.publish).validate()
+
+
 @dataclass(frozen=True, repr=False)
 class RelayOptions:
     server_address: str
@@ -106,23 +159,9 @@ class RelayOptions:
         return f"RelayOptions(server_address={self.server_address!r}, port={self.port}, access_token=<redacted>)"
 
     def validate(self):
-        host = self.server_address.strip()
-        token = self.access_token.strip()
-        pin = re.sub(r"[:\s-]", "", self.tls_certificate_sha256).upper()
-        if not host or len(host) > 253 or any(c.isspace() for c in host) or any(c in host for c in '/@\\'):
-            raise ValueError("请填写中转服务器主机名或 IP，不要包含协议或路径。")
-        if isinstance(self.port, bool) or not 1 <= int(self.port) <= 65535:
-            raise ValueError("中转端口无效。")
-        if not 32 <= len(token) <= 4096:
-            raise ValueError("中转访问密钥无效。")
-        if not re.fullmatch(r"[0-9A-F]{64}", pin):
-            raise ValueError("中转 TLS 指纹必须是 64 位 SHA-256。")
-        try:
-            device = str(uuid.UUID(self.device_id.strip()))
-        except (ValueError, AttributeError) as error:
-            raise ValueError("中转设备 ID 无效。") from error
-        return replace(self, server_address=host, port=int(self.port), access_token=token,
-                       tls_certificate_sha256=pin, device_id=device)
+        draft = RelayEnrollmentDraft(self.server_address, self.port, self.access_token, self.device_id, self.publish).validate()
+        return replace(self, server_address=draft.server_address, access_token=draft.access_token,
+                       tls_certificate_sha256=_checked_pin(self.tls_certificate_sha256), device_id=draft.device_id)
 
     def to_dict(self):
         return dict(serverAddress=self.server_address, port=self.port, accessToken=self.access_token,
@@ -413,6 +452,14 @@ class RelayNetworkPathSelector:
                         failures.append(error)
             identity = next((error for error in failures if isinstance(error, RelayIdentityError)), None)
             raise identity or (failures[0] if failures else ConnectionError("没有可用的中转网络路径。"))
+        except asyncio.CancelledError:
+            # Preserve an already observed pin rejection when another route stalls
+            # until the shared deadline. Explicit cancellation remains cancellation.
+            observed = failures + [task.exception() for task in tasks if task.done() and not task.cancelled()]
+            identity = next((error for error in observed if isinstance(error, RelayIdentityError)), None)
+            if identity is not None:
+                raise asyncio.CancelledError() from identity
+            raise
         finally:
             for task in tasks:
                 task.add_done_callback(release_loser)
@@ -459,9 +506,72 @@ async def _connect_tls_path(options, path):
 _relay_path_selector = RelayNetworkPathSelector()
 
 
+async def _relay_deadline(operation):
+    try:
+        return await asyncio.wait_for(operation, TIMEOUT)
+    except TimeoutError as error:
+        cause = error.__cause__
+        while cause is not None:
+            if isinstance(cause, RelayIdentityError):
+                raise RelayIdentityError("服务器身份与已保存的信息不符；原配置未更改。") from error
+            cause = cause.__cause__
+        raise
+
+
 async def connect_tls(options):
     # The original deadline includes discovery and all candidate handshakes.
-    return await asyncio.wait_for(_relay_path_selector.connect(options.validate()), TIMEOUT)
+    return await _relay_deadline(_relay_path_selector.connect(options.validate()))
+
+
+async def discover_server_identity(server_address, port):
+    """Observe only: no token argument, application writes, persistence or reused TLS context."""
+    host, port = _checked_endpoint(server_address, port)
+
+    async def observe():
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE  # First-use observation, not an authenticated connection.
+        writer = None
+        try:
+            _, writer = await asyncio.open_connection(host, port, ssl=context, ssl_handshake_timeout=10)
+            certificate = writer.get_extra_info("ssl_object").getpeercert(binary_form=True)
+            if not certificate:
+                raise RelayIdentityError("无法取得服务器身份；未发送访问密钥。")
+            return hashlib.sha256(certificate).hexdigest().upper()
+        finally:
+            await close_writer(writer)
+
+    return await asyncio.wait_for(observe(), TIMEOUT)
+
+
+def run_setup_request(operation, stop_event):
+    """Run one UI worker operation; cancellation also closes its network request."""
+    async def run():
+        if stop_event.is_set():
+            raise asyncio.CancelledError()
+        task = asyncio.create_task(operation())
+        try:
+            while not stop_event.is_set():
+                done, _ = await asyncio.wait([task], timeout=.05)
+                if done:
+                    if stop_event.is_set():
+                        raise asyncio.CancelledError()
+                    return task.result()
+            raise asyncio.CancelledError()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    try:
+        return asyncio.run(run())
+    except asyncio.CancelledError as error:
+        raise ConnectionAbortedError("配置已取消；原配置未更改。") from error
+
+
+def setup_error_message(error):
+    if isinstance(error, RelayIdentityError):
+        return "连接未通过身份或访问密钥验证，请核实服务器是否重装、共享密钥是否正确；原配置未更改。"
+    return "连接失败，请检查服务器地址、端口和网络；原配置未更改。"
 
 
 async def hello(reader, writer, options, role, **fields):
@@ -472,7 +582,7 @@ async def hello(reader, writer, options, role, **fields):
 
 
 async def list_devices_async(options):
-    return await asyncio.wait_for(_list_devices_pages(options), TIMEOUT)
+    return await _relay_deadline(_list_devices_pages(options))
 
 
 async def _list_devices_pages(options):

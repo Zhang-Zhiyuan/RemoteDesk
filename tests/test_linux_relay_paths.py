@@ -47,6 +47,39 @@ class RelayPathTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(relay.RelayIdentityError):
             await relay.RelayNetworkPathSelector.race(OPTIONS, [None, WIFI], connect)
 
+    async def test_deadline_does_not_mask_completed_identity_rejection(self):
+        async def connect(options, path):
+            if path is not None:
+                raise relay.RelayIdentityError("pin")
+            await asyncio.Event().wait()
+        selector = relay.RelayNetworkPathSelector(mock.AsyncMock(return_value=[WIFI]), connect)
+        with mock.patch.object(relay, "_relay_path_selector", selector), mock.patch.object(relay, "TIMEOUT", .05):
+            with self.assertRaises(relay.RelayIdentityError):
+                await relay.list_devices_async(OPTIONS)
+
+    async def test_explicit_cancel_with_identity_rejection_remains_cancelled(self):
+        rejected = asyncio.Event()
+        async def connect(options, path):
+            if path is not None:
+                rejected.set()
+                raise relay.RelayIdentityError("pin")
+            await asyncio.Event().wait()
+        selector = relay.RelayNetworkPathSelector(mock.AsyncMock(return_value=[WIFI]), connect)
+        with mock.patch.object(relay, "_relay_path_selector", selector):
+            task = asyncio.create_task(relay.list_devices_async(OPTIONS))
+            await rejected.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+    async def test_deadline_without_identity_failure_remains_timeout(self):
+        async def connect(options, path):
+            await asyncio.Event().wait()
+        selector = relay.RelayNetworkPathSelector(mock.AsyncMock(return_value=[WIFI]), connect)
+        with mock.patch.object(relay, "_relay_path_selector", selector), mock.patch.object(relay, "TIMEOUT", .05):
+            with self.assertRaises(TimeoutError):
+                await relay.list_devices_async(OPTIONS)
+
     async def test_primary_failure_does_not_wait_for_head_start(self):
         async def connect(options, path):
             if path:

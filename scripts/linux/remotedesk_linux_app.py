@@ -4533,6 +4533,9 @@ class RemoteDeskLinuxApp:
         self.viewer_relay_options = None
         self.relay_refresh_generation = 0
         self.relay_refreshing = False
+        self.relay_setup_generation = 0
+        self.relay_setup_busy = False
+        self.relay_setup_cancel = None
         self.relay_devices = {}
         self.host_preferences = host_startup.HostPreferences()
         self.host_resume_after_id = None
@@ -4569,22 +4572,37 @@ class RemoteDeskLinuxApp:
         self.relay_server = tk.StringVar(value=options.server_address if options else "")
         self.relay_port = tk.StringVar(value=str(options.port if options else 56567))
         self.relay_token = tk.StringVar(value=options.access_token if options else "")
-        self.relay_pin = tk.StringVar(value=options.tls_certificate_sha256 if options else "")
+        self.relay_pin = tk.StringVar()  # Empty means reuse this endpoint's saved identity, not a new trust decision.
         self.relay_publish = tk.BooleanVar(value=options.publish if options else True)
         self.relay_password = tk.StringVar()
         form = ttk.LabelFrame(tab, text="私有服务器配置", padding=16, style="Panel.TLabelframe")
         form.pack(fill=tk.X)
+        self.relay_setup_controls = []
         for row, label, variable, secret in (
             (0, "服务器 / IP", self.relay_server, False), (1, "端口", self.relay_port, False),
-            (2, "共享访问密钥", self.relay_token, True), (3, "TLS SHA-256 指纹", self.relay_pin, False)):
-            self._row_entry(form, row, label, variable, show="*" if secret else "")
-        ttk.Checkbutton(form, text="发布本机，并自动更新 IP / 端口", variable=self.relay_publish).grid(
-            row=4, column=0, columnspan=3, sticky=tk.W, pady=8)
-        ttk.Label(form, text="访问密钥不是远控口令。配置保存在仅本用户可读的 0600 文件中。",
-                  wraplength=680, style="PanelSubtitle.TLabel").grid(row=5, column=0, columnspan=3, sticky=tk.W)
+            (2, "共享访问密钥", self.relay_token, True)):
+            self.relay_setup_controls.append(self._row_entry(form, row, label, variable, show="*" if secret else ""))
+        advanced = ttk.Frame(form)
+        advanced.grid(row=4, column=0, columnspan=3, sticky=tk.EW)
+        self.relay_setup_controls.append(self._row_entry(advanced, 0, "身份指纹（可选）", self.relay_pin))
+        ttk.Label(advanced, text="留空自动获取；已配对的服务器自动沿用。服务器重装后才需手动更新。",
+                  wraplength=680, style="PanelSubtitle.TLabel").grid(row=1, column=0, columnspan=2, sticky=tk.W)
+        advanced.grid_remove()
+        ttk.Button(form, text="高级设置（通常不用改）", command=lambda:
+                   advanced.grid_remove() if advanced.winfo_manager() else advanced.grid()).grid(
+                       row=3, column=0, columnspan=3, sticky=tk.W, pady=6)
+        publish = ttk.Checkbutton(form, text="发布本机，并自动更新 IP / 端口", variable=self.relay_publish)
+        publish.grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=8)
+        self.relay_setup_controls.append(publish)
+        ttk.Label(form, text="首次连接确认一次，以后自动记住。共享访问密钥不是远控口令。配置仅本用户可读。",
+                  wraplength=680, style="PanelSubtitle.TLabel").grid(row=6, column=0, columnspan=3, sticky=tk.W)
         actions = ttk.Frame(tab)
         actions.pack(fill=tk.X, pady=10)
-        ttk.Button(actions, text="保存配置 / 应用上线设置", command=self._save_relay, style="Accent.TButton").pack(side=tk.LEFT)
+        save = ttk.Button(actions, text="保存并连接", command=self._save_relay, style="Accent.TButton")
+        save.pack(side=tk.LEFT)
+        self.relay_setup_controls.append(save)
+        self.relay_cancel_button = ttk.Button(actions, text="取消配置", command=self._cancel_relay_setup, state=tk.DISABLED)
+        self.relay_cancel_button.pack(side=tk.LEFT, padx=8)
         ttk.Button(actions, text="刷新在线设备", command=self._refresh_relay).pack(side=tk.LEFT, padx=8)
         ttk.Button(actions, text="立即上报本机 IP", command=self._report_relay_address).pack(side=tk.LEFT)
         self.relay_status = ttk.Label(tab, text=load_error or "先保存服务器配置，再刷新在线设备。", wraplength=700)
@@ -4610,6 +4628,8 @@ class RemoteDeskLinuxApp:
         ttk.Button(tab, text="查看 / 使用 IP", command=self._request_relay_addresses).pack(anchor=tk.W)
 
     def _report_relay_address(self):
+        if self.relay_setup_busy:
+            return
         connector = self.relay_host
         requested = connector is not None and connector.request_address_refresh()
         self.relay_status.config(text="已请求上报本机 IP / 端口；稍后刷新在线设备即可查看。" if requested
@@ -4617,6 +4637,8 @@ class RemoteDeskLinuxApp:
 
     def _request_relay_addresses(self):
         selection = self.relay_list.selection()
+        if self.relay_setup_busy:
+            return
         if self.relay_refreshing or self.relay_options is None or not selection:
             self.relay_status.config(text="请刷新并选择一台在线设备。")
             return
@@ -4663,19 +4685,106 @@ class RemoteDeskLinuxApp:
                    state=tk.DISABLED if target["deviceId"] == self.relay_device_id else tk.NORMAL).pack(pady=12)
 
     def _save_relay(self):
-        try:
-            options = relay.RelayOptions(self.relay_server.get(), int(self.relay_port.get()),
-                self.relay_token.get(), self.relay_pin.get(), self.relay_device_id, self.relay_publish.get()).validate()
-            relay.save_settings(options)
-        except (OSError, ValueError):
-            self.relay_status.config(text="配置未保存：请检查端口、密钥、指纹及配置目录权限。")
+        if self.closing or self.relay_setup_busy:
             return
-        self.relay_options = options
+        try:
+            draft = relay.RelayEnrollmentDraft(self.relay_server.get(), int(self.relay_port.get().strip() or "56567"),
+                self.relay_token.get(), self.relay_device_id, self.relay_publish.get()).validate()
+            pin = draft.known_pin(self.relay_options, self.relay_pin.get())
+        except ValueError:
+            self.relay_status.config(text="配置未保存：请检查服务器地址、端口和共享密钥；高级指纹可以留空。")
+            return
+        self.relay_setup_generation += 1
+        self.relay_setup_cancel = threading.Event()
+        self.relay_refresh_generation += 1  # Discard directory/address results from before this edit.
+        self.relay_refreshing = False
+        self._set_relay_setup_busy(True)
+        if pin is None:
+            self._run_relay_setup("identity", draft,
+                lambda: relay.discover_server_identity(draft.server_address, draft.port))
+        elif draft.replaces_identity(self.relay_options, pin):
+            self._confirm_relay_identity(draft, pin, replacing=True)
+        else:
+            self._verify_relay_setup(draft.with_pin(pin))
+
+    def _set_relay_setup_busy(self, value):
+        self.relay_setup_busy = value
+        for control in self.relay_setup_controls:
+            control.config(state=tk.DISABLED if value else tk.NORMAL)
+        self.relay_cancel_button.config(state=tk.NORMAL if value else tk.DISABLED)
+
+    def _cancel_relay_setup(self):
+        if self.relay_setup_cancel is not None:
+            self.relay_setup_cancel.set()
+            self.relay_setup_cancel = None
+        self.relay_setup_generation += 1
+        if not self.closing:
+            self._set_relay_setup_busy(False)
+            self.relay_status.config(text="配置已取消；原配置未更改。")
+
+    def _run_relay_setup(self, stage, target, operation):
+        generation, stop, events = self.relay_setup_generation, self.relay_setup_cancel, self.events
+        self.relay_status.config(text="正在获取服务器身份（尚未发送密钥）……" if stage == "identity"
+                                 else "正在验证连接和访问密钥……")
+        def work():
+            try:
+                result, error = relay.run_setup_request(operation, stop), ""
+            except Exception as failure:
+                result, error = None, relay.setup_error_message(failure)
+            put_ui_event(events, "relay_setup", (generation, stage, target, result, error))
+        threading.Thread(target=work, name="RemoteDeskRelaySetup", daemon=True).start()
+
+    def _confirm_relay_identity(self, draft, pin, replacing=False):
+        generation = self.relay_setup_generation
+        approved = messagebox.askyesno("更新服务器身份？" if replacing else "信任这台中转服务器？",
+            f"{draft.server_address}:{draft.port}\n\n"
+            + ("服务器身份与原来不同。请先核实服务器是否重装或更换。\n" if replacing else
+               "请确认这是你的服务器，并在可信网络上完成首次连接。\n")
+            + f"身份指纹：{pin}\n\n确认后才会发送共享访问密钥；以后自动记住。",
+            parent=self.root, default=messagebox.NO)
+        if self.closing or generation != self.relay_setup_generation:
+            return
+        if not approved:
+            self._cancel_relay_setup()
+            return
+        self._verify_relay_setup(draft.with_pin(pin))
+
+    def _verify_relay_setup(self, options):
+        self._run_relay_setup("verified", options, lambda: relay.list_devices_async(options))
+
+    def _handle_relay_setup(self, value):
+        generation, stage, target, result, error = value
+        if self.closing or generation != self.relay_setup_generation or not self.relay_setup_busy:
+            return
+        if error:
+            self._set_relay_setup_busy(False)
+            self.relay_status.config(text=error)
+        elif stage == "identity":
+            self._confirm_relay_identity(target, result)
+        else:
+            try:
+                relay.save_settings(target)
+            except (OSError, ValueError):
+                self._set_relay_setup_busy(False)
+                self.relay_status.config(text="验证成功，但配置未保存；请检查配置目录权限。原配置仍保留。")
+                return
+            self.relay_options = target
+            self.relay_server.set(target.server_address)
+            self.relay_port.set(str(target.port))
+            self.relay_pin.set("")
+            self._set_relay_setup_busy(False)
+            self._show_relay_directory(result)
+            self._sync_relay_registration()
+            self.relay_status.config(text=f"中转配置已保存，当前 {len(result)} 台在线；被控端启动后可让本机上线。")
+
+    def _show_relay_directory(self, devices):
         self.relay_list.delete(*self.relay_list.get_children())
-        self.relay_devices = {}
-        self._sync_relay_registration()
-        self.relay_status.config(text="中转配置已保存；被控端启动后才能让本机上线。")
-        self._refresh_relay()
+        self.relay_devices = {device["deviceId"]: device for device in devices}
+        for device in devices:
+            local = device["deviceId"] == self.relay_device_id
+            self.relay_list.insert("", tk.END, iid=device["deviceId"], text=device["machineName"],
+                values=(device["platform"], "本机（不可自连）" if local else "使用中（可接管）" if device["busy"] else "在线",
+                        relay.direct_address_display(device)))
 
     def _stop_relay_registration(self):
         connector = getattr(self, "relay_host", None)
@@ -4696,6 +4805,8 @@ class RemoteDeskLinuxApp:
         connector.start()
 
     def _refresh_relay(self):
+        if self.relay_setup_busy:
+            return
         if self.relay_options is None:
             self.relay_status.config(text="请先保存有效的中转配置。")
             return
@@ -4711,12 +4822,14 @@ class RemoteDeskLinuxApp:
         def work():
             try:
                 devices, error = relay.list_devices(options), ""
-            except Exception:
-                devices, error = [], "在线列表读取失败，请核对服务器、访问密钥和 TLS 指纹。"
+            except Exception as failure:
+                devices, error = [], relay.setup_error_message(failure)
             put_ui_event(events, "relay_directory", (generation, options, devices, error))
         threading.Thread(target=work, name="RemoteDeskRelayDirectory", daemon=True).start()
 
     def _connect_relay(self):
+        if self.relay_setup_busy:
+            return
         if self.viewer is not None or self.viewer_reconnect_after_id is not None:
             self.relay_status.config(text="请先断开当前远控会话。")
             return
@@ -5159,7 +5272,7 @@ class RemoteDeskLinuxApp:
         variable: tk.StringVar,
         show: str | None = None,
         browse: bool = False,
-    ) -> None:
+    ) -> ttk.Entry:
         ttk.Label(parent, text=label, style="Panel.TLabel").grid(row=row, column=0, sticky=tk.W, pady=6, padx=(0, 12))
         entry = ttk.Entry(parent, textvariable=variable, show=show or "")
         entry.grid(row=row, column=1, sticky=tk.EW, pady=6)
@@ -5170,6 +5283,7 @@ class RemoteDeskLinuxApp:
                 text="浏览",
                 command=lambda: self._browse_directory(variable),
             ).grid(row=row, column=2, sticky=tk.W, padx=(8, 0), pady=6)
+        return entry
 
     def _browse_directory(self, variable: tk.StringVar) -> None:
         selected = filedialog.askdirectory(initialdir=variable.get() or str(Path.home()))
@@ -6485,9 +6599,11 @@ class RemoteDeskLinuxApp:
         latest_native_frame: tuple[int, int, float, str] | None = None
         latest_file_preview: ViewerFilePreviewResult | None = None
         for event, value in iter_ui_event_batch(self.events):
-            if event == "relay_status":
+            if event == "relay_setup":
+                self._handle_relay_setup(value)
+            elif event == "relay_status":
                 connector, message = value
-                if connector is self.relay_host:
+                if connector is self.relay_host and not self.relay_setup_busy:
                     self.relay_status.config(text=str(message))
             elif event == "relay_addresses":
                 generation, options, target = value
@@ -6505,12 +6621,7 @@ class RemoteDeskLinuxApp:
                 if options != self.relay_options:
                     self._refresh_relay()
                     continue
-                self.relay_devices = {device["deviceId"]: device for device in devices}
-                for device in devices:
-                    local = device["deviceId"] == self.relay_device_id
-                    self.relay_list.insert("", tk.END, iid=device["deviceId"], text=device["machineName"],
-                        values=(device["platform"], "本机（不可自连）" if local else "使用中（可接管）" if device["busy"] else "在线",
-                                relay.direct_address_display(device)))
+                self._show_relay_directory(devices)
                 self.relay_status.config(text=error or f"当前 {len(devices)} 台在线；选择设备后输入目标远控口令。")
             elif event == "host_log":
                 self._append_host_log(str(value))
@@ -6785,6 +6896,7 @@ class RemoteDeskLinuxApp:
         if self.closing:
             return
         self.closing = True
+        self._cancel_relay_setup()
         if getattr(self, "device_panel", None) is not None: self.device_panel.close()
         pending_poll = getattr(self, "event_poll_after_id", None)
         if pending_poll is not None:

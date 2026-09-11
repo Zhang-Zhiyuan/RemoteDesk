@@ -399,6 +399,77 @@ class LinuxRelayTlsTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_for(lambda: bool(received))
         self.assertEqual([b""], received)
 
+    async def test_first_use_observes_certificate_without_sending_any_application_data(self):
+        received = []
+        async def observe(reader, writer):
+            try:
+                received.append(await reader.read())
+            finally:
+                await client.close_writer(writer)
+        listener = await asyncio.start_server(observe, "127.0.0.1", 0, ssl=self.tls)
+        self.extra_servers.append(listener)
+        pin = await client.discover_server_identity("127.0.0.1", listener.sockets[0].getsockname()[1])
+        self.assertEqual(self.options.tls_certificate_sha256, pin)
+        await self.wait_for(lambda: bool(received))
+        self.assertEqual([b""], received)
+        # Reconnect through the ordinary pinned API after the user's trust decision.
+        self.assertEqual([], await client.list_devices_async(replace(self.options, tls_certificate_sha256=pin)))
+
+    async def test_observation_deadline_closes_stalled_tls_and_allows_retry(self):
+        closed = asyncio.Event()
+        async def silent(reader, writer):
+            try:
+                await reader.read()
+                closed.set()
+            finally:
+                await client.close_writer(writer)
+        listener = await asyncio.start_server(silent, "127.0.0.1", 0)
+        self.extra_servers.append(listener)
+        with mock.patch.object(client, "TIMEOUT", .2):
+            with self.assertRaises(TimeoutError):
+                await client.discover_server_identity("127.0.0.1", listener.sockets[0].getsockname()[1])
+        await asyncio.wait_for(closed.wait(), 3)
+        self.assertEqual(self.options.tls_certificate_sha256,
+                         await client.discover_server_identity(self.options.server_address, self.options.port))
+
+    async def test_cancelled_observation_closes_pending_tls(self):
+        accepted, closed = asyncio.Event(), asyncio.Event()
+        async def silent(reader, writer):
+            accepted.set()
+            try:
+                await reader.read()
+                closed.set()
+            finally:
+                await client.close_writer(writer)
+        listener = await asyncio.start_server(silent, "127.0.0.1", 0)
+        self.extra_servers.append(listener)
+        task = asyncio.create_task(client.discover_server_identity("127.0.0.1", listener.sockets[0].getsockname()[1]))
+        await asyncio.wait_for(accepted.wait(), 2)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(closed.wait(), 3)
+
+    async def test_directory_pages_have_separate_live_tls_connections(self):
+        offsets = []
+        async def page(reader, writer):
+            try:
+                request = await client.read_json(reader)
+                offsets.append(request["offset"])
+                self.assertEqual(TOKEN, request["token"])
+                value = dict(ok=True, devices=[dict(deviceId=str(uuid.UUID(int=request["offset"] + 1)))])
+                if request["offset"] == 0:
+                    value["nextOffset"] = 32
+                await client.write_json(writer, value)
+                self.assertEqual(b"", await reader.read())
+            finally:
+                await client.close_writer(writer)
+        listener = await asyncio.start_server(page, "127.0.0.1", 0, ssl=self.tls)
+        self.extra_servers.append(listener)
+        devices = await client.list_devices_async(replace(self.options, port=listener.sockets[0].getsockname()[1]))
+        self.assertEqual([0, 32], offsets)
+        self.assertEqual(2, len(devices))
+
     async def test_viewer_cancels_pending_relay_pair(self):
         got_hello, closed = asyncio.Event(), asyncio.Event()
         async def stall(reader, writer):

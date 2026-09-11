@@ -48,8 +48,9 @@ final class AndroidPasswordStore {
             throw new java.io.IOException("无法保存历史连接");
     }
 
-    static String loadRelay(Context context) {
-        return loadValue(context, "relay-options.keystore.v1", false);
+    static String loadRelay(Context context) throws Exception {
+        return loadRelayValue(preferences(context).getString("relay-options.keystore.v1", ""),
+            AndroidPasswordStore::decrypt);
     }
 
     static String loadUnlockPin(Context context) {
@@ -71,8 +72,42 @@ final class AndroidPasswordStore {
         if (!editor.commit()) throw new java.io.IOException("无法持久保存自动解锁设置");
     }
 
-    static void saveRelay(Context context, String configuration) throws Exception {
-        saveValue(context, "relay-options.keystore.v1", configuration, false);
+    static synchronized void saveRelay(Context context, String configuration) throws Exception {
+        SharedPreferences preferences = preferences(context);
+        saveRelayValue(configuration, preferences.getString("relay-options.keystore.v1", null),
+            AndroidPasswordStore::encrypt, encrypted -> {
+            SharedPreferences.Editor editor = preferences.edit();
+            if (encrypted == null) editor.remove("relay-options.keystore.v1");
+            else editor.putString("relay-options.keystore.v1", encrypted);
+            return editor.commit();
+        });
+    }
+
+    @FunctionalInterface
+    interface ValueTransform { String apply(String value) throws Exception; }
+
+    @FunctionalInterface
+    interface ValueCommit { boolean apply(String encrypted) throws Exception; }
+
+    static String loadRelayValue(String encrypted, ValueTransform decryptor) throws Exception {
+        if (encrypted == null || encrypted.isEmpty()) return "";
+        String value = decryptor.apply(encrypted);
+        // A broken keystore or restored ciphertext is not an unconfigured device.
+        // Keep the original preference and let the UI report the read failure.
+        if (value == null || value.trim().isEmpty()) throw new java.io.IOException("无法读取已保存的中转配置");
+        return value;
+    }
+
+    static void saveRelayValue(String configuration, String previous, ValueTransform encryptor, ValueCommit commit) throws Exception {
+        boolean clear = configuration == null || configuration.trim().isEmpty();
+        String encrypted = clear ? null : encryptor.apply(configuration);
+        if (!clear && (encrypted == null || encrypted.isEmpty())) throw new java.io.IOException("无法加密中转配置");
+        if (!commit.apply(encrypted)) {
+            // SharedPreferences updates its in-memory map even when disk commit fails.
+            // Restore the previous encrypted identity there too, without decrypting it.
+            try { commit.apply(previous); } catch (Exception ignored) { }
+            throw new java.io.IOException("无法持久保存中转配置");
+        }
     }
 
     private static String loadValue(
