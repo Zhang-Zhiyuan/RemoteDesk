@@ -84,8 +84,12 @@ internal static class FeatureAuditProbe
             await client.SendFileToRemoteAsync(empty).WaitAsync(token);
             var directory = Path.Combine(output, "directory-fixture");
             Directory.CreateDirectory(Path.Combine(directory, "nested"));
-            await File.WriteAllTextAsync(Path.Combine(directory, "nested", "中文.txt"), "nested 中文😀", new UTF8Encoding(false), token);
+            string archivedSource = Path.Combine(directory, "nested", "中文.txt");
+            await File.WriteAllTextAsync(archivedSource, "nested 中文😀", new UTF8Encoding(false), token);
+            File.SetLastWriteTimeUtc(archivedSource, DateTime.UnixEpoch);
             await client.SendFileToRemoteAsync(directory).WaitAsync(token);
+            Check("Pre-1980 directory file transfers without changing the source timestamp",
+                File.GetLastWriteTimeUtc(archivedSource) == DateTime.UnixEpoch);
             Check("Files, duplicate name, empty file and directory sent (remote hashes checked separately)", true,
                 new { bytes.Length, sha256 = Convert.ToHexString(SHA256.HashData(bytes)) });
             var returned = await client.RequestRemoteClipboardFilesForDragOutAsync(token);

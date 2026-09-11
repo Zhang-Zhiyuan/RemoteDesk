@@ -26,6 +26,29 @@ import remotedesk_protocol_probe as protocol  # noqa: E402
 
 
 class LinuxIncomingFileTransferTests(unittest.TestCase):
+    def test_directory_archive_clamps_only_unsupported_zip_timestamps(self) -> None:
+        for year, expected in ((1970, (1980, 1, 1, 0, 0, 0)),
+                               (2150, (2107, 12, 31, 23, 59, 58)),
+                               (2024, (2024, 4, 10, 12, 34, 56))):
+            with self.subTest(year=year), tempfile.TemporaryDirectory() as folder:
+                source = Path(folder) / "folder"
+                source.mkdir()
+                path = source / "payload.txt"
+                payload = "archive payload 中文😀".encode("utf-8")
+                path.write_bytes(payload)
+                modified = time.mktime((year, 4, 10, 12, 34, 56, 0, 0, -1))
+                os.utime(path, (modified, modified))
+                original_mtime = path.stat().st_mtime_ns
+                archive_path = protocol.create_safe_directory_archive(source)
+                try:
+                    with zipfile.ZipFile(archive_path) as archive:
+                        self.assertEqual(expected, archive.getinfo("folder/payload.txt").date_time)
+                        self.assertEqual(payload, archive.read("folder/payload.txt"))
+                    self.assertEqual(payload, path.read_bytes())
+                    self.assertEqual(original_mtime, path.stat().st_mtime_ns)
+                finally:
+                    archive_path.unlink(missing_ok=True)
+
     def test_receive_budget_rejects_low_disk_space(self) -> None:
         budget = protocol.IncomingFileTransferBudget(
             lambda _directory: protocol.MINIMUM_FREE_SPACE_RESERVE_BYTES

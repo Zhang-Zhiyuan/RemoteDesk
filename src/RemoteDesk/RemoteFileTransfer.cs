@@ -302,7 +302,14 @@ internal static class RemoteFileTransfer
     {
         cancellationToken.ThrowIfCancellationRequested();
         ZipArchiveEntry archiveEntry = archive.CreateEntry(entryName, CompressionLevel.Fastest);
-        archiveEntry.LastWriteTime = source.LastWriteTime;
+        // DOS timestamps in ZIP have a narrower range than NTFS. Match the
+        // Linux sender: clamp archive metadata, never mutate the source file.
+        DateTime modified = source.LastWriteTime;
+        archiveEntry.LastWriteTime = modified.Year < 1980
+            ? new DateTime(1980, 1, 1, 0, 0, 0, modified.Kind)
+            : modified.Year > 2107
+                ? new DateTime(2107, 12, 31, 23, 59, 58, modified.Kind)
+                : modified;
         cancellationToken.ThrowIfCancellationRequested();
 
         using var input = new FileStream(

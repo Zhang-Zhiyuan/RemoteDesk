@@ -69,6 +69,37 @@ public sealed class RemoteFileTransferTests
         Assert.Contains("folder/empty/", entryNames);
     }
 
+    [Theory]
+    [InlineData(1970)]
+    [InlineData(2150)]
+    [InlineData(2024)]
+    public void DirectoryArchiveClampsOnlyUnsupportedZipTimestampsAndPreservesSource(int year)
+    {
+        using var temp = TemporaryDirectory.Create();
+        string sourceDirectory = Path.Combine(temp.Path, "folder");
+        Directory.CreateDirectory(sourceDirectory);
+        string filePath = Path.Combine(sourceDirectory, "payload.txt");
+        byte[] payload = System.Text.Encoding.UTF8.GetBytes("archive payload 中文😀");
+        File.WriteAllBytes(filePath, payload);
+        var sourceTime = new DateTime(year, 4, 10, 12, 34, 56, DateTimeKind.Local);
+        File.SetLastWriteTime(filePath, sourceTime);
+        DateTime originalUtc = File.GetLastWriteTimeUtc(filePath);
+
+        string archivePath = RemoteFileTransfer.CreateTemporaryDirectoryArchive(
+            sourceDirectory, maxArchiveBytes: 16 * 1024, temp.Path);
+
+        using ZipArchive archive = ZipFile.OpenRead(archivePath);
+        ZipArchiveEntry entry = Assert.Single(archive.Entries);
+        DateTime expected = year < 1980 ? new DateTime(1980, 1, 1) :
+            year > 2107 ? new DateTime(2107, 12, 31, 23, 59, 58) : sourceTime;
+        Assert.Equal(expected, entry.LastWriteTime.DateTime);
+        using var restored = new MemoryStream();
+        using (Stream content = entry.Open()) content.CopyTo(restored);
+        Assert.Equal(payload, restored.ToArray());
+        Assert.Equal(payload, File.ReadAllBytes(filePath));
+        Assert.Equal(originalUtc, File.GetLastWriteTimeUtc(filePath));
+    }
+
     [Fact]
     public void CreateTemporaryDirectoryArchiveExcludesOutputInsideSourceTree()
     {
