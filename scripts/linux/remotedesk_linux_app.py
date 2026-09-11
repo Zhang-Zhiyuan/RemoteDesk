@@ -45,7 +45,7 @@ if __name__ == "__main__" and sys.platform.startswith("linux"):
 
 try:
     import tkinter as tk
-    from tkinter import filedialog, messagebox, ttk
+    from tkinter import filedialog, messagebox, simpledialog, ttk
 except Exception as ex:  # pragma: no cover - exercised on target desktops.
     print(f"RemoteDesk Linux GUI requires tkinter: {ex}", file=sys.stderr)
     raise SystemExit(2)
@@ -4554,6 +4554,8 @@ class RemoteDeskLinuxApp:
         self._restore_host_preferences()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.event_poll_after_id = self.root.after(EVENT_POLL_MS, self._poll_events)
+        if self.relay_options is not None:
+            self.root.after_idle(lambda: None if self.closing else self._refresh_relay())
 
     def _build_relay_tab(self, notebook):
         tab = self._create_scrollable_tab(notebook, "公网中转")
@@ -4578,7 +4580,13 @@ class RemoteDeskLinuxApp:
         self.relay_admin_user = tk.StringVar(value=options.admin_username if options else 'root')
         self.relay_publish = tk.BooleanVar(value=options.publish if options else True)
         self.relay_password = tk.StringVar()
+        self.relay_key_selection = None
+        self.relay_server_summary = ttk.Label(tab, text='', style='PanelSubtitle.TLabel')
+        self.relay_server_summary.pack(fill=tk.X, pady=(0, 8))
+        self.relay_manage_button = ttk.Button(tab, text='服务器设置', command=self._toggle_relay_form)
+        self.relay_manage_button.pack(anchor=tk.W, pady=(0, 8))
         form = ttk.LabelFrame(tab, text="私有服务器配置", padding=16, style="Panel.TLabelframe")
+        self.relay_form = form
         form.pack(fill=tk.X)
         self.relay_setup_controls = []
         for row, label, variable, secret in (
@@ -4595,21 +4603,27 @@ class RemoteDeskLinuxApp:
         ttk.Button(form, text="高级设置（通常不用改）", command=lambda:
                    advanced.grid_remove() if advanced.winfo_manager() else advanced.grid()).grid(
                        row=3, column=0, columnspan=3, sticky=tk.W, pady=6)
-        publish = ttk.Checkbutton(form, text="发布本机，并自动更新 IP / 端口", variable=self.relay_publish)
-        publish.grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=8)
+        publish = ttk.Checkbutton(tab, text="允许本机在此服务器上线（立即生效）", variable=self.relay_publish,
+                                  command=self._change_relay_publish)
+        publish.pack(anchor=tk.W, pady=8)
+        self.relay_publish_control = publish
         self.relay_setup_controls.append(publish)
         ttk.Label(form, text="首次用 root 密码登录，之后自动连接；root 密码不保存，已登录可留空。设备控制使用各自的设备密钥。",
                   wraplength=680, style="PanelSubtitle.TLabel").grid(row=6, column=0, columnspan=3, sticky=tk.W)
-        actions = ttk.Frame(tab)
-        actions.pack(fill=tk.X, pady=10)
+        actions = ttk.Frame(form)
+        actions.grid(row=7, column=0, columnspan=3, sticky=tk.EW, pady=10)
         save = ttk.Button(actions, text="登录服务器", command=self._save_relay, style="Accent.TButton")
         save.pack(side=tk.LEFT)
         self.relay_setup_controls.append(save)
         self.relay_cancel_button = ttk.Button(actions, text="取消配置", command=self._cancel_relay_setup, state=tk.DISABLED)
         self.relay_cancel_button.pack(side=tk.LEFT, padx=8)
-        ttk.Button(actions, text="刷新在线设备", command=self._refresh_relay).pack(side=tk.LEFT, padx=8)
-        ttk.Button(actions, text="立即上报本机 IP", command=self._report_relay_address).pack(side=tk.LEFT)
-        self.relay_status = ttk.Label(tab, text=load_error or "先保存服务器配置，再刷新在线设备。", wraplength=700)
+        self.relay_logout_button = ttk.Button(actions, text="退出服务器", command=self._logout_relay)
+        self.relay_logout_button.pack(side=tk.LEFT, padx=8)
+        directory_actions = ttk.Frame(tab)
+        directory_actions.pack(fill=tk.X, pady=8)
+        ttk.Button(directory_actions, text="刷新在线设备", command=self._refresh_relay).pack(side=tk.LEFT)
+        ttk.Button(directory_actions, text="立即上报本机 IP", command=self._report_relay_address).pack(side=tk.LEFT, padx=8)
+        self.relay_status = ttk.Label(tab, text=load_error or ("服务器登录已保存，点击刷新查看在线设备。" if options else "尚未登录，请填写服务器地址和管理员密码。"), wraplength=700)
         self.relay_status.pack(fill=tk.X, pady=6)
         self.relay_list = ttk.Treeview(tab, columns=("platform", "status", "address"), show="tree headings", height=7)
         self.relay_list.heading("#0", text="设备")
@@ -4625,11 +4639,82 @@ class RemoteDeskLinuxApp:
         self.relay_list.configure(xscrollcommand=address_scroll.set)
         address_scroll.pack(fill=tk.X)
         self.relay_list.bind("<Double-1>", lambda _event: self._connect_relay())
+        self.relay_list.bind('<<TreeviewSelect>>', lambda _event: self._select_relay_key())
         password_form = ttk.Frame(tab)
         password_form.pack(fill=tk.X)
         self._row_entry(password_form, 0, "目标设备密钥", self.relay_password, show="*")
         ttk.Button(tab, text="连接选中设备", command=self._connect_relay, style="Accent.TButton").pack(anchor=tk.W, pady=10)
         ttk.Button(tab, text="查看 / 使用 IP", command=self._request_relay_addresses).pack(anchor=tk.W)
+        self._update_relay_form()
+
+    def _toggle_relay_form(self):
+        if self.relay_form.winfo_manager():
+            self.relay_form.pack_forget()
+            self.relay_manage_button.config(text='服务器设置')
+        else:
+            self.relay_form.pack(fill=tk.X, before=self.relay_publish_control)
+            self.relay_manage_button.config(text='收起服务器设置')
+
+    def _update_relay_form(self):
+        if not hasattr(self, 'relay_form'): return
+        configured = self.relay_options is not None
+        self.relay_server_summary.config(text='服务器：' + self.relay_options.server_address + ' · 已保存登录' if configured else '尚未登录服务器')
+        self.relay_logout_button.config(state=tk.NORMAL if configured else tk.DISABLED)
+        self.relay_publish_control.config(state=tk.NORMAL if configured and not self.relay_setup_busy else tk.DISABLED)
+        if configured:
+            self.relay_form.pack_forget()
+            self.relay_manage_button.config(text='服务器设置')
+        else:
+            self.relay_form.pack(fill=tk.X, before=self.relay_publish_control)
+            self.relay_manage_button.config(text='收起服务器设置')
+
+    def _change_relay_publish(self):
+        if self.relay_setup_busy or self.relay_options is None: return
+        previous = self.relay_options
+        next_options = replace(previous, publish=self.relay_publish.get())
+        try:
+            relay.save_settings(next_options)
+        except (OSError, ValueError):
+            self.relay_publish.set(previous.publish)
+            self.relay_status.config(text='修改未保存，开关已恢复，请重试。')
+            return
+        self.relay_options = next_options
+        self.relay_refresh_generation += 1
+        self.relay_refreshing = False
+        self._sync_relay_registration()
+        self.relay_status.config(text='已允许本机上线；被控开启后自动发布。' if next_options.publish else '已停止本机中继发布，仍可连接其他设备。')
+
+    def _logout_relay(self):
+        if self.relay_setup_busy: return
+        if self.viewer_relay_options is not None and (self.viewer is not None or self.viewer_reconnect_after_id is not None):
+            self.relay_status.config(text='请先断开当前中继远控会话。'); return
+        if not messagebox.askyesno('退出服务器？', '本机将从此服务器下线，设备记录和设备密钥保留。再次接入需要管理员密码。\n\n服务器重装或身份变化时，请先核实，再退出并重新登录。', parent=self.root, default=messagebox.NO): return
+        try:
+            relay.save_settings(None)
+        except (OSError, ValueError):
+            self.relay_status.config(text='退出未保存，原配置保持不变，请重试。'); return
+        self._cancel_relay_setup()
+        self.relay_refresh_generation += 1
+        self.relay_refreshing = False
+        self.relay_options = None
+        self._stop_relay_registration()
+        self.relay_server.set(''); self.relay_admin_password.set(''); self.relay_password.set('')
+        self.relay_ssh_port.set('22'); self.relay_admin_user.set('root')
+        self._show_relay_directory([])
+        self._update_relay_form()
+        self.relay_status.config(text='已退出服务器，设备记录和设备密钥保留。')
+
+    def _select_relay_key(self):
+        selected = self.relay_list.selection()
+        target = replace(self.relay_options, device_id=selected[0]) if selected and self.relay_options else None
+        key = (relay.device_key_scope(target), target.device_id) if target else None
+        if key == getattr(self, 'relay_key_selection', None): return
+        self.relay_key_selection = key
+        try:
+            self.relay_password.set(relay.load_device_key(target) if target else '')
+        except Exception:
+            self.relay_password.set('')
+            self.relay_status.config(text='无法读取此设备保存的密钥，请重新填写。')
 
     def _report_relay_address(self):
         if self.relay_setup_busy:
@@ -4738,6 +4823,8 @@ class RemoteDeskLinuxApp:
         for control in self.relay_setup_controls:
             control.config(state=tk.DISABLED if value else tk.NORMAL)
         self.relay_cancel_button.config(state=tk.NORMAL if value else tk.DISABLED)
+        if hasattr(self, 'relay_publish_control'):
+            self.relay_publish_control.config(state=tk.DISABLED if value or self.relay_options is None else tk.NORMAL)
 
     def _cancel_relay_setup(self):
         operation = getattr(self, 'relay_admin_operation', None)
@@ -4810,9 +4897,11 @@ class RemoteDeskLinuxApp:
             self._set_relay_setup_busy(False)
             self._show_relay_directory(result)
             self._sync_relay_registration()
+            self._update_relay_form()
             self.relay_status.config(text=f"服务器已登录，当前 {len(result)} 台在线；root 密码未保存，下次自动连接。")
 
     def _show_relay_directory(self, devices):
+        selected = self.relay_list.selection()
         self.relay_list.delete(*self.relay_list.get_children())
         self.relay_devices = {device["deviceId"]: device for device in devices}
         for device in devices:
@@ -4820,6 +4909,7 @@ class RemoteDeskLinuxApp:
             self.relay_list.insert("", tk.END, iid=device["deviceId"], text=device["machineName"],
                 values=(device["platform"], "本机（不可自连）" if local else "使用中（可接管）" if device["busy"] else "在线",
                         relay.direct_address_display(device)))
+        if selected and selected[0] in self.relay_devices: self.relay_list.selection_set(selected[0])
 
     def _stop_relay_registration(self):
         connector = getattr(self, "relay_host", None)
@@ -4850,8 +4940,7 @@ class RemoteDeskLinuxApp:
         self.relay_refreshing = True
         self.relay_refresh_generation += 1
         generation, options = self.relay_refresh_generation, self.relay_options
-        self.relay_list.delete(*self.relay_list.get_children())
-        self.relay_devices = {}
+        # Keep the current selection/key while a fresh directory is being read.
         self.relay_status.config(text="正在读取在线设备……")
         events = self.events
         def work():
@@ -4878,8 +4967,12 @@ class RemoteDeskLinuxApp:
             return
         password = self.relay_password.get().strip()
         if not password:
-            self.relay_status.config(text="请输入所选设备的设备密钥。")
-            return
+            password = simpledialog.askstring('连接 ' + device['machineName'], '请输入这台设备自己的密钥，不是服务器 root 密码。\n连接成功后自动记住。', show='*', parent=self.root)
+            if password is None: return
+            password = password.strip()
+            if not password or len(password) > 4096:
+                self.relay_status.config(text='请输入这台设备的有效密钥。'); return
+            self.relay_password.set(password)
         self.viewer_relay_options = relay.replace(self.relay_options, device_id=device["deviceId"])
         options = self.viewer_relay_options
         self.viewer_reconnect_policy.begin()
@@ -6734,6 +6827,11 @@ class RemoteDeskLinuxApp:
                         )
                     )
                     viewer = self.viewer
+                    if getattr(self, 'viewer_relay_options', None) is not None and self.viewer_reconnect_target is not None:
+                        try:
+                            relay.save_device_key(self.viewer_relay_options, self.viewer_reconnect_target[2])
+                        except Exception:
+                            self.relay_status.config(text='已连接，但此设备的密钥未能保存，请检查配置目录权限。')
                     if getattr(self, "device_panel", None) is not None:
                         self.device_panel.record(getattr(viewer, "remote_device_info", None))
                     self._set_viewer_file_action_state(

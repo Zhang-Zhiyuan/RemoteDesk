@@ -50,7 +50,7 @@ final class AndroidLanDiscoveryPanel extends LinearLayout implements AutoCloseab
         status = AndroidUiTheme.createSectionSubtitle(activity, "正在查找局域网设备…");
         LinearLayout actions = new LinearLayout(activity);
         refresh = button("查找附近设备"); refresh.setOnClickListener(view -> scan(null, null));
-        detectPort = button("探测此 IP 的端口"); detectPort.setOnClickListener(view -> {
+        detectPort = button("探测端口"); detectPort.setContentDescription("探测所填 IP 的端口"); detectPort.setOnClickListener(view -> {
             MainActivity.RemoteEndpoint endpoint = MainActivity.parseRemoteEndpoint(enteredAddress.get(), RemoteDeskProtocol.HOST_PORT);
             if (endpoint == null) { status.setText(R.string.discovery_enter_host); return; }
             resolve(endpoint.host, result -> showChoices(result, select));

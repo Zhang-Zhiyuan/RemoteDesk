@@ -149,12 +149,16 @@ public final class RemoteDeskViewerActivity extends Activity {
                     if (requestedPort < 1 || requestedPort > 65535) throw new IOException("Invalid discovered endpoint");
                 }
                 if (node.relay()) {
-                    relayOptions = AndroidRelay.Options.parse(node.relayConfiguration);
+                    relayOptions = AndroidRelayUiPolicy.historyTarget(node, AndroidRelaySettings.load(this));
                     if (!AndroidConnectionHistory.normalizeHost(relayOptions.serverAddress).equals(node.host) || relayOptions.port != node.port ||
                             !relayOptions.deviceId.equals(node.relayDeviceId)) throw new IOException("Invalid relay history");
                     if (relayOptions.deviceId.equals(AndroidRelaySettings.localDeviceId(this)))
                         throw new IOException("Cannot connect to local device");
                 }
+            } catch (AndroidRelayUiPolicy.LoginRequired ex) {
+                buildViewerUi("", RemoteDeskProtocol.HOST_PORT);
+                updateStatus(ex.getMessage());
+                return;
             } catch (Exception ex) {
                 buildViewerUi("", RemoteDeskProtocol.HOST_PORT);
                 updateStatus("这条历史连接已删除或无法读取，请返回首页重新连接。");

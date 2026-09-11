@@ -109,6 +109,8 @@ internal sealed class RelaySettings
 
     public string? ProtectedViewerPassword { get; set; }
 
+    public List<RelayDeviceKey> DeviceKeys { get; set; } = [];
+
     public string DeviceId { get; set; } = Guid.NewGuid().ToString("D");
 
     public string? ProtectedAccessToken { get; set; }
@@ -353,6 +355,7 @@ internal sealed class AppSettingsService
             NormalizeOptionalText(settings.Relay.TlsCertificateSha256);
         settings.Relay.SshHostKeySha256 =
             NormalizeOptionalText(settings.Relay.SshHostKeySha256);
+        settings.Relay.DeviceKeys = RelayDeviceKeys.Normalize(settings.Relay.DeviceKeys);
         return settings;
     }
 

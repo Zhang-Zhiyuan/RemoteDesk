@@ -88,6 +88,7 @@ class EnrollmentUiStateTests(unittest.TestCase):
         self.ui.relay_status = mock.Mock()
         self.ui.relay_server, self.ui.relay_port, self.ui.relay_pin = mock.Mock(), mock.Mock(), mock.Mock()
         self.ui.relay_list = mock.Mock()
+        self.ui.relay_list.selection.return_value = ()
         self.ui.relay_list.get_children.return_value = ()
         self.ui.events = queue.Queue()
         self.ui._sync_relay_registration = mock.Mock()

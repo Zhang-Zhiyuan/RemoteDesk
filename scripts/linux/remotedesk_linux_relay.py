@@ -859,21 +859,49 @@ def load_settings(path=None):
         data = source.read(MAX_JSON + 1)
     if len(data) > MAX_JSON:
         raise ValueError("中转配置文件过大。")
-    return RelayOptions.from_dict(json.loads(data))
+    value = json.loads(data)
+    return None if value is None else RelayOptions.from_dict(value)
 
 
 def save_settings(options, path=None):
-    options = options.validate()
+    options = options.validate() if options is not None else None
     path = Path(path) if path is not None else settings_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=".relay-", dir=path.parent)
     try:
         os.chmod(temporary, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            json.dump(options.to_dict(), output, ensure_ascii=False)
+            json.dump(options.to_dict() if options is not None else None, output, ensure_ascii=False)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(temporary)
+
+
+def device_key_scope(options):
+    server, port = _checked_endpoint(options.server_address, options.port)
+    return hashlib.sha256((server.lower().rstrip('.') + '\n' + str(port) + '\n' +
+        options.tls_certificate_sha256.upper()).encode('utf-8')).hexdigest()
+
+
+def _device_key_store(options, directory=None):
+    from remotedesk_linux_devices import Store
+    import remotedesk_linux_startup as private
+    root = Path(directory) if directory is not None else private.config_home() / 'remotedesk' / 'relay-device-keys'
+    return Store(root / device_key_scope(options))
+
+
+def load_device_key(options, directory=None):
+    for node in _device_key_store(options, directory).load().nodes:
+        if node.device_id == options.device_id:
+            return node.password
+    return ''
+
+
+def save_device_key(options, password, directory=None):
+    store = _device_key_store(options, directory)
+    book = store.load()
+    book.remember(options.server_address, options.port, password, device_id=options.device_id)
+    store.save(book)

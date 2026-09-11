@@ -19,19 +19,21 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
-/** Collapsed by default so private relay configuration does not crowd mobile controls. */
+/** Online devices first; administrator configuration is hidden after enrollment. */
 @android.annotation.SuppressLint("ViewConstructor") // Programmatic panel requiring an explicit connection callback; never inflated from XML.
 final class AndroidRelayPanel extends LinearLayout {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor(r -> AndroidRelay.thread("RelayDirectory", r));
-    private final Consumer<AndroidRelay.Options> connectTarget;
+    interface Connector { void connect(AndroidRelay.Options target, String name, boolean editKey); }
+    private final Connector connectTarget;
     private final Consumer<String> useDirectAddress;
-    private final LinearLayout content, devices;
-    private final TextView status, hostStatus;
+    private final LinearLayout content, devices, configuration;
+    private final TextView status, hostStatus, serverSummary;
     private final AndroidRelayPanelStatus panelStatus = new AndroidRelayPanelStatus();
     private final EditText server, sshPort, adminUser, adminPassword;
     private final CheckBox publish;
-    private final Button saveButton, cancelSetupButton;
+    private final Button saveButton, cancelSetupButton, manageButton, clearButton;
+    private boolean restoringPublish;
     private boolean setupBusy;
     private AndroidRelay.Options saved;
     private String deviceId;
@@ -55,18 +57,33 @@ final class AndroidRelayPanel extends LinearLayout {
     }
 
     AndroidRelayPanel(Context context, Consumer<AndroidRelay.Options> connectTarget, Consumer<String> useDirectAddress) {
+        this(context, (target, name, editKey) -> connectTarget.accept(target), useDirectAddress);
+    }
+
+    AndroidRelayPanel(Context context, Connector connectTarget, Consumer<String> useDirectAddress) {
         super(context);
         this.connectTarget = connectTarget;
         this.useDirectAddress = useDirectAddress;
         setOrientation(VERTICAL);
-        Button expand = button("公网中转 · 配置与在线设备", false);
+        Button expand = button("公网中继 · 在线设备", false);
         addView(expand, layout());
         content = new LinearLayout(context);
         content.setOrientation(VERTICAL);
-        content.setVisibility(GONE);
+        content.setVisibility(VISIBLE);
         addView(content, layout());
-        content.addView(AndroidUiTheme.createSectionSubtitle(context,
-            "首次用服务器 root 密码登录，之后自动连接。控制设备时，填写对方的设备密钥。"), layout());
+        serverSummary = AndroidUiTheme.createSectionSubtitle(context, "尚未登录服务器");
+        content.addView(serverSummary, layout());
+        manageButton = button("服务器设置", false);
+        content.addView(manageButton, layout());
+        configuration = new LinearLayout(context);
+        configuration.setOrientation(VERTICAL);
+        content.addView(configuration, layout());
+        configuration.addView(AndroidUiTheme.createSectionSubtitle(context,
+            "首次用服务器 root 密码登录，之后自动连接。连接设备时另填该设备自己的密钥。"), layout());
+        manageButton.setOnClickListener(view -> {
+            configuration.setVisibility(configuration.getVisibility() == VISIBLE ? GONE : VISIBLE);
+            manageButton.setText(configuration.getVisibility() == VISIBLE ? "收起服务器设置" : "服务器设置");
+        });
         server = field("服务器地址 / IP", false);
         adminPassword = field("服务器 root / 管理员密码", true);
         adminPassword.setHint("仅本次 SSH 登录使用，不保存；已登录可留空");
@@ -76,13 +93,13 @@ final class AndroidRelayPanel extends LinearLayout {
         advanced.setVisibility(GONE);
         Button advancedButton = button("高级设置（通常不用改）", false);
         advancedButton.setOnClickListener(view -> advanced.setVisibility(advanced.getVisibility() == VISIBLE ? GONE : VISIBLE));
-        content.addView(advancedButton, layout());
+        configuration.addView(advancedButton, layout());
         sshPort = field(advanced, "SSH 端口（默认 22）", false);
         sshPort.setInputType(InputType.TYPE_CLASS_NUMBER);
         adminUser = field(advanced, "服务器管理员账号", false);
         advanced.addView(AndroidUiTheme.createSectionSubtitle(context,
             "默认 root。中继端口和内部连接配置自动获取，无需填写密钥或证书。"), layout());
-        content.addView(advanced, layout());
+        configuration.addView(advanced, layout());
         publish = new CheckBox(context);
         publish.setText(R.string.relay_publish_addresses);
         publish.setTextColor(AndroidUiTheme.TEXT);
@@ -96,11 +113,11 @@ final class AndroidRelayPanel extends LinearLayout {
         content.addView(hostStatus, layout());
         saveButton = button("登录服务器", true);
         saveButton.setOnClickListener(view -> save());
-        content.addView(saveButton, layout());
-        cancelSetupButton = button("取消连接", false);
+        configuration.addView(saveButton, layout());
+        cancelSetupButton = button("取消登录", false);
         cancelSetupButton.setVisibility(GONE);
         cancelSetupButton.setOnClickListener(view -> cancelSetup());
-        content.addView(cancelSetupButton, layout());
+        configuration.addView(cancelSetupButton, layout());
         Button refresh = button("刷新在线设备", false);
         refresh.setOnClickListener(view -> refresh());
         content.addView(refresh, layout());
@@ -118,11 +135,11 @@ final class AndroidRelayPanel extends LinearLayout {
         devices = new LinearLayout(context);
         devices.setOrientation(VERTICAL);
         content.addView(devices, layout());
-        Button clear = button("清除中转配置", false);
-        clear.setOnClickListener(view -> new AlertDialog.Builder(context)
-            .setTitle("退出服务器？").setMessage("本机将从中转下线，设备密钥和直连配置不变。")
-            .setNegativeButton("取消", null).setPositiveButton("清除", (dialog, which) -> clear()).show());
-        content.addView(clear, layout());
+        clearButton = button("退出服务器", false);
+        clearButton.setOnClickListener(view -> new AlertDialog.Builder(context)
+            .setTitle("退出服务器？").setMessage("本机将从此服务器下线，设备记录和设备密钥保留。再次接入需要服务器管理员密码。\n\n如果服务器重装或身份变化，请先核实，再退出并重新登录。")
+            .setNegativeButton("取消", null).setPositiveButton("退出服务器", (dialog, which) -> clear()).show());
+        configuration.addView(clearButton, layout());
         expand.setOnClickListener(view -> {
             content.setVisibility(content.getVisibility() == VISIBLE ? GONE : VISIBLE);
             if (content.getVisibility() == VISIBLE) refresh();
@@ -140,7 +157,40 @@ final class AndroidRelayPanel extends LinearLayout {
                 sshPort.setText(R.string.relay_default_ssh_port); adminUser.setText(R.string.relay_default_admin);
                 setStatus("请填写服务器地址和 root 密码；无需填写中继密钥或证书。");
             }
-        } catch (Exception ex) { setStatus("中转配置无法读取，请重新配置服务器。"); }
+        } catch (Exception ex) { setStatus("中转配置无法读取，请重新登录服务器。"); }
+        updateServerUi();
+        publish.setOnCheckedChangeListener((button, checked) -> updatePublish(checked));
+    }
+
+    private void updateServerUi() {
+        boolean configured = saved != null;
+        serverSummary.setText(configured ? "服务器：" + saved.serverAddress + " · 已保存登录" : "尚未登录服务器");
+        configuration.setVisibility(configured ? GONE : VISIBLE);
+        manageButton.setVisibility(configured ? VISIBLE : GONE);
+        manageButton.setText("服务器设置");
+        clearButton.setEnabled(configured);
+        publish.setEnabled(configured && !setupBusy);
+    }
+
+    private void updatePublish(boolean enabled) {
+        if (restoringPublish || saved == null || closed || setupBusy) return;
+        AndroidRelay.Options previous = saved;
+        try {
+            AndroidRelay.Options next = AndroidRelayUiPolicy.publish(previous, enabled,
+                options -> AndroidRelaySettings.save(getContext(), options));
+            saved = next;
+            epoch++; AndroidRelay.close(pendingSocket);
+            panelStatus.beginSetup();
+            applyHostSettings();
+            setStatus(enabled ? "已允许本机上线；被控端开启后自动发布。" : "已停止本机中继发布，仍可连接其他设备。");
+        } catch (Exception failure) {
+            // If persistence failed, the effective configuration is unchanged.
+            // If the service could not be notified, keep the saved state visible.
+            restoringPublish = true;
+            publish.setChecked(saved.publish);
+            restoringPublish = false;
+            showSetupFailure(saved == previous ? "修改未保存，开关已恢复，请重试。" : "设置已保存，但服务更新失败；请重启本机被控端。");
+        }
     }
 
     private LayoutParams layout() {
@@ -150,7 +200,7 @@ final class AndroidRelayPanel extends LinearLayout {
     }
 
     private EditText field(String label, boolean secret) {
-        return field(content, label, secret);
+        return field(configuration, label, secret);
     }
 
     private EditText field(LinearLayout parent, String label, boolean secret) {
@@ -236,7 +286,7 @@ final class AndroidRelayPanel extends LinearLayout {
     private void setSetupBusy(boolean value) {
         setupBusy = value;
         for (EditText field : new EditText[] {server, sshPort, adminUser, adminPassword}) field.setEnabled(!value);
-        publish.setEnabled(!value);
+        publish.setEnabled(!value && saved != null);
         saveButton.setEnabled(!value);
         cancelSetupButton.setVisibility(value ? VISIBLE : GONE);
     }
@@ -283,7 +333,13 @@ final class AndroidRelayPanel extends LinearLayout {
                         adminUser.setText(options.adminUsername);
                         devices.removeAllViews();
                         setSetupBusy(false);
-                        applyHostSettings();
+                        updateServerUi();
+                        try { applyHostSettings(); }
+                        catch (Exception serviceFailure) {
+                            showSetupFailure("登录已保存，但服务更新失败；请重启本机被控端。");
+                            refresh();
+                            return;
+                        }
                         setStatus("服务器登录成功，下次自动连接；root 密码未保存。");
                         refresh();
                     } catch (Exception ex) {
@@ -304,8 +360,13 @@ final class AndroidRelayPanel extends LinearLayout {
             adminPassword.setText(""); server.setText("");
             sshPort.setText(R.string.relay_default_ssh_port); adminUser.setText(R.string.relay_default_admin);
             AndroidRelay.close(pendingSocket);
-            applyHostSettings();
-            setStatus("中转配置已清除。");
+            updateServerUi();
+            try { applyHostSettings(); }
+            catch (Exception serviceFailure) {
+                showSetupFailure("已退出并清除登录，但服务更新失败；请重启本机被控端以停止旧连接。");
+                return;
+            }
+            setStatus("已退出服务器，设备记录和设备密钥保留。");
         } catch (Exception ex) { showSetupFailure("配置清除失败，请重试。"); }
     }
 
@@ -352,7 +413,15 @@ final class AndroidRelayPanel extends LinearLayout {
                         (local ? "本机（不可自连）" : device.busy ? "使用中（可接管）" : "在线 · 点击中转连接") +
                         "\n" + device.addressDisplay(), false);
                     item.setEnabled(!local);
-                    item.setOnClickListener(view -> connectTarget.accept(options.target(device.deviceId)));
+                    item.setOnClickListener(view -> {
+                        if (!closed && active && !setupBusy && epoch == generation && saved == options)
+                            connectTarget.connect(options.target(device.deviceId), device.name, false);
+                    });
+                    item.setOnLongClickListener(view -> {
+                        if (!closed && active && !setupBusy && epoch == generation && saved == options)
+                            connectTarget.connect(options.target(device.deviceId), device.name, true);
+                        return true;
+                    });
                     devices.addView(item, layout());
                     if (!local && useDirectAddress != null && !device.directAddresses.isEmpty() && device.directPort > 0) {
                         Button address = button("查看 / 使用 IP", false);
@@ -396,6 +465,7 @@ final class AndroidRelayPanel extends LinearLayout {
     }
 
     void active(boolean enabled) {
+        if (active == enabled && !closed) return;
         active = enabled; epoch++;
         ui.removeCallbacks(ticker);
         if (enabled) { lastRefresh = 0; ui.post(ticker); }

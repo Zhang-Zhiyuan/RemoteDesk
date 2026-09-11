@@ -60,8 +60,8 @@ public final class MainActivity extends Activity {
     private static final String STATE_VIEWER_ADDRESS = "main.viewer_address";
     private static final String STATE_SCROLL_X = "main.scroll_x";
     private static final String STATE_SCROLL_Y = "main.scroll_y";
+    private static final String STATE_PAGE = "main.page";
     private static final int CONTENT_MARGIN_DP = 16;
-    private static final int COLUMN_GAP_DP = 16;
     private static final int CONTROL_SPACING_DP = 8;
 
     private final ExecutorService discoveryExecutor = Executors.newSingleThreadExecutor();
@@ -80,6 +80,9 @@ public final class MainActivity extends Activity {
     private LinearLayout mainContentLayout;
     private LinearLayout columnsLayout;
     private LinearLayout connectionColumn;
+    private LinearLayout hostColumn;
+    private final Button[] navigationButtons = new Button[3];
+    private int selectedPage;
     private AndroidRelayPanel relayPanel;
     private AndroidConnectionHistoryPanel historyPanel;
     private AndroidLanDiscoveryPanel lanPanel;
@@ -87,8 +90,6 @@ public final class MainActivity extends Activity {
     private boolean historyRestored;
     private LinearLayout statusColumn;
     private int appliedContentWidth = -1;
-    private boolean adaptiveColumnsApplied;
-    private boolean appliedTwoColumns;
     private static DatagramSocket discoverySocket;
     private static volatile boolean discoveryPreviewRunning;
     private static CountDownLatch discoveryPreviewStopped = new CountDownLatch(0);
@@ -131,7 +132,9 @@ public final class MainActivity extends Activity {
         viewerPasswordEdit.setSingleLine(true);
         viewerPasswordEdit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         viewerPasswordEdit.setSaveEnabled(false);
-        viewerPasswordEdit.setText(AndroidPasswordStore.loadViewer(this));
+        // A last-used key is not necessarily the key for the address selected now.
+        // Restoring a device history entry fills both address and its own key.
+        viewerPasswordEdit.setText("");
         AndroidUiTheme.styleInput(this, viewerPasswordEdit);
 
         Button viewerButton = new Button(this);
@@ -261,6 +264,7 @@ public final class MainActivity extends Activity {
         addColumnView(connectionColumn, historyPanel);
         relayPanel = new AndroidRelayPanel(this, this::openRelayViewer, address -> {
             viewerAddressEdit.setText(address);
+            viewerPasswordEdit.setText(""); // A new address must not inherit the previous direct target's key.
             viewerAddressEdit.requestFocus();
             viewerAddressEdit.post(() -> viewerAddressEdit.requestRectangleOnScreen(
                 new android.graphics.Rect(0, 0, viewerAddressEdit.getWidth(), viewerAddressEdit.getHeight()), true));
@@ -268,19 +272,19 @@ public final class MainActivity extends Activity {
         });
         addColumnView(connectionColumn, relayPanel);
 
-        addColumnDivider(connectionColumn);
+        hostColumn = createVerticalColumn();
         addColumnView(
-            connectionColumn,
+            hostColumn,
             AndroidUiTheme.createEyebrow(this, "本机被控"));
         addColumnView(
-            connectionColumn,
+            hostColumn,
             AndroidUiTheme.createSectionTitle(this, "共享这台 Android"));
         addColumnView(
-            connectionColumn,
+            hostColumn,
             AndroidUiTheme.createSectionSubtitle(
                 this,
                 "录屏授权时请选择“整个屏幕”。启动成功后自动返回桌面；无障碍权限用于远程触控与文本输入。"));
-        addLabeledField(connectionColumn, "本机设备密钥", passwordEdit);
+        addLabeledField(hostColumn, "本机设备密钥", passwordEdit);
         CheckBox compatibleHost = new CheckBox(this);
         compatibleHost.setText("免重复录屏授权（无障碍兼容模式）");
         compatibleHost.setChecked(AndroidHostResume.compatibleSelected(this));
@@ -295,14 +299,14 @@ public final class MainActivity extends Activity {
                 .edit().putBoolean(AndroidHostResume.PREF_COMPATIBLE, checked).apply();
             if (!checked) AndroidHostResume.setArmed(this, false);
         });
-        addColumnView(connectionColumn, compatibleHost);
-        addColumnView(connectionColumn, AndroidUiTheme.createSectionSubtitle(this,
+        addColumnView(hostColumn, compatibleHost);
+        addColumnView(hostColumn, AndroidUiTheme.createSectionSubtitle(this,
             "Android 11 及以上可用。开启无障碍后不再弹录屏授权，锁屏后仍可连接，约 3 FPS；系统保护的内容除外。关闭此项使用 H.264 流畅模式。"));
         Button unlockPinButton = new Button(this);
         unlockPinButton.setText("设置 / 清除自动解锁 PIN");
         AndroidUiTheme.styleButton(this, unlockPinButton, AndroidUiTheme.ButtonRole.SECONDARY);
         unlockPinButton.setOnClickListener(view -> configureUnlockPin());
-        addColumnView(connectionColumn, unlockPinButton);
+        addColumnView(hostColumn, unlockPinButton);
         CheckBox keepScreenAwake = new CheckBox(this);
         keepScreenAwake.setText("远控连接期间保持屏幕亮起");
         keepScreenAwake.setChecked(RemoteDeskForegroundService.shouldKeepScreenAwake(this));
@@ -314,15 +318,15 @@ public final class MainActivity extends Activity {
                     .putExtra(RemoteDeskForegroundService.EXTRA_REFRESH_POWER, true));
             }
         });
-        addColumnView(connectionColumn, keepScreenAwake);
-        addColumnView(connectionColumn, AndroidUiTheme.createSectionSubtitle(this,
+        addColumnView(hostColumn, keepScreenAwake);
+        addColumnView(hostColumn, AndroidUiTheme.createSectionSubtitle(this,
             "无人连接时释放亮屏和性能锁，降低耗电及系统清理风险。兼容模式不依赖录屏授权；H.264 在锁屏后可能需要重新授权。"));
-        addColumnView(connectionColumn, startHostButton);
-        addColumnView(connectionColumn, returnToDesktopButton);
-        addColumnView(connectionColumn, AndroidUiTheme.createSectionSubtitle(this,
+        addColumnView(hostColumn, startHostButton);
+        addColumnView(hostColumn, returnToDesktopButton);
+        addColumnView(hostColumn, AndroidUiTheme.createSectionSubtitle(this,
             "含设备密钥的配置页可能被系统录屏保护遮黑。返回桌面即可查看其它内容；可通过应用通知回来管理连接。"));
-        addColumnView(connectionColumn, presenceButton);
-        addColumnView(connectionColumn, stopButton);
+        addColumnView(hostColumn, presenceButton);
+        addColumnView(hostColumn, stopButton);
 
         statusColumn = createVerticalColumn();
         addColumnView(
@@ -353,6 +357,9 @@ public final class MainActivity extends Activity {
         columnsLayout = new LinearLayout(this);
         columnsLayout.setOrientation(LinearLayout.VERTICAL);
         columnsLayout.addView(connectionColumn, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT));
+        columnsLayout.addView(hostColumn, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT));
         columnsLayout.addView(statusColumn, new LinearLayout.LayoutParams(
@@ -393,12 +400,29 @@ public final class MainActivity extends Activity {
         scrollView.addView(contentFrame, new ScrollView.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT));
-        scrollView.setOnApplyWindowInsetsListener(this::applyMainWindowInsets);
         scrollView.addOnLayoutChangeListener((view, left, top, right, bottom,
                                                oldLeft, oldTop, oldRight, oldBottom) ->
             updateMainAdaptiveLayout());
-        setContentView(scrollView);
-        scrollView.requestApplyInsets();
+        LinearLayout screen = new LinearLayout(this);
+        screen.setOrientation(LinearLayout.VERTICAL);
+        screen.setBackgroundColor(AndroidUiTheme.BACKGROUND);
+        screen.addView(scrollView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        LinearLayout navigation = new LinearLayout(this);
+        navigation.setPadding(dp(8), dp(4), dp(8), dp(4));
+        String[] pages = { "设备", "本机被控", "设置" };
+        for (int i = 0; i < pages.length; i++) {
+            final int page = i;
+            Button button = new Button(this); button.setText(pages[i]);
+            button.setContentDescription(pages[i]);
+            button.setOnClickListener(view -> selectPage(page, true));
+            navigationButtons[i] = button;
+            navigation.addView(button, new LinearLayout.LayoutParams(0, dp(48), 1));
+        }
+        screen.addView(navigation, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        screen.setOnApplyWindowInsetsListener(this::applyMainWindowInsets);
+        setContentView(screen);
+        screen.requestApplyInsets();
+        selectPage(savedInstanceState == null ? 0 : savedInstanceState.getInt(STATE_PAGE, 0), false);
 
         restoreMainUiState(savedInstanceState);
 
@@ -542,6 +566,22 @@ public final class MainActivity extends Activity {
         return windowInsets;
     }
 
+    private void selectPage(int page, boolean resetScroll) {
+        selectedPage = Math.max(0, Math.min(2, page));
+        connectionColumn.setVisibility(selectedPage == 0 ? View.VISIBLE : View.GONE);
+        hostColumn.setVisibility(selectedPage == 1 ? View.VISIBLE : View.GONE);
+        statusColumn.setVisibility(selectedPage == 2 ? View.VISIBLE : View.GONE);
+        for (int i = 0; i < navigationButtons.length; i++) {
+            AndroidUiTheme.styleButton(this, navigationButtons[i], i == selectedPage
+                ? AndroidUiTheme.ButtonRole.PRIMARY : AndroidUiTheme.ButtonRole.SECONDARY);
+            navigationButtons[i].setSelected(i == selectedPage);
+        }
+        if (resetScroll) scrollView.post(() -> scrollView.scrollTo(0, 0));
+        if (lanPanel != null) lanPanel.active(activityResumed && selectedPage == 0);
+        if (relayPanel != null) relayPanel.active(activityResumed && selectedPage == 0);
+        if (resetScroll) updateStatusPanel(currentHeadline());
+    }
+
     private void updateMainAdaptiveLayout() {
         if (scrollView == null || mainContentLayout == null || scrollView.getWidth() <= 0) {
             return;
@@ -572,43 +612,9 @@ public final class MainActivity extends Activity {
             appliedContentWidth = contentWidth;
         }
 
-        boolean useTwoColumns = AndroidAdaptiveLayout.useMainTwoColumns(
-            availableWidthDp,
-            getResources().getConfiguration().fontScale);
-        if (adaptiveColumnsApplied && useTwoColumns == appliedTwoColumns) {
-            return;
-        }
-
-        int gap = dp(COLUMN_GAP_DP);
-        columnsLayout.setOrientation(useTwoColumns
-            ? LinearLayout.HORIZONTAL
-            : LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams connectionParams;
-        LinearLayout.LayoutParams statusParams;
-        if (useTwoColumns) {
-            connectionParams = new LinearLayout.LayoutParams(
-                0,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                1.0f);
-            statusParams = new LinearLayout.LayoutParams(
-                0,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                1.0f);
-            connectionParams.setMarginEnd(gap / 2);
-            statusParams.setMarginStart(gap - gap / 2);
-        } else {
-            connectionParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT);
-            statusParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT);
-            connectionParams.bottomMargin = gap;
-        }
-        connectionColumn.setLayoutParams(connectionParams);
-        statusColumn.setLayoutParams(statusParams);
-        adaptiveColumnsApplied = true;
-        appliedTwoColumns = useTwoColumns;
+        // Each task has its own page, including on tablets. Width still adapts
+        // to density/font scaling without mixing permissions into connection UI.
+        columnsLayout.setOrientation(LinearLayout.VERTICAL);
     }
 
     private void restoreMainUiState(Bundle savedInstanceState) {
@@ -629,6 +635,7 @@ public final class MainActivity extends Activity {
         outState.putString(STATE_VIEWER_ADDRESS, viewerAddressEdit.getText().toString());
         outState.putInt(STATE_SCROLL_X, scrollView.getScrollX());
         outState.putInt(STATE_SCROLL_Y, scrollView.getScrollY());
+        outState.putInt(STATE_PAGE, selectedPage);
         super.onSaveInstanceState(outState);
     }
 
@@ -644,9 +651,9 @@ public final class MainActivity extends Activity {
                 if (!node.relay()) { fillHistoryNode(node); break; }
             }
         });
-        if (lanPanel != null) lanPanel.active(true);
+        if (lanPanel != null) lanPanel.active(selectedPage == 0);
         AndroidHostResume.tryResume(this);
-        if (relayPanel != null) relayPanel.active(true);
+        if (relayPanel != null) relayPanel.active(selectedPage == 0);
         if (RemoteDeskForegroundService.isServiceRunning()) {
             stopDiscoveryPreviewAndWait();
             updateStatusPanel(currentHeadline());
@@ -681,10 +688,35 @@ public final class MainActivity extends Activity {
         super.onPause();
     }
 
-    private void openRelayViewer(AndroidRelay.Options target) {
-        String password = viewerPasswordEdit.getText().toString().trim();
-        if (password.isEmpty()) password = passwordEdit.getText().toString().trim();
-        if (password.isEmpty()) { updateStatusPanel("请先填写目标设备的设备密钥。"); return; }
+    private void openRelayViewer(AndroidRelay.Options target, String name, boolean editKey) {
+        String remembered = "";
+        try {
+            AndroidConnectionHistory.Node node = AndroidConnectionHistoryStore.load(this).findRelay(target);
+            if (node != null) remembered = node.password;
+        } catch (Exception ignored) { /* Ask explicitly if a saved credential cannot be read. */ }
+        if (!editKey && !remembered.isEmpty()) { launchRelayViewer(target, remembered); return; }
+        EditText key = new EditText(this);
+        key.setSingleLine(true); key.setSaveEnabled(false);
+        key.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
+        key.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        key.setHint("这台设备的密钥，不是服务器密码"); key.setText(remembered);
+        AndroidUiTheme.styleInput(this, key);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL); content.setPadding(dp(20), dp(8), dp(20), dp(8));
+        content.addView(AndroidUiTheme.createSectionSubtitle(this, "连接成功后自动记住。在线列表长按此设备可更改密钥。"));
+        content.addView(key);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("连接 " + name).setView(content)
+            .setNegativeButton("取消", null).setPositiveButton("连接", null).create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+            String value = key.getText().toString().trim();
+            if (value.isEmpty() || value.length() > 4096) { key.setError("请输入这台设备的有效密钥"); return; }
+            dialog.dismiss(); launchRelayViewer(target, value);
+        }));
+        dialog.setOnDismissListener(ignored -> key.setText(""));
+        dialog.show();
+    }
+
+    private void launchRelayViewer(AndroidRelay.Options target, String password) {
         try {
             AndroidPasswordStore.saveViewer(this, password);
             startActivity(new Intent(this, RemoteDeskViewerActivity.class)
@@ -700,6 +732,15 @@ public final class MainActivity extends Activity {
     }
 
     private void openHistoryViewer(AndroidConnectionHistory.Node node) {
+        if (node.relay()) {
+            try { AndroidRelayUiPolicy.historyTarget(node, AndroidRelaySettings.load(this)); }
+            catch (Exception unavailable) {
+                new AlertDialog.Builder(this).setTitle("请先登录服务器")
+                    .setMessage("此记录的服务器：" + node.host + "\n请在设备页的公网中继中登录此服务器；更换服务器后请从在线列表重新连接。")
+                    .setPositiveButton("知道了", null).show();
+                return;
+            }
+        }
         if (node.relay() || !node.autoPort) { launchHistoryViewer(node, null); return; }
         int generation = ++viewerLaunchEpoch;
         updateStatusPanel("正在查找 " + node.title() + " 的地址和端口…");
@@ -894,9 +935,6 @@ public final class MainActivity extends Activity {
             enteredAddress,
             RemoteDeskProtocol.HOST_PORT);
         String password = viewerPasswordEdit.getText().toString().trim();
-        if (password.isEmpty()) {
-            password = passwordEdit.getText().toString().trim();
-        }
 
         if (endpoint == null || password.isEmpty()) {
             updateStatusPanel("请填写远端地址和设备密钥");
@@ -1404,6 +1442,7 @@ public final class MainActivity extends Activity {
             return "发现常驻中";
         }
 
+        if (selectedPage == 0) return "选择设备即可远控\n控制其他设备无需本机录屏授权";
         return AndroidHostResume.compatibleSelected(this)
             ? "已打开，可被局域网扫描\n点击启动兼容被控，无需录屏授权"
             : "已打开，可被局域网扫描\n等待屏幕录制授权";

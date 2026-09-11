@@ -66,6 +66,18 @@ final class AndroidConnectionHistory {
         return null;
     }
 
+    Node findRelay(AndroidRelay.Options target) {
+        for (Node node : nodes) {
+            if (!node.relay() || !node.host.equals(normalizeHost(target.serverAddress)) ||
+                    node.port != target.port || !node.relayDeviceId.equals(target.deviceId)) continue;
+            try {
+                AndroidRelay.Options previous = AndroidRelay.Options.parse(node.relayConfiguration);
+                if (previous.tlsCertificateSha256.equals(target.tlsCertificateSha256)) return node;
+            } catch (Exception ignored) { /* Invalid old shortcuts cannot supply another device's key. */ }
+        }
+        return null;
+    }
+
     Node remember(String previousId, String host, int port, String relayDeviceId, String password,
                   String relayConfiguration, String name, long now) {
         return remember(previousId, host, port, relayDeviceId, password, relayConfiguration, name, now, "");

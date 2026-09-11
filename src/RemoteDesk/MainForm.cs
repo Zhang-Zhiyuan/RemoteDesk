@@ -911,12 +911,12 @@ public sealed partial class MainForm : Form
                 ? "已管理员运行"
                 : "管理员重启");
         _restartAsAdministratorButton.Enabled = !elevated;
-        _persistentStartupButton = CreateSecondaryButton("安装 / 更新常驻权限");
+        _persistentStartupButton = CreateSecondaryButton("设置登录后自动可控");
         SetToolTip(_persistentStartupButton,
             "一次管理员授权：安装到受保护目录，之后登录自动以管理员运行。" +
             "不保存 Windows 密码，不关闭 UAC；取消“开机自启”可停用。");
         _persistentStartupButton.Click += async (_, _) => await InstallPersistentStartupAsync();
-        _secureDesktopButton = CreateSecondaryButton("锁屏控制…");
+        _secureDesktopButton = CreateSecondaryButton("设置锁屏控制…");
         var secureDesktopMenu = new ContextMenuStrip();
         secureDesktopMenu.Items.Add("安装 / 更新锁屏控制", null, async (_, _) => await ConfigureSecureDesktopAsync(true));
         secureDesktopMenu.Items.Add("停用锁屏控制", null, async (_, _) => await ConfigureSecureDesktopAsync(false));
@@ -947,9 +947,16 @@ public sealed partial class MainForm : Form
         _hostStatusLabel = CreateStatusBadge("未启动", NeutralBadgeBackColor, NeutralBadgeTextColor);
 
         actions.Controls.Add(_hostToggleButton);
-        actions.Controls.Add(_restartAsAdministratorButton);
-        actions.Controls.Add(_persistentStartupButton);
-        actions.Controls.Add(_secureDesktopButton);
+        Control permissions = BuildHostPermissionsPanel();
+        permissions.Visible = false;
+        var permissionsButton = CreateSecondaryButton("被控权限设置…");
+        permissionsButton.Click += (_, _) =>
+        {
+            _refreshPermissionStatus?.Invoke();
+            permissions.Visible = !permissions.Visible;
+            permissionsButton.Text = permissions.Visible ? "收起权限设置" : "被控权限设置…";
+        };
+        actions.Controls.Add(permissionsButton);
         actions.Controls.Add(refreshIpButton);
         actions.Controls.Add(minimizeToTrayButton);
         actions.Controls.Add(exportLogButton);
@@ -985,9 +992,16 @@ public sealed partial class MainForm : Form
         logSection.RowStyles.Clear();
         logSection.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
+        root.RowCount = 4;
+        root.RowStyles.Clear();
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.Controls.Add(settingsArea, 0, 0);
         root.Controls.Add(actions, 0, 1);
-        root.Controls.Add(logSection.Parent!, 0, 2);
+        root.Controls.Add(permissions, 0, 2);
+        root.Controls.Add(logSection.Parent!, 0, 3);
         page.Controls.Add(root);
         return page;
     }
@@ -1338,6 +1352,7 @@ public sealed partial class MainForm : Form
         PopulateViewerVideoModes(_relayVideoModeBox);
 
         _relayLoginButton = CreatePrimaryButton("登录服务器");
+        _relayLogoutButton = CreateSecondaryButton("退出服务器");
         _relayConfigureButton = CreateSecondaryButton("部署 / 更新服务器");
         _relayRefreshButton = CreateSecondaryButton("刷新在线设备");
         _relayReportAddressButton = CreateSecondaryButton("立即上报本机 IP");
@@ -1353,6 +1368,7 @@ public sealed partial class MainForm : Form
         };
         configurationActions.Controls.Add(_relayLoginButton);
         configurationActions.Controls.Add(_relayConfigureButton);
+        configurationActions.Controls.Add(_relayLogoutButton);
         configurationActions.Controls.Add(_relayRefreshButton);
         configurationActions.Controls.Add(_relayReportAddressButton);
 
@@ -1362,7 +1378,7 @@ public sealed partial class MainForm : Form
             sizeToContent: true);
         AddSettingRow(configuration, 0, "服务器", _relayServerSummaryLabel);
         AddSettingRow(configuration, 1, "本机上线", _relayRegisterHostBox);
-        AddSettingRow(configuration, 2, "设备密钥", _relayViewerPasswordBox);
+        AddSettingRow(configuration, 2, "目标设备密钥", _relayViewerPasswordBox);
         AddSettingRow(configuration, 3, "画面模式", _relayVideoModeBox);
         AddSettingRow(configuration, 4, "网络", networkOptions);
         AddSettingRow(configuration, 5, "管理", configurationActions);
@@ -2235,7 +2251,14 @@ public sealed partial class MainForm : Form
                 return;
             }
 
-            SaveSettingsFromUi();
+            if (!RelayDeviceKeys.SetPublication(_settings.Relay, _relayRegisterHostBox.Checked, TrySaveSettings))
+            {
+                _applyingSettings = true;
+                try { _relayRegisterHostBox.Checked = _settings.Relay.RegisterThisDevice; }
+                finally { _applyingSettings = false; }
+                SetRelayStatus("修改未保存，开关已恢复，请重试。", DangerColor);
+                return;
+            }
             await ApplyRelayHostRegistrationAsync();
         };
         _relayOptimizeNetworkBox.CheckedChanged += async (_, _) =>
@@ -2272,6 +2295,7 @@ public sealed partial class MainForm : Form
             await ConfigureRelayServerAsync();
         _relayLoginButton.Click += async (_, _) =>
             await ConfigureRelayServerAsync(loginOnly: true);
+        _relayLogoutButton.Click += async (_, _) => await LogoutRelayServerAsync();
         _relayRefreshButton.Click += async (_, _) =>
             await RefreshRelayDevicesAsync(silent: false);
         _relayReportAddressButton.Click += (_, _) => SetRelayStatus(
@@ -2282,7 +2306,10 @@ public sealed partial class MainForm : Form
         _relayConnectButton.Click += async (_, _) =>
             await ToggleRelayViewerAsync();
         _relayDevicesList.SelectedIndexChanged += (_, _) =>
+        {
+            SelectRelayDeviceKey();
             UpdateRelayActionState();
+        };
         _relayDevicesList.DoubleClick += async (_, _) =>
         {
             if (_relayConnectButton.Enabled &&
@@ -3534,6 +3561,7 @@ public sealed partial class MainForm : Form
         finally
         {
             if (!_isClosing && !IsDisposed) _persistentStartupButton.Enabled = true;
+            _refreshPermissionStatus?.Invoke();
         }
     }
 
@@ -3552,7 +3580,7 @@ public sealed partial class MainForm : Form
             _secureDesktopButton.Text = enable ? "锁屏控制：已启用" : "锁屏控制：已停用";
             AppendHostLog(enable
                 ? "锁屏控制已安装。无密码账户可直接点击登录；有密码 / PIN 时按 Windows 提示输入，不保存系统密码。" +
-                  (WindowsProcessElevation.IsCurrentProcessElevated() ? "当前连接可直接使用。" : "请点击“管理员重启”使当前被控端生效。")
+                  (WindowsProcessElevation.IsCurrentProcessElevated() ? "当前连接可直接使用。" : "请在“被控权限设置”中点击“授权并重启应用”使当前被控端生效。")
                 : "锁屏控制已停用，普通桌面远控不受影响。");
         }
         catch (System.ComponentModel.Win32Exception ex) when (WindowsProcessElevation.IsUserCancellation(ex))
@@ -3563,7 +3591,7 @@ public sealed partial class MainForm : Form
         {
             if (!_isClosing && !IsDisposed) MessageBox.Show(this, ex.Message, "锁屏控制", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
-        finally { if (!_isClosing && !IsDisposed) _secureDesktopButton.Enabled = true; }
+        finally { if (!_isClosing && !IsDisposed) { _secureDesktopButton.Enabled = true; _refreshPermissionStatus?.Invoke(); } }
     }
 
     private async Task ToggleHostAsync()
@@ -3983,6 +4011,7 @@ public sealed partial class MainForm : Form
         finally
         {
             _relayRefreshInProgress = false;
+            SelectRelayDeviceKey();
             UpdateRelayActionState();
         }
     }
@@ -4077,6 +4106,9 @@ public sealed partial class MainForm : Form
             return;
         }
 
+        string? deviceKey = disconnecting ? null : RequestRelayDeviceKey(selected!);
+        if (!disconnecting && deviceKey is null) return;
+
         _viewerActionInProgress = true;
         _viewerActionDisconnecting = disconnecting;
         SetViewerConnectionInputsEnabled(false);
@@ -4100,7 +4132,7 @@ public sealed partial class MainForm : Form
             var snapshot = new ViewerConnectionSnapshot(
                 route.ServerAddress,
                 route.Port,
-                _relayViewerPasswordBox.Text,
+                deviceKey!,
                 GetSelectedViewerVideoMode(
                     _relayVideoModeBox),
                 route);
@@ -4136,10 +4168,17 @@ public sealed partial class MainForm : Form
                     "连接握手后未收到被控端设备信息。");
             }
 
+            string? protectedKey = AppSettingsService.ProtectSecret(snapshot.Password);
+            bool keySaved = false;
+            if (protectedKey is not null)
+            {
+                _settings.Relay.DeviceKeys = RelayDeviceKeys.Remember(_settings.Relay.DeviceKeys, route, protectedKey);
+                keySaved = TrySaveSettings();
+            }
             ShowViewerWindow();
             SetRelayStatus(
-                $"已通过私有中继连接 {selected.MachineName}。",
-                SuccessTextColor);
+                $"已通过私有中继连接 {selected.MachineName}。" + (keySaved ? "" : "设备密钥未能保存，下次连接需要重新填写。"),
+                keySaved ? SuccessTextColor : DangerColor);
         }
         catch (OperationCanceledException)
             when (_relayOperationCancellation.IsCancellationRequested)
@@ -4255,7 +4294,7 @@ public sealed partial class MainForm : Form
         }
 
         _relayServerSummaryLabel.Text =
-            $"{_settings.Relay.ServerAddress}:{_settings.Relay.RelayPort}  ·  TLS 已固定  ·  " +
+            $"{_settings.Relay.ServerAddress}:{_settings.Relay.RelayPort}  ·  已保存登录  ·  " +
             $"本机 ID {_settings.Relay.DeviceId[..8]}";
         _relayServerSummaryLabel.ForeColor = SuccessTextColor;
         UpdateRelayActionState();
@@ -6379,10 +6418,7 @@ public sealed partial class MainForm : Form
             _relayRegisterHostBox.Checked =
                 _settings.Relay.RegisterThisDevice;
             _relayOptimizeNetworkBox.Checked = _settings.Relay.OptimizeNetworkRoute;
-            _relayViewerPasswordBox.Text =
-                string.IsNullOrWhiteSpace(relayViewerPassword)
-                    ? DefaultAccessPassword
-                    : relayViewerPassword;
+            _relayViewerPasswordBox.Text = ""; // Filled only for the selected device, never a global fallback.
             SetSelectedViewerVideoMode(
                 _relayVideoModeBox,
                 _settings.Relay.VideoMode);
@@ -6468,9 +6504,8 @@ public sealed partial class MainForm : Form
             _settings.Relay.OptimizeNetworkRoute = _relayOptimizeNetworkBox.Checked;
             _settings.Relay.VideoMode =
                 GetSelectedViewerVideoMode(_relayVideoModeBox);
-            _settings.Relay.ProtectedViewerPassword =
-                AppSettingsService.ProtectSecret(
-                    _relayViewerPasswordBox.Text);
+            // Legacy global relay keys are retained for old settings compatibility,
+            // but new keys are saved per authenticated device after connection.
 
             TrySaveSettings();
             UpdateDiscoveryPresence();
@@ -6795,6 +6830,8 @@ public sealed partial class MainForm : Form
             !IsViewerReconnecting() &&
             !_viewerClient.IsConnected;
         _relayLoginButton.Enabled = _relayConfigureButton.Enabled;
+        _relayLogoutButton.Enabled = _relayConfigureButton.Enabled &&
+            (!string.IsNullOrEmpty(_settings.Relay.ServerAddress) || !string.IsNullOrEmpty(_settings.Relay.ProtectedAccessToken));
         _relayRefreshButton.Enabled =
             configured &&
             !_relayOperationInProgress &&
