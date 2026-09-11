@@ -91,6 +91,37 @@ class RelayServerTests(unittest.IsolatedAsyncioTestCase):
         await write_json(writer, dict(version=1, role="directory", token=TOKEN, pageSize=32, offset=0))
         return (await read_json(reader))["devices"]
 
+    async def test_authenticated_health_reports_loaded_version_hash_and_idle_state(self):
+        reader, writer = await self.connect()
+        await write_json(writer, dict(version=1, role="health", token=TOKEN))
+        response = await read_json(reader)
+        self.assertTrue(response["ok"])
+        self.assertEqual(relay.RELAY_RELEASE_VERSION, response["serverVersion"])
+        self.assertEqual(relay.RELAY_SOURCE_SHA256, response["serverSourceSha256"])
+        self.assertRegex(response["serverSourceSha256"], r"^[0-9a-f]{64}$")
+        self.assertFalse(response["busy"])
+
+    async def test_health_requires_authentication_before_exposing_build(self):
+        reader, writer = await self.connect()
+        await write_json(writer, dict(version=1, role="health", token="wrong"))
+        response = await read_json(reader)
+        self.assertFalse(response["ok"])
+        self.assertNotIn("serverVersion", response)
+        self.assertNotIn("serverSourceSha256", response)
+
+    async def test_health_includes_pending_sessions(self):
+        with mock.patch.dict(self.relay.pending, {"pending": object()}):
+            reader, writer = await self.connect()
+            await write_json(writer, dict(version=1, role="health", token=TOKEN))
+            self.assertTrue((await read_json(reader))["busy"])
+
+    async def test_health_source_identity_is_not_reloaded_from_replaced_disk_file(self):
+        with mock.patch.object(Path, "read_bytes", return_value=b"replaced file"):
+            reader, writer = await self.connect()
+            await write_json(writer, dict(version=1, role="health", token=TOKEN))
+            response = await read_json(reader)
+            self.assertEqual(relay.RELAY_SOURCE_SHA256, response["serverSourceSha256"])
+
     async def test_address_change_and_custom_port_replace_same_device(self):
         device_id = str(uuid.uuid4())
         reader, writer = await self.register_host(device_id, directAddresses=["192.0.2.3"], directPort=40565)

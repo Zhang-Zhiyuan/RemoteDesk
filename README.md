@@ -2,7 +2,7 @@
 
 一个自用的远程桌面工具，支持 Windows、Linux 和 Android。局域网内可以直接连接，跨网络可以走自己的公网中继服务器。
 
-打包好的程序在 [release](release/)：Windows 下载 `windows-x64` 文件夹后运行 `RemoteDesk.exe`，Android 安装 APK，Linux 选择对应安装包。
+安装包在 [GitHub Releases](https://github.com/Zhang-Zhiyuan/RemoteDesk/releases)，仓库的 [release](release/) 目录也保留成品。Windows 解压 ZIP 后运行 `RemoteDesk.exe`，Android 安装 APK，Linux 选择对应安装包。
 
 ## 功能
 

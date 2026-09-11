@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -22,7 +23,12 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
+from pathlib import Path
 
+
+RELAY_RELEASE_VERSION = "1.0.8"
+# Capture once when this process loads, not when an installer replaces the file.
+RELAY_SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 MAX_HANDSHAKE_BYTES = 64 * 1024
 MAX_CONNECTIONS = 512
@@ -173,6 +179,11 @@ class RelayServer:
                 await self.handle_viewer(reader, writer, hello)
             elif role == "host-data":
                 await self.handle_host_data(reader, writer, hello)
+            elif role == "health":
+                async with self.state_lock:
+                    busy = bool(self.pending) or any(host.active_sessions for host in self.hosts.values())
+                await write_json(writer, {"ok": True, "serverVersion": RELAY_RELEASE_VERSION,
+                                          "serverSourceSha256": RELAY_SOURCE_SHA256, "busy": busy})
             else:
                 await write_error(writer, "未知的中继连接类型。")
         except (asyncio.IncompleteReadError, ConnectionError):

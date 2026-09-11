@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.Json;
 using Renci.SshNet.Sftp;
 using Xunit;
 
@@ -6,6 +7,36 @@ namespace RemoteDesk.Tests;
 
 public sealed class RelayProvisionerTests
 {
+    [Theory]
+    [InlineData(false, "1.0.8", true)]
+    [InlineData(true, "invalid", true)]
+    [InlineData(true, "1.0", true)]
+    [InlineData(true, "1.0.8.1", true)]
+    [InlineData(true, "1.0.8", false)]
+    public void InstallerSuccessRequiresVerifiedRuntimeIdentity(bool verified, string version, bool validHash)
+    {
+        string json = JsonSerializer.Serialize(new
+        {
+            port = 56567, accessToken = new string('a', 64), tlsCertificateSha256 = new string('b', 64),
+            healthVerified = verified, serverVersion = version, serverSourceSha256 = validHash ? new string('c', 64) : "bad"
+        });
+        Assert.Throws<InvalidOperationException>(() => RelayProvisioner.ParseResult("REMOTEDESK_RELAY_RESULT=" + json));
+    }
+
+    [Fact]
+    public void VerifiedRuntimeIdentityIsRetainedInInstallerResult()
+    {
+        string json = JsonSerializer.Serialize(new
+        {
+            port = 56567, accessToken = new string('a', 64), tlsCertificateSha256 = new string('b', 64),
+            healthVerified = true, serverVersion = "1.0.8", serverSourceSha256 = new string('c', 64)
+        });
+        var result = RelayProvisioner.ParseResult("REMOTEDESK_RELAY_RESULT=" + json);
+        Assert.True(result.HealthVerified);
+        Assert.Equal("1.0.8", result.ServerVersion);
+        Assert.Equal(new string('c', 64), result.ServerSourceSha256);
+    }
+
     [Theory]
     [InlineData("null")]
     [InlineData("{}")]

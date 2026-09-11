@@ -312,6 +312,10 @@ internal sealed class RelayProvisioner
             if (result is null ||
                 result.Port is <= 0 or > 65535 ||
                 string.IsNullOrEmpty(result.AccessToken) || result.AccessToken.Length < 32 ||
+                !result.HealthVerified ||
+                !Version.TryParse(result.ServerVersion, out Version? serverVersion) ||
+                serverVersion.Build < 0 || serverVersion.Revision >= 0 ||
+                RelayTls.NormalizeFingerprint(result.ServerSourceSha256).Length != 64 ||
                 RelayTls.NormalizeFingerprint(
                     result.TlsCertificateSha256).Length != 64)
             {
@@ -435,6 +439,12 @@ internal sealed class RelayProvisioner
         public string AccessToken { get; set; } = string.Empty;
 
         public string TlsCertificateSha256 { get; set; } = string.Empty;
+
+        public bool HealthVerified { get; set; }
+
+        public string ServerVersion { get; set; } = string.Empty;
+
+        public string ServerSourceSha256 { get; set; } = string.Empty;
     }
 
     private sealed record SshInputCommandResult(
