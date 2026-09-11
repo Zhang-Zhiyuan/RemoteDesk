@@ -81,7 +81,7 @@ final class AndroidConnectionHistoryPanel extends LinearLayout implements AutoCl
             more.setOnClickListener(view -> {
                 PopupMenu menu = new PopupMenu(activity, more);
                 menu.getMenu().add("连接").setOnMenuItemClickListener(item -> { connect.accept(node); return true; });
-                if (!node.relay()) menu.getMenu().add("填入地址和口令").setOnMenuItemClickListener(item -> { fill.accept(node); return true; });
+                if (!node.relay()) menu.getMenu().add("填入地址和设备密钥").setOnMenuItemClickListener(item -> { fill.accept(node); return true; });
                 menu.getMenu().add("修改备注").setOnMenuItemClickListener(item -> { rename(node); return true; });
                 menu.getMenu().add("删除记录").setOnMenuItemClickListener(item -> { remove(node); return true; });
                 menu.show();
@@ -105,7 +105,7 @@ final class AndroidConnectionHistoryPanel extends LinearLayout implements AutoCl
         content.setPadding(dp(24), dp(8), dp(24), 0);
         EditText address = new EditText(activity), port = new EditText(activity), password = new EditText(activity), remark = new EditText(activity);
         EditText[] fields = {address, port, password, remark};
-        String[] hints = {"IP / 主机名", "端口（留空自动探测）", "连接口令", "备注（可选）"};
+        String[] hints = {"IP / 主机名", "端口（留空自动探测）", "设备密钥", "备注（可选）"};
         for (int i=0; i<fields.length; i++) {
             fields[i].setSingleLine(true); fields[i].setHint(hints[i]); fields[i].setSaveEnabled(false);
             fields[i].setContentDescription(hints[i]);
@@ -127,7 +127,7 @@ final class AndroidConnectionHistoryPanel extends LinearLayout implements AutoCl
             MainActivity.RemoteEndpoint target = MainActivity.parseRemoteEndpoint(address.getText().toString(), requestedPort);
             if (target == null) { address.setError("请输入有效 IP 或主机名"); return; }
             String secret = password.getText().toString().trim(), note = remark.getText().toString();
-            if (secret.isEmpty()) { password.setError("请输入连接口令"); return; }
+            if (secret.isEmpty()) { password.setError("请输入设备密钥"); return; }
             boolean autoPort = port.getText().toString().trim().isEmpty() && !AndroidLanDevice.explicitPort(address.getText().toString());
             mutate(() -> AndroidConnectionHistoryStore.add(activity, target.host, target.port, secret, note, autoPort));
             dialog.dismiss();
@@ -153,7 +153,7 @@ final class AndroidConnectionHistoryPanel extends LinearLayout implements AutoCl
 
     private void remove(AndroidConnectionHistory.Node node) {
         new AlertDialog.Builder(activity).setTitle("删除这条连接记录？")
-            .setMessage(node.title() + "\n会删除此记录保存的地址和口令，不会影响远端设备。")
+            .setMessage(node.title() + "\n会删除此记录保存的地址和设备密钥，不会影响远端设备。")
             .setNegativeButton("取消", null)
             .setPositiveButton("删除", (dialog, which) -> mutate(() -> AndroidConnectionHistoryStore.remove(activity, node.id)))
             .show();

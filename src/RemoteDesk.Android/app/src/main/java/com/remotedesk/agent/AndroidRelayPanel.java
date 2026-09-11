@@ -29,10 +29,9 @@ final class AndroidRelayPanel extends LinearLayout {
     private final LinearLayout content, devices;
     private final TextView status, hostStatus;
     private final AndroidRelayPanelStatus panelStatus = new AndroidRelayPanelStatus();
-    private final EditText server, port, token, pin;
+    private final EditText server, sshPort, adminUser, adminPassword;
     private final CheckBox publish;
     private final Button saveButton, cancelSetupButton;
-    private AlertDialog trustDialog;
     private boolean setupBusy;
     private AndroidRelay.Options saved;
     private String deviceId;
@@ -44,7 +43,8 @@ final class AndroidRelayPanel extends LinearLayout {
     private final Runnable ticker = new Runnable() {
         @Override public void run() {
             if (!active || closed) return;
-            hostStatus.setText(RemoteDeskForegroundService.getRelayStatus());
+            hostStatus.setText(getContext().getString(R.string.relay_host_status,
+                RemoteDeskForegroundService.getRelayStatus()));
             if (content.getVisibility() == VISIBLE && System.currentTimeMillis() - lastRefresh > 15000) refresh();
             ui.postDelayed(this, 1000);
         }
@@ -66,21 +66,22 @@ final class AndroidRelayPanel extends LinearLayout {
         content.setVisibility(GONE);
         addView(content, layout());
         content.addView(AndroidUiTheme.createSectionSubtitle(context,
-            "填写服务器和共享访问密钥即可；首次连接确认一次，以后自动记住。共享密钥不是上方的远控口令。"), layout());
-        server = field("中转服务器 / IP", false);
-        port = field("中转端口（默认 56567）", false);
-        port.setInputType(InputType.TYPE_CLASS_NUMBER);
-        token = field("中转共享访问密钥", true);
+            "首次用服务器 root 密码登录，之后自动连接。控制设备时，填写对方的设备密钥。"), layout());
+        server = field("服务器地址 / IP", false);
+        adminPassword = field("服务器 root / 管理员密码", true);
+        adminPassword.setHint("仅本次 SSH 登录使用，不保存；已登录可留空");
+        adminPassword.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
         LinearLayout advanced = new LinearLayout(context);
         advanced.setOrientation(VERTICAL);
         advanced.setVisibility(GONE);
         Button advancedButton = button("高级设置（通常不用改）", false);
         advancedButton.setOnClickListener(view -> advanced.setVisibility(advanced.getVisibility() == VISIBLE ? GONE : VISIBLE));
         content.addView(advancedButton, layout());
-        pin = field(advanced, "服务器身份指纹（可选）", false);
-        pin.setHint("留空自动获取；已配对的服务器自动沿用");
+        sshPort = field(advanced, "SSH 端口（默认 22）", false);
+        sshPort.setInputType(InputType.TYPE_CLASS_NUMBER);
+        adminUser = field(advanced, "服务器管理员账号", false);
         advanced.addView(AndroidUiTheme.createSectionSubtitle(context,
-            "只有核对身份或服务器重装后才需要手动填写。更换已保存的身份会再次确认。"), layout());
+            "默认 root。中继端口和内部连接配置自动获取，无需填写密钥或证书。"), layout());
         content.addView(advanced, layout());
         publish = new CheckBox(context);
         publish.setText(R.string.relay_publish_addresses);
@@ -93,7 +94,7 @@ final class AndroidRelayPanel extends LinearLayout {
         hostStatus.setTextColor(AndroidUiTheme.MUTED);
         content.addView(status, layout());
         content.addView(hostStatus, layout());
-        saveButton = button("保存并连接", true);
+        saveButton = button("登录服务器", true);
         saveButton.setOnClickListener(view -> save());
         content.addView(saveButton, layout());
         cancelSetupButton = button("取消连接", false);
@@ -119,7 +120,7 @@ final class AndroidRelayPanel extends LinearLayout {
         content.addView(devices, layout());
         Button clear = button("清除中转配置", false);
         clear.setOnClickListener(view -> new AlertDialog.Builder(context)
-            .setTitle("清除中转配置？").setMessage("本机将从中转下线，直连与远控口令不变。")
+            .setTitle("退出服务器？").setMessage("本机将从中转下线，设备密钥和直连配置不变。")
             .setNegativeButton("取消", null).setPositiveButton("清除", (dialog, which) -> clear()).show());
         content.addView(clear, layout());
         expand.setOnClickListener(view -> {
@@ -131,13 +132,13 @@ final class AndroidRelayPanel extends LinearLayout {
             saved = AndroidRelaySettings.load(context);
             if (saved != null) {
                 deviceId = saved.deviceId;
-                server.setText(saved.serverAddress); port.setText(String.format(java.util.Locale.ROOT, "%d", saved.port));
-                token.setText(saved.accessToken);
+                server.setText(saved.serverAddress); sshPort.setText(String.format(java.util.Locale.ROOT, "%d", saved.sshPort));
+                adminUser.setText(saved.adminUsername);
                 publish.setChecked(saved.publish);
                 setStatus(R.string.relay_saved_private);
             } else {
-                port.setText(String.format(java.util.Locale.ROOT, "%d", AndroidRelay.PORT));
-                setStatus("请填写服务器配置；录屏和无障碍授权仍需正常开启。");
+                sshPort.setText(R.string.relay_default_ssh_port); adminUser.setText(R.string.relay_default_admin);
+                setStatus("请填写服务器地址和 root 密码；无需填写中继密钥或证书。");
             }
         } catch (Exception ex) { setStatus("中转配置无法读取，请重新配置服务器。"); }
     }
@@ -182,33 +183,49 @@ final class AndroidRelayPanel extends LinearLayout {
         panelStatus.beginSetup();
         try {
             if (deviceId == null) deviceId = AndroidRelaySettings.localDeviceId(getContext());
-            String portText = port.getText().toString().trim();
-            AndroidRelayEnrollment.Draft draft = new AndroidRelayEnrollment.Draft(server.getText().toString(),
-                portText.isEmpty() ? AndroidRelay.PORT : Integer.parseInt(portText), token.getText().toString(),
-                deviceId, publish.isChecked());
-            String knownPin = AndroidRelayEnrollment.knownPin(saved, draft, pin.getText().toString());
+            String portText = sshPort.getText().toString().trim();
+            int loginPort = portText.isEmpty() ? 22 : Integer.parseInt(portText);
+            String host = AndroidRelay.checkedServer(server.getText().toString(), loginPort);
+            String username = AndroidRelayAdminLogin.username(adminUser.getText().toString());
+            boolean reuse = adminPassword.length() == 0 && saved != null &&
+                saved.serverAddress.equalsIgnoreCase(host) && saved.sshPort == loginPort && saved.adminUsername.equals(username);
+            if (adminPassword.length() == 0 && !reuse) {
+                showSetupFailure("首次登录或更换服务器时，请输入服务器 root / 管理员密码；不是设备密钥。");
+                return;
+            }
             final int generation = ++epoch;
             AndroidRelay.close(pendingSocket);
             setSetupBusy(true);
-            if (!knownPin.isEmpty()) {
-                if (AndroidRelayEnrollment.replacesIdentity(saved, draft, knownPin))
-                    confirmIdentity(draft, knownPin, generation, true);
-                else verifyAndSave(draft.options(knownPin), generation);
+            if (reuse) {
+                verifyAndSave(new AndroidRelay.Options(saved.serverAddress, saved.port, saved.accessToken,
+                    saved.tlsCertificateSha256, deviceId, publish.isChecked(), saved.sshPort,
+                    saved.adminUsername, saved.sshHostKeySha256), generation);
                 return;
             }
-            setStatus("正在连接服务器，获取身份信息……尚未发送共享密钥。");
-            worker.execute(() -> {
-                try {
-                    String discovered = AndroidRelayEnrollment.discover(draft.server, draft.port,
-                        socket -> setupSocket(socket, generation));
-                    ui.post(() -> {
-                        if (setupCurrent(generation)) confirmIdentity(draft, discovered, generation, false);
-                    });
-                } catch (Exception ex) { setupFailed(generation, "无法连接服务器，请检查地址、端口和网络；原配置未更改。"); }
-            });
+            String expected = AndroidRelayAdminLogin.knownIdentity(saved, host, loginPort);
+            boolean publishDevice = publish.isChecked();
+            byte[] secret = adminPassword.getText().toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            adminPassword.setText("");
+            AndroidRelayAdminLogin.Operation operation = new AndroidRelayAdminLogin.Operation();
+            setupSocket(operation, generation);
+            setStatus("正在登录服务器 SSH 并自动获取中继配置……");
+            try {
+                worker.execute(() -> {
+                    try {
+                        AndroidRelay.Options options = operation.login(getContext().getApplicationContext(), host,
+                            loginPort, username, secret, expected, deviceId, publishDevice);
+                        ui.post(() -> { if (setupCurrent(generation)) verifyAndSave(options, generation); });
+                    } catch (AndroidRelayAdminLogin.LoginFailure ex) { setupFailed(generation, ex.getMessage()); }
+                    finally { java.util.Arrays.fill(secret, (byte) 0); operation.close(); }
+                });
+            } catch (RuntimeException failure) {
+                java.util.Arrays.fill(secret, (byte) 0); operation.close(); throw failure;
+            }
         } catch (NumberFormatException ex) {
             showSetupFailure(getContext().getString(R.string.relay_invalid_port));
         } catch (IllegalArgumentException ex) {
+            showSetupFailure(ex.getMessage());
+        } catch (AndroidRelayAdminLogin.LoginFailure ex) {
             showSetupFailure(ex.getMessage());
         } catch (Exception ex) {
             setSetupBusy(false);
@@ -218,7 +235,7 @@ final class AndroidRelayPanel extends LinearLayout {
 
     private void setSetupBusy(boolean value) {
         setupBusy = value;
-        for (EditText field : new EditText[] {server, port, token, pin}) field.setEnabled(!value);
+        for (EditText field : new EditText[] {server, sshPort, adminUser, adminPassword}) field.setEnabled(!value);
         publish.setEnabled(!value);
         saveButton.setEnabled(!value);
         cancelSetupButton.setVisibility(value ? VISIBLE : GONE);
@@ -243,32 +260,13 @@ final class AndroidRelayPanel extends LinearLayout {
         panelStatus.beginSetup();
         epoch++;
         AndroidRelay.close(pendingSocket);
-        if (trustDialog != null) { trustDialog.dismiss(); trustDialog = null; }
         setSetupBusy(false);
         setStatus("已取消，原配置未更改。");
     }
 
-    private void confirmIdentity(AndroidRelayEnrollment.Draft draft, String identity, int generation, boolean replacement) {
-        if (!setupCurrent(generation)) return;
-        String message = draft.server + ":" + draft.port + "\n\n" + (replacement
-            ? "你正在更换这台服务器已保存的身份。请确认服务器确实由你更换或重装，再继续。"
-            : "首次连接会记住这台服务器，以后自动校验，无需填写证书。请确认地址属于你，并在可信网络中完成首次配置。") +
-            "\n\n确认后才会发送共享访问密钥。";
-        trustDialog = new AlertDialog.Builder(getContext())
-            .setTitle(replacement ? "更新服务器身份？" : "信任这台中转服务器？")
-            .setMessage(message)
-            .setNegativeButton("取消", (dialog, which) -> cancelSetup())
-            .setPositiveButton(replacement ? "确认更新并连接" : "信任并连接", (dialog, which) -> {
-                trustDialog = null;
-                if (setupCurrent(generation)) verifyAndSave(draft.options(identity), generation);
-            }).create();
-        trustDialog.setOnCancelListener(dialog -> cancelSetup());
-        trustDialog.show();
-    }
-
     private void verifyAndSave(AndroidRelay.Options options, int generation) {
         if (!setupCurrent(generation)) return;
-        setStatus("正在验证服务器和共享访问密钥……");
+        setStatus("服务器配置已就绪，正在验证公网中继连接……");
         worker.execute(() -> {
             try {
                 // Reconnect with the exact accepted identity. The observation
@@ -280,12 +278,13 @@ final class AndroidRelayPanel extends LinearLayout {
                         AndroidRelaySettings.save(getContext(), options);
                         saved = options;
                         epoch++;
-                        port.setText(String.format(java.util.Locale.ROOT, "%d", options.port));
-                        pin.setText("");
+                        server.setText(options.serverAddress);
+                        sshPort.setText(String.format(java.util.Locale.ROOT, "%d", options.sshPort));
+                        adminUser.setText(options.adminUsername);
                         devices.removeAllViews();
                         setSetupBusy(false);
                         applyHostSettings();
-                        setStatus("连接成功，服务器身份和配置已保存；下次自动连接。");
+                        setStatus("服务器登录成功，下次自动连接；root 密码未保存。");
                         refresh();
                     } catch (Exception ex) {
                         setSetupBusy(false);
@@ -293,7 +292,7 @@ final class AndroidRelayPanel extends LinearLayout {
                     }
                 });
             } catch (AndroidRelay.IdentityFailure ex) { setupFailed(generation, ex.getMessage()); }
-            catch (Exception ex) { setupFailed(generation, "验证未完成，请检查网络、地址和中转访问密钥；原配置未更改。"); }
+            catch (Exception ex) { setupFailed(generation, "中继连接未完成，请检查服务器中继端口是否开放；可重新用 root 密码登录。原配置未更改。"); }
         });
     }
 
@@ -302,7 +301,8 @@ final class AndroidRelayPanel extends LinearLayout {
             cancelSetup();
             AndroidRelaySettings.save(getContext(), null);
             saved = null; epoch++; devices.removeAllViews();
-            token.setText(""); pin.setText(""); server.setText("");
+            adminPassword.setText(""); server.setText("");
+            sshPort.setText(R.string.relay_default_ssh_port); adminUser.setText(R.string.relay_default_admin);
             AndroidRelay.close(pendingSocket);
             applyHostSettings();
             setStatus("中转配置已清除。");
@@ -310,6 +310,7 @@ final class AndroidRelayPanel extends LinearLayout {
     }
 
     private void showSetupFailure(String message) {
+        setSetupBusy(false);
         panelStatus.failed(message);
         setStatus("");
     }
@@ -400,7 +401,6 @@ final class AndroidRelayPanel extends LinearLayout {
         if (enabled) { lastRefresh = 0; ui.post(ticker); }
         else {
             AndroidRelay.close(pendingSocket);
-            if (trustDialog != null) { trustDialog.dismiss(); trustDialog = null; }
             if (setupBusy) { setSetupBusy(false); setStatus("配置已暂停，原配置未更改；可重新保存连接。"); }
         }
     }

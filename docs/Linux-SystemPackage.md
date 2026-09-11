@@ -4,11 +4,11 @@
 与 amd64 deb 不同，不内置 x86-64 Python 或本机二进制库；Windows、Android
 不能运行此包。桌面远控需要可用的图形会话，完整桌面控制优先使用 Xorg。
 
-解压后运行 `./remotedesk-linux-app`。缺少 Tk、Pillow、cryptography、FFmpeg
+解压后运行 `./remotedesk-linux-app`。缺少 Tk、Pillow、cryptography、Paramiko、FFmpeg
 等依赖时，程序按现有依赖检查流程提示申请安装；系统管理员授权仍由系统处理。
 不要将启动器单独移出目录，`app` 目录必须保留在旁边。
 
-被控端需要设置远控口令并启动；公网中继仍使用用户自己的服务器和配置。
+被控端需要设置设备密钥并启动；登录自己的公网中继使用服务器 root 密码，登录后自动记住配置，不保存 root 密码。
 包中不包含测试机密码、中继访问令牌、发布私钥或个人配置。
 
 新版本可以解压到新目录，关闭旧程序后启动新版；保留旧目录即可回退。

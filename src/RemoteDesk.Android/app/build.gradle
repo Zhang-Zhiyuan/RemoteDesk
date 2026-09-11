@@ -37,8 +37,8 @@ android {
         applicationId "com.remotedesk.agent"
         minSdk 26
         targetSdk 36
-        versionCode 16
-        versionName "1.0.13"
+        versionCode 17
+        versionName "1.0.14"
     }
 
     compileOptions {
@@ -69,9 +69,18 @@ android {
 }
 
 dependencies {
+    implementation "com.github.mwiede:jsch:2.28.6"
     compileOnly "androidx.annotation:annotation:1.10.0"
     testImplementation "junit:junit:4.13.2"
+    testImplementation "org.json:json:20240303"
 }
+
+def relayLoginAssets = tasks.register("prepareRelayLoginAssets", Copy) {
+    from(rootProject.file("../../scripts/relay/read_remotedesk_relay_config.py"))
+    into(layout.buildDirectory.dir("generated/relayLoginAssets"))
+}
+android.sourceSets.main.assets.srcDir(layout.buildDirectory.dir("generated/relayLoginAssets"))
+tasks.named("preBuild").configure { dependsOn relayLoginAssets }
 
 tasks.withType(JavaCompile).configureEach {
     options.compilerArgs += "-Xlint:deprecation"

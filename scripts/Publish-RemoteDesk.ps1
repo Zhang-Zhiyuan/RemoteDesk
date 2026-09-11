@@ -1255,6 +1255,8 @@ function New-LinuxSelfContainedRuntime {
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_app.py") -Destination (Join-Path $Staging "app\remotedesk_linux_app.py") -Force
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_dependencies.py") -Destination (Join-Path $Staging "app\remotedesk_linux_dependencies.py") -Force
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_relay.py") -Destination (Join-Path $Staging "app\remotedesk_linux_relay.py") -Force
+    Copy-Item -LiteralPath (Join-Path $Root 'scripts/linux/remotedesk_linux_relay_login.py') -Destination (Join-Path $Staging 'app/remotedesk_linux_relay_login.py') -Force
+    Copy-Item -LiteralPath (Join-Path $Root 'scripts/relay/read_remotedesk_relay_config.py') -Destination (Join-Path $Staging 'app/read_remotedesk_relay_config.py') -Force
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_startup.py") -Destination (Join-Path $Staging "app\remotedesk_linux_startup.py") -Force
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_devices.py") -Destination (Join-Path $Staging "app\remotedesk_linux_devices.py") -Force
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_device_panel.py") -Destination (Join-Path $Staging "app\remotedesk_linux_device_panel.py") -Force
@@ -1294,17 +1296,23 @@ if [ -d /usr/local/lib/python3.12/dist-packages ]; then
   cp -a /usr/local/lib/python3.12/dist-packages/cryptography-*.dist-info runtime/lib/python3.12/dist-packages/ 2>/dev/null || true
   cp -a /usr/local/lib/python3.12/dist-packages/_cffi_backend*.so runtime/lib/python3.12/dist-packages/ 2>/dev/null || true
 fi
-for package in python3 python3.12 python3.12-minimal libpython3.12-stdlib python3-cryptography python3-cffi-backend; do
+for module in paramiko nacl bcrypt six.py; do
+  cp -a "/usr/lib/python3/dist-packages/$module" runtime/lib/python3/dist-packages/
+done
+multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
+cp -a /usr/lib/"$multiarch"/libsodium.so.23* runtime/lib/
+for package in python3 python3.12 python3.12-minimal libpython3.12-stdlib python3-cryptography python3-cffi-backend python3-paramiko python3-nacl python3-bcrypt python3-six libsodium23; do
   if [ -f "/usr/share/doc/$package/copyright" ]; then
     cp "/usr/share/doc/$package/copyright" "third-party-licenses/$package-copyright"
   fi
 done
-if ! PYTHONHOME="$PWD/runtime" PYTHONPATH="$PWD/runtime/lib/python3/dist-packages:$PWD/runtime/lib/python3.12/dist-packages" "$PWD/runtime/bin/python" - <<'PY'
+if ! LD_LIBRARY_PATH="$PWD/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" PYTHONHOME="$PWD/runtime" PYTHONPATH="$PWD/runtime/lib/python3/dist-packages:$PWD/runtime/lib/python3.12/dist-packages" "$PWD/runtime/bin/python" - <<'PY'
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-print('cryptography-ok')
+import paramiko
+print('cryptography-and-ssh-ok')
 PY
 then
-  echo 'Failed to import cryptography from bundled runtime. Install python3-cryptography in WSL before publishing.' >&2
+  echo 'Failed to import bundled cryptography/SSH. Install python3-cryptography and python3-paramiko in WSL before publishing.' >&2
   exit 1
 fi
 find runtime app -type d -name __pycache__ -prune -exec rm -rf {} +

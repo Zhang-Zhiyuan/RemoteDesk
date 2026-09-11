@@ -21,7 +21,18 @@ android {
         assets.srcDirs = ["build/generated/probe-assets"]
     }
 }
-dependencies { compileOnly "androidx.annotation:annotation:1.10.0" }
+dependencies {
+    compileOnly "androidx.annotation:annotation:1.10.0"
+    implementation "com.github.mwiede:jsch:2.28.6"
+}
+
+def relayLoginAssets = tasks.register("prepareRelayLoginAssets", Copy) {
+    from(file("../../scripts/relay/read_remotedesk_relay_config.py"))
+    into(layout.buildDirectory.dir("generated/relayLoginAssets"))
+}
+android.sourceSets.main.assets.srcDir(layout.buildDirectory.dir("generated/relayLoginAssets"))
+android.sourceSets.main.assets.srcDir(file("../../src/RemoteDesk.Android/app/src/main/assets"))
+tasks.named("preBuild").configure { dependsOn relayLoginAssets }
 
 def fixtureDirectory = providers.gradleProperty("fixtureDir")
 def fixtureNames = providers.gradleProperty("fixtureNames")

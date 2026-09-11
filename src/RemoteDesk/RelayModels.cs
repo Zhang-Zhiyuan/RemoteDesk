@@ -9,6 +9,8 @@ internal sealed record RelayConnectionOptions(
     string TlsCertificateSha256,
     string DeviceId)
 {
+    public override string ToString() => $"RelayConnectionOptions({ServerAddress}:{Port}, <redacted>)";
+
     public RelayConnectionOptions Validate()
     {
         string address = ServerAddress.Trim();
@@ -27,14 +29,14 @@ internal sealed record RelayConnectionOptions(
             throw new InvalidOperationException("中继端口无效。");
         }
 
-        if (token.Length < 32)
+        if (token.Length is < 32 or > 4096)
         {
-            throw new InvalidOperationException("中继访问密钥无效，请重新配置服务器。");
+            throw new InvalidOperationException("服务器登录配置无效，请用 root 密码重新登录服务器。");
         }
 
         if (certificateFingerprint.Length != 64)
         {
-            throw new InvalidOperationException("中继 TLS 证书指纹无效，请重新配置服务器。");
+            throw new InvalidOperationException("服务器身份配置无效，请用 root 密码重新登录服务器。");
         }
 
         if (!Guid.TryParse(deviceId, out Guid parsedDeviceId))
@@ -111,7 +113,10 @@ internal sealed record RelayProvisionRequest(
     string AdminUsername,
     string AdminPassword,
     int RelayPort,
-    string? ExpectedSshHostKeySha256 = null);
+    string? ExpectedSshHostKeySha256 = null)
+{
+    public override string ToString() => $"RelayProvisionRequest({ServerAddress}:{SshPort}, <redacted>)";
+}
 
 internal sealed record RelayProvisionResult(
     string ServerAddress,
@@ -119,7 +124,10 @@ internal sealed record RelayProvisionResult(
     string AccessToken,
     string TlsCertificateSha256,
     string SshHostKeySha256,
-    bool Installed);
+    bool Installed)
+{
+    public override string ToString() => $"RelayProvisionResult({ServerAddress}:{RelayPort}, <redacted>)";
+}
 
 internal sealed class RelayProtocolException : IOException
 {

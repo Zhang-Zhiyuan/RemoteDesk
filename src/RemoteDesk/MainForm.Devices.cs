@@ -164,7 +164,7 @@ public sealed partial class MainForm
         var port = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "留空自动探测" };
         var password = new TextBox { Dock = DockStyle.Fill, UseSystemPasswordChar = true };
         var remark = new TextBox { Dock = DockStyle.Fill, MaxLength = AppSettingsService.MaxSavedDeviceRemarkLength };
-        TextBox[] fields = [address, port, password, remark]; string[] labels = ["IP / 主机名", "端口（可选）", "连接口令", "备注（可选）"];
+        TextBox[] fields = [address, port, password, remark]; string[] labels = ["IP / 主机名", "端口（可选）", "设备密钥", "备注（可选）"];
         for (int i = 0; i < fields.Length; i++) { layout.Controls.Add(new Label { Text = labels[i], AutoSize = true, Padding = new Padding(0, 7, 0, 0) }, 0, i); layout.Controls.Add(fields[i], 1, i); }
         var error = new Label { AutoSize = true, ForeColor = DangerColor, MaximumSize = new Size(420, 80) }; layout.Controls.Add(error, 0, 4); layout.SetColumnSpan(error, 2);
         var save = new Button { Text = "保存设备", AutoSize = true }; var cancel = new Button { Text = "取消", AutoSize = true, DialogResult = DialogResult.Cancel };
@@ -174,7 +174,7 @@ public sealed partial class MainForm
             try
             {
                 var value = ParseDeviceEndpoint(address.Text, port.Text);
-                if (string.IsNullOrWhiteSpace(password.Text)) throw new ArgumentException("请输入对方设备的连接口令。");
+                if (string.IsNullOrWhiteSpace(password.Text)) throw new ArgumentException("请输入对方设备的设备密钥。");
                 var node = new SavedRemoteDevice { Address = value.Host, Port = value.Port, AutoDetectPort = !value.ExplicitPort,
                     MachineName = value.Host, Remark = string.IsNullOrWhiteSpace(remark.Text) ? null : remark.Text,
                     ProtectedPassword = AppSettingsService.ProtectSecret(password.Text), LastConnectedAt = DateTimeOffset.Now };

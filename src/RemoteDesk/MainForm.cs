@@ -112,6 +112,7 @@ public sealed partial class MainForm : Form
     private TextBox _relayViewerPasswordBox = null!;
     private ComboBox _relayVideoModeBox = null!;
     private Button _relayConfigureButton = null!;
+    private Button _relayLoginButton = null!;
     private Button _relayRefreshButton = null!;
     private Button _relayConnectButton = null!;
     private ListView _relayDevicesList = null!;
@@ -791,7 +792,7 @@ public sealed partial class MainForm : Form
         };
         _hostPortBox = CreatePortInput();
         _hostPasswordBox = CreatePasswordInput();
-        _hostPasswordBox.PlaceholderText = "访问口令";
+        _hostPasswordBox.PlaceholderText = "设备密钥";
         _startWithWindowsBox = new CheckBox
         {
             Text = "开机启动应用到托盘",
@@ -811,7 +812,7 @@ public sealed partial class MainForm : Form
         };
         _allowRemoteStartBox = new CheckBox
         {
-            Text = "允许同口令远程启动被控端",
+            Text = "允许相同设备密钥远程启动被控端",
             AutoSize = true,
             Checked = false
         };
@@ -870,10 +871,10 @@ public sealed partial class MainForm : Form
 
         var networkSettings = CreateSection(
             "连接",
-            "端口、口令与后台行为");
+            "端口、设备密钥与后台行为");
         AddSettingRow(networkSettings, 0, "本机 IP", _localIpsBox);
         AddSettingRow(networkSettings, 1, "监听端口", _hostPortBox);
-        AddSettingRow(networkSettings, 2, "访问口令", _hostPasswordBox);
+        AddSettingRow(networkSettings, 2, "设备密钥", _hostPasswordBox);
         AddSettingRow(networkSettings, 3, "开机自启", _startWithWindowsBox);
         AddSettingRow(networkSettings, 4, "被控自启", _autoStartHostBox);
         AddSettingRow(networkSettings, 5, "托盘驻留", _minimizeToTrayBox);
@@ -1029,7 +1030,7 @@ public sealed partial class MainForm : Form
         _viewerPortBox = CreatePortInput();
         _viewerAutoPortBox = new CheckBox { Text = "自动端口", Checked = true, AutoSize = true, Margin = new Padding(6, 12, 6, 0) };
         _viewerPasswordBox = CreatePasswordInput();
-        _viewerPasswordBox.PlaceholderText = "连接口令";
+        _viewerPasswordBox.PlaceholderText = "设备密钥";
         _discoveredHostsBox = new ComboBox
         {
             DropDownStyle = ComboBoxStyle.DropDownList,
@@ -1101,7 +1102,7 @@ public sealed partial class MainForm : Form
         toolbar.Controls.Add(_viewerAutoPortBox);
         toolbar.Controls.Add(
             CreateNonWrappingToolbarField(
-                "口令",
+                "设备密钥",
                 _viewerPasswordBox));
         toolbar.Controls.Add(
             CreateNonWrappingToolbarField(
@@ -1327,7 +1328,7 @@ public sealed partial class MainForm : Form
         networkOptions.Controls.Add(_relayOptimizeNetworkBox, 0, 0);
         networkOptions.Controls.Add(_relayRouteStatusLabel, 0, 1);
         _relayViewerPasswordBox = CreatePasswordInput();
-        _relayViewerPasswordBox.PlaceholderText = "所选远端电脑的访问口令";
+        _relayViewerPasswordBox.PlaceholderText = "所选远端电脑的设备密钥";
         _relayVideoModeBox = new ComboBox
         {
             DropDownStyle = ComboBoxStyle.DropDownList,
@@ -1336,7 +1337,8 @@ public sealed partial class MainForm : Form
         };
         PopulateViewerVideoModes(_relayVideoModeBox);
 
-        _relayConfigureButton = CreatePrimaryButton("配置/更新服务器");
+        _relayLoginButton = CreatePrimaryButton("登录服务器");
+        _relayConfigureButton = CreateSecondaryButton("部署 / 更新服务器");
         _relayRefreshButton = CreateSecondaryButton("刷新在线设备");
         _relayReportAddressButton = CreateSecondaryButton("立即上报本机 IP");
         _relayAddressButton = CreateSecondaryButton("查看 / 使用 IP");
@@ -1349,6 +1351,7 @@ public sealed partial class MainForm : Form
             WrapContents = true,
             Margin = new Padding(0)
         };
+        configurationActions.Controls.Add(_relayLoginButton);
         configurationActions.Controls.Add(_relayConfigureButton);
         configurationActions.Controls.Add(_relayRefreshButton);
         configurationActions.Controls.Add(_relayReportAddressButton);
@@ -1359,7 +1362,7 @@ public sealed partial class MainForm : Form
             sizeToContent: true);
         AddSettingRow(configuration, 0, "服务器", _relayServerSummaryLabel);
         AddSettingRow(configuration, 1, "本机上线", _relayRegisterHostBox);
-        AddSettingRow(configuration, 2, "远控口令", _relayViewerPasswordBox);
+        AddSettingRow(configuration, 2, "设备密钥", _relayViewerPasswordBox);
         AddSettingRow(configuration, 3, "画面模式", _relayVideoModeBox);
         AddSettingRow(configuration, 4, "网络", networkOptions);
         AddSettingRow(configuration, 5, "管理", configurationActions);
@@ -1520,10 +1523,10 @@ public sealed partial class MainForm : Form
             _hostPortBox,
             "被控端监听端口，默认 56565；若 Windows 保留该端口，" +
             "会自动迁移并保存到 40565/40567。");
-        SetToolTip(_hostPasswordBox, "控制端连接时必须填写相同口令。");
+        SetToolTip(_hostPasswordBox, "控制端连接时必须填写本机的设备密钥。");
         SetToolTip(_startWithWindowsBox, "当前 Windows 用户登录后自动启动 RemoteDesk。");
         SetToolTip(_minimizeToTrayBox, "关闭或最小化窗口时驻留到右下角托盘。");
-        SetToolTip(_allowRemoteStartBox, "允许同口令控制端远程启动本机被控端。");
+        SetToolTip(_allowRemoteStartBox, "允许相同设备密钥控制端远程启动本机被控端。");
         SetToolTip(_captureTargetBox, "选择被控端要捕获的屏幕。");
         SetToolTip(_captureScaleBox, "“100%（原生）+ 60 FPS”为 4K60；“最高 1440p + 60 FPS”为精确 1440p60。1440p 模式使用 GPU 表面缩放，低于该分辨率的屏幕保持原生。");
         SetToolTip(_hostFpsBox, "30 FPS 更节省带宽；60 FPS 仅在查看端声明高帧率能力且硬件捕获/编解码链路可用时启用。");
@@ -1544,7 +1547,7 @@ public sealed partial class MainForm : Form
             _viewerPortBox,
             "被控端 TCP 端口，默认 56565；扫描和历史探测会同时兼容 " +
             "Windows 自动迁移端口 40565/40567。");
-        SetToolTip(_viewerPasswordBox, "填写与被控端相同的连接口令。");
+        SetToolTip(_viewerPasswordBox, "填写与被控端相同的设备密钥。");
         SetToolTip(_viewerCaptureTargetBox, "连接后可切换远程屏幕。");
         SetToolTip(
             _viewerVideoModeBox,
@@ -1566,7 +1569,7 @@ public sealed partial class MainForm : Form
             "双击在线设备即可通过私有中继建立端到端加密远控连接。");
         SetToolTip(
             _relayViewerPasswordBox,
-            "这是目标电脑 RemoteDesk 的访问口令，不是 Linux 管理员密码。");
+            "这是目标电脑 RemoteDesk 的设备密钥，不是 Linux 管理员密码。");
         UpdateViewerCapabilityToolTips(_viewerClient.IsConnected, NormalizeCapabilities(_connectedViewerCapabilities));
         UpdateViewerActionState();
     }
@@ -2267,6 +2270,8 @@ public sealed partial class MainForm : Form
         _remoteUpdateButton.Click += async (_, _) => await SynchronizeRemoteUpdateAsync();
         _relayConfigureButton.Click += async (_, _) =>
             await ConfigureRelayServerAsync();
+        _relayLoginButton.Click += async (_, _) =>
+            await ConfigureRelayServerAsync(loginOnly: true);
         _relayRefreshButton.Click += async (_, _) =>
             await RefreshRelayDevicesAsync(silent: false);
         _relayReportAddressButton.Click += (_, _) => SetRelayStatus(
@@ -3420,7 +3425,7 @@ public sealed partial class MainForm : Form
 
         if (string.IsNullOrWhiteSpace(_hostPasswordBox.Text))
         {
-            return new RemoteStartResult(false, "本机未设置被控端口令。", (int)_hostPortBox.Value);
+            return new RemoteStartResult(false, "本机未设置设备密钥。", (int)_hostPortBox.Value);
         }
 
         ScreenCaptureTarget captureTarget =
@@ -3740,7 +3745,7 @@ public sealed partial class MainForm : Form
         return result;
     }
 
-    private async Task ConfigureRelayServerAsync()
+    private async Task ConfigureRelayServerAsync(bool loginOnly = false)
     {
         if (_relayOperationInProgress ||
             _viewerActionInProgress || IsViewerReconnecting() || _viewerClient.IsConnected)
@@ -3749,7 +3754,7 @@ public sealed partial class MainForm : Form
         }
 
         using var dialog = new RelaySetupDialog(
-            _settings.Relay);
+            _settings.Relay, loginOnly);
         string? expectedFingerprint = null;
         if (dialog.ShowDialog(this) != DialogResult.OK)
         {
@@ -3780,28 +3785,27 @@ public sealed partial class MainForm : Form
         UseWaitCursor = true;
         UpdateRelayActionState();
         SetRelayStatus(
-            $"正在通过 SSH 配置 {request.ServerAddress}:{request.SshPort}，" +
-            "首次安装依赖可能需要几分钟...",
+            loginOnly ? $"正在登录 {request.ServerAddress}:{request.SshPort}，自动获取中继配置..."
+                : $"正在通过 SSH 配置 {request.ServerAddress}:{request.SshPort}，首次安装依赖可能需要几分钟...",
             MutedTextColor);
         try
         {
-            RelayProvisionResult result =
-                await _relayProvisioner.ProvisionAsync(
-                    request,
-                    _relayOperationCancellation.Token);
+            RelayProvisionResult result = loginOnly
+                ? await RelayAdminLogin.LoginAsync(request, _relayOperationCancellation.Token)
+                : await _relayProvisioner.ProvisionAsync(request, _relayOperationCancellation.Token);
             if (_isClosing || IsDisposed)
             {
                 return;
             }
+            string protectedAccessToken = AppSettingsService.ProtectSecret(result.AccessToken)
+                ?? throw new InvalidOperationException("无法保存服务器登录凭据，原配置未更改。");
             _settings.Relay.ServerAddress =
                 result.ServerAddress;
             _settings.Relay.RelayPort = result.RelayPort;
             _settings.Relay.SshPort = request.SshPort;
             _settings.Relay.AdminUsername =
                 request.AdminUsername;
-            _settings.Relay.ProtectedAccessToken =
-                AppSettingsService.ProtectSecret(
-                    result.AccessToken);
+            _settings.Relay.ProtectedAccessToken = protectedAccessToken;
             _settings.Relay.TlsCertificateSha256 =
                 result.TlsCertificateSha256;
             _settings.Relay.SshHostKeySha256 =
@@ -3814,9 +3818,10 @@ public sealed partial class MainForm : Form
             SetRelayStatus(
                 !settingsSaved
                     ? "中继服务器已配置，但本机配置未保存；请点击顶部“重试保存”。"
+                    : loginOnly ? "服务器已登录，下次自动连接；root 密码未保存，设备密钥不变。"
                     : result.Installed
-                    ? "私有中继已安装并启动；已固定 SSH 与 TLS 指纹。"
-                    : "私有中继配置已保存；原访问密钥继续有效。",
+                    ? "服务器已部署并登录，可连接在线设备。"
+                    : "服务器已更新并登录，已有设备的连接配置继续有效。",
                 settingsSaved ? SuccessTextColor : DangerColor);
             await RefreshRelayDevicesAsync(silent: true);
             if (_settingsSaveNotice.HasPendingChanges && !_isClosing && !IsDisposed)
@@ -4243,7 +4248,7 @@ public sealed partial class MainForm : Form
         if (!IsRelayConfigured())
         {
             _relayServerSummaryLabel.Text =
-                "尚未配置（点击“配置/更新服务器”）";
+                "尚未登录（已有服务器点“登录服务器”，首次部署点“部署 / 更新服务器”）";
             _relayServerSummaryLabel.ForeColor = MutedTextColor;
             UpdateRelayActionState();
             return;
@@ -4916,7 +4921,7 @@ public sealed partial class MainForm : Form
         {
             if (string.Equals(device.Platform, RemoteDevicePlatforms.Android, StringComparison.OrdinalIgnoreCase))
             {
-                throw new InvalidOperationException("已扫描到 Android App，但手机端尚未启动被控端。请在手机上设置口令、点击“启动被控端”并授权屏幕录制后再连接。");
+                throw new InvalidOperationException("已扫描到 Android App，但手机端尚未启动被控端。请在手机上设置设备密钥、点击“启动被控端”并授权屏幕录制后再连接。");
             }
 
             throw new InvalidOperationException("对方软件已运行，但未启用远程启动被控端。");
@@ -6772,7 +6777,7 @@ public sealed partial class MainForm : Form
         _viewerToggleButton.Text = "连接";
         _viewerToggleButton.Enabled = true;
         ApplyButtonStyle(_viewerToggleButton, PrimaryColor, Color.White, PrimaryColor);
-        SetToolTip(_viewerToggleButton, "连接到当前 IP/主机名，必要时会尝试同口令远程启动。");
+        SetToolTip(_viewerToggleButton, "连接到当前 IP/主机名，必要时会尝试相同设备密钥远程启动。");
     }
 
     private void UpdateRelayActionState()
@@ -6789,6 +6794,7 @@ public sealed partial class MainForm : Form
             !_viewerActionInProgress &&
             !IsViewerReconnecting() &&
             !_viewerClient.IsConnected;
+        _relayLoginButton.Enabled = _relayConfigureButton.Enabled;
         _relayRefreshButton.Enabled =
             configured &&
             !_relayOperationInProgress &&
@@ -8175,7 +8181,7 @@ public sealed partial class MainForm : Form
         var input = new TextBox
         {
             Width = 180,
-            PlaceholderText = "连接口令",
+            PlaceholderText = "设备密钥",
             UseSystemPasswordChar = true
         };
         StyleInput(input);
@@ -8641,7 +8647,7 @@ public sealed partial class MainForm : Form
         {
             if (string.Equals(Platform, RemoteDevicePlatforms.Android, StringComparison.OrdinalIgnoreCase))
             {
-                return "Android App 已在线，但手机端尚未启动被控端；请在手机上设置口令、点击“启动被控端”并授权屏幕录制后再连接。";
+                return "Android App 已在线，但手机端尚未启动被控端；请在手机上设置设备密钥、点击“启动被控端”并授权屏幕录制后再连接。";
             }
 
             return "对方软件已在线，但被控端尚未监听，且未启用远程启动。请在对方机器启动被控端后再连接。";

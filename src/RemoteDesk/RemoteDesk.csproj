@@ -8,7 +8,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ApplicationIcon>Assets\RemoteDesk.ico</ApplicationIcon>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.0.13</Version>
+    <Version>1.0.14</Version>
     <RemoteDeskBuildStamp Condition="'$(RemoteDeskBuildStamp)' == ''">$([System.DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))</RemoteDeskBuildStamp>
     <InformationalVersion>$(Version)+remotedesk.$(RemoteDeskBuildStamp)</InformationalVersion>
   </PropertyGroup>
@@ -39,6 +39,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="..\..\scripts\relay\read_remotedesk_relay_config.py"
+                      LogicalName="RemoteDesk.Relay.read_remotedesk_relay_config.py" />
     <EmbeddedResource Include="..\..\scripts\relay\install_remotedesk_relay.sh"
                       LogicalName="RemoteDesk.Relay.install_remotedesk_relay.sh" />
     <EmbeddedResource Include="..\..\scripts\relay\remotedesk_relay_server.py"

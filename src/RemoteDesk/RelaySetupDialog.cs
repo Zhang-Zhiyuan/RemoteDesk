@@ -8,10 +8,10 @@ internal sealed class RelaySetupDialog : Form
     private readonly TextBox _passwordBox;
     private readonly NumericUpDown _relayPortBox;
 
-    public RelaySetupDialog(RelaySettings settings)
+    public RelaySetupDialog(RelaySettings settings, bool loginOnly = false)
     {
         ArgumentNullException.ThrowIfNull(settings);
-        Text = "配置私有公网中继";
+        Text = loginOnly ? "登录公网服务器" : "部署 / 更新服务器";
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -33,7 +33,7 @@ internal sealed class RelaySetupDialog : Form
             Padding = new Padding(20),
             BackColor = Color.White
         };
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 118));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
         _serverBox = CreateTextBox(
@@ -43,7 +43,7 @@ internal sealed class RelaySetupDialog : Form
         _usernameBox = CreateTextBox(
             settings.AdminUsername ?? "root",
             "root 或有 sudo 权限的账号");
-        _passwordBox = CreateTextBox(string.Empty, "仅本次 SSH 安装使用");
+        _passwordBox = CreateTextBox(string.Empty, "仅本次 SSH 登录使用，不保存");
         _passwordBox.UseSystemPasswordChar = true;
         _relayPortBox = CreatePortBox(
             settings.RelayPort,
@@ -52,15 +52,18 @@ internal sealed class RelaySetupDialog : Form
         AddRow(root, 0, "公网服务器", _serverBox);
         AddRow(root, 1, "SSH 端口", _sshPortBox);
         AddRow(root, 2, "管理员账号", _usernameBox);
-        AddRow(root, 3, "管理员密码", _passwordBox);
-        AddRow(root, 4, "中继端口", _relayPortBox);
+        AddRow(root, 3, "root / 管理员密码", _passwordBox);
+        if (!loginOnly) AddRow(root, 4, "中继端口", _relayPortBox);
 
         var note = new Label
         {
             AutoSize = true,
             MaximumSize = new Size(390, 0),
             ForeColor = Color.FromArgb(71, 85, 105),
-            Text = "首次保存会通过 SSH 自动安装/更新 systemd 服务并放行本机防火墙。" +
+            Text = loginOnly
+                ? "用服务器 root / 管理员密码登录，自动获取中继配置；不保存 root 密码、不更新或重启服务器。" +
+                  "之后自动连接，控制设备时使用各自的设备密钥。首次登录记住服务器身份，变化时停止登录。"
+                : "首次保存会通过 SSH 自动安装/更新 systemd 服务并放行本机防火墙。" +
                 "管理员密码不会保存；首次连接会记录 SSH 主机指纹，之后指纹变化将被拒绝。" +
                 "云厂商安全组仍需放行所填 TCP 中继端口。",
             Margin = new Padding(0, 8, 0, 10)
@@ -88,7 +91,7 @@ internal sealed class RelaySetupDialog : Form
         };
         var saveButton = new Button
         {
-            Text = "自动配置并保存",
+            Text = loginOnly ? "登录服务器" : "部署 / 更新并保存",
             AutoSize = true,
             MinimumSize = new Size(146, 36),
             DialogResult = DialogResult.None
@@ -136,7 +139,7 @@ internal sealed class RelaySetupDialog : Form
 
         if (string.IsNullOrEmpty(_passwordBox.Text))
         {
-            ShowWarning("请输入管理员密码；密码仅用于本次 SSH 安装。", _passwordBox);
+            ShowWarning("请输入服务器 root / 管理员密码，仅用于本次 SSH 登录；不是设备密钥。", _passwordBox);
             return;
         }
 

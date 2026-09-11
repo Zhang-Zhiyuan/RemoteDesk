@@ -32,6 +32,7 @@ DEPENDENCIES = {
     "crypto": ("加密通信", "python3-cryptography"),
     "tk": ("图形界面 Tk", "python3-tk"),
     "pillow": ("JPEG 图像解码", "python3-pil"),
+    "ssh": ("服务器 root 登录", "python3-paramiko"),
     "ffmpeg": ("画面采集与视频编解码 FFmpeg", "ffmpeg"),
     "x11": ("X11 图形库", "libx11-6"),
     "xtst": ("鼠标和键盘控制 XTest", "libxtst6"),
@@ -52,6 +53,7 @@ checks = {
 }
 if sys.argv[1] == "app":
     checks["tk"] = "import tkinter; tkinter.Tcl()"
+    checks["ssh"] = "import paramiko"
 errors = {}
 for key, code in checks.items():
     try:

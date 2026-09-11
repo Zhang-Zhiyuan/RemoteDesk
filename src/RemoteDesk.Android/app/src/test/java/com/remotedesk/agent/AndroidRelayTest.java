@@ -152,7 +152,7 @@ public final class AndroidRelayTest {
 
     @Test public void accessKeyFailureIsDistinctFromRemotePasswordFailure() {
         String display = AndroidViewerStatusText.connectionFailure(new AndroidRelay.IdentityFailure(false, null));
-        assertTrue(display.contains("中转访问密钥被拒绝"));
+        assertTrue(display.contains("服务器登录已失效"));
         assertFalse(display.contains("口令"));
     }
 }

@@ -92,7 +92,7 @@ class DevicePanel(ttk.LabelFrame):
             return
         self.cancel_scan(); self.busy = True; generation = self.epoch; scanner = self.scanner = model.Scanner()
         self.scan_deadline = time.monotonic()+6; self.scan_callback = callback
-        self.status.config(text="正在查找设备和实际端口，不发送口令…")
+        self.status.config(text="正在查找设备和实际端口，不发送设备密钥…")
         nodes = tuple(self.book.nodes)
         slots, messages = self.network_slots, self.messages
         def run():
@@ -139,7 +139,7 @@ class DevicePanel(ttk.LabelFrame):
         if not node and not device: return
         self.fill_selection()
         if not node:
-            value = simpledialog.askstring("连接设备", f"{device.name or device.address}\n请输入对方设备的连接口令：", show="*", parent=self.app.root)
+            value = simpledialog.askstring("连接设备", f"{device.name or device.address}\n请输入对方设备的设备密钥：", show="*", parent=self.app.root)
             if not value: return
             self.app.viewer_password.set(value)
         self.app.connect_viewer()
@@ -153,7 +153,7 @@ class DevicePanel(ttk.LabelFrame):
         try:
             host, port, explicit = model.endpoint(self.app.viewer_host.get(), self.app.viewer_port.get())
             password = self.app.viewer_password.get().strip()
-            if not password: raise ValueError("请输入对方设备的连接口令。")
+            if not password: raise ValueError("请输入对方设备的设备密钥。")
         except ValueError as error: messagebox.showerror("RemoteDesk", str(error), parent=self.app.root); return
         self.connection_auto = not explicit
         node = self.book.find(self.selected_id)
@@ -190,14 +190,14 @@ class DevicePanel(ttk.LabelFrame):
     def add(self):
         dialog = tk.Toplevel(self.app.root); dialog.title("新增设备"); dialog.transient(self.app.root)
         values = [tk.StringVar() for _ in range(4)]
-        for i, title in enumerate(("IP / 主机名", "端口（留空自动探测）", "连接口令", "备注（可选）")):
+        for i, title in enumerate(("IP / 主机名", "端口（留空自动探测）", "设备密钥", "备注（可选）")):
             ttk.Label(dialog, text=title).grid(row=i, column=0, padx=14, pady=7, sticky=tk.W)
             ttk.Entry(dialog, textvariable=values[i], show="*" if i == 2 else "", width=32).grid(row=i, column=1, padx=14, pady=7)
         error = ttk.Label(dialog, text=""); error.grid(row=4, column=0, columnspan=2)
         def save():
             try:
                 host, port, explicit = model.endpoint(values[0].get(), values[1].get()); password = values[2].get(); note = values[3].get()
-                if not password.strip(): raise ValueError("请输入连接口令。")
+                if not password.strip(): raise ValueError("请输入设备密钥。")
                 self.mutate(lambda book:book.remember(host, port, password, remark=note or None, auto_port=not explicit), self.fill)
                 dialog.destroy()
             except ValueError as ex: error.config(text=str(ex))
@@ -212,7 +212,7 @@ class DevicePanel(ttk.LabelFrame):
         if text is not None: self.mutate(lambda book:book.rename(node.id, text))
     def remove(self):
         node, _ = self.selection()
-        if node and messagebox.askokcancel("删除设备记录", f"删除 {node.title} 的地址和已保存口令？不会影响远端设备。", parent=self.app.root):
+        if node and messagebox.askokcancel("删除设备记录", f"删除 {node.title} 的地址和已保存的设备密钥？不会影响远端设备。", parent=self.app.root):
             self.mutate(lambda book:book.remove(node.id))
 
     def record(self, info):

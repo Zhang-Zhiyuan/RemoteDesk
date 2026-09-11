@@ -478,7 +478,7 @@ internal sealed class RemoteViewerClient : IDisposable
 
         if (string.IsNullOrWhiteSpace(password))
         {
-            throw new InvalidOperationException("请输入连接口令。");
+            throw new InvalidOperationException("请输入目标设备的设备密钥。");
         }
 
         // A remote close can make TcpClient.Connected false a little before the receive loop has

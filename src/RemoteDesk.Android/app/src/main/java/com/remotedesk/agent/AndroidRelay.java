@@ -62,16 +62,23 @@ final class AndroidRelay {
 
     static final class IdentityFailure extends SecurityException {
         IdentityFailure(boolean certificate, Throwable cause) {
-            super(certificate ? "中转服务器身份与已保存的信息不符，请核实是否更换或重装过服务器；原配置未更改。" : "中转访问密钥被拒绝，请检查中转配置。", cause);
+            super(certificate ? "中转服务器身份与已保存的信息不符，请核实是否更换或重装过服务器，再用 root 密码重新登录；原配置未更改。" : "服务器登录已失效，请用 root 密码重新登录服务器；设备密钥无需更改。", cause);
         }
     }
 
     static final class Options {
         final String serverAddress, accessToken, tlsCertificateSha256, deviceId;
+        final String adminUsername, sshHostKeySha256;
         final int port;
+        final int sshPort;
         final boolean publish;
 
         Options(String server, int port, String token, String pin, String deviceId, boolean publish) {
+            this(server, port, token, pin, deviceId, publish, 22, "root", "");
+        }
+
+        Options(String server, int port, String token, String pin, String deviceId, boolean publish,
+                int sshPort, String adminUsername, String sshHostKeySha256) {
             this.serverAddress = checkedServer(server, port);
             this.accessToken = checkedToken(token);
             this.tlsCertificateSha256 = normalizePin(pin);
@@ -81,16 +88,24 @@ final class AndroidRelay {
             this.deviceId = checkedDeviceId(deviceId);
             this.port = port;
             this.publish = publish;
+            if (sshPort < 1 || sshPort > 65535 || adminUsername == null ||
+                    !adminUsername.matches("[a-zA-Z_][a-zA-Z0-9_.-]{0,63}"))
+                throw new IllegalArgumentException("服务器 SSH 端口或管理员账号无效。");
+            this.sshPort = sshPort;
+            this.adminUsername = adminUsername;
+            this.sshHostKeySha256 = AndroidRelayAdminLogin.normalizeIdentity(sshHostKeySha256);
         }
 
         Options target(String id) {
-            return new Options(serverAddress, port, accessToken, tlsCertificateSha256, id, publish);
+            return new Options(serverAddress, port, accessToken, tlsCertificateSha256, id, publish,
+                sshPort, adminUsername, sshHostKeySha256);
         }
 
         JSONObject json() throws Exception {
             return new JSONObject().put("serverAddress", serverAddress).put("port", port)
                 .put("accessToken", accessToken).put("tlsCertificateSha256", tlsCertificateSha256)
-                .put("deviceId", deviceId).put("publish", publish);
+                .put("deviceId", deviceId).put("publish", publish).put("sshPort", sshPort)
+                .put("adminUsername", adminUsername).put("sshHostKeySha256", sshHostKeySha256);
         }
 
         static Options parse(String text) throws Exception {
@@ -98,7 +113,8 @@ final class AndroidRelay {
             JSONObject data = new JSONObject(text);
             return new Options(data.optString("serverAddress"), data.optInt("port", PORT),
                 data.optString("accessToken"), data.optString("tlsCertificateSha256"),
-                data.optString("deviceId"), data.optBoolean("publish", true));
+                data.optString("deviceId"), data.optBoolean("publish", true), data.optInt("sshPort", 22),
+                data.optString("adminUsername", "root"), data.optString("sshHostKeySha256", ""));
         }
 
         @Override public String toString() { return "RelayOptions(" + serverAddress + ":" + port + ", <redacted>)"; }
@@ -114,7 +130,7 @@ final class AndroidRelay {
     static String checkedToken(String token) {
         String value = token == null ? "" : token.trim();
         if (value.length() < 32 || value.length() > 4096)
-            throw new IllegalArgumentException("中转共享访问密钥无效。");
+            throw new IllegalArgumentException("服务器登录配置无效，请用 root 密码重新登录服务器。");
         return value;
     }
 

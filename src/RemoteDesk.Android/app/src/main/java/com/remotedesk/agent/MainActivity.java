@@ -113,7 +113,7 @@ public final class MainActivity extends Activity {
         AndroidUiTheme.styleReadiness(readinessView);
 
         passwordEdit = new EditText(this);
-        passwordEdit.setHint("本机被控口令");
+        passwordEdit.setHint("本机设备密钥");
         passwordEdit.setSingleLine(true);
         passwordEdit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         passwordEdit.setSaveEnabled(false);
@@ -127,7 +127,7 @@ public final class MainActivity extends Activity {
         AndroidUiTheme.styleInput(this, viewerAddressEdit);
 
         viewerPasswordEdit = new EditText(this);
-        viewerPasswordEdit.setHint("远端口令");
+        viewerPasswordEdit.setHint("远端设备密钥");
         viewerPasswordEdit.setSingleLine(true);
         viewerPasswordEdit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         viewerPasswordEdit.setSaveEnabled(false);
@@ -254,7 +254,7 @@ public final class MainActivity extends Activity {
         addDevice.setOnClickListener(view -> historyPanel.add());
         addColumnView(connectionColumn, addDevice);
         addLabeledField(connectionColumn, "远端地址", viewerAddressEdit);
-        addLabeledField(connectionColumn, "连接口令", viewerPasswordEdit);
+        addLabeledField(connectionColumn, "设备密钥", viewerPasswordEdit);
         addColumnView(connectionColumn, viewerButton);
         historyPanel = new AndroidConnectionHistoryPanel(this, this::openHistoryViewer,
             this::fillHistoryNode, this::updateStatusPanel);
@@ -264,7 +264,7 @@ public final class MainActivity extends Activity {
             viewerAddressEdit.requestFocus();
             viewerAddressEdit.post(() -> viewerAddressEdit.requestRectangleOnScreen(
                 new android.graphics.Rect(0, 0, viewerAddressEdit.getWidth(), viewerAddressEdit.getHeight()), true));
-            Toast.makeText(this, "已填入最新地址和端口，确认口令后点击连接；跨网可使用中转。", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "已填入最新地址和端口，确认设备密钥后点击连接；跨网可使用中转。", Toast.LENGTH_LONG).show();
         });
         addColumnView(connectionColumn, relayPanel);
 
@@ -280,7 +280,7 @@ public final class MainActivity extends Activity {
             AndroidUiTheme.createSectionSubtitle(
                 this,
                 "录屏授权时请选择“整个屏幕”。启动成功后自动返回桌面；无障碍权限用于远程触控与文本输入。"));
-        addLabeledField(connectionColumn, "本机访问口令", passwordEdit);
+        addLabeledField(connectionColumn, "本机设备密钥", passwordEdit);
         CheckBox compatibleHost = new CheckBox(this);
         compatibleHost.setText("免重复录屏授权（无障碍兼容模式）");
         compatibleHost.setChecked(AndroidHostResume.compatibleSelected(this));
@@ -320,7 +320,7 @@ public final class MainActivity extends Activity {
         addColumnView(connectionColumn, startHostButton);
         addColumnView(connectionColumn, returnToDesktopButton);
         addColumnView(connectionColumn, AndroidUiTheme.createSectionSubtitle(this,
-            "含口令的配置页可能被系统录屏保护遮黑。返回桌面即可查看其它内容；可通过应用通知回来管理连接。"));
+            "含设备密钥的配置页可能被系统录屏保护遮黑。返回桌面即可查看其它内容；可通过应用通知回来管理连接。"));
         addColumnView(connectionColumn, presenceButton);
         addColumnView(connectionColumn, stopButton);
 
@@ -684,14 +684,14 @@ public final class MainActivity extends Activity {
     private void openRelayViewer(AndroidRelay.Options target) {
         String password = viewerPasswordEdit.getText().toString().trim();
         if (password.isEmpty()) password = passwordEdit.getText().toString().trim();
-        if (password.isEmpty()) { updateStatusPanel("请先填写目标设备的连接口令。"); return; }
+        if (password.isEmpty()) { updateStatusPanel("请先填写目标设备的设备密钥。"); return; }
         try {
             AndroidPasswordStore.saveViewer(this, password);
             startActivity(new Intent(this, RemoteDeskViewerActivity.class)
                 .putExtra(RemoteDeskViewerActivity.EXTRA_HOST, target.serverAddress)
                 .putExtra(RemoteDeskViewerActivity.EXTRA_PORT, target.port)
                 .putExtra(RemoteDeskViewerActivity.EXTRA_RELAY_DEVICE_ID, target.deviceId));
-        } catch (Exception ex) { updateStatusPanel("中转连接未启动，请检查口令保存状态。"); }
+        } catch (Exception ex) { updateStatusPanel("中转连接未启动，请检查设备密钥保存状态。"); }
     }
 
     private void fillHistoryNode(AndroidConnectionHistory.Node node) {
@@ -754,17 +754,17 @@ public final class MainActivity extends Activity {
         EditText password = new EditText(this);
         password.setSingleLine(true); password.setSaveEnabled(false);
         password.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        password.setHint("对方设备的访问口令");
+        password.setHint("对方设备的设备密钥");
         AndroidUiTheme.styleInput(this, password);
         LinearLayout content = new LinearLayout(this); content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(24), dp(8), dp(24), 0);
-        content.addView(AndroidUiTheme.createSectionSubtitle(this, device.address() + "\n首次连接需要对方的访问口令，成功后自动记住。"));
+        content.addView(AndroidUiTheme.createSectionSubtitle(this, device.address() + "\n首次连接需要对方的设备密钥，成功后自动记住。"));
         content.addView(password, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle("连接 " + device.name).setView(content)
             .setNegativeButton("取消", null).setPositiveButton("连接", null).create();
         dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
             String value = password.getText().toString().trim();
-            if (value.isEmpty()) { password.setError("请输入访问口令"); return; }
+            if (value.isEmpty()) { password.setError("请输入设备密钥"); return; }
             viewerAddressEdit.setText(device.address()); viewerPasswordEdit.setText(value);
             dialog.dismiss(); launchDirectViewer(device.host, device.port, value);
         }));
@@ -780,7 +780,7 @@ public final class MainActivity extends Activity {
         if (hostLaunchPolicy.isPending()) return;
         String password = passwordEdit.getText().toString().trim();
         if (password.isEmpty()) {
-            updateStatusPanel("请先设置连接口令");
+            updateStatusPanel("请先设置设备密钥");
             return;
         }
 
@@ -788,7 +788,7 @@ public final class MainActivity extends Activity {
             AndroidPasswordStore.save(this, password);
         } catch (Exception ex) {
             AndroidSessionLog.error("Failed to save connection password.", ex);
-            updateStatusPanel("保存连接口令失败：" + ex.getMessage());
+            updateStatusPanel("保存设备密钥失败：" + ex.getMessage());
             return;
         }
 
@@ -832,7 +832,7 @@ public final class MainActivity extends Activity {
         content.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
         TextView notice = new TextView(this);
         notice.setText((AndroidPasswordStore.hasUnlockPin(this) ? "已加密保存 PIN，不会回显。\n" : "尚未保存 PIN。\n") +
-            "可选：仅保存在这台手机的 Android Keystore 加密存储中。通过 RemoteDesk 连接口令验证的人可以用它解锁手机。\n" +
+            "可选：仅保存在这台手机的 Android Keystore 加密存储中。通过 RemoteDesk 设备密钥验证的人可以用它解锁手机。\n" +
             "只支持数字 PIN，失败后不自动重试；更改手机 PIN 后也请更新这里。重启后的首次解锁仍需在手机上完成。留空不修改已保存的 PIN。");
         content.addView(notice);
         EditText pin = new EditText(this);
@@ -899,7 +899,7 @@ public final class MainActivity extends Activity {
         }
 
         if (endpoint == null || password.isEmpty()) {
-            updateStatusPanel("请填写远端地址和口令");
+            updateStatusPanel("请填写远端地址和设备密钥");
             return;
         }
 
@@ -929,7 +929,7 @@ public final class MainActivity extends Activity {
             AndroidPasswordStore.saveViewer(this, password);
         } catch (Exception ex) {
             AndroidSessionLog.error("Failed to save viewer password.", ex);
-            updateStatusPanel("保存远端口令失败：" + ex.getMessage());
+            updateStatusPanel("保存远端设备密钥失败：" + ex.getMessage());
             return;
         }
 
@@ -1005,7 +1005,7 @@ public final class MainActivity extends Activity {
             AndroidSessionLog.info("Host is ready; settings task moved behind the desktop to avoid sensitive-page screen masking.");
         } catch (RuntimeException ex) {
             AndroidSessionLog.error("Could not return to desktop after host startup.", ex);
-            updateStatusPanel("被控已启动，请按手机 Home 键返回桌面；口令页可能被系统录屏保护遮黑。");
+            updateStatusPanel("被控已启动，请按手机 Home 键返回桌面；设备密钥页可能被系统录屏保护遮黑。");
         }
     }
 
@@ -1387,7 +1387,7 @@ public final class MainActivity extends Activity {
             if (AndroidScreenCaptureSession.getInstance().isAccessibilityCapture()) {
                 return "免重复授权被控正在运行\n" + AndroidScreenCaptureSession.getInstance().captureStatus();
             }
-            return "被控端正在运行\n若远端看到黑屏，请返回手机桌面；口令页可能被系统录屏保护遮蔽。";
+            return "被控端正在运行\n若远端看到黑屏，请返回手机桌面；设备密钥页可能被系统录屏保护遮蔽。";
         }
 
         String startFailure = RemoteDeskForegroundService.getLastStartFailure();
@@ -1438,7 +1438,7 @@ public final class MainActivity extends Activity {
         String h264Status = AndroidVideoCodecDiagnostics.formatH264Status(
             AndroidVideoCodecDiagnostics.cachedH264Report());
 
-        return "口令：" + (hasPassword ? "已设置" : "未设置") + "\n" +
+        return "设备密钥：" + (hasPassword ? "已设置" : "未设置") + "\n" +
             "屏幕录制：" + projectionStatus + "\n" +
             "通知权限：" + notificationStatus + "\n" +
             "电池优化：" + batteryOptimizationStatus + "\n" +

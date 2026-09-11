@@ -184,7 +184,7 @@ class EnrollmentTkTests(unittest.TestCase):
         self.assertFalse(self.ui.relay_setup_busy)
 
     def test_old_configuration_reconnects_without_another_trust_dialog(self):
-        self.assertEqual("", self.ui.relay_pin.get())
+        self.assertEqual("", self.ui.relay_admin_password.get())
         with mock.patch.object(relay, "discover_server_identity", new_callable=mock.AsyncMock) as observe, \
                 mock.patch.object(relay, "list_devices_async", new_callable=mock.AsyncMock, return_value=[]) as directory, \
                 mock.patch.object(app.messagebox, "askyesno") as trust:
@@ -196,40 +196,57 @@ class EnrollmentTkTests(unittest.TestCase):
         self.assertEqual(SAVED, relay.load_settings(self.path))
         self.assertEqual("normal", str(self.ui.relay_setup_controls[0].cget("state")))
 
-    def test_new_endpoint_uses_default_port_and_confirms_before_authentication(self):
+    def test_new_endpoint_logs_in_using_root_then_verifies_relay_without_manual_token(self):
         self.ui.relay_server.set("new.test")
-        self.ui.relay_port.set("")
+        self.ui.relay_ssh_port.set("")
+        self.ui.relay_admin_password.set('owned-root-password')
         order = []
-        def trust(*args, **kwargs):
-            order.append("trust")
-            return True
+        def login(request, password, device_id, publish):
+            order.append('root-login')
+            self.assertEqual('new.test', request.server)
+            self.assertEqual(22, request.ssh_port)
+            self.assertEqual('', request.expected_identity)
+            self.assertEqual('owned-root-password', password)
+            self.assertEqual(ID, device_id)
+            return replace(SAVED, server_address='new.test')
         async def directory(options):
             order.append("authenticate")
             self.assertEqual("new.test", options.server_address)
             self.assertEqual(56567, options.port)
             self.assertEqual(SAVED.tls_certificate_sha256, options.tls_certificate_sha256)
             return []
-        with mock.patch.object(relay, "discover_server_identity", new_callable=mock.AsyncMock,
-                               return_value=SAVED.tls_certificate_sha256) as observe, \
+        with mock.patch.object(app.relay_login.LoginOperation, 'login', side_effect=login) as login_call, \
                 mock.patch.object(relay, "list_devices_async", side_effect=directory), \
-                mock.patch.object(app.messagebox, "askyesno", side_effect=trust):
+                mock.patch.object(app.messagebox, "askyesno") as trust:
             self.ui._save_relay()
             self.assertEqual("disabled", str(self.ui.relay_setup_controls[0].cget("state")))
+            self.assertEqual('', self.ui.relay_admin_password.get())
             self.finish_setup()
-        self.assertEqual(["trust", "authenticate"], order)
-        observe.assert_awaited_once_with("new.test", 56567)
+        self.assertEqual(["root-login", "authenticate"], order)
+        login_call.assert_called_once()
+        trust.assert_not_called()
         self.assertEqual("new.test", relay.load_settings(self.path).server_address)
 
     def test_failed_credentials_leave_original_file_unchanged(self):
         original = self.path.read_bytes()
-        self.ui.relay_token.set("incorrect-test-token-" * 3)
-        with mock.patch.object(relay, "list_devices_async", new_callable=mock.AsyncMock,
-                               side_effect=relay.RelayIdentityError("bad token")):
+        self.ui.relay_admin_password.set('wrong-root-password')
+        with mock.patch.object(app.relay_login.LoginOperation, 'login',
+                               side_effect=app.relay_login.RelayLoginError('服务器 root 密码错误；原配置未更改。')):
             self.ui._save_relay()
             self.finish_setup()
         self.assertEqual(original, self.path.read_bytes())
         self.assertIs(SAVED, self.ui.relay_options)
         self.assertIn("原配置未更改", self.ui.relay_status.cget("text"))
+
+    def test_new_server_without_root_password_never_connects_or_changes_old_config(self):
+        original = self.path.read_bytes()
+        self.ui.relay_server.set('new.test')
+        with mock.patch.object(app.relay_login.LoginOperation, 'login') as login_call:
+            self.ui._save_relay()
+        login_call.assert_not_called()
+        self.assertFalse(self.ui.relay_setup_busy)
+        self.assertEqual(original, self.path.read_bytes())
+        self.assertIn('root', self.ui.relay_status.cget('text'))
 
 
 if __name__ == "__main__":

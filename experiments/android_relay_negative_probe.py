@@ -20,7 +20,7 @@ def main():
     package = "com.remotedesk.viewerprobe"
     report = {"complete": False, "scope": "physical Android viewer through public relay; invalid fixture credentials only", "checks": {}}
     try:
-        for label, pin, expected in (("wrongPin", "0" * 64, "身份校验失败"), ("wrongAccessKey", args.tls_pin, "访问密钥被拒绝")):
+        for label, pin, expected in (("wrongPin", "0" * 64, "身份校验失败"), ("wrongAccessKey", args.tls_pin, "服务器登录已失效")):
             run(adb + ["shell", "am", "force-stop", package])
             run(adb + ["shell", "run-as", package, "mkdir", "-p", "files"])
             config = dict(host=args.server, port=56567, password="owned-unusable-test-password",

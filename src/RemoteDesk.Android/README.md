@@ -16,13 +16,14 @@ Android 1.0.1 修正了被控启动后的黑屏误导：Android 14+ 使用系统
 相关平台行为见 [Android 屏幕共享保护](https://developer.android.com/about/versions/15/behavior-changes-all#screen-sharing)
 及 [整屏录制授权](https://developer.android.com/media/grow/media-projection#opt-out)。
 
-私有公网中转已接入主界面：展开“公网中转 · 配置与在线设备”，配置已部署的服务器
-地址和共享访问密钥，端口留空使用 56567。1.0.9 起不再要求手填证书指纹：首次连接
-自动获取服务器身份，确认“信任并连接”后校验访问密钥并保存；以后沿用该身份。
-首次信任请在可信网络中完成，确认前不会发送访问密钥。已保存身份变化时会停止连接，
-不会自动替换；核实服务器重装后可在“高级设置”手动更新。访问密钥由 Android Keystore
-加密保存，目标远控口令仍独立验证；可刷新在线设备并点击连接，也可在正常授权
-录屏/无障碍后将手机作为中转被控端。服务器自动部署入口目前仍在 Windows。
+私有公网中转已接入主界面：展开“公网中转 · 配置与在线设备”，填写已部署服务器的
+地址和 root 密码，点击“登录服务器”。高级设置可改 SSH 端口（默认 22）和管理员账号。
+中继端口、内部凭据和服务器身份自动通过 SSH 读取，验证连接后由 Android Keystore
+加密保存。root 密码仅用于本次登录，不保存；下次自动连接，已有配置继续有效。
+控制在线设备时使用目标自己的设备密钥，和服务器 root 密码分开。
+首次登录请在可信网络中完成。已保存的 SSH 身份变化时，会在发送密码前停止登录。
+登录不会部署、更新或重启服务器；首次部署入口在 Windows。手机被控仍需要系统
+录屏/无障碍授权，服务器登录不会替代这些权限。
 详见 [接入说明](../../docs/PrivateRelay.md) 与 [公网六向实测记录](../../docs/RelaySixDirections-20260908.md)。
 
 This is the Android controlled-end preview for RemoteDesk, with a lightweight

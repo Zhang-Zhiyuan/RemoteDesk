@@ -124,7 +124,7 @@ class RelayEnrollmentDraft:
         host, port = _checked_endpoint(self.server_address, self.port)
         token = self.access_token.strip()
         if not 32 <= len(token) <= 4096:
-            raise ValueError("中转访问密钥无效（不是远控口令）。")
+            raise ValueError("服务器登录配置无效，请用 root 密码重新登录服务器。")
         try:
             device = str(uuid.UUID(self.device_id.strip()))
         except (ValueError, AttributeError) as error:
@@ -154,18 +154,28 @@ class RelayOptions:
     tls_certificate_sha256: str
     device_id: str
     publish: bool = True
+    ssh_port: int = 22
+    admin_username: str = 'root'
+    ssh_host_key_sha256: str = ''
 
     def __repr__(self):
         return f"RelayOptions(server_address={self.server_address!r}, port={self.port}, access_token=<redacted>)"
 
     def validate(self):
         draft = RelayEnrollmentDraft(self.server_address, self.port, self.access_token, self.device_id, self.publish).validate()
+        if type(self.ssh_port) is not int or not 1 <= self.ssh_port <= 65535:
+            raise ValueError('服务器 SSH 端口无效。')
+        if not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_.-]{0,63}', self.admin_username):
+            raise ValueError('服务器管理员账号无效。')
+        if self.ssh_host_key_sha256 and not re.fullmatch(r'SHA256:[A-Za-z0-9+/]{43}', self.ssh_host_key_sha256):
+            raise ValueError('已保存的 SSH 服务器身份无效。')
         return replace(self, server_address=draft.server_address, access_token=draft.access_token,
                        tls_certificate_sha256=_checked_pin(self.tls_certificate_sha256), device_id=draft.device_id)
 
     def to_dict(self):
         return dict(serverAddress=self.server_address, port=self.port, accessToken=self.access_token,
-                    tlsCertificateSha256=self.tls_certificate_sha256, deviceId=self.device_id, publish=self.publish)
+                    tlsCertificateSha256=self.tls_certificate_sha256, deviceId=self.device_id, publish=self.publish,
+                    sshPort=self.ssh_port, adminUsername=self.admin_username, sshHostKeySha256=self.ssh_host_key_sha256)
 
     @classmethod
     def from_dict(cls, value):
@@ -176,7 +186,9 @@ class RelayOptions:
             raise ValueError("中转端口无效。")
         return cls(str(value.get("serverAddress", "")), int(port),
                    str(value.get("accessToken", "")), str(value.get("tlsCertificateSha256", "")),
-                   str(value.get("deviceId", "")), value.get("publish", True) is True).validate()
+                   str(value.get("deviceId", "")), value.get("publish", True) is True,
+                   value.get('sshPort', 22), value.get('adminUsername', 'root'),
+                   value.get('sshHostKeySha256', '')).validate()
 
 
 async def read_json(reader):
@@ -202,7 +214,7 @@ def ensure_success(value):
         return
     detail = str(value.get("error", "中转拒绝连接。"))[:300]
     if "访问密钥" in detail:
-        raise RelayIdentityError("中转访问密钥被拒绝，请检查配置。")
+        raise RelayIdentityError("服务器登录已失效，请用 root 密码重新登录服务器；设备密钥无需更改。")
     # Do not echo untrusted server error text that could contain an access token.
     raise ConnectionError("中转拒绝连接：目标可能已离线，请刷新设备列表。")
 
@@ -570,7 +582,7 @@ def run_setup_request(operation, stop_event):
 
 def setup_error_message(error):
     if isinstance(error, RelayIdentityError):
-        return "连接未通过身份或访问密钥验证，请核实服务器是否重装、共享密钥是否正确；原配置未更改。"
+        return "服务器登录或身份验证失败，请核实服务器是否重装，再用 root 密码重新登录；原配置未更改。"
     return "连接失败，请检查服务器地址、端口和网络；原配置未更改。"
 
 

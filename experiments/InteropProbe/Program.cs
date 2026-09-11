@@ -41,6 +41,25 @@ internal static class Program
             });
             return 0;
         }
+        if (args[0] == "relay-login")
+        {
+            string server = c.GetProperty("serverAddress").GetString()!;
+            if (server is not ("8.138.5.232" or "127.0.0.1")) throw new InvalidOperationException("Unexpected authorized server");
+            try
+            {
+                RelayProvisionResult result = RelayAdminLogin.LoginAsync(new(server, c.GetProperty("sshPort").GetInt32(),
+                    "root", c.GetProperty("password").GetString()!, 56567,
+                    c.TryGetProperty("sshIdentity", out var identity) ? identity.GetString() : null)).GetAwaiter().GetResult();
+                Save(Path.Combine(output, "login.json"), new {complete=true, server, port=result.RelayPort, installed=result.Installed,
+                    scope="Read-only administrator login and pinned directory; no deployment or real desktop input"});
+                return 0;
+            }
+            catch (Exception error)
+            {
+                Save(Path.Combine(output, "login.json"), new {complete=false, failureType=error.GetType().Name, failure=error.Message});
+                return 1;
+            }
+        }
         if (args[0] == "transport") return RelayThroughputProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "features") return FeatureAuditProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "android-lock") return AndroidLockContinuityProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();

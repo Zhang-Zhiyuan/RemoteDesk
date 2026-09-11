@@ -27,10 +27,11 @@ function Convert-LocalDrivePathToWsl([string]$Path) {
 [void](New-Item -ItemType Directory -Path (Join-Path $staging "app"))
 try {
     foreach ($name in @("remotedesk_linux_app.py", "remotedesk_linux_host.py",
-        "remotedesk_linux_dependencies.py", "remotedesk_linux_relay.py", "remotedesk_protocol_probe.py",
+        "remotedesk_linux_dependencies.py", "remotedesk_linux_relay.py", "remotedesk_linux_relay_login.py", "remotedesk_protocol_probe.py",
         "remotedesk_linux_startup.py", "remotedesk_linux_devices.py", "remotedesk_linux_device_panel.py")) {
         Copy-Item -LiteralPath (Join-Path $repoRoot "scripts/linux/$name") -Destination (Join-Path $staging "app/$name")
     }
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'scripts/relay/read_remotedesk_relay_config.py') -Destination (Join-Path $staging 'app/read_remotedesk_relay_config.py')
     Copy-Item -LiteralPath (Join-Path $repoRoot "src/RemoteDesk/Assets/RemoteDesk.png") -Destination (Join-Path $staging "app/RemoteDesk.png")
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts/linux/remotedesk-linux-app") -Destination $staging
     Copy-Item -LiteralPath (Join-Path $repoRoot "docs/Linux-SystemPackage.md") -Destination (Join-Path $staging "README.md")

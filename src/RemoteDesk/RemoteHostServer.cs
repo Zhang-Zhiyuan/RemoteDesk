@@ -99,7 +99,7 @@ internal sealed class RemoteHostServer : IDisposable
 
         if (string.IsNullOrWhiteSpace(password))
         {
-            throw new InvalidOperationException("被控端口令不能为空。");
+            throw new InvalidOperationException("本机设备密钥不能为空。");
         }
 
         try

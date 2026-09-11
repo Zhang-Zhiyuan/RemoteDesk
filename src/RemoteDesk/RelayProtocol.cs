@@ -229,7 +229,7 @@ internal static class RelayTls
                 "访问密钥",
                 StringComparison.Ordinal))
         {
-            throw new RelayAccessDeniedException(message);
+            throw new RelayAccessDeniedException("服务器登录已失效，请用 root 密码重新登录服务器；设备密钥无需更改。");
         }
 
         throw new RelayProtocolException(message);
