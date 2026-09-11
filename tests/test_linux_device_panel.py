@@ -80,6 +80,29 @@ class DevicePanelUiTests(unittest.TestCase):
         self.panel.render(); self.root.update()
         self.assertEqual("typed-new-address", self.app.viewer_host.get()); self.assertEqual("45679", self.app.viewer_port.get())
 
+    def test_reused_endpoint_renders_separate_rows_and_preserves_each_credential(self):
+        first_id = "00112233-4455-6677-8899-aabbccddeeff"
+        second_id = "00112233-4455-6677-8899-aabbccddeeaa"
+        first = self.panel.book.remember("pc", 56565, "first-secret", device_id=first_id, remark="第一台")
+        second = self.panel.book.remember("pc", 56565, "second-secret", device_id=second_id, remark="第二台")
+        self.panel.nearby = [model.Device("pc", 56565, "PC", device_id=second_id)]
+        self.panel.render(); self.root.update()
+        self.assertEqual(2, len(self.panel.tree.get_children()))
+        self.assertEqual("第二台", self.panel.tree.item("saved:" + second.id, "text"))
+        self.panel.tree.selection_set("saved:" + first.id); self.panel.fill_selection()
+        self.assertEqual("first-secret", self.app.viewer_password.get())
+        self.panel.tree.selection_set("saved:" + second.id); self.panel.fill_selection()
+        self.assertEqual("second-secret", self.app.viewer_password.get())
+
+    def test_discovery_does_not_borrow_credentials_from_conflicting_saved_identity(self):
+        first = self.panel.book.remember("pc", 56565, "first-secret", device_id="00112233-4455-6677-8899-aabbccddeeff")
+        self.panel.nearby = [model.Device("pc", 56565, "Other", device_id="00112233-4455-6677-8899-aabbccddeeaa")]
+        self.panel.render(); self.root.update()
+        self.assertEqual(2, len(self.panel.tree.get_children()))
+        self.panel.tree.selection_set("found:pc:56565"); self.panel.fill_selection()
+        self.assertEqual("", self.app.viewer_password.get())
+        self.assertIn("saved:" + first.id, self.panel.rows)
+
 
 @unittest.skipUnless(sys.platform.startswith("linux") and os.environ.get("DISPLAY"), "Tk display required")
 class FullApplicationDevicePanelTests(unittest.TestCase):

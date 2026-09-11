@@ -42,6 +42,37 @@ class DeviceModelTests(unittest.TestCase):
         self.assertIsNone(book.remember("new", 45678, "one", device_id=ID, previous_id=old.id))
         self.assertEqual(1, len(book.nodes))
 
+    def test_reused_endpoint_keeps_distinct_authenticated_machines_after_restart(self):
+        book = devices.Book()
+        first = book.remember("pc", 56565, "first-secret", device_id=ID, remark="第一台")
+        other_id = str(uuid.uuid4())
+        second = book.remember("pc", 56565, "second-secret", device_id=other_id)
+        restored = devices.Book.decode(book.encode())
+        self.assertEqual(2, len(restored.nodes))
+        self.assertEqual("第一台", restored.find(first.id).remark)
+        self.assertEqual("first-secret", restored.find(first.id).password)
+        self.assertEqual("", restored.find(second.id).remark)
+        self.assertEqual(other_id, restored.find(second.id).device_id)
+
+    def test_previous_node_is_not_rewritten_when_authenticated_identity_changes(self):
+        book = devices.Book()
+        first = book.remember("old", 56565, "first-secret", device_id=ID, remark="第一台")
+        second = book.remember("new", 45678, "second-secret", device_id=str(uuid.uuid4()), previous_id=first.id)
+        self.assertEqual(2, len(book.nodes))
+        self.assertNotEqual(first.id, second.id)
+        self.assertEqual(first, book.find(first.id))
+        self.assertEqual("", second.remark)
+
+    def test_manual_endpoint_update_does_not_bridge_conflicting_identities(self):
+        book = devices.Book()
+        first = book.remember("pc", 56565, "first", device_id=ID, remark="保留")
+        second = book.remember("pc", 56565, "second", device_id=str(uuid.uuid4()))
+        updated = book.remember("pc", 56565, "manual")
+        self.assertEqual(2, len(book.nodes))
+        self.assertEqual(second.id, updated.id)
+        self.assertEqual(second.device_id, updated.device_id)
+        self.assertEqual(first, book.find(first.id))
+
     def test_manual_add_deduplicates_endpoint_and_retains_note(self):
         book = devices.Book(); old = book.remember("PC.", 45678, "old", remark="备注", auto_port=False)
         book.remember("pc", 45678, "new", auto_port=False)

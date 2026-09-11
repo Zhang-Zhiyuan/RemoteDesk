@@ -5501,7 +5501,12 @@ public sealed partial class MainForm : Form
         string currentAddress = _viewerHostBox.Text.Trim();
         int currentPort =
             (int)_viewerPortBox.Value;
-        RemoteDeviceListItem? selected = devices.FirstOrDefault(device => device.Port == currentPort &&
+        RemoteDeviceListItem? previous = GetSelectedRemoteDevice();
+        string? selectedIdentity = _viewerClient.IsConnected ? _lastConnectedDeviceInfo?.DeviceId :
+            previous is not null && previous.Port == currentPort &&
+            string.Equals(previous.Address, currentAddress, StringComparison.OrdinalIgnoreCase) ? previous.DeviceId : null;
+        RemoteDeviceListItem? selected = devices.FirstOrDefault(device => RemoteDeviceIdentity.Same(device.DeviceId, selectedIdentity)) ??
+            devices.FirstOrDefault(device => device.Port == currentPort &&
             string.Equals(device.Address, currentAddress, StringComparison.OrdinalIgnoreCase)) ?? devices.FirstOrDefault(device =>
             string.Equals(device.Address, currentAddress, StringComparison.OrdinalIgnoreCase)) ?? devices.FirstOrDefault();
 
@@ -5587,6 +5592,7 @@ public sealed partial class MainForm : Form
             DiscoveredHost? compatibleHost =
                 discoveredHosts
                     .Where(host =>
+                        !RemoteDeviceIdentity.Conflicts(device.DeviceId, host.DeviceId) &&
                         string.Equals(
                             host.Address,
                             device.Address,
@@ -5613,27 +5619,20 @@ public sealed partial class MainForm : Form
             return false;
         }
 
-        var retainedEndpoints =
-            new Dictionary<string, SavedRemoteDevice>(
-                StringComparer.OrdinalIgnoreCase);
+        var retainedDevices = new List<SavedRemoteDevice>();
         for (int index = 0;
              index < recentDevices.Count;)
         {
             SavedRemoteDevice device =
                 recentDevices[index];
-            string key =
-                $"{device.Address?.Trim()}:" +
-                $"{device.Port}";
-            if (retainedEndpoints.TryAdd(
-                    key,
-                    device))
+            SavedRemoteDevice? retainedDevice = retainedDevices.FirstOrDefault(item => SameSavedMachine(item, device));
+            if (retainedDevice is null)
             {
+                retainedDevices.Add(device);
                 index++;
             }
             else
             {
-                SavedRemoteDevice retainedDevice =
-                    retainedEndpoints[key];
                 if (string.IsNullOrWhiteSpace(
                         retainedDevice.Remark) &&
                     !string.IsNullOrWhiteSpace(
@@ -5769,7 +5768,8 @@ public sealed partial class MainForm : Form
                 GetRecentDevices(),
                 device.Address,
                 device.Port,
-                remark))
+                remark,
+                device.DeviceId))
         {
             SetViewerStatus(
                 "未找到对应的保存记录，请重新扫描后再试。",
@@ -5785,7 +5785,8 @@ public sealed partial class MainForm : Form
             silent: true);
         ReselectDisplayedRemoteDevice(
             device.Address,
-            device.Port);
+            device.Port,
+            device.DeviceId);
         if (!TrySaveSettings())
         {
             SetViewerStatus("备注更改尚未保存；当前仅本次运行有效，请点击顶部“重试保存”。", DangerColor);
@@ -5825,7 +5826,8 @@ public sealed partial class MainForm : Form
         if (!RemoveSavedDevice(
                 GetRecentDevices(),
                 device.Address,
-                device.Port))
+                device.Port,
+                device.DeviceId))
         {
             SetViewerStatus(
                 "未找到对应的保存记录，请重新扫描后再试。",
@@ -5841,7 +5843,8 @@ public sealed partial class MainForm : Form
             silent: true);
         ReselectDisplayedRemoteDevice(
             device.Address,
-            device.Port);
+            device.Port,
+            device.DeviceId);
         if (!TrySaveSettings())
         {
             SetViewerStatus("删除记录尚未保存；当前仅本次运行有效，请点击顶部“重试保存”。", DangerColor);
@@ -5962,12 +5965,14 @@ public sealed partial class MainForm : Form
 
     private void ReselectDisplayedRemoteDevice(
         string address,
-        int port)
+        int port,
+        string? deviceId = null)
     {
         RemoteDeviceListItem? match =
             _discoveredHostsList.Items
                 .OfType<RemoteDeviceListItem>()
                 .FirstOrDefault(device =>
+                    RemoteDeviceIdentity.Normalize(deviceId) is not null ? RemoteDeviceIdentity.Same(device.DeviceId, deviceId) :
                     string.Equals(
                         device.Address,
                         address,
@@ -5989,25 +5994,26 @@ public sealed partial class MainForm : Form
 
     private IReadOnlyList<RemoteDeviceListItem> BuildRemoteDeviceList(IReadOnlyList<DiscoveredHost> hosts)
     {
-        List<SavedRemoteDevice> recentDevices = GetRecentDevices();
+        return BuildRemoteDeviceList(hosts, GetRecentDevices(), NetworkUtils.GetLocalIPv4Addresses()
+            .ToHashSet(StringComparer.OrdinalIgnoreCase));
+    }
+
+    internal static IReadOnlyList<RemoteDeviceListItem> BuildRemoteDeviceList(IReadOnlyList<DiscoveredHost> hosts,
+        IReadOnlyList<SavedRemoteDevice> recentDevices, IReadOnlySet<string> localAddresses)
+    {
         var devices = new List<RemoteDeviceListItem>(hosts.Count + recentDevices.Count);
         var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var localAddresses = NetworkUtils.GetLocalIPv4Addresses()
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        Dictionary<string, SavedRemoteDevice> savedDevices = recentDevices
+        SavedRemoteDevice[] savedDevices = recentDevices
             .Where(IsValidSavedRemoteDevice)
             .Where(device => !IsLocalSavedRemoteDevice(device, localAddresses))
-            .GroupBy(device => MakeDeviceKey(device.Address!, device.Port), StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+            .ToArray();
 
         foreach (DiscoveredHost host in CollapseDiscoveryAliases(hosts))
         {
-            string key = MakeDeviceKey(host.Address, host.Port);
-            savedDevices.TryGetValue(key, out SavedRemoteDevice? savedDevice);
-            savedDevice ??= recentDevices.FirstOrDefault(item => RemoteDeviceIdentity.Same(item.DeviceId, host.DeviceId));
+            SavedRemoteDevice? savedDevice = FindSavedForDiscovery(savedDevices, host.Address, host.Port, host.DeviceId);
             devices.Add(RemoteDeviceListItem.FromDiscovered(host, savedDevice));
-            seenKeys.Add(key);
-            if (savedDevice is not null) seenKeys.Add(MakeDeviceKey(savedDevice.Address!, savedDevice.Port));
+            seenKeys.Add(MakeDeviceListKey(host.Address, host.Port, host.DeviceId ?? savedDevice?.DeviceId));
+            if (savedDevice is not null) seenKeys.Add(MakeDeviceListKey(savedDevice.Address!, savedDevice.Port, savedDevice.DeviceId));
         }
 
         foreach (SavedRemoteDevice savedDevice in recentDevices
@@ -6015,7 +6021,7 @@ public sealed partial class MainForm : Form
             .Where(device => !IsLocalSavedRemoteDevice(device, localAddresses))
             .OrderByDescending(device => device.LastConnectedAt))
         {
-            string key = MakeDeviceKey(savedDevice.Address!, savedDevice.Port);
+            string key = MakeDeviceListKey(savedDevice.Address!, savedDevice.Port, savedDevice.DeviceId);
             if (seenKeys.Contains(key))
             {
                 continue;
@@ -6095,8 +6101,8 @@ public sealed partial class MainForm : Form
             : RemoteDeviceCapabilities.RemoteDesktop | RemoteDeviceCapabilities.InputControl;
 
         List<SavedRemoteDevice> recentDevices = GetRecentDevices();
-        SavedRemoteDevice? confirmedSource = _confirmedHistorySource is null ? null : recentDevices.FirstOrDefault(d =>
-            d.Port == _confirmedHistorySource.Port && string.Equals(d.Address, _confirmedHistorySource.Address, StringComparison.OrdinalIgnoreCase));
+        SavedRemoteDevice? confirmedSource = _confirmedHistorySource is null ? null : FindSavedForDiscovery(recentDevices,
+            _confirmedHistorySource.Address!, _confirmedHistorySource.Port, _confirmedHistorySource.DeviceId);
         if (_confirmedHistorySource is not null && confirmedSource is null) return; // Deleted while connecting.
         if (confirmedSource is not null && RemoteDeviceIdentity.Normalize(confirmedSource.DeviceId) is not null &&
             !RemoteDeviceIdentity.Same(confirmedSource.DeviceId, connectedDevice?.DeviceId)) confirmedSource = null;
@@ -6192,14 +6198,16 @@ public sealed partial class MainForm : Form
         IList<SavedRemoteDevice> recentDevices,
         string? address,
         int port,
-        string? remark)
+        string? remark,
+        string? deviceId = null)
     {
         ArgumentNullException.ThrowIfNull(recentDevices);
         SavedRemoteDevice? device =
             FindSavedDevice(
                 recentDevices,
                 address,
-                port);
+                port,
+                deviceId);
         if (device is null)
         {
             return false;
@@ -6213,7 +6221,8 @@ public sealed partial class MainForm : Form
     internal static bool RemoveSavedDevice(
         IList<SavedRemoteDevice> recentDevices,
         string? address,
-        int port)
+        int port,
+        string? deviceId = null)
     {
         ArgumentNullException.ThrowIfNull(recentDevices);
         bool removed = false;
@@ -6221,10 +6230,10 @@ public sealed partial class MainForm : Form
              index >= 0;
              index--)
         {
-            if (!SavedDeviceMatchesEndpoint(
+            if (!(RemoteDeviceIdentity.Normalize(deviceId) is not null ? RemoteDeviceIdentity.Same(recentDevices[index].DeviceId, deviceId) : SavedDeviceMatchesEndpoint(
                     recentDevices[index],
                     address,
-                    port))
+                    port)))
             {
                 continue;
             }
@@ -6239,10 +6248,11 @@ public sealed partial class MainForm : Form
     private static SavedRemoteDevice? FindSavedDevice(
         IEnumerable<SavedRemoteDevice> recentDevices,
         string? address,
-        int port)
+        int port,
+        string? deviceId = null)
     {
         return recentDevices.FirstOrDefault(device =>
-            SavedDeviceMatchesEndpoint(
+            RemoteDeviceIdentity.Normalize(deviceId) is not null ? RemoteDeviceIdentity.Same(device.DeviceId, deviceId) : SavedDeviceMatchesEndpoint(
                 device,
                 address,
                 port));
@@ -6278,6 +6288,9 @@ public sealed partial class MainForm : Form
     {
         return $"{address.Trim()}:{port}";
     }
+
+    private static string MakeDeviceListKey(string address, int port, string? deviceId) =>
+        RemoteDeviceIdentity.Normalize(deviceId) is string id ? "id:" + id : "ep:" + MakeDeviceKey(address, port);
 
     private void RefreshLocalIps()
     {
@@ -8436,7 +8449,7 @@ public sealed partial class MainForm : Form
         }
     }
 
-    private sealed class RemoteDeviceListItem
+    internal sealed class RemoteDeviceListItem
     {
         private RemoteDeviceListItem(
             string machineName,

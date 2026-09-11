@@ -30,6 +30,37 @@ public class AndroidDeviceIdentityTest {
         history.remember("", "two", 56565, "", "two", "", "PC", 2, UUID.randomUUID().toString());
         assertEquals(2, history.entries().size());
     }
+    @Test public void reusedEndpointKeepsDistinctMachinesAndCredentialsAcrossRestart() throws Exception {
+        AndroidConnectionHistory history = new AndroidConnectionHistory();
+        String first = history.remember("", "pc", 56565, "", "first-secret", "", "PC", 1, ID).id;
+        history.rename(first, "第一台");
+        String other = UUID.randomUUID().toString();
+        String second = history.remember("", "pc", 56565, "", "second-secret", "", "PC", 2, other).id;
+        history = AndroidConnectionHistory.decode(history.encode());
+        assertEquals(2, history.entries().size());
+        assertEquals("第一台", history.find(first).remark);
+        assertEquals("first-secret", history.find(first).password);
+        assertEquals("", history.find(second).remark);
+        assertEquals(other, history.find(second).deviceId);
+    }
+    @Test public void previousRecordIsNotRewrittenWhenIdentityChanges() {
+        AndroidConnectionHistory history = new AndroidConnectionHistory();
+        String first = history.remember("", "old", 56565, "", "first", "", "PC", 1, ID).id;
+        history.rename(first, "第一台");
+        AndroidConnectionHistory.Node second = history.remember(first, "new", 45678, "", "second", "", "PC", 2, UUID.randomUUID().toString());
+        assertEquals(2, history.entries().size()); assertNotEquals(first, second.id);
+        assertEquals("old", history.find(first).host); assertEquals("第一台", history.find(first).remark);
+        assertEquals("", second.remark);
+    }
+    @Test public void manualUpdateDoesNotBridgeTwoKnownIdentities() {
+        AndroidConnectionHistory history = new AndroidConnectionHistory();
+        String first = history.remember("", "pc", 56565, "", "first", "", "PC", 1, ID).id;
+        String other = UUID.randomUUID().toString();
+        String second = history.remember("", "pc", 56565, "", "second", "", "PC", 2, other).id;
+        AndroidConnectionHistory.Node updated = history.remember("", "pc", 56565, "", "manual", "", "", 3);
+        assertEquals(2, history.entries().size()); assertEquals(second, updated.id);
+        assertEquals(other, updated.deviceId); assertEquals("first", history.find(first).password);
+    }
     @Test public void explicitlyAddedPortSurvivesRemarkIdentityUpdateAndRestart() throws Exception {
         AndroidConnectionHistory history = new AndroidConnectionHistory();
         String node = history.remember("", "pc", 45678, "", "test", "", "", 1).id;

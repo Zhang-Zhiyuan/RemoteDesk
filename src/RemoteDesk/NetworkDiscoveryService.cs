@@ -472,6 +472,7 @@ internal static class NetworkDiscoveryService
 
         IReadOnlyList<IPAddress> resolvedDirectAddresses = await ResolveDirectProbeAddressesAsync(
             directAddresses,
+            cancellationToken,
             timeoutSource.Token).ConfigureAwait(false);
         foreach (IPAddress ipAddress in resolvedDirectAddresses)
         {
@@ -486,6 +487,7 @@ internal static class NetworkDiscoveryService
 
         IReadOnlyList<IPEndPoint> resolvedDirectTargets = await ResolveDirectProbeTargetsAsync(
             directTargets,
+            cancellationToken,
             timeoutSource.Token).ConfigureAwait(false);
         foreach (IPEndPoint directTarget in resolvedDirectTargets)
         {
@@ -512,6 +514,7 @@ internal static class NetworkDiscoveryService
 
         foreach (IPEndPoint endpoint in endpoints)
         {
+            if (timeoutSource.IsCancellationRequested) break;
             try
             {
                 await udpClient.SendAsync(
@@ -583,6 +586,7 @@ internal static class NetworkDiscoveryService
             }
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         return discovered.Values
             .OrderBy(host => host.MachineName, StringComparer.OrdinalIgnoreCase)
             .ThenBy(host => host.Address, StringComparer.OrdinalIgnoreCase)
@@ -887,7 +891,8 @@ internal static class NetworkDiscoveryService
 
     internal static async Task<IReadOnlyList<IPAddress>> ResolveDirectProbeAddressesAsync(
         IEnumerable<string>? directAddresses,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        CancellationToken? dnsCancellationToken = null)
     {
         if (directAddresses is null)
         {
@@ -898,7 +903,7 @@ internal static class NetworkDiscoveryService
         foreach (string address in directAddresses)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            string trimmedAddress = address.Trim();
+            string trimmedAddress = address?.Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(trimmedAddress))
             {
                 continue;
@@ -914,12 +919,17 @@ internal static class NetworkDiscoveryService
                 continue;
             }
 
+            // A spent UDP/DNS budget must not discard literal IPs or prevent
+            // their separately bounded TCP banner fallback. User cancellation
+            // remains authoritative for every path.
+            CancellationToken dnsToken = dnsCancellationToken ?? cancellationToken;
+            if (dnsToken.IsCancellationRequested) continue;
             try
             {
                 IPAddress[] resolved = await Dns.GetHostAddressesAsync(
                     trimmedAddress,
                     AddressFamily.InterNetwork,
-                    cancellationToken).ConfigureAwait(false);
+                    dnsToken).ConfigureAwait(false);
                 foreach (IPAddress resolvedAddress in resolved)
                 {
                     if (resolvedAddress.AddressFamily == AddressFamily.InterNetwork)
@@ -931,6 +941,9 @@ internal static class NetworkDiscoveryService
             catch (Exception ex) when (ex is SocketException or ArgumentException or InvalidOperationException)
             {
             }
+            catch (OperationCanceledException) when (dnsToken.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+            {
+            }
         }
 
         return addresses.ToArray();
@@ -938,7 +951,8 @@ internal static class NetworkDiscoveryService
 
     internal static async Task<IReadOnlyList<IPEndPoint>> ResolveDirectProbeTargetsAsync(
         IEnumerable<DiscoveryProbeTarget>? directTargets,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        CancellationToken? dnsCancellationToken = null)
     {
         if (directTargets is null)
         {
@@ -958,7 +972,8 @@ internal static class NetworkDiscoveryService
 
             IReadOnlyList<IPAddress> addresses = await ResolveDirectProbeAddressesAsync(
                 [target.Address],
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                dnsCancellationToken).ConfigureAwait(false);
             foreach (IPAddress address in addresses)
             {
                 endpoints.Add(new IPEndPoint(address, target.HostPort));

@@ -10,4 +10,6 @@ internal static class RemoteDeviceIdentity
         Guid.TryParse(value, out Guid id) && id != Guid.Empty ? id.ToString("D") : null;
     public static bool Same(string? first, string? second) =>
         Normalize(first) is string id && id == Normalize(second);
+    public static bool Conflicts(string? first, string? second) =>
+        Normalize(first) is string left && Normalize(second) is string right && left != right;
 }

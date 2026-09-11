@@ -77,8 +77,12 @@ final class AndroidConnectionHistory {
         Node fresh = new Node(UUID.randomUUID().toString(), host, port, relayDeviceId,
             password, relayConfiguration, name, "", now, deviceId);
         Node existing = previousId.isEmpty() ? null : find(previousId);
+        if (existing != null && identityConflicts(existing.deviceId, fresh.deviceId)) existing = null;
+        if (existing == null && !fresh.deviceId.isEmpty()) for (Node candidate : nodes) {
+            if (fresh.deviceId.equals(candidate.deviceId)) { existing = candidate; break; }
+        }
         if (existing == null) for (Node candidate : nodes) {
-            if ((!fresh.deviceId.isEmpty() && fresh.deviceId.equals(candidate.deviceId)) || candidate.key().equals(fresh.key())) { existing = candidate; break; }
+            if (sameMachine(candidate, fresh)) { existing = candidate; break; }
         }
         if (existing != null) {
             fresh = new Node(existing.id, fresh.host, port, fresh.relayDeviceId, password,
@@ -86,14 +90,12 @@ final class AndroidConnectionHistory {
                 fresh.deviceId.isEmpty() ? existing.deviceId : fresh.deviceId, existing.autoPort);
         }
         if (fresh.remark.isEmpty()) for (Node candidate : nodes) {
-            if ((!fresh.deviceId.isEmpty() && fresh.deviceId.equals(candidate.deviceId) || fresh.key().equals(candidate.key())) && !candidate.remark.isEmpty()) {
+            if (sameMachine(candidate, fresh) && !candidate.remark.isEmpty()) {
                 fresh = fresh.withRemark(candidate.remark); break;
             }
         }
-        String key = fresh.key();
-        String id = fresh.id;
-        String identity = fresh.deviceId;
-        nodes.removeIf(node -> node.key().equals(key) || node.id.equals(id) || !identity.isEmpty() && identity.equals(node.deviceId));
+        Node remembered = fresh;
+        nodes.removeIf(node -> node.id.equals(remembered.id) || sameMachine(node, remembered));
         nodes.add(0, fresh);
         while (nodes.size() > LIMIT) nodes.remove(nodes.size() - 1);
         return fresh;
@@ -145,7 +147,7 @@ final class AndroidConnectionHistory {
                 Node node = new Node(in.readUTF(), in.readUTF(), in.readInt(), in.readUTF(),
                     in.readUTF(), in.readUTF(), in.readUTF(), in.readUTF(), in.readLong(), version == 2 ? in.readUTF() : "", version == 1 || in.readBoolean());
                 for (Node existing : result.nodes) {
-                    if (existing.id.equals(node.id) || existing.key().equals(node.key()))
+                    if (existing.id.equals(node.id) || (existing.key().equals(node.key()) && !identityConflicts(existing.deviceId, node.deviceId)))
                         throw new IOException("Duplicate history entry");
                 }
                 result.nodes.add(node);
@@ -159,6 +161,16 @@ final class AndroidConnectionHistory {
         if (value == null || !value.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")) return "";
         UUID id = UUID.fromString(value);
         return id.getMostSignificantBits() == 0 && id.getLeastSignificantBits() == 0 ? "" : id.toString();
+    }
+
+    static boolean identityConflicts(String first, String second) {
+        String left = deviceIdentity(first), right = deviceIdentity(second);
+        return !left.isEmpty() && !right.isEmpty() && !left.equals(right);
+    }
+
+    private static boolean sameMachine(Node first, Node second) {
+        return !identityConflicts(first.deviceId, second.deviceId) &&
+            ((!first.deviceId.isEmpty() && first.deviceId.equals(second.deviceId)) || first.key().equals(second.key()));
     }
 
     static String normalizeHost(String value) {

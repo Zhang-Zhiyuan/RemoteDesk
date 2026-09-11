@@ -31,6 +31,16 @@ def identity(value):
     except (ValueError, AttributeError): return ""
 
 
+def identity_conflicts(first, second):
+    left, right = identity(first), identity(second)
+    return bool(left and right and left != right)
+
+
+def same_machine(first, second):
+    if identity_conflicts(first.device_id, second.device_id): return False
+    return bool(first.device_id and first.device_id == second.device_id) or (first.host == second.host and first.port == second.port)
+
+
 def label(value, limit=128):
     return "".join(c for c in str(value or "") if not unicodedata.category(c).startswith("C"))[:limit].strip()
 
@@ -90,13 +100,16 @@ class Book:
         if previous_id and self.find(previous_id) is None: return None  # A deleted connecting record stays deleted.
         fresh = Node.parse(dict(id=str(uuid.uuid4()), host=host, port=port, password=password, name=name,
                                 device_id=device_id, auto_port=auto_port, updated=time.time()))
-        matches = [n for n in self.nodes if n.id == previous_id or (fresh.device_id and n.device_id == fresh.device_id) or
-                   (n.host == fresh.host and n.port == fresh.port)]
-        existing = self.find(previous_id) or next((n for n in matches if n.device_id == fresh.device_id and fresh.device_id), None) or next(iter(matches), None)
-        note = label(remark, 80) if remark is not None else next((n.remark for n in matches if n.remark), "")
+        previous = self.find(previous_id)
+        if previous and identity_conflicts(previous.device_id, fresh.device_id): previous = None
+        existing = previous or next((n for n in self.nodes if fresh.device_id and n.device_id == fresh.device_id), None) or next((n for n in self.nodes if same_machine(n, fresh)), None)
         if existing:
             fresh = replace(fresh, id=existing.id, name=fresh.name or existing.name,
                             device_id=fresh.device_id or existing.device_id)
+        # Re-evaluate after inheriting a known identity. An unverified manual
+        # endpoint must not bridge two different machines that reused that IP.
+        matches = [n for n in self.nodes if n is previous or same_machine(n, fresh)]
+        note = label(remark, 80) if remark is not None else (existing.remark if existing and existing.remark else next((n.remark for n in matches if n.remark), ""))
         fresh = replace(fresh, remark=note)
         self.nodes = [fresh] + [n for n in self.nodes if n not in matches]
         self.nodes = self.nodes[:LIMIT]

@@ -42,6 +42,7 @@ def main():
     parser.add_argument("--discovery-port", type=int, choices=(40566,), help="Optional loopback-only product UDP fixture, advertises this peer's actual TCP port")
     parser.add_argument("--machine-name", default="Synthetic test PC")
     parser.add_argument("--device-id", default="", help="Optional stable synthetic identity, negotiated after authentication")
+    parser.add_argument("--next-device-id", default="", help="Optional synthetic replacement identity after the first authenticated session, for reused-address history checks")
     parser.add_argument("--allow-test-controls", action="store_true", help="Read a fixed local fixture-command.json for fault injection; never an OS command")
     args = parser.parse_args()
     output = Path(args.output).resolve()
@@ -65,7 +66,7 @@ def main():
         buffer = io.BytesIO(); image.save(buffer, format="JPEG", quality=90)
         jpeg_images[name] = struct.pack("<iidd", *size, 0.0, 0.0) + buffer.getvalue()
     deadline = time.monotonic() + max(10, min(args.seconds, 1800))
-    report = {"scope":"synthetic encrypted loopback peer; not actual Windows capture/input", "sessions":0, "events":[], "controls":[], "frames":0,
+    report = {"scope":"synthetic encrypted loopback peer; not actual Windows capture/input", "sessions":0, "events":[], "controls":[], "identities":[], "frames":0,
               "testControls":args.allow_test_controls, "commands":[], "sessionStarts":[]}
     last_command = 0
     accept_after = 0.0
@@ -115,13 +116,14 @@ def main():
                     continue
                 client.settimeout(30)
                 report["sessions"] += 1
+                session_device_id = args.next_device_id if report["sessions"] > 1 and args.next_device_id else args.device_id
                 report["sessionStarts"].append({"session":report["sessions"],"eventOffset":len(report["events"])})
                 lock=threading.Lock(); stopped=threading.Event()
                 state={"h264":False,"target":"primary", "pausedUntil":0.0}
                 def send(kind,payload):
                     with lock: wire.write_message(client,session,kind,payload)
                 caps=wire.CAPABILITY_REMOTE_DESKTOP | wire.CAPABILITY_INPUT_CONTROL | wire.CAPABILITY_CAPTURE_TARGET_SELECTION
-                if args.device_id: caps |= wire.CAPABILITY_DEVICE_IDENTITY
+                if session_device_id: caps |= wire.CAPABILITY_DEVICE_IDENTITY
                 send(wire.MESSAGE_CONTROL,wire.encode_device_info(args.machine_name,"Windows",caps))
                 send(wire.MESSAGE_CONTROL,wire.encode_capture_target_list([("primary","测试屏幕 1 · 1080P"),("secondary","测试屏幕 2 · 720P")]))
                 send(wire.MESSAGE_CONTROL,wire.encode_capture_target_changed("primary","测试屏幕 1 · 1080P"))
@@ -135,8 +137,9 @@ def main():
                             elif kind==wire.MESSAGE_CONTROL:
                                 control=wire.decode_control(payload); report["controls"].append(control)
                                 if payload[0]==wire.CONTROL_VIEWER_INFO: state["h264"]=bool(struct.unpack_from("<i",payload,1)[0]&2)
-                                elif payload[0]==wire.CONTROL_DEVICE_IDENTITY_REQUEST and args.device_id:
-                                    send(wire.MESSAGE_CONTROL, wire.encode_device_identity(args.device_id))
+                                elif payload[0]==wire.CONTROL_DEVICE_IDENTITY_REQUEST and session_device_id:
+                                    send(wire.MESSAGE_CONTROL, wire.encode_device_identity(session_device_id))
+                                    report["identities"].append(session_device_id)
                                 elif payload[0]==wire.CONTROL_SELECT_CAPTURE_TARGET:
                                     selected=control["targetId"]
                                     if selected not in jpeg_images: raise ValueError("Unknown synthetic target")

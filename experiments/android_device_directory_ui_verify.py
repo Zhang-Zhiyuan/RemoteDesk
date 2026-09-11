@@ -14,7 +14,10 @@ PACKAGE = "com.remotedesk.agent"
 def main():
     parser = argparse.ArgumentParser()
     for name in ("adb", "serial", "peer-a", "peer-b", "output"): parser.add_argument("--" + name, required=True)
+    parser.add_argument("--conflict-peer", help="Owned synthetic peer configured with --next-device-id")
+    parser.add_argument("--conflict-only", action="store_true", help="Only test distinct identities at one reused endpoint in a fresh emulator profile")
     args = parser.parse_args()
+    if args.conflict_only and not args.conflict_peer: parser.error("--conflict-only requires --conflict-peer")
     if not re.fullmatch(r"emulator-\d+", args.serial): raise ValueError("Synthetic credentials and process restarts: emulator only")
     output = Path(args.output).resolve(); output.mkdir(parents=True, exist_ok=False)
     report = dict(scope="Signed production APK UI; encrypted synthetic peers, no OS input", checks=[])
@@ -69,22 +72,49 @@ def main():
         adb("shell", "input", "keyevent", "KEYCODE_BACK")
         tap("保存设备"); time.sleep(.5); start()
     def count():
-        for n in nodes():
-            text = n.get("text", "")
-            if text == "最近连接": return 0
-            if text.startswith("最近连接 · "): return int(text.rsplit(" ", 1)[1])
+        # On compact displays the history is below the connection form; do not
+        # mistake an offscreen heading for failed persistence after restart.
+        width, height = map(int, re.search(r"(\d+)x(\d+)", adb("shell", "wm", "size")).groups())
+        for _ in range(14):
+            for n in nodes():
+                text = n.get("text", "")
+                if text == "最近连接": return 0
+                if text.startswith("最近连接 · "): return int(text.rsplit(" ", 1)[1])
+            adb("shell", "input", "swipe", width//2, int(height*.78), width//2, int(height*.48), 500)
         raise AssertionError("History section missing")
     def connect(title, port, path):
         before = peer(path)["sessions"]
+        previous_controls = len(peer(path)["controls"])
         tap(desc=f"连接 {title}，直连 10.0.2.2:{port}", scroll=True)
         deadline = time.monotonic() + 12
         while peer(path)["sessions"] <= before and time.monotonic() < deadline: time.sleep(.2)
         check("Saved explicit port connects without being replaced by discovery", peer(path)["sessions"] > before)
         time.sleep(1)
-        check("Identity requested after encrypted authentication", any(c["kind"] == 33 for c in peer(path)["controls"]))
+        check("Identity requested after encrypted authentication", any(c["kind"] == 33 for c in peer(path)["controls"][previous_controls:]))
         adb("shell", "input", "keyevent", "KEYCODE_BACK"); tap("断开"); time.sleep(.5); start()
 
     start(); check("Explicit add-device button exists", any(n.get("text") == "新增设备" for n in nodes()))
+    if args.conflict_only:
+        state = peer(args.conflict_peer)
+        if state["sessions"] != 0: raise ValueError("Identity-replacement peer must be fresh")
+        port = state["port"]
+        add(port, "Original-PC")
+        connect("Original-PC", port, args.conflict_peer)
+        check("Original authenticated machine is one saved record", count() == 1)
+        connect("Original-PC", port, args.conflict_peer)
+        identities = peer(args.conflict_peer).get("identities", [])
+        check("Fixture delivered different authenticated identities at the identical endpoint", len(identities) == 2 and identities[0] != identities[1])
+        check("Reused endpoint retains both machines after application restart", count() == 2)
+        check("New identity does not inherit the original machine remark",
+              any(n.get("content-desc") == f"连接 Synthetic replacement，直连 10.0.2.2:{port}" for n in nodes()))
+        tap(desc="管理连接 Synthetic replacement", scroll=True); tap("删除记录"); tap("删除"); start()
+        check("Deleting the replacement leaves the original record", count() == 1)
+        check("Original remark is still available", any(n.get("content-desc") == f"连接 Original-PC，直连 10.0.2.2:{port}" for n in nodes()))
+        report["completed"] = True
+        report["scope"] += "; reused-address subset only"
+        (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps(dict(completed=True, checks=len(report["checks"]))))
+        return
     add(port_a, "Directory-Note"); check("Manual add persists without connecting", count() == 1 and peer(args.peer_a)["sessions"] == initial_sessions_a)
     add(port_a, ""); check("Repeated manual endpoint is merged", count() == 1)
     connect("Directory-Note", port_a, args.peer_a)

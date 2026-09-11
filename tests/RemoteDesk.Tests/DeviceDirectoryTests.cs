@@ -64,6 +64,81 @@ public sealed class DeviceDirectoryTests
     }
 
     [Fact]
+    public void ReusedEndpointKeepsDistinctAuthenticatedMachinesThroughSettingsRestart()
+    {
+        using var temp = TemporaryDirectory.Create();
+        var service = new AppSettingsService(Path.Combine(temp.Path, "settings.json"));
+        var first = new SavedRemoteDevice { Address = "pc", Port = 56565, DeviceId = MachineId,
+            Remark = "第一台", ProtectedPassword = AppSettingsService.ProtectSecret("first-secret"), LastConnectedAt = DateTimeOffset.UtcNow.AddMinutes(-1) };
+        var second = new SavedRemoteDevice { Address = "pc", Port = 56565, DeviceId = Guid.NewGuid().ToString(),
+            ProtectedPassword = AppSettingsService.ProtectSecret("second-secret"), LastConnectedAt = DateTimeOffset.UtcNow };
+        var settings = new RemoteDeskSettings(); settings.Viewer.RecentDevices = [first];
+        Assert.False(MainForm.SameSavedMachine(first, second));
+        MainForm.UpsertRecentDevice(settings.Viewer.RecentDevices, second);
+        Assert.Equal(2, settings.Viewer.RecentDevices.Count);
+        Assert.Null(second.Remark);
+        Assert.True(service.Save(settings).Success);
+        var restored = service.Load().Viewer.RecentDevices;
+        Assert.Equal(2, restored.Count);
+        Assert.Equal("第一台", restored.Single(n => n.DeviceId == MachineId).Remark);
+        Assert.Equal("first-secret", AppSettingsService.UnprotectSecret(restored.Single(n => n.DeviceId == MachineId).ProtectedPassword));
+        Assert.Equal("second-secret", AppSettingsService.UnprotectSecret(restored.Single(n => n.DeviceId == second.DeviceId).ProtectedPassword));
+    }
+
+    [Fact]
+    public void ManualEndpointUpdateDoesNotBridgeDifferentKnownIdentities()
+    {
+        var first = new SavedRemoteDevice { Address = "pc", Port = 56565, DeviceId = MachineId, Remark = "保留" };
+        var second = new SavedRemoteDevice { Address = "pc", Port = 56565, DeviceId = Guid.NewGuid().ToString() };
+        var rows = new List<SavedRemoteDevice> { second, first };
+        var manual = new SavedRemoteDevice { Address = "pc", Port = 56565, ProtectedPassword = AppSettingsService.ProtectSecret("manual") };
+        MainForm.UpsertRecentDevice(rows, manual);
+        Assert.Equal(2, rows.Count); Assert.Contains(first, rows);
+        Assert.Equal(second.DeviceId, manual.DeviceId); Assert.Null(manual.Remark);
+    }
+
+    [Fact]
+    public void ReusedEndpointIsVisibleAsTwoRowsAndManagementTargetsIdentity()
+    {
+        var first = new SavedRemoteDevice { Address = "192.0.2.10", Port = 56565, DeviceId = MachineId, Remark = "第一台" };
+        var second = new SavedRemoteDevice { Address = first.Address, Port = first.Port, DeviceId = Guid.NewGuid().ToString(), Remark = "第二台" };
+        var rows = new List<SavedRemoteDevice> { second, first };
+        var found = new DiscoveredHost("New PC", first.Address, first.Port, "", true, false,
+            RemoteDevicePlatforms.Windows, RemoteDeviceCapabilities.DeviceIdentity, DeviceId: second.DeviceId);
+        var displayed = MainForm.BuildRemoteDeviceList([found], rows, new HashSet<string>());
+        Assert.Equal(2, displayed.Count);
+        Assert.Equal("第二台", displayed[0].Remark); Assert.False(displayed[0].IsSavedOnly);
+        Assert.Equal(MachineId, displayed[1].DeviceId); Assert.True(displayed[1].IsSavedOnly);
+        Assert.True(MainForm.UpdateSavedDeviceRemark(rows, first.Address, first.Port, "只改第一台", MachineId));
+        Assert.Equal("第二台", second.Remark);
+        Assert.True(MainForm.RemoveSavedDevice(rows, first.Address, first.Port, MachineId));
+        Assert.Same(second, Assert.Single(rows));
+    }
+
+    [Fact]
+    public void DiscoveryIdentityWinsOverAddressAndDoesNotBorrowAnotherMachinesPassword()
+    {
+        var first = new SavedRemoteDevice { Address = "old", Port = 56565, DeviceId = MachineId };
+        var second = new SavedRemoteDevice { Address = "new", Port = 56565, DeviceId = Guid.NewGuid().ToString() };
+        Assert.Same(first, MainForm.FindSavedForDiscovery([second, first], "new", 56565, MachineId));
+        Assert.Null(MainForm.FindSavedForDiscovery([first], "old", 56565, second.DeviceId));
+        Assert.True(MainForm.UpdateSavedDeviceRemark(new List<SavedRemoteDevice> { first }, "new", 45678, "移动后的备注", MachineId));
+        Assert.Equal("移动后的备注", first.Remark);
+    }
+
+    [Fact]
+    public void LegacyPortMigrationDoesNotMergeReusedAddressesWithConflictingIdentities()
+    {
+        var first = new SavedRemoteDevice { Address = "192.0.2.10", Port = 56565, DeviceId = MachineId };
+        var second = new SavedRemoteDevice { Address = first.Address, Port = 40565, DeviceId = Guid.NewGuid().ToString() };
+        var rows = new List<SavedRemoteDevice> { first, second };
+        var found = new DiscoveredHost("Other PC", first.Address, second.Port, "", true, false,
+            RemoteDevicePlatforms.Windows, RemoteDeviceCapabilities.DeviceIdentity, DeviceId: second.DeviceId);
+        Assert.False(MainForm.MigrateCompatibleRecentDevicePorts(rows, [found]));
+        Assert.Equal(56565, first.Port); Assert.Equal(2, rows.Count);
+    }
+
+    [Fact]
     public void SettingsRestartMergesIdentityAliasesAndPreservesEncryptedCredentials()
     {
         using var temp = TemporaryDirectory.Create();

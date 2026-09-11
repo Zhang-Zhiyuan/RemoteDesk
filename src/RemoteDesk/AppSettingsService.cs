@@ -393,9 +393,6 @@ internal sealed class AppSettingsService
     private static List<SavedRemoteDevice> NormalizeRecentDevices(IEnumerable<SavedRemoteDevice?> devices)
     {
         var normalized = new List<SavedRemoteDevice>();
-        var normalizedByEndpoint =
-            new Dictionary<string, SavedRemoteDevice>(
-                StringComparer.OrdinalIgnoreCase);
         foreach (SavedRemoteDevice? device in devices
             .Where(device => device is not null)
             .OrderByDescending(device => device!.LastConnectedAt))
@@ -406,13 +403,11 @@ internal sealed class AppSettingsService
                 continue;
             }
 
-            string key = $"{address}:{device.Port}";
-            SavedRemoteDevice? identityMatch = normalized.FirstOrDefault(item => RemoteDeviceIdentity.Same(item.DeviceId, device.DeviceId));
-            if (identityMatch is not null || normalizedByEndpoint.TryGetValue(
-                    key,
-                    out SavedRemoteDevice? retainedDevice))
+            SavedRemoteDevice? retainedDevice = normalized.FirstOrDefault(item => RemoteDeviceIdentity.Same(item.DeviceId, device.DeviceId)) ??
+                normalized.FirstOrDefault(item => item.Port == device.Port && string.Equals(item.Address, address, StringComparison.OrdinalIgnoreCase) &&
+                    !RemoteDeviceIdentity.Conflicts(item.DeviceId, device.DeviceId));
+            if (retainedDevice is not null)
             {
-                retainedDevice = identityMatch ?? normalizedByEndpoint[key];
                 if (string.IsNullOrWhiteSpace(
                         retainedDevice.Remark) &&
                     !string.IsNullOrWhiteSpace(
@@ -449,9 +444,6 @@ internal sealed class AppSettingsService
                 LastConnectedAt = device.LastConnectedAt
             };
             normalized.Add(normalizedDevice);
-            normalizedByEndpoint.Add(
-                key,
-                normalizedDevice);
         }
 
         return normalized;

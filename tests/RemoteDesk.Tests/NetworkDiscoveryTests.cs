@@ -206,6 +206,39 @@ public sealed class NetworkDiscoveryTests
     }
 
     [Fact]
+    public async Task ExpiredDnsBudgetKeepsLiteralTargetsWithoutResolvingNames()
+    {
+        using var dnsDeadline = new CancellationTokenSource(); dnsDeadline.Cancel();
+        var endpoints = await NetworkDiscoveryService.ResolveDirectProbeTargetsAsync(
+            [new("unused.invalid", 45670), new("127.0.0.1", 45671)], CancellationToken.None, dnsDeadline.Token);
+        Assert.Equal(new IPEndPoint(IPAddress.Loopback, 45671), Assert.Single(endpoints));
+    }
+
+    [Fact]
+    public async Task ExpiredDnsBudgetDoesNotSwallowCallerCancellation()
+    {
+        using var caller = new CancellationTokenSource(); caller.Cancel();
+        using var dnsDeadline = new CancellationTokenSource(); dnsDeadline.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => NetworkDiscoveryService.ResolveDirectProbeTargetsAsync(
+            [new("127.0.0.1", 45671)], caller.Token, dnsDeadline.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => NetworkDiscoveryService.DiscoverAsync(
+            TimeSpan.Zero, caller.Token, includeBroadcast: false));
+    }
+
+    [Fact]
+    public async Task ExpiredUdpWindowStillAllowsBoundedExplicitTcpFallback()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        Task accepted = AcceptAndWriteAsync(listener, "RDK1", timeout.Token);
+        var hosts = await NetworkDiscoveryService.DiscoverAsync(TimeSpan.Zero, timeout.Token,
+            directTargets: [new("127.0.0.1", port)], includeBroadcast: false);
+        await accepted;
+        Assert.Contains(hosts, h => h.Address == "127.0.0.1" && h.Port == port);
+    }
+
+    [Fact]
     public async Task ResolveDirectProbeTargetsAsyncKeepsTargetPorts()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));

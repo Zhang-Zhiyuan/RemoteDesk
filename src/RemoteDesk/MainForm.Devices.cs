@@ -56,6 +56,7 @@ public sealed partial class MainForm
     internal static bool SameSavedMachine(SavedRemoteDevice a, SavedRemoteDevice b)
     {
         if (RemoteDeviceIdentity.Same(a.DeviceId, b.DeviceId)) return true;
+        if (RemoteDeviceIdentity.Conflicts(a.DeviceId, b.DeviceId)) return false;
         if (!string.Equals(a.Address?.Trim(), b.Address?.Trim(), StringComparison.OrdinalIgnoreCase)) return false;
         if (a.Port == b.Port) return true;
         // Keep the legacy automatic-port migration, but never merge two known
@@ -70,8 +71,12 @@ public sealed partial class MainForm
             .Select(g => g.OrderByDescending(h => h.IsHostRunning).ThenBy(h => h.Address, StringComparer.OrdinalIgnoreCase).First()).ToArray();
 
     private SavedRemoteDevice? FindSavedForDiscovery(string host, int port, string? deviceId) =>
-        GetRecentDevices().FirstOrDefault(d => d.Port == port && string.Equals(d.Address, host, StringComparison.OrdinalIgnoreCase)) ??
-        GetRecentDevices().FirstOrDefault(d => RemoteDeviceIdentity.Same(d.DeviceId, deviceId));
+        FindSavedForDiscovery(GetRecentDevices(), host, port, deviceId);
+
+    internal static SavedRemoteDevice? FindSavedForDiscovery(IEnumerable<SavedRemoteDevice> saved, string host, int port, string? deviceId) =>
+        saved.FirstOrDefault(d => RemoteDeviceIdentity.Same(d.DeviceId, deviceId)) ??
+        saved.FirstOrDefault(d => !RemoteDeviceIdentity.Conflicts(d.DeviceId, deviceId) && d.Port == port &&
+            string.Equals(d.Address?.Trim(), host.Trim(), StringComparison.OrdinalIgnoreCase));
 
     internal static IReadOnlyList<DiscoveredHost> FindDeviceCandidates(string address, int port, string? deviceId,
         string? name, IReadOnlyList<DiscoveredHost> hosts)

@@ -108,9 +108,10 @@ class DevicePanel(ttk.LabelFrame):
             key = device.device_id or device.address
             if key in seen: continue
             seen.add(key)
-            saved = next((n for n in self.book.nodes if (device.device_id and device.device_id == n.device_id) or
-                          (device.host == n.host and device.port == n.port)), None)
+            saved = next((n for n in self.book.nodes if device.device_id and device.device_id == n.device_id), None) or \
+                next((n for n in self.book.nodes if model.same_machine(n, device)), None)
             row_id = "saved:"+saved.id if saved else "found:"+device.address
+            if row_id in self.rows: continue
             self.rows[row_id] = (saved, device)
             self.tree.insert("", tk.END, iid=row_id, text=saved.title if saved else device.name or device.host,
                              values=(device.address, "可连接" if device.listening else "被控未启动"))
