@@ -2210,8 +2210,8 @@ internal sealed class RemoteHostServer : IDisposable
         bool CanAttemptHardwareH264OnCurrentDesktop(
             RemoteVideoCodecs supportedCodecs)
         {
-            if (!supportedCodecs.HasFlag(
-                    RemoteVideoCodecs.Jpeg))
+            if (!SupportsSecureDesktopJpegRecovery(
+                    supportedCodecs, viewerState.Capabilities))
             {
                 return true;
             }
@@ -2353,6 +2353,19 @@ internal sealed class RemoteHostServer : IDisposable
                 if (captureState.TargetVersion != targetVersion ||
                     currentSelection.Version != codecVersion)
                 {
+                    continue;
+                }
+
+                // A desktop transition is not an encoder defect. Recover
+                // immediately, including legacy RemoteDesk viewers which
+                // advertised JPEG capability but selected the old H.264-only
+                // preference. Genuine H.264-only peers are not sent JPEG.
+                interactiveDesktopCheckedAt = 0;
+                if (!CanAttemptHardwareH264OnCurrentDesktop(currentSelection.SupportedCodecs))
+                {
+                    failedTargetVersion = failedCodecVersion = int.MinValue;
+                    hardwareRetryAtMilliseconds = long.MaxValue;
+                    runtimeRestartCount = hardwareRetryCount = 0;
                     continue;
                 }
 
@@ -4293,6 +4306,16 @@ internal sealed class RemoteHostServer : IDisposable
             capture.Backend);
     }
 
+    internal static bool SupportsSecureDesktopJpegRecovery(
+        RemoteVideoCodecs codecs, RemoteDeviceCapabilities capabilities) =>
+        codecs.HasFlag(RemoteVideoCodecs.Jpeg) ||
+        // Older Windows clients retain a JPEG decoder even in their removed
+        // "H.264 only" UI mode and explicitly advertise HighQualityJpeg.
+        // Use that declaration only for a non-interactive/secure desktop;
+        // the normal desktop still honors their H.264 preference.
+        (codecs.HasFlag(RemoteVideoCodecs.H264AnnexB) &&
+         capabilities.HasFlag(RemoteDeviceCapabilities.HighQualityJpeg));
+
     internal static bool ShouldFinishJpegStartupPreview(
         bool startupPreviewOnly,
         bool udpRouteActive) =>
@@ -4336,6 +4359,8 @@ internal sealed class RemoteHostServer : IDisposable
                 : null);
         int consecutiveCaptureFailures = 0;
         bool captureUnavailablePublished = false;
+        var unchangedFrames = new UnchangedJpegFrameGate();
+        int suppressedFramesInWindow = 0;
         int framesInWindow = 0;
         long bytesInWindow = 0;
         double captureMillisecondsInWindow = 0;
@@ -4380,7 +4405,8 @@ internal sealed class RemoteHostServer : IDisposable
 
             long frameStartedAt = Stopwatch.GetTimestamp();
             TimeSpan frameInterval = TimeSpan.FromMilliseconds(1000d / adaptiveController.CurrentFps);
-            if (WindowsSecureDesktopClient.IsRequired && frameInterval < TimeSpan.FromMilliseconds(100))
+            bool secureDesktop = WindowsSecureDesktopClient.IsRequired;
+            if (secureDesktop && frameInterval < TimeSpan.FromMilliseconds(100))
                 frameInterval = TimeSpan.FromMilliseconds(100);
             ScreenCaptureResult capture;
             int sourceTargetGeneration;
@@ -4394,6 +4420,9 @@ internal sealed class RemoteHostServer : IDisposable
             catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or OutOfMemoryException or System.ComponentModel.Win32Exception or System.Runtime.InteropServices.ExternalException)
             {
                 consecutiveCaptureFailures++;
+                // Recovery clears/requalifies the viewer's surface. Its first
+                // image must be resent even if the locked desktop is unchanged.
+                unchangedFrames.Reset();
                 if (consecutiveCaptureFailures == 1 || consecutiveCaptureFailures % 10 == 0)
                 {
                     captureLog($"屏幕采集暂时失败，稍后重试：{ex.Message}");
@@ -4466,8 +4495,28 @@ internal sealed class RemoteHostServer : IDisposable
                 continue;
             }
 
+            // A locked desktop is usually a static, large wallpaper. Sending
+            // it ten times a second fills relay/TCP queues and delays input.
+            // Do not change quality or skip any changed frame. Leave UDP's
+            // negotiated feedback/recovery cadence untouched.
+            bool gateUnchangedFrame = secureDesktop && !lowLatencyVideo.IsRouteActive;
+            if (!gateUnchangedFrame)
+            {
+                unchangedFrames.Reset();
+            }
+            else if (!unchangedFrames.ShouldSend(capture.JpegBytes.Span, capture.FrameSize,
+                         sourceTargetGeneration, Environment.TickCount64))
+            {
+                suppressedFramesInWindow++;
+                TimeSpan idleDelay = frameInterval - Stopwatch.GetElapsedTime(frameStartedAt);
+                if (idleDelay > TimeSpan.Zero)
+                    await Task.Delay(idleDelay, cancellationToken);
+                continue;
+            }
+
             long sendStartedAt = Stopwatch.GetTimestamp();
             bool frameSent = false;
+            bool sentViaTcp = false;
             bool admitted = await captureTargetPublicationCoordinator
                 .AdmitFrameIfCurrentAsync(
                     sourceTargetGeneration,
@@ -4508,6 +4557,7 @@ internal sealed class RemoteHostServer : IDisposable
                             writePriority.Lock,
                             token);
                         tcpWriteTimings.Record(writeTimings);
+                        sentViaTcp = true;
                         frameSent = true;
                     },
                     cancellationToken);
@@ -4521,6 +4571,9 @@ internal sealed class RemoteHostServer : IDisposable
 
                 continue;
             }
+
+            if (gateUnchangedFrame && sentViaTcp)
+                unchangedFrames.MarkSent(Environment.TickCount64);
 
             // Count only a successfully admitted/sent preview, never capture
             // failures or a frame rejected by a target/control publication
@@ -4573,19 +4626,22 @@ internal sealed class RemoteHostServer : IDisposable
                         : string.Empty;
                 captureLog(
                     $"画面统计：{actualFps:F1} FPS，JPEG {adaptiveController.CurrentQuality}，分辨率 {ScreenCaptureService.FormatScaleMode(adaptiveController.CurrentScalePercent)}，采 {averageCaptureMilliseconds:F1}ms，编 {averageEncodeMilliseconds:F1}ms，{sendMetricName} {averageSendMilliseconds:F1}ms，编码 {megabitsPerSecond:F1}Mbps{networkMetrics}" +
+                    (suppressedFramesInWindow > 0 ? $"，省略 {suppressedFramesInWindow} 张重复锁屏画面" : string.Empty) +
                     tcpWriteTimings.DescribeAverage());
 
                 string? adaptiveMessage = adaptiveController.Update(
                     actualFps,
                     averageFrameMilliseconds,
                     averageSendMilliseconds,
-                    networkSnapshot);
+                    networkSnapshot,
+                    sourceWasIdle: suppressedFramesInWindow > 0);
                 if (adaptiveMessage is not null)
                 {
                     captureLog(adaptiveMessage);
                 }
 
                 framesInWindow = 0;
+                suppressedFramesInWindow = 0;
                 bytesInWindow = 0;
                 captureMillisecondsInWindow = 0;
                 encodeMillisecondsInWindow = 0;
@@ -7151,8 +7207,18 @@ internal sealed class RemoteHostServer : IDisposable
             double actualFps,
             double averageFrameMilliseconds,
             double averageSendMilliseconds,
-            LowLatencyVideoNetworkSnapshot networkSnapshot = default)
+            LowLatencyVideoNetworkSnapshot networkSnapshot = default,
+            bool sourceWasIdle = false)
         {
+            if (sourceWasIdle)
+            {
+                // Low output FPS is intentional while identical frames are
+                // suppressed, not evidence of congestion or insufficient GPU.
+                _comfortableWindows = 0;
+                _consecutiveSevereWindows = 0;
+                return null;
+            }
+
             if (!_enabled)
             {
                 return null;

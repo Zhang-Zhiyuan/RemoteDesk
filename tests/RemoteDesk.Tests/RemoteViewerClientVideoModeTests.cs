@@ -63,20 +63,20 @@ public sealed class RemoteViewerClientVideoModeTests
     }
 
     [Fact]
-    public void ResolveSupportedVideoCodecsUsesOnlyH264ForForceMode()
+    public void LegacyH264ModeKeepsJpegAvailableForLockedHosts()
     {
         RemoteVideoCodecs codecs = RemoteViewerClient.ResolveSupportedVideoCodecs(
             ViewerVideoMode.ForceH264,
             "ffmpeg.exe",
             hasNativeHardwareDecoder: false);
 
-        Assert.Equal(RemoteVideoCodecs.H264AnnexB, codecs);
+        Assert.Equal(RemoteVideoCodecs.H264AnnexB | RemoteVideoCodecs.Jpeg, codecs);
     }
 
     [Fact]
-    public void ResolveSupportedVideoCodecsRejectsForceModeWithoutFfmpeg()
+    public void LegacyH264ModeConnectsWithoutHardwareOrFfmpeg()
     {
-        Assert.Throws<InvalidOperationException>(() =>
+        Assert.Equal(RemoteVideoCodecs.Jpeg,
             RemoteViewerClient.ResolveSupportedVideoCodecs(
                 ViewerVideoMode.ForceH264,
                 ffmpegPath: null,
@@ -85,7 +85,7 @@ public sealed class RemoteViewerClientVideoModeTests
 
     [Theory]
     [InlineData(0, true)]
-    [InlineData(2, false)]
+    [InlineData(2, true)]
     public void ResolveSupportedVideoCodecsUsesNativeHardwareWithoutFfmpeg(
         int videoModeValue,
         bool expectsJpegFallback)

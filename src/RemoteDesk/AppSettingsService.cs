@@ -221,8 +221,8 @@ internal sealed class AppSettingsService
             // Older builds exposed ForceH264 as if it were a quality preset.
             // On a host without a usable hardware encoder that selection has
             // no compatible frame path and deliberately closes the session.
-            // Migrate it once to the resilient automatic mode. A user can
-            // still explicitly select H.264-only after schema v3.
+            // Retain the old one-time migration. Normalization below also
+            // recovers this obsolete selection in later direct/relay settings.
             settings.Viewer.VideoMode =
                 ViewerVideoMode.Automatic;
             settings.Viewer.PreferH264 = true;
@@ -333,6 +333,7 @@ internal sealed class AppSettingsService
         settings.Viewer.RecentDevices ??= [];
         settings.Viewer.RecentDevices = NormalizeRecentDevices(settings.Viewer.RecentDevices);
         settings.Viewer.VideoMode = NormalizeViewerVideoMode(settings.Viewer.VideoMode, settings.Viewer.PreferH264);
+        settings.Viewer.PreferH264 = settings.Viewer.VideoMode != ViewerVideoMode.StableJpeg;
 
         settings.Relay.ServerAddress =
             NormalizeOptionalText(settings.Relay.ServerAddress);
@@ -463,6 +464,13 @@ internal sealed class AppSettingsService
 
     private static ViewerVideoMode NormalizeViewerVideoMode(ViewerVideoMode mode, bool legacyPreferH264)
     {
+        // Apply to both direct and relay settings, including current-schema
+        // files. No credentials or other user preferences are changed.
+        if (mode == ViewerVideoMode.ForceH264)
+        {
+            return ViewerVideoMode.Automatic;
+        }
+
         if (!Enum.IsDefined(mode))
         {
             return legacyPreferH264 ? ViewerVideoMode.Automatic : ViewerVideoMode.StableJpeg;

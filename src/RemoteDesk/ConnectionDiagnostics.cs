@@ -81,9 +81,7 @@ internal static class ConnectionDiagnostics
         string fallback = value.JpegFallbackRequested ? "已请求" : "未请求";
         string directState = value.DirectHardwarePathDisabled ? "已禁用" : "仍可用/未禁用";
         string forceH264Note = report.VideoMode == ViewerVideoMode.ForceH264
-            ? value.JpegFallbackRequested
-                ? "（异常：强制 H.264 不应请求 JPEG）"
-                : "（强制 H.264：JPEG 回退禁止）"
+            ? "（旧 H.264 选项：允许锁屏/解码故障时自动兼容）"
             : string.Empty;
         string captureTime = report.CapturedAtUtc == default
             ? "未记录"
@@ -139,7 +137,7 @@ internal static class ConnectionDiagnostics
         return videoMode switch
         {
             ViewerVideoMode.StableJpeg => "稳定 JPEG",
-            ViewerVideoMode.ForceH264 => "强制 H.264",
+            ViewerVideoMode.ForceH264 => "自动低延迟（兼容旧 H.264 选项）",
             _ => "自动低延迟"
         };
     }
@@ -226,8 +224,7 @@ internal static class ConnectionDiagnostics
             !hasNativeHardwareDecoder &&
             string.IsNullOrWhiteSpace(ffmpegPath))
         {
-            return "建议：更新显卡驱动、安装 ffmpeg，或切换为" +
-                "“自动低延迟/稳定 JPEG”。";
+            return "建议：当前可使用 JPEG 正常连接；更新显卡驱动、安装 ffmpeg 后可恢复 H.264。";
         }
 
         if (string.IsNullOrWhiteSpace(host))

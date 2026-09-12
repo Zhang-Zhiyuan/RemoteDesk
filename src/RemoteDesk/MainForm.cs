@@ -1859,10 +1859,6 @@ public sealed partial class MainForm : Form
         videoModeBox.Items.Clear();
         videoModeBox.Items.Add(new ViewerVideoModeItem(ViewerVideoMode.Automatic, "自动（H.264 清晰增强）"));
         videoModeBox.Items.Add(new ViewerVideoModeItem(ViewerVideoMode.StableJpeg, "文字清晰（JPEG）"));
-        videoModeBox.Items.Add(
-            new ViewerVideoModeItem(
-                ViewerVideoMode.ForceH264,
-                "仅 H.264（不可用即断开）"));
         videoModeBox.SelectedIndex = 0;
     }
 

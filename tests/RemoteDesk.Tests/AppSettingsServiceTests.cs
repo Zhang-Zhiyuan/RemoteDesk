@@ -174,7 +174,7 @@ public sealed class AppSettingsServiceTests
             loaded.Host.ScalePercent);
         Assert.False(loaded.Host.AdaptiveQuality);
         Assert.Equal("192.0.2.249", loaded.Viewer.Host);
-        Assert.Equal(ViewerVideoMode.ForceH264, loaded.Viewer.VideoMode);
+        Assert.Equal(ViewerVideoMode.Automatic, loaded.Viewer.VideoMode);
         SavedRemoteDevice device = Assert.Single(loaded.Viewer.RecentDevices);
         Assert.Equal("RemoteDesk-Phone", device.MachineName);
         Assert.Equal("客厅平板", device.Remark);
@@ -302,7 +302,7 @@ public sealed class AppSettingsServiceTests
     }
 
     [Fact]
-    public void LoadPreservesForcedH264ChosenInCurrentSchema()
+    public void LoadMigratesForcedH264InBothCurrentSchemaConnectionModes()
     {
         using var temp = TemporaryDirectory.Create();
         string settingsPath = Path.Combine(temp.Path, "settings.json");
@@ -314,6 +314,9 @@ public sealed class AppSettingsServiceTests
               "Viewer": {
                 "PreferH264": true,
                 "VideoMode": 2
+              },
+              "Relay": {
+                "VideoMode": 2
               }
             }
             """);
@@ -322,8 +325,26 @@ public sealed class AppSettingsServiceTests
         RemoteDeskSettings settings = service.Load();
 
         Assert.Equal(
-            ViewerVideoMode.ForceH264,
+            ViewerVideoMode.Automatic,
             settings.Viewer.VideoMode);
+        Assert.Equal(ViewerVideoMode.Automatic, settings.Relay.VideoMode);
+    }
+
+    [Fact]
+    public void LegacyH264MigrationStaysAutomaticAfterSaveWithStalePreference()
+    {
+        using var temp = TemporaryDirectory.Create();
+        var service = new AppSettingsService(Path.Combine(temp.Path, "settings.json"));
+        service.Save(new RemoteDeskSettings
+        {
+            SchemaVersion = AppSettingsService.CurrentSettingsSchemaVersion,
+            Viewer = new ViewerSettings { VideoMode = ViewerVideoMode.ForceH264, PreferH264 = false }
+        });
+        RemoteDeskSettings loaded = service.Load();
+        Assert.Equal(ViewerVideoMode.Automatic, loaded.Viewer.VideoMode);
+        Assert.True(loaded.Viewer.PreferH264);
+        service.Save(loaded);
+        Assert.Equal(ViewerVideoMode.Automatic, service.Load().Viewer.VideoMode);
     }
 
     [Fact]
