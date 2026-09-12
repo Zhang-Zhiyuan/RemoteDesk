@@ -55,6 +55,18 @@ final class AndroidAdaptiveLayout {
         return availableWidthDp < viewerToolbarStackThresholdDp(fontScale);
     }
 
+    static boolean compactViewerChrome(
+        int measuredHeightPx, int verticalInsetsPx, float density, int fallbackHeightDp) {
+        // Edge-to-edge windows keep their full configuration height while the
+        // IME consumes root padding. Do not use the changing toolbar/dock
+        // measurements here: doing so can make compact mode oscillate.
+        float availableHeightDp = fallbackHeightDp;
+        if (measuredHeightPx > 0 && Float.isFinite(density) && density > 0f) {
+            availableHeightDp = Math.max(0, measuredHeightPx - Math.max(0, verticalInsetsPx)) / density;
+        }
+        return availableHeightDp >= 0 && availableHeightDp < 420;
+    }
+
     static ViewerToolbarMode viewerToolbarMode(
         int availableWidthDp,
         int availableHeightDp,

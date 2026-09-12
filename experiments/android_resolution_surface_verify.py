@@ -44,9 +44,15 @@ def main():
     def phase(name, predicate):
         deadline = time.monotonic() + 15
         matched = None
+        geometry = None
         while time.monotonic() < deadline:
             current = state()
             good = current["h264"] and current["geometryReady"] and predicate(current)
+            signature = tuple(str(current[key]) for key in
+                              ("viewport", "imeInset", "frame", "surfaceFrame", "surfaceView", "scale", "zoom"))
+            if signature != geometry:
+                geometry = signature
+                matched = None
             if good:
                 # Wait for layout / Surface callbacks to settle, not only the
                 # first UI-thread snapshot immediately following an action.
@@ -69,11 +75,11 @@ def main():
     action("original_size")
     phase("original_pixels", lambda s: abs(s["scale"] - 1) < .001)
     action("keyboard")
-    phase("original_with_keyboard", lambda s: s["keyboard"] and abs(s["scale"] - 1) < .001)
+    phase("original_with_keyboard", lambda s: s["keyboard"] and s["imeInset"] > 0 and abs(s["scale"] - 1) < .001)
     action("fit_size")
     phase("fit_with_keyboard", lambda s: s["keyboard"] and s["zoom"] == 1)
     action("keyboard")
-    phase("fit_keyboard_closed", lambda s: not s["keyboard"])
+    phase("fit_keyboard_closed", lambda s: not s["keyboard"] and s["imeInset"] == 0)
     action("landscape")
     landscape = phase("landscape_fit", lambda s: s["viewport"][2] - s["viewport"][0] > s["viewport"][3] - s["viewport"][1]
                       and s["zoom"] == 1 and s["imeInset"] == 0)
@@ -87,7 +93,9 @@ def main():
         raise AssertionError("Remote composer must request non-fullscreen IME")
     action("keyboard")
     phase("landscape_fit_restored", lambda s: not s["keyboard"] and s["imeInset"] == 0
-          and s["zoom"] == 1 and abs(s["scale"] - landscape["scale"]) < .002)
+          and s["zoom"] == 1 and abs(s["scale"] - min(
+              1, (s["viewport"][2] - s["viewport"][0]) / s["frame"][0],
+              (s["viewport"][3] - s["viewport"][1]) / s["frame"][1])) < .002)
     action("original_size")
     phase("landscape_original_pixels", lambda s: abs(s["scale"] - 1) < .001)
     action("portrait")

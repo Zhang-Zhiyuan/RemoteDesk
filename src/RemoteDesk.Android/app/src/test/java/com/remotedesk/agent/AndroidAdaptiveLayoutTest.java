@@ -8,6 +8,27 @@ import org.junit.Test;
 
 public final class AndroidAdaptiveLayoutTest {
     @Test
+    public void portraitKeyboardUsesRemainingHeightInsteadOfFullConfigurationHeight() {
+        assertFalse(AndroidAdaptiveLayout.compactViewerChrome(960, 0, 1.5f, 640));
+        assertTrue(AndroidAdaptiveLayout.compactViewerChrome(960, 614, 1.5f, 640));
+        assertTrue(AndroidAdaptiveLayout.compactViewerChrome(960, 425, 1.5f, 640));
+        assertFalse(AndroidAdaptiveLayout.compactViewerChrome(960, 0, 1.5f, 640));
+    }
+
+    @Test
+    public void viewerChromeHandlesResizeInsetsAndUnmeasuredLayouts() {
+        assertFalse(AndroidAdaptiveLayout.compactViewerChrome(2340, 800, 2.75f, 850));
+        assertTrue(AndroidAdaptiveLayout.compactViewerChrome(1080, 550, 2.75f, 850));
+        assertTrue(AndroidAdaptiveLayout.compactViewerChrome(960, 960, 1.5f, 640));
+        assertFalse(AndroidAdaptiveLayout.compactViewerChrome(0, 0, 1.5f, 640));
+        assertTrue(AndroidAdaptiveLayout.compactViewerChrome(0, 0, 1.5f, 320));
+        assertFalse(AndroidAdaptiveLayout.compactViewerChrome(960, 614, Float.NaN, 640));
+        assertFalse(AndroidAdaptiveLayout.compactViewerChrome(960, 614, 0f, 640));
+        assertFalse(AndroidAdaptiveLayout.compactViewerChrome(630, 0, 1.5f, 640));
+        assertTrue(AndroidAdaptiveLayout.compactViewerChrome(629, 0, 1.5f, 640));
+    }
+
+    @Test
     public void smallScreensAndLargeFontsUseCompactBrandingWithoutShrinkingText() {
         assertTrue(AndroidAdaptiveLayout.compactMainHeader(320, 1f));
         assertTrue(AndroidAdaptiveLayout.compactMainHeader(480, 2f));

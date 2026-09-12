@@ -302,6 +302,9 @@ public final class RemoteDeskViewerActivity extends Activity {
         View.OnLayoutChangeListener layoutChanged = (v, l, t, r, b, ol, ot, or, ob) -> updateViewerContentLayout();
         toolbar.addOnLayoutChangeListener(layoutChanged); chrome.dock.addOnLayoutChangeListener(layoutChanged);
         rootLayout.addOnLayoutChangeListener(layoutChanged);
+        rootLayout.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            if (b - t != ob - ot) rootLayout.post(this::updateViewerToolbarLayout);
+        });
         viewerFrame.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> updateH264SurfaceLayout());
         setContentView(rootLayout);
         chrome.controls(false); chrome.screens.setEnabled(false);
@@ -762,9 +765,11 @@ public final class RemoteDeskViewerActivity extends Activity {
 
     private void updateViewerToolbarLayout() {
         if (chrome == null) return;
-        int height = getResources().getConfiguration().screenHeightDp;
-        chrome.adapt(height < 420);
-        toolbar.setVisibility(viewerFullscreen || height < 420 && chrome.keyboardOpen ? View.GONE : View.VISIBLE);
+        boolean compact = AndroidAdaptiveLayout.compactViewerChrome(
+            rootLayout.getHeight(), rootLayout.getPaddingTop() + rootLayout.getPaddingBottom(),
+            getResources().getDisplayMetrics().density, getResources().getConfiguration().screenHeightDp);
+        chrome.adapt(compact);
+        toolbar.setVisibility(viewerFullscreen || compact && chrome.keyboardOpen ? View.GONE : View.VISIBLE);
         updateViewerContentLayout();
     }
 
