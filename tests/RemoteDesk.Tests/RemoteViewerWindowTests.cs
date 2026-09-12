@@ -1889,15 +1889,41 @@ public sealed class RemoteViewerWindowTests
             });
     }
 
-    [Fact]
-    public void RemotePasteTriggerCommandSequenceIgnoresNonPasteShortcut()
+    [Theory]
+    [InlineData(Keys.Control | Keys.C)]
+    [InlineData(Keys.Control | Keys.Alt | Keys.V)]
+    [InlineData(Keys.Shift | Keys.Alt | Keys.Insert)]
+    [InlineData(Keys.Control | Keys.Shift | Keys.Insert)]
+    [InlineData(Keys.V)]
+    public void RemotePasteTriggerCommandSequenceIgnoresNonPasteShortcut(Keys keys)
     {
         bool created = RemoteViewerWindow.TryCreateRemotePasteTriggerCommandSequence(
-            new KeyEventArgs(Keys.Control | Keys.C),
+            new KeyEventArgs(keys),
             out RemoteInputCommand[] commands);
 
         Assert.False(created);
         Assert.Empty(commands);
+        Assert.False(RemoteViewerWindow.TryCreateRemotePasteTriggerCommands(
+            new KeyEventArgs(keys), out _, out _));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void RemotePastePreservesTerminalShiftAndPhysicallyHeldModifiers(bool controlHeld, bool shiftHeld)
+    {
+        Assert.True(RemoteViewerWindow.TryCreateRemotePasteTriggerCommandSequence(
+            new KeyEventArgs(Keys.Control | Keys.Shift | Keys.V), out var commands, controlHeld, shiftHeld));
+        var expected = new List<(RemoteInputKind, int)>();
+        if (!controlHeld) expected.Add((RemoteInputKind.KeyDown, (int)Keys.ControlKey));
+        if (!shiftHeld) expected.Add((RemoteInputKind.KeyDown, (int)Keys.ShiftKey));
+        expected.Add((RemoteInputKind.KeyDown, (int)Keys.V));
+        expected.Add((RemoteInputKind.KeyUp, (int)Keys.V));
+        if (!shiftHeld) expected.Add((RemoteInputKind.KeyUp, (int)Keys.ShiftKey));
+        if (!controlHeld) expected.Add((RemoteInputKind.KeyUp, (int)Keys.ControlKey));
+        Assert.Equal(expected, commands.Select(command => (command.Kind, command.Data)));
     }
 
     [Theory]

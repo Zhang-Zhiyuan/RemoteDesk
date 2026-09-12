@@ -110,6 +110,7 @@ internal sealed class RemoteViewerWindow : Form
     private readonly CapturePresentationTransitionGate
         _capturePresentationTransitionGate = new();
     private readonly object _clipboardPullLock = new();
+    private readonly HashSet<Keys> _clipboardPasteKeys = [];
     private readonly Queue<PooledRemoteFrame> _h264Frames = new();
     private readonly Dictionary<long, PendingH264Submission> _h264Submissions = new();
     private readonly Dictionary<long, PendingMediaFoundationInput>
@@ -133,12 +134,16 @@ internal sealed class RemoteViewerWindow : Form
     private long _d3d11VideoPresenterDecoderGeneration;
     private long _d3d11VideoPresenterHandleGeneration;
     private CancellationTokenSource? _clipboardPullCancellation;
+    private Task<bool>? _clipboardPullTask;
+    private uint _clipboardPullLocalSequence;
     private PooledRemoteFrame? _pendingFrame;
     private bool _isRenderingFrame;
     private bool _inputEnabled = true;
     private int _captureTargetAvailable = 1;
     private int _capturePresentationTransitionPending;
     private bool _clipboardTextEnabled;
+    private bool _clipboardPasteInProgress;
+    private long _clipboardPasteRevision;
     private bool _filePasteEnabled;
     private bool _fileDropPasteEnabled;
     private bool _remoteFilePullEnabled;
@@ -764,8 +769,6 @@ internal sealed class RemoteViewerWindow : Form
         Keys keyData)
     {
         if (!_client.IsConnected ||
-            !_inputEnabled ||
-            _isAndroidRemote ||
             !_pictureBox.ContainsFocus ||
             _remoteDragOutStage is
                 RemoteDragOutStage.Pulling or
@@ -773,6 +776,12 @@ internal sealed class RemoteViewerWindow : Form
         {
             return false;
         }
+
+        // Native and low-level routes bypass PictureBox_KeyDown; paste must
+        // still exchange the clipboard before the shortcut reaches the peer.
+        if (!_isAndroidRemote && TryHandleClipboardPasteKey(command.Kind, new KeyEventArgs(keyData)))
+            return true;
+        if (!_inputEnabled || _isAndroidRemote) return false;
 
         if (command.Kind == RemoteInputKind.KeyDown &&
             !IsModifierVirtualKey(command.Data))
@@ -6562,10 +6571,9 @@ internal sealed class RemoteViewerWindow : Form
             return;
         }
 
-        if (_isAndroidRemote && IsPasteShortcut(args))
+        if (TryHandleClipboardPasteKey(RemoteInputKind.KeyDown, args))
         {
             args.SuppressKeyPress = true;
-            _ = PasteClipboardToRemoteAsync(args);
             return;
         }
 
@@ -6632,6 +6640,11 @@ internal sealed class RemoteViewerWindow : Form
 
     private void PictureBox_KeyUp(object? sender, KeyEventArgs args)
     {
+        if (TryHandleClipboardPasteKey(RemoteInputKind.KeyUp, args))
+        {
+            args.SuppressKeyPress = true;
+            return;
+        }
         if (_suppressFullScreenShortcutKeyUp &&
             args.KeyCode == Keys.F11)
         {
@@ -6767,6 +6780,10 @@ internal sealed class RemoteViewerWindow : Form
 
     private void ReleaseAllRemoteInputs()
     {
+        // Do not inject a delayed paste after focus loss, reconnect, or any
+        // other transition which relinquishes remote input ownership.
+        _clipboardPasteRevision++;
+        _clipboardPasteKeys.Clear();
         _remoteInputOwnership.ReleaseAll(
             _client.InputConnectionGeneration,
             _client.TryQueueOwnedInput);
@@ -6917,13 +6934,62 @@ internal sealed class RemoteViewerWindow : Form
         await Task.Delay(RemoteDropFocusDelayMs);
     }
 
-    private async Task PasteClipboardToRemoteAsync(KeyEventArgs shortcutArgs)
+    private bool TryHandleClipboardPasteKey(RemoteInputKind kind, KeyEventArgs args)
+    {
+        if (kind == RemoteInputKind.KeyUp) return _clipboardPasteKeys.Remove(args.KeyCode);
+        if (kind != RemoteInputKind.KeyDown) return false;
+        if (_clipboardPasteKeys.Contains(args.KeyCode)) return true; // Held-key repeat.
+        if (!IsPasteShortcut(args) || (!_clipboardTextEnabled && !_filePasteEnabled && !_isAndroidRemote) ||
+            _remoteInputOwnership.AnyPressedKey(_client.InputConnectionGeneration,
+                key => key.VirtualKey is (int)Keys.LWin or (int)Keys.RWin)) return false;
+
+        _clipboardPasteKeys.Add(args.KeyCode);
+        if (_clipboardPasteInProgress)
+        {
+            SetStatus("正在等待上一项剪贴板粘贴完成，请稍后重试", MutedTextColor);
+            return true;
+        }
+        _clipboardPasteInProgress = true;
+        _ = PasteClipboardToRemoteAsync(args, ++_clipboardPasteRevision);
+        return true;
+    }
+
+    private async Task PasteClipboardToRemoteAsync(KeyEventArgs shortcutArgs, long revision)
     {
         long clipboardGeneration = _client.InputConnectionGeneration;
+        bool IsCurrentPaste() => !_isClosing && !IsDisposed && _client.IsConnected &&
+            _client.InputConnectionGeneration == clipboardGeneration && _clipboardPasteRevision == revision;
         try
         {
+            // A just-issued remote copy may still be returning over a slow
+            // connection. Wait for it before reading the local clipboard;
+            // otherwise Ctrl+C, Ctrl+V would paste the previous local value.
+            Task<bool>? precedingCopy = _clipboardPullTask;
+            uint precedingSequence = _clipboardPullLocalSequence;
+            if (precedingCopy is not null)
+            {
+                bool synchronized = await precedingCopy;
+                if (!IsCurrentPaste()) return;
+                if (ReferenceEquals(_clipboardPullTask, precedingCopy)) _clipboardPullTask = null;
+                if (!synchronized && ClipboardTextService.ReadClipboardSequenceNumber() == precedingSequence)
+                {
+                    // A remote file/image copy need not have a text reply.
+                    // Keep that clipboard on the peer instead of replacing it
+                    // with the unchanged local text or round-tripping its files.
+                    if (_inputEnabled && (!_isAndroidRemote || _client.SupportsRemoteClipboardPasteShortcut) &&
+                        TryCreateRemotePasteTriggerCommandSequence(shortcutArgs, out var remoteOnlyCommands,
+                            controlHeld: _remoteInputOwnership.AnyPressedKey(clipboardGeneration, key => IsControlVirtualKey(key.VirtualKey)),
+                            shiftHeld: _remoteInputOwnership.AnyPressedKey(clipboardGeneration, key => IsShiftVirtualKey(key.VirtualKey))))
+                    {
+                        await _client.SendInputsAsync(remoteOnlyCommands, clipboardGeneration);
+                        SetStatus("已使用远端自身剪贴板粘贴，未用本机旧内容覆盖", MutedTextColor);
+                    }
+                    else SetStatus("远端复制未同步成功，未粘贴本机旧内容；请重新复制后重试", DangerTextColor);
+                    return;
+                }
+            }
             IReadOnlyList<string> clipboardFiles = await ClipboardTextService.GetFileDropListAsync();
-            if (_client.InputConnectionGeneration != clipboardGeneration) return;
+            if (!IsCurrentPaste()) return;
             if (clipboardFiles.Count > 0)
             {
                 await PasteClipboardFilesToRemoteAsync(clipboardFiles);
@@ -6931,7 +6997,7 @@ internal sealed class RemoteViewerWindow : Form
             }
 
             string text = await ClipboardTextService.GetTextAsync();
-            if (_client.InputConnectionGeneration != clipboardGeneration) return;
+            if (!IsCurrentPaste()) return;
             if (string.IsNullOrEmpty(text))
             {
                 OnUi(() => SetStatus("本机剪贴板没有可输入的文本", MutedTextColor));
@@ -6954,7 +7020,7 @@ internal sealed class RemoteViewerWindow : Form
                 }
             }
 
-            if (_client.InputConnectionGeneration != clipboardGeneration) return;
+            if (!IsCurrentPaste()) return;
             if (_clipboardTextEnabled && !clipboardSynced)
             {
                 OnUi(() => SetStatus("远端未确认写入剪贴板，未触发粘贴；请检查连接后重试", DangerTextColor));
@@ -6979,10 +7045,12 @@ internal sealed class RemoteViewerWindow : Form
 
             if (clipboardSynced && (!_isAndroidRemote || _client.SupportsRemoteClipboardPasteShortcut) && TryCreateRemotePasteTriggerCommandSequence(
                 shortcutArgs,
-                out RemoteInputCommand[] pasteCommands))
+                out RemoteInputCommand[] pasteCommands,
+                controlHeld: _remoteInputOwnership.AnyPressedKey(clipboardGeneration, key => IsControlVirtualKey(key.VirtualKey)),
+                shiftHeld: _remoteInputOwnership.AnyPressedKey(clipboardGeneration, key => IsShiftVirtualKey(key.VirtualKey))))
             {
                 await _client.SendInputsAsync(
-                    pasteCommands);
+                    pasteCommands, clipboardGeneration);
 
                 OnUi(() => SetStatus("已同步文本剪贴板并触发远程粘贴", SuccessTextColor));
                 return;
@@ -7020,6 +7088,7 @@ internal sealed class RemoteViewerWindow : Form
         {
             OnUi(() => SetStatus($"读取本机剪贴板失败：{ex.Message}", DangerTextColor));
         }
+        finally { _clipboardPasteInProgress = false; }
     }
 
     private async Task PasteClipboardFilesToRemoteAsync(IReadOnlyList<string> clipboardFiles)
@@ -7425,8 +7494,8 @@ internal sealed class RemoteViewerWindow : Form
 
     private static bool IsPasteShortcut(KeyEventArgs args)
     {
-        return (args.Control && args.KeyCode == Keys.V) ||
-            (args.Shift && args.KeyCode == Keys.Insert);
+        return !args.Alt && ((args.Control && args.KeyCode == Keys.V) ||
+            (args.Shift && !args.Control && args.KeyCode == Keys.Insert));
     }
 
     internal static bool TryCreateRemotePasteTriggerCommands(
@@ -7434,11 +7503,7 @@ internal sealed class RemoteViewerWindow : Form
         out RemoteInputCommand keyDown,
         out RemoteInputCommand keyUp)
     {
-        Keys key = args.Control && args.KeyCode == Keys.V
-            ? Keys.V
-            : args.Shift && args.KeyCode == Keys.Insert
-                ? Keys.Insert
-                : Keys.None;
+        Keys key = IsPasteShortcut(args) ? args.KeyCode : Keys.None;
         if (key == Keys.None)
         {
             keyDown = default;
@@ -7453,29 +7518,22 @@ internal sealed class RemoteViewerWindow : Form
 
     internal static bool TryCreateRemotePasteTriggerCommandSequence(
         KeyEventArgs args,
-        out RemoteInputCommand[] commands)
+        out RemoteInputCommand[] commands,
+        bool controlHeld = false,
+        bool shiftHeld = false)
     {
-        if (args.Control && args.KeyCode == Keys.V)
+        if (IsPasteShortcut(args))
         {
-            commands =
-            [
-                RemoteInputCommand.KeyDown((int)Keys.ControlKey),
-                RemoteInputCommand.KeyDown((int)Keys.V),
-                RemoteInputCommand.KeyUp((int)Keys.V),
-                RemoteInputCommand.KeyUp((int)Keys.ControlKey)
-            ];
-            return true;
-        }
-
-        if (args.Shift && args.KeyCode == Keys.Insert)
-        {
-            commands =
-            [
-                RemoteInputCommand.KeyDown((int)Keys.ShiftKey),
-                RemoteInputCommand.KeyDown((int)Keys.Insert),
-                RemoteInputCommand.KeyUp((int)Keys.Insert),
-                RemoteInputCommand.KeyUp((int)Keys.ShiftKey)
-            ];
+            // Keep Ctrl+Shift+V for terminals / plain-text paste. A physical
+            // modifier still held by the user must not be released here.
+            var sequence = new List<RemoteInputCommand>();
+            if (args.Control && !controlHeld) sequence.Add(RemoteInputCommand.KeyDown((int)Keys.ControlKey));
+            if (args.Shift && !shiftHeld) sequence.Add(RemoteInputCommand.KeyDown((int)Keys.ShiftKey));
+            sequence.Add(RemoteInputCommand.KeyDown((int)args.KeyCode));
+            sequence.Add(RemoteInputCommand.KeyUp((int)args.KeyCode));
+            if (args.Shift && !shiftHeld) sequence.Add(RemoteInputCommand.KeyUp((int)Keys.ShiftKey));
+            if (args.Control && !controlHeld) sequence.Add(RemoteInputCommand.KeyUp((int)Keys.ControlKey));
+            commands = sequence.ToArray();
             return true;
         }
 
@@ -7522,6 +7580,7 @@ internal sealed class RemoteViewerWindow : Form
 
     private void ScheduleRemoteClipboardPull(string reason)
     {
+        Task<bool>? previous = _clipboardPullTask;
         CancelPendingClipboardPull();
         var cancellation = new CancellationTokenSource();
         lock (_clipboardPullLock)
@@ -7529,13 +7588,19 @@ internal sealed class RemoteViewerWindow : Form
             _clipboardPullCancellation = cancellation;
         }
 
-        _ = PullRemoteClipboardAfterDelayAsync(cancellation, reason);
+        _clipboardPullLocalSequence = ClipboardTextService.ReadClipboardSequenceNumber();
+        _clipboardPullTask = PullRemoteClipboardAfterDelayAsync(cancellation, reason, previous);
     }
 
-    private async Task PullRemoteClipboardAfterDelayAsync(CancellationTokenSource owner, string reason)
+    private async Task<bool> PullRemoteClipboardAfterDelayAsync(
+        CancellationTokenSource owner, string reason, Task<bool>? previous)
     {
         try
         {
+            // The legacy protocol has one reply slot. Drain an earlier read
+            // before sending another so quick repeated copies are not dropped.
+            if (previous is not null) await previous;
+            owner.Token.ThrowIfCancellationRequested();
             bool supportsSequenceTracking = _client.SupportsRemoteClipboardSequenceTracking;
             int clipboardSettleDelay = GetClipboardSynchronizationDelayMs(
                 supportsSequenceTracking,
@@ -7557,13 +7622,14 @@ internal sealed class RemoteViewerWindow : Form
                 _remoteDragOutStage != RemoteDragOutStage.None ||
                 (!_clipboardTextEnabled && !_remoteFilePullEnabled))
             {
-                return;
+                return false;
             }
 
             OnUi(() => SetStatus($"正在同步远程{reason}后的剪贴板...", MutedTextColor));
+            bool textSynchronized = false;
             if (_clipboardTextEnabled)
             {
-                await _client.ReadRemoteClipboardAsync(notifyRequest: false);
+                textSynchronized = await _client.ReadRemoteClipboardAndWaitAsync();
             }
 
             // ReadRemoteClipboardAsync is intentionally independent of this delay token. A drag
@@ -7579,6 +7645,7 @@ internal sealed class RemoteViewerWindow : Form
                 Interlocked.Exchange(ref _lastAutomaticRemoteFilePullAt, Environment.TickCount64);
                 await _client.RequestRemoteClipboardFilesAsync(notifyRequest: false);
             }
+            return textSynchronized;
         }
         catch (OperationCanceledException)
         {
@@ -7599,6 +7666,7 @@ internal sealed class RemoteViewerWindow : Form
 
             owner.Dispose();
         }
+        return false;
     }
 
     private bool IsCurrentPendingClipboardPull(CancellationTokenSource owner)

@@ -9,7 +9,7 @@ using RemoteDesk;
 // user's interactive WinSta0 clipboard for an automated test.
 internal static class ClipboardSystemProbe
 {
-    internal static int Run(bool relayFiles = false)
+    internal static int Run(bool relayFiles = false, bool shortcuts = false)
     {
         using var config = JsonDocument.Parse(Console.ReadLine()!);
         string output = config.RootElement.GetProperty("output").GetString()!;
@@ -27,7 +27,7 @@ internal static class ClipboardSystemProbe
         var worker = new Thread(() => {
             try {
                 if (!SetThreadDesktop(desktop)) throw new Win32Exception();
-                result = (relayFiles ? FileClipboardRelayProbe.RunAsync(output,
+                result = (shortcuts ? ClipboardShortcutProbe.RunAsync(output, desktop) : relayFiles ? FileClipboardRelayProbe.RunAsync(output,
                     config.RootElement.GetProperty("expectedServer").GetString()!) : RunAsync(output)).GetAwaiter().GetResult();
             } catch (Exception error) { failure = error; }
         });

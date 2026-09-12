@@ -1229,7 +1229,7 @@ internal sealed class RemoteViewerClient : IDisposable
         return queuedForTcp;
     }
 
-    internal Task SendInputsAsync(IReadOnlyList<RemoteInputCommand> commands)
+    internal Task SendInputsAsync(IReadOnlyList<RemoteInputCommand> commands, long? expectedGeneration = null)
     {
         ArgumentNullException.ThrowIfNull(commands);
         if (commands.Count == 0)
@@ -1241,7 +1241,8 @@ internal sealed class RemoteViewerClient : IDisposable
         bool queuedForTcp = false;
         lock (_inputLock)
         {
-            if (CanQueueInput(expectedConnection))
+            if ((!expectedGeneration.HasValue || expectedGeneration.Value == _inputConnectionGeneration) &&
+                CanQueueInput(expectedConnection))
             {
                 foreach (RemoteInputCommand command in commands)
                 {
@@ -1468,7 +1469,13 @@ internal sealed class RemoteViewerClient : IDisposable
         return success && IsCurrentConnection(owner);
     }
 
-    public async Task ReadRemoteClipboardAsync(bool notifyRequest = true)
+    public Task ReadRemoteClipboardAsync(bool notifyRequest = true) =>
+        ReadRemoteClipboardCoreAsync(notifyRequest, waitForReply: false);
+
+    internal Task<bool> ReadRemoteClipboardAndWaitAsync(bool notifyRequest = false) =>
+        ReadRemoteClipboardCoreAsync(notifyRequest, waitForReply: true);
+
+    private async Task<bool> ReadRemoteClipboardCoreAsync(bool notifyRequest, bool waitForReply)
     {
         CancellationTokenSource? owner = _cancellationTokenSource;
         ClipboardRequestTracker.Request? request = _clipboardRequests.Begin(
@@ -1476,7 +1483,7 @@ internal sealed class RemoteViewerClient : IDisposable
         if (request is null)
         {
             if (notifyRequest) ClipboardStatusReceived?.Invoke("上一项剪贴板操作仍在等待远端，请稍后重试；长时间无响应请重连。");
-            return;
+            return false;
         }
         if (await SendControlAsync(RemoteMessageCodec.EncodeClipboardGetText(), owner))
         {
@@ -1484,12 +1491,14 @@ internal sealed class RemoteViewerClient : IDisposable
             {
                 ClipboardStatusReceived?.Invoke("已请求读取远程文本剪贴板。");
             }
-            _ = WaitForClipboardReplyAsync(request, owner);
+            Task<bool> reply = WaitForClipboardReplyAsync(request, owner);
+            return !waitForReply || await reply;
         }
         else
         {
             _clipboardRequests.Take(request.Generation, textReply: false, success: false)?.Completion.TrySetResult(false);
         }
+        return false;
     }
 
     private async Task<bool> WaitForClipboardReplyAsync(ClipboardRequestTracker.Request request, CancellationTokenSource? owner)
