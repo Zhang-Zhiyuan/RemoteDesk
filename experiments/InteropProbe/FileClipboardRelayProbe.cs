@@ -100,10 +100,10 @@ internal static class FileClipboardRelayProbe
             Check("public relay clipboard send ACK", await viewer.SendClipboardTextToRemoteAsync(clipboard));
             Check("remote fixture exact clipboard text", remoteClipboard == clipboard);
             await ClipboardTextService.SetTextAsync("private station sentinel");
-            var clipboardDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            viewer.ClipboardStatusReceived += _ => clipboardDone.TrySetResult();
-            await viewer.ReadRemoteClipboardAsync(notifyRequest: false);
-            await clipboardDone.Task.WaitAsync(timeout.Token);
+            // WAN progress/status messages are not completion. Wait for the
+            // correlated read request and the actual Windows clipboard write.
+            Check("public relay clipboard read reply completed",
+                await viewer.ReadRemoteClipboardAndWaitAsync(notifyRequest: false).WaitAsync(timeout.Token));
             Check("public relay text return to real isolated Windows clipboard", await ClipboardTextService.GetTextAsync() == clipboard);
             await viewer.SendFileToRemoteAsync(binary);
             Check("public relay 1 MiB upload saved and SHA256 verified", File.ReadAllBytes(Directory.GetFiles(received).Single()).SequenceEqual(bytes));

@@ -368,8 +368,9 @@ class RelayServerTests(unittest.IsolatedAsyncioTestCase):
         right.write.assert_called_once_with(b"x")
         first.feed_eof()
         await asyncio.wait_for(task, 1)
-        left.close.assert_called_once()
-        right.close.assert_called_once()
+        for writer in (left, right):
+            writer.close.assert_not_called()
+            writer.transport.abort.assert_called_once()
 
     async def test_stalled_tls_writer_closes_both_directions(self) -> None:
         first, second = asyncio.StreamReader(), asyncio.StreamReader()
@@ -382,8 +383,21 @@ class RelayServerTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(relay, "BRIDGE_WRITE_TIMEOUT_SECONDS", .02):
             await asyncio.wait_for(relay.bridge_streams(first, left, second, right), 1)
         right.write.assert_called_once_with(b"unchanged encrypted bytes")
-        left.close.assert_called_once()
-        right.close.assert_called_once()
+        for writer in (left, right):
+            writer.close.assert_not_called()
+            writer.transport.abort.assert_called_once()
+
+    async def test_close_timeout_does_not_poison_later_owner_cleanup(self):
+        closed = asyncio.get_running_loop().create_future()
+        async def wait_closed():
+            await closed
+        writer = mock.Mock(wait_closed=mock.AsyncMock(side_effect=wait_closed))
+        writer.transport.abort.side_effect = lambda: closed.set_result(None)
+        with mock.patch.object(relay, "STREAM_CLOSE_TIMEOUT_SECONDS", .02):
+            await asyncio.wait_for(relay.close_writer(writer), 1)
+        self.assertFalse(closed.cancelled())
+        await asyncio.wait_for(relay.close_writer(writer), 1)
+        writer.transport.abort.assert_called_once()
 
     async def test_tls_close_timeout_aborts_socket_instead_of_leaking_it(self) -> None:
         writer = mock.Mock()

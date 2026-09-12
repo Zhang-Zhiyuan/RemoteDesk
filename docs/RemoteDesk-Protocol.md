@@ -632,6 +632,17 @@ An absent/false capability disables editing with an update/storage explanation. 
 are keyed by installation UUID, persist independently of registrations/addresses, and
 survive relay restarts. There is no push notification: clients reread the directory.
 
+## Session capture diagnostics
+
+Windows hosts advertising `HostVideoDiagnostics` (capability bit 25) accept the
+authenticated, empty `HostVideoDiagnosticsRequest` control (kind 36) and reply
+with `HostVideoDiagnostics` (kind 37, a BinaryWriter UTF-8 string, at most 4096
+characters). Requests are limited to one per second and replies are scheduled
+off the input reader. This optional diagnostic contains only the current
+session's bounded capture/encoder status and managed dependency progress;
+it does not read operating-system logs, credentials, settings or clipboard.
+Older peers are never sent this request. No unsolicited diagnostic is sent.
+
 ## Discovery
 
 UDP discovery uses port `56566` by default. A client sends the UTF-8 payload `RemoteDesk.Discover.v1`; a host responds with JSON:

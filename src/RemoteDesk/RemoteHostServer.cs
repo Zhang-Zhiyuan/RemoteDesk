@@ -1123,7 +1123,7 @@ internal sealed class RemoteHostServer : IDisposable
                         lowLatencyVideo,
                         interactionActivity,
                         _desktopDuplicationCircuitBreaker,
-                        message => Log?.Invoke(message),
+                        message => { viewerState.VideoDiagnostics.Record(message); Log?.Invoke(message); },
                         clientCancellation.Token);
                     Task captureTargetTopologyTask =
                         RunCaptureTargetTopologyMonitorAsync(
@@ -1659,6 +1659,7 @@ internal sealed class RemoteHostServer : IDisposable
 
     internal sealed class ViewerSessionState
     {
+        internal HostVideoDiagnostics VideoDiagnostics { get; } = new();
         private readonly object _clipboardFileReturnLock = new();
         private readonly object _clipboardInputSequenceLock = new();
         private readonly object
@@ -2196,6 +2197,7 @@ internal sealed class RemoteHostServer : IDisposable
         long hardwareRetryAtMilliseconds =
             long.MaxValue;
         bool suppressWindowsGraphicsCapture = false;
+        long ffmpegAvailabilityVersion = FfmpegH264Decoder.AvailabilityVersion;
         AdaptiveH264ResolutionController? resolutionController = null;
         int lastLoggedEffectiveFramesPerSecond = -1;
         long interactiveDesktopCheckedAt = 0;
@@ -2316,6 +2318,7 @@ internal sealed class RemoteHostServer : IDisposable
                 CanAttemptHardwareH264OnCurrentDesktop(
                     codecs))
             {
+                WindowsFfmpegDependency.StartIfMissing(captureLog);
                 resolutionController ??= new AdaptiveH264ResolutionController(
                     CalculateH264FrameSize(captureState.LastCaptureBounds, scalePercent),
                     effectiveFramesPerSecond,
@@ -2456,6 +2459,13 @@ internal sealed class RemoteHostServer : IDisposable
                 {
                     ViewerVideoSelection currentSelection =
                         viewerState.GetVideoSelection();
+                    if (ffmpegAvailabilityVersion != FfmpegH264Decoder.AvailabilityVersion)
+                    {
+                        ffmpegAvailabilityVersion = FfmpegH264Decoder.AvailabilityVersion;
+                        failedTargetVersion = failedCodecVersion = int.MinValue;
+                        hardwareRetryAtMilliseconds = long.MaxValue;
+                        hardwareRetryCount = 0;
+                    }
                     if (currentSelection.Version != codecVersion)
                     {
                         return true;
@@ -2595,6 +2605,8 @@ internal sealed class RemoteHostServer : IDisposable
                         : $"adapter{target.AdapterIndex} " +
                             target.AdapterDescription;
                     lastFailure = start;
+                    if (WindowsFfmpegDependency.NeedsGraphicsCaptureUpgrade(start.FailureDetail))
+                        WindowsFfmpegDependency.StartIfMissing(captureLog, requireGraphicsCapture: true);
                     bool skipRemainingWgc =
                         ShouldSkipRemainingWindowsGraphicsCaptureCandidates(
                             attemptOptions,
@@ -4316,6 +4328,8 @@ internal sealed class RemoteHostServer : IDisposable
         (codecs.HasFlag(RemoteVideoCodecs.H264AnnexB) &&
          capabilities.HasFlag(RemoteDeviceCapabilities.HighQualityJpeg));
 
+    internal static bool ShouldGateUnchangedReliableJpeg(bool udpRouteActive) => !udpRouteActive;
+
     internal static bool ShouldFinishJpegStartupPreview(
         bool startupPreviewOnly,
         bool udpRouteActive) =>
@@ -4495,11 +4509,12 @@ internal sealed class RemoteHostServer : IDisposable
                 continue;
             }
 
-            // A locked desktop is usually a static, large wallpaper. Sending
-            // it ten times a second fills relay/TCP queues and delays input.
-            // Do not change quality or skip any changed frame. Leave UDP's
-            // negotiated feedback/recovery cadence untouched.
-            bool gateUnchangedFrame = secureDesktop && !lowLatencyVideo.IsRouteActive;
+            // An unchanged desktop (not only a lock screen) does not need the
+            // same full JPEG queued repeatedly. Compare exact encoded bytes:
+            // every changed frame is still sent at its original quality, and
+            // the five-second refresh preserves static-session liveness.
+            // Leave UDP's negotiated feedback/recovery cadence untouched.
+            bool gateUnchangedFrame = ShouldGateUnchangedReliableJpeg(lowLatencyVideo.IsRouteActive);
             if (!gateUnchangedFrame)
             {
                 unchangedFrames.Reset();
@@ -4626,7 +4641,7 @@ internal sealed class RemoteHostServer : IDisposable
                         : string.Empty;
                 captureLog(
                     $"画面统计：{actualFps:F1} FPS，JPEG {adaptiveController.CurrentQuality}，分辨率 {ScreenCaptureService.FormatScaleMode(adaptiveController.CurrentScalePercent)}，采 {averageCaptureMilliseconds:F1}ms，编 {averageEncodeMilliseconds:F1}ms，{sendMetricName} {averageSendMilliseconds:F1}ms，编码 {megabitsPerSecond:F1}Mbps{networkMetrics}" +
-                    (suppressedFramesInWindow > 0 ? $"，省略 {suppressedFramesInWindow} 张重复锁屏画面" : string.Empty) +
+                    (suppressedFramesInWindow > 0 ? $"，省略 {suppressedFramesInWindow} 张重复画面" : string.Empty) +
                     tcpWriteTimings.DescribeAverage());
 
                 string? adaptiveMessage = adaptiveController.Update(
@@ -5004,6 +5019,7 @@ internal sealed class RemoteHostServer : IDisposable
             RemoteControlKind kind) =>
         kind is
             RemoteControlKind.ClipboardGetText or
+            RemoteControlKind.HostVideoDiagnosticsRequest or
             RemoteControlKind
                 .FileTransferRequestClipboardFiles;
 
@@ -5727,6 +5743,17 @@ internal sealed class RemoteHostServer : IDisposable
                 await Protocol.WriteMessageAsync(stream, MessageType.Control,
                     RemoteMessageCodec.EncodeDeviceIdentity(RemoteDeviceIdentity.LocalId),
                     session, writeLock, cancellationToken);
+                break;
+            case RemoteControlKind.HostVideoDiagnosticsRequest:
+                // Opt-in only: strict old clients never receive new controls.
+                string? diagnostics = viewerState.VideoDiagnostics.TryRead(Environment.TickCount64);
+                if (diagnostics is not null)
+                {
+                    string dependencyStatus = WindowsFfmpegDependency.Status;
+                    if (dependencyStatus.Length != 0) diagnostics += "\n" + dependencyStatus;
+                    await Protocol.WriteMessageAsync(stream, MessageType.Control,
+                        RemoteMessageCodec.EncodeHostVideoDiagnostics(diagnostics), session, writeLock, cancellationToken);
+                }
                 break;
             case RemoteControlKind.VideoKeyFrameRequest:
                 viewerState.RequestVideoKeyFrame();

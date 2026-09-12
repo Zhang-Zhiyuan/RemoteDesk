@@ -220,9 +220,17 @@ def ensure_success(value):
     raise ConnectionError("中转拒绝连接：目标可能已离线，请刷新设备列表。")
 
 
-async def close_writer(writer):
+async def close_writer(writer, *, abort=False):
     if writer is not None:
-        writer.close()
+        # A bridge ends only after EOF, failure or cancellation of a session.
+        # Its peer no longer consumes video; flushing that abandoned backlog
+        # can retain the socket, delay reconnects and hit CPython gh-115514 on
+        # distribution Python 3.12 builds. Abort ONLY these ended tunnels.
+        # Live writes/receipts and short directory exchanges stay graceful.
+        if abort:
+            writer.transport.abort()
+        else:
+            writer.close()
         closed = asyncio.ensure_future(writer.wait_closed())
         # wait_closed() uses a shared protocol future. Cancelling that future
         # on timeout also poisons a later close by the bridge's owner. Shield
@@ -716,7 +724,7 @@ async def bridge(first, second):
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await asyncio.gather(close_writer(first[1]), close_writer(second[1]))
+        await asyncio.gather(close_writer(first[1], abort=True), close_writer(second[1], abort=True))
 
 
 def connect_viewer(options, stop_event=None):
@@ -754,7 +762,7 @@ def connect_viewer(options, stop_event=None):
             state["error"] = error
         finally:
             ready.set()
-            await asyncio.gather(close_writer(remote_writer), close_writer(local_writer))
+            await asyncio.gather(close_writer(remote_writer, abort=True), close_writer(local_writer, abort=True))
             local.close()
 
     threading.Thread(target=lambda: asyncio.run(run()), name="RemoteDeskRelayViewer", daemon=True).start()
@@ -904,7 +912,7 @@ class RelayHostConnector:
         except (OSError, ValueError, asyncio.IncompleteReadError, TimeoutError):
             self._status("中转会话未建立或已结束，请确认本机被控端正在运行。")
         finally:
-            await asyncio.gather(close_writer(local_writer), close_writer(remote_writer))
+            await asyncio.gather(close_writer(local_writer, abort=True), close_writer(remote_writer, abort=True))
 
 
 def settings_path():

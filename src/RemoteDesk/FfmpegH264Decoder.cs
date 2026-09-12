@@ -170,8 +170,9 @@ internal sealed class FfmpegH264Decoder : IDisposable
 {
     internal const int MaximumFfmpegAllocationBytes =
         128 * 1024 * 1024;
-    private static readonly Lazy<IReadOnlyList<string>> FfmpegPaths =
+    private static Lazy<IReadOnlyList<string>> FfmpegPaths =
         new(FindFfmpegPaths);
+    private static long _availabilityVersion;
     private static readonly IReadOnlyList<FfmpegH264Backend>
         HardwareBackendCandidates = Array.AsReadOnly(
         [
@@ -255,10 +256,18 @@ internal sealed class FfmpegH264Decoder : IDisposable
     public static bool IsAvailable => AvailablePath is not null;
 
     public static string? AvailablePath =>
-        FfmpegPaths.Value.FirstOrDefault();
+        AvailablePaths.FirstOrDefault();
 
     internal static IReadOnlyList<string> AvailablePaths =>
-        FfmpegPaths.Value;
+        Volatile.Read(ref FfmpegPaths).Value;
+
+    internal static long AvailabilityVersion => Interlocked.Read(ref _availabilityVersion);
+
+    internal static void RefreshAvailablePaths()
+    {
+        Interlocked.Exchange(ref FfmpegPaths, new Lazy<IReadOnlyList<string>>(FindFfmpegPaths));
+        Interlocked.Increment(ref _availabilityVersion);
+    }
 
     internal static TimeSpan DecodeWaitTimeout => DecodeTimeout;
 
@@ -1890,6 +1899,7 @@ internal sealed class FfmpegH264Decoder : IDisposable
         {
         }
 
+        candidates.AddRange(WindowsFfmpegDependency.CompanionPaths());
         candidates.AddRange(
             EnumeratePathCandidates(
                 "ffmpeg.exe",

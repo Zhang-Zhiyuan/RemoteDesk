@@ -28,7 +28,7 @@ from typing import Optional
 from pathlib import Path
 
 
-RELAY_RELEASE_VERSION = "1.0.9"
+RELAY_RELEASE_VERSION = "1.0.21"
 # Capture once when this process loads, not when an installer replaces the file.
 RELAY_SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
@@ -530,10 +530,22 @@ async def write_json(writer: asyncio.StreamWriter, value: dict) -> None:
     await asyncio.wait_for(writer.drain(), timeout=10)
 
 
-async def close_writer(writer: asyncio.StreamWriter) -> None:
-    writer.close()
+async def close_writer(writer: asyncio.StreamWriter, *, abort: bool = False) -> None:
+    if abort:
+        # The paired session has already ended. Do not flush abandoned video
+        # to a closed peer (also avoids CPython gh-115514 on older 3.12 builds).
+        writer.transport.abort()
+    else:
+        writer.close()
+    closed = asyncio.ensure_future(writer.wait_closed())
+    def observe_close(task):
+        if not task.cancelled():
+            task.exception()
+    closed.add_done_callback(observe_close)
     try:
-        await asyncio.wait_for(writer.wait_closed(), timeout=STREAM_CLOSE_TIMEOUT_SECONDS)
+        # wait_closed shares the protocol future with any later owner cleanup.
+        # A timeout must not cancel/poison that shared future.
+        await asyncio.wait_for(asyncio.shield(closed), timeout=STREAM_CLOSE_TIMEOUT_SECONDS)
     except asyncio.CancelledError:
         writer.transport.abort()
         raise
@@ -573,7 +585,7 @@ async def bridge_streams(
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await asyncio.gather(close_writer(first_writer), close_writer(second_writer))
+        await asyncio.gather(close_writer(first_writer, abort=True), close_writer(second_writer, abort=True))
 
 
 def validate_congestion_control(value: str) -> str:

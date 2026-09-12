@@ -9,6 +9,14 @@ namespace RemoteDesk.Tests;
 public sealed class RemoteHostServerTests
 {
     [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public void UnchangedJpegIsSuppressedOnReliableVideoWithoutChangingUdpRecovery(bool udp, bool expected)
+    {
+        Assert.Equal(expected, RemoteHostServer.ShouldGateUnchangedReliableJpeg(udp));
+    }
+
+    [Theory]
     [InlineData(true, false, true)]
     [InlineData(true, true, false)]
     [InlineData(false, false, false)]

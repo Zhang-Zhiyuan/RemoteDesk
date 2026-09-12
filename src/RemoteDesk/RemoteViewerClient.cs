@@ -221,6 +221,7 @@ internal sealed class RemoteViewerClient : IDisposable
     public event Action<string>? Log;
     public event Action<bool>? ConnectedChanged;
     public event Action<TimeSpan>? RoundTripUpdated;
+    public event Action<string>? HostVideoDiagnosticsReceived;
     internal Func<IReadOnlyList<FileTransferConfirmationItem>, string?, bool>? ConfirmRemoteClipboardFileTransfer { get; set; }
 
     public bool IsConnected
@@ -1176,6 +1177,11 @@ internal sealed class RemoteViewerClient : IDisposable
         _ = TryQueueOwnedInput(command);
         return Task.CompletedTask;
     }
+
+    internal Task<bool> RequestHostVideoDiagnosticsAsync() =>
+        _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.HostVideoDiagnostics)
+            ? SendControlAsync(RemoteMessageCodec.EncodeHostVideoDiagnosticsRequest())
+            : Task.FromResult(false);
 
     internal RemoteInputQueueAdmission TryQueueOwnedInput(
         RemoteInputCommand command)
@@ -2795,6 +2801,9 @@ internal sealed class RemoteViewerClient : IDisposable
         TouchReturnedClipboardFileRequestForControl(control.Kind);
         switch (control.Kind)
         {
+            case RemoteControlKind.HostVideoDiagnostics:
+                HostVideoDiagnosticsReceived?.Invoke(control.Text ?? string.Empty);
+                break;
             case RemoteControlKind.CaptureTargetList:
                 if (IsCurrentConnection(ownerConnection) &&
                     IsCurrentInputConnectionGeneration(

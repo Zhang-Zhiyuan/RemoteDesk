@@ -106,6 +106,14 @@ class LinuxRelayTransportPolicyTests(unittest.TestCase):
 
 
 class LinuxRelayCloseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ended_tunnel_aborts_instead_of_flushing_abandoned_tls_video(self):
+        writer = mock.Mock(wait_closed=mock.AsyncMock())
+        await client.close_writer(writer, abort=True)
+        writer.transport.abort.assert_called_once()
+        writer.close.assert_not_called()
+        writer.wait_closed.assert_awaited_once()
+        await client.close_writer(None, abort=True)
+
     async def test_successful_close_does_not_abort(self):
         writer = mock.Mock(wait_closed=mock.AsyncMock())
         await client.close_writer(writer)
@@ -166,7 +174,8 @@ class LinuxRelayBridgeTests(unittest.IsolatedAsyncioTestCase):
         left.write.assert_not_called()
         self.assertEqual(data[client.COPY_BUFFER_BYTES:], await first.read(len(data)))
         for writer in (left, right):
-            writer.close.assert_called_once()
+            writer.close.assert_not_called()
+            writer.transport.abort.assert_called_once()
             writer.transport.set_write_buffer_limits.assert_called_once_with(high=16384, low=4096)
 
     async def test_cancellation_stops_both_copies_and_releases_writers(self):
@@ -180,8 +189,32 @@ class LinuxRelayBridgeTests(unittest.IsolatedAsyncioTestCase):
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await asyncio.wait_for(task, 1)
-        left.close.assert_called_once()
-        right.close.assert_called_once()
+        for writer in (left, right):
+            writer.close.assert_not_called()
+            writer.transport.abort.assert_called_once()
+
+    async def test_live_bridge_flushes_exact_bytes_before_ended_tunnel_is_aborted(self):
+        first, second = asyncio.StreamReader(), asyncio.StreamReader()
+        left, right = mock.Mock(), mock.Mock()
+        for writer in (left, right):
+            writer.drain = mock.AsyncMock()
+            writer.wait_closed = mock.AsyncMock()
+        data = os.urandom(client.COPY_BUFFER_BYTES * 4 + 31)
+        first.feed_data(data)
+        task = asyncio.create_task(client.bridge((first, left), (second, right)))
+        for _ in range(100):
+            if right.drain.await_count == 5:
+                break
+            await asyncio.sleep(.001)
+        self.assertEqual(data, b"".join(call.args[0] for call in right.write.call_args_list))
+        self.assertEqual(5, right.drain.await_count)
+        right.transport.abort.assert_not_called()
+        left.transport.abort.assert_not_called()
+        first.feed_eof()
+        await asyncio.wait_for(task, 1)
+        for writer in (left, right):
+            writer.close.assert_not_called()
+            writer.transport.abort.assert_called_once()
 
 
 class LinuxRelayTlsTests(unittest.IsolatedAsyncioTestCase):

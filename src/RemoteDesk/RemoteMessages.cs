@@ -131,7 +131,9 @@ internal enum RemoteControlKind : byte
     SessionRejected = 32,
     DeviceIdentityRequest = 33,
     DeviceIdentity = 34,
-    FileTransferReceipt = 35
+    FileTransferReceipt = 35,
+    HostVideoDiagnosticsRequest = 36,
+    HostVideoDiagnostics = 37
 }
 
 internal sealed record LowLatencyVideoOffer(
@@ -523,6 +525,18 @@ internal static class RemoteMessageCodec
     }
 
     public static byte[] EncodeDeviceIdentityRequest() => [(byte)RemoteControlKind.DeviceIdentityRequest];
+
+    public static byte[] EncodeHostVideoDiagnosticsRequest() => [(byte)RemoteControlKind.HostVideoDiagnosticsRequest];
+
+    public static byte[] EncodeHostVideoDiagnostics(string text)
+    {
+        if (text.Length > HostVideoDiagnostics.MaximumCharacters) throw new ArgumentException("Video diagnostic exceeds limit.");
+        using var output = new MemoryStream();
+        using var writer = new BinaryWriter(output, Encoding.UTF8);
+        writer.Write((byte)RemoteControlKind.HostVideoDiagnostics);
+        writer.Write(text);
+        return output.ToArray();
+    }
 
     public static byte[] EncodeDeviceIdentity(string deviceId)
     {
@@ -950,6 +964,9 @@ internal static class RemoteMessageCodec
             RemoteControlKind.FileTransferChecksum => DecodeFileTransferChecksum(reader, kind),
             RemoteControlKind.DeviceInfo => DecodeDeviceInfo(reader, kind),
             RemoteControlKind.DeviceIdentityRequest => new RemoteControlMessage(kind, [], null, null),
+            RemoteControlKind.HostVideoDiagnosticsRequest => new RemoteControlMessage(kind, [], null, null),
+            RemoteControlKind.HostVideoDiagnostics => new RemoteControlMessage(kind, [], null, null,
+                Text: ReadHostVideoDiagnostics(reader)),
             RemoteControlKind.DeviceIdentity => new RemoteControlMessage(kind, [], null, null,
                 Text: RemoteDeviceIdentity.Normalize(ReadBoundedString(reader)) ??
                     throw new InvalidDataException("设备标识无效。")),
@@ -1255,6 +1272,13 @@ internal static class RemoteMessageCodec
         string text = reader.ReadString();
         ValidateClipboardText(text);
         return new RemoteControlMessage(kind, Array.Empty<CaptureTargetInfo>(), null, null, text);
+    }
+
+    private static string ReadHostVideoDiagnostics(BinaryReader reader)
+    {
+        string text = ReadBoundedString(reader);
+        if (text.Length > HostVideoDiagnostics.MaximumCharacters) throw new InvalidDataException("Video diagnostic exceeds limit.");
+        return text;
     }
 
     private static string ReadBoundedString(BinaryReader reader)

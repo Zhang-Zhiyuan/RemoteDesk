@@ -9,7 +9,7 @@
     <ApplicationIcon>Assets\RemoteDesk.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.0.20</Version>
+    <Version>1.0.21</Version>
     <RemoteDeskBuildStamp Condition="'$(RemoteDeskBuildStamp)' == ''">$([System.DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))</RemoteDeskBuildStamp>
     <InformationalVersion>$(Version)+remotedesk.$(RemoteDeskBuildStamp)</InformationalVersion>
   </PropertyGroup>
@@ -40,6 +40,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="..\..\scripts\Install-RemoteDeskFfmpeg.ps1"
+                      LogicalName="RemoteDesk.InstallFfmpeg.ps1" />
     <EmbeddedResource Include="..\..\scripts\relay\read_remotedesk_relay_config.py"
                       LogicalName="RemoteDesk.Relay.read_remotedesk_relay_config.py" />
     <EmbeddedResource Include="..\..\scripts\relay\install_remotedesk_relay.sh"

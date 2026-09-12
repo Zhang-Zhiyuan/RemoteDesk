@@ -35,7 +35,8 @@ internal enum RemoteDeviceCapabilities
     HighQualityJpeg = 1 << 21,
     DeviceIdentity = 1 << 22,
     ClipboardPasteShortcut = 1 << 23,
-    FileTransferReceipt = 1 << 24
+    FileTransferReceipt = 1 << 24,
+    HostVideoDiagnostics = 1 << 25
 }
 
 internal static class RemoteDevicePlatforms
@@ -98,6 +99,7 @@ internal static class RemoteDeviceCapabilityInfo
     {
         RemoteDeviceCapabilities capabilities =
             RemoteDeviceCapabilities.DeviceIdentity |
+            RemoteDeviceCapabilities.HostVideoDiagnostics |
             RemoteDeviceCapabilities.RemoteDesktop |
             RemoteDeviceCapabilities.InputControl |
             RemoteDeviceCapabilities.ClipboardText |
