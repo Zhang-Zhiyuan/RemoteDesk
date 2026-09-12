@@ -5,6 +5,7 @@ OpenSSL, Python, file permissions and the installer itself execute normally.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,15 @@ import uuid
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts" / "relay"
+SERVER_SOURCE = (SCRIPTS / "remotedesk_relay_server.py").read_text(encoding="utf-8")
+VERSION_NODE, = (node for node in ast.parse(SERVER_SOURCE).body
+                 if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name)
+                 and target.id == "RELAY_RELEASE_VERSION" for target in node.targets))
+CURRENT_VERSION = ast.literal_eval(VERSION_NODE.value)
+VERSION_ASSIGNMENT = ast.get_source_segment(SERVER_SOURCE, VERSION_NODE)
+_version_parts = [int(part) for part in CURRENT_VERSION.split(".")]
+NEXT_VERSION = ".".join(map(str, _version_parts[:-1] + [_version_parts[-1] + 1]))
+LATER_VERSION = ".".join(map(str, _version_parts[:-1] + [_version_parts[-1] + 2]))
 
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("openssl"), "requires Linux shell and OpenSSL")
@@ -132,9 +142,9 @@ elif action == "disable":
             env=self.environment, timeout=30,
         )
 
-    def candidate(self, version="1.0.10", broken=False):
-        value = (SCRIPTS / "remotedesk_relay_server.py").read_text()
-        value = value.replace('RELAY_RELEASE_VERSION = "1.0.9"', 'RELAY_RELEASE_VERSION = "' + version + '"')
+    def candidate(self, version=NEXT_VERSION, broken=False):
+        self.assertEqual(1, SERVER_SOURCE.count(VERSION_ASSIGNMENT))
+        value = SERVER_SOURCE.replace(VERSION_ASSIGNMENT, 'RELAY_RELEASE_VERSION = "' + version + '"')
         if broken:
             value = value.replace("asyncio.run(run(config_path))", 'raise RuntimeError("deliberate test-only startup failure")')
         path = self.root / ("candidate-" + version + ".py")
@@ -186,7 +196,7 @@ elif action == "disable":
         self.assertEqual(first["tlsCertificateSha256"], second["tlsCertificateSha256"])
         self.assertNotIn("restart", self.log.read_text())
         self.assertTrue(second["healthVerified"])
-        self.assertEqual("1.0.9", second["serverVersion"])
+        self.assertEqual(CURRENT_VERSION, second["serverVersion"])
         self.assertEqual(1, len(list((self.root / "state").glob("update-*"))))
         self.assertEqual(0o640, (self.config / "config.json").stat().st_mode & 0o777)
         self.assertEqual(0o640, (self.config / "relay.key").stat().st_mode & 0o777)
@@ -261,7 +271,7 @@ exec '{python}' "$@"
     def test_same_version_different_source_is_rejected(self):
         self.result(self.install())
         before = self.installed_files()
-        result = self.install(source=self.candidate("1.0.9", broken=True))
+        result = self.install(source=self.candidate(CURRENT_VERSION, broken=True))
         self.assertNotEqual(0, result.returncode)
         self.assertIn("version bump", result.stderr)
         self.assertEqual(before, self.installed_files())
@@ -280,7 +290,7 @@ exec '{python}' "$@"
         first = self.result(self.install())
         self._stop_service()
         server = self.root / "lib/remotedesk_relay_server.py"
-        server.write_text(server.read_text().replace('RELAY_RELEASE_VERSION = "1.0.9"', '# Legacy unversioned server'))
+        server.write_text(server.read_text().replace(VERSION_ASSIGNMENT, '# Legacy unversioned server'))
         (self.root / "state/deployment.json").unlink()
         subprocess.run([str(self.bin / "systemctl"), "restart", "remotedesk-relay.service"],
                        env=self.environment, check=True, capture_output=True, timeout=10)
@@ -296,7 +306,7 @@ exec '{python}' "$@"
                     raise
                 time.sleep(.02)
         result = self.result(self.install())
-        self.assertEqual("1.0.9", result["serverVersion"])
+        self.assertEqual(CURRENT_VERSION, result["serverVersion"])
         self.assertEqual(first["accessToken"], result["accessToken"])
         self.assertEqual(first["tlsCertificateSha256"], result["tlsCertificateSha256"])
 
@@ -325,7 +335,7 @@ exec '{python}' "$@"
         first = self.result(self.install())
         previous = self.installed_files()
         result = self.result(self.install(source=self.candidate()))
-        self.assertEqual("1.0.10", result["serverVersion"])
+        self.assertEqual(NEXT_VERSION, result["serverVersion"])
         self.assertEqual(first["accessToken"], result["accessToken"])
         self.assertEqual(first["tlsCertificateSha256"], result["tlsCertificateSha256"])
         self.assertFalse((self.root / "state/deployment-pending.json").exists())
@@ -343,7 +353,7 @@ exec '{python}' "$@"
         self.assertIn("previous files/service restored", result.stderr)
         self.assertEqual(previous, self.installed_files())
         self.assertFalse((self.root / "state/deployment-pending.json").exists())
-        self.assertEqual("1.0.9", self.result(self.install())["serverVersion"])
+        self.assertEqual(CURRENT_VERSION, self.result(self.install())["serverVersion"])
 
     def test_restart_failure_rolls_back_and_reports_failure_not_success(self):
         self.result(self.install())
@@ -353,7 +363,7 @@ exec '{python}' "$@"
         self.assertNotEqual(0, result.returncode)
         self.assertNotIn("REMOTEDESK_RELAY_RESULT=", result.stdout)
         self.assertEqual(previous, self.installed_files())
-        self.assertEqual("1.0.9", self.result(self.install())["serverVersion"])
+        self.assertEqual(CURRENT_VERSION, self.result(self.install())["serverVersion"])
 
     def test_first_install_failure_removes_candidate_and_disables_service(self):
         result = self.install(source=self.candidate(broken=True))
@@ -372,7 +382,7 @@ exec '{python}' "$@"
         pending = self.root / "state/deployment-pending.json"
         self.assertTrue(pending.exists())
         before = self.installed_files()
-        another = self.install(source=self.candidate("1.0.11"))
+        another = self.install(source=self.candidate(LATER_VERSION))
         self.assertIn("interrupted deployment", another.stderr)
         self.assertEqual(before, self.installed_files())
 
@@ -405,7 +415,7 @@ exec '{python}' "$@"
         self.send(viewer, dict(version=1, token="ab" * 32, role="viewer", deviceId=device_id))
         self.assertEqual("open", self.receive(host)["type"])
         before = self.installed_files()
-        self.assertEqual("1.0.9", self.result(self.install())["serverVersion"])
+        self.assertEqual(CURRENT_VERSION, self.result(self.install())["serverVersion"])
         result = self.install(source=self.candidate())
         self.assertNotEqual(0, result.returncode)
         self.assertIn("active/pending", result.stderr)
