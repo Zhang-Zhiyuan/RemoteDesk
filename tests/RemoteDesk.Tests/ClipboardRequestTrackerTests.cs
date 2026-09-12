@@ -5,6 +5,26 @@ namespace RemoteDesk.Tests;
 public sealed class ClipboardRequestTrackerTests
 {
     [Fact]
+    public void SlowRelayReplyUsesItsOwnDeadlineAndStillRejectsChangedClipboard()
+    {
+        long now = 0;
+        var tracker = new ClipboardRequestTracker(() => now);
+        var request = tracker.Begin(1, true, 10, ClipboardRequestTracker.RelayTimeoutMilliseconds)!;
+        now = 12000;
+        Assert.Equal(18000, request.RemainingTimeoutMilliseconds);
+        Assert.False(request.Expired);
+        Assert.True(tracker.CanApply(request, 10));
+        Assert.False(tracker.CanApply(request, 11));
+        now = 30000;
+        Assert.Equal(0, request.RemainingTimeoutMilliseconds);
+        Assert.True(request.Expired);
+        Assert.False(tracker.CanApply(request, 10));
+        Assert.Null(tracker.Begin(1, false));
+        Assert.Same(request, tracker.Take(1, true, true));
+        Assert.NotNull(tracker.Begin(1, false));
+    }
+
+    [Fact]
     public void ReadReplyIsFencedByLocalClipboardSequenceAndConnection()
     {
         var tracker = new ClipboardRequestTracker();

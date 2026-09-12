@@ -7,6 +7,23 @@ namespace RemoteDesk.Tests;
 public sealed class InputInjectorTests
 {
     [Theory]
+    [InlineData(3840, 2160, 1920, 1080, 0)]
+    [InlineData(3840, 2160, 1920, 1080, -3840)]
+    [InlineData(2160, 3840, 1080, 1920, 0)]
+    [InlineData(3440, 1440, 1920, 802, 1920)]
+    public void BandwidthScaledFramesStillMapToTheEntireNativeDesktop(
+        int nativeWidth, int nativeHeight, int frameWidth, int frameHeight, int left)
+    {
+        var bounds = new Rectangle(left, 0, nativeWidth, nativeHeight);
+        var frameSize = new Size(frameWidth, frameHeight);
+        Assert.Equal(new Point(left, 0), InputInjector.GetPointerScreenPosition(
+            RemoteInputCommand.MouseMove(0, 0), bounds, frameSize));
+        Assert.Equal(new Point(left + nativeWidth - 1, nativeHeight - 1),
+            InputInjector.GetPointerScreenPosition(
+                RemoteInputCommand.MouseMove(frameWidth - 1, frameHeight - 1), bounds, frameSize));
+    }
+
+    [Theory]
     [InlineData(-1920, -1920, 3840, 0)]
     [InlineData(1919, -1920, 3840, 65535)]
     [InlineData(-4000, -1920, 3840, 0)]

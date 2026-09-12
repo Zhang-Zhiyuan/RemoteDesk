@@ -59,6 +59,16 @@ class ClipboardWireTests(unittest.TestCase):
 
 
 class ViewerClipboardTests(unittest.TestCase):
+    def test_only_manual_relay_operations_get_the_longer_deadline(self):
+        for via_relay, paste, expected in [(True, False, 130), (True, True, 108), (False, False, 108)]:
+            with self.subTest(via_relay=via_relay, paste=paste):
+                self.viewer.relay_options = object() if via_relay else None
+                with mock.patch.object(app.time, "monotonic", return_value=100), \
+                        mock.patch.object(app.threading, "Thread"):
+                    self.assertTrue(self.viewer.request_clipboard(read=False, text=TEXT, paste=paste))
+                    self.assertEqual(expected, self.viewer.clipboard_pending.deadline)
+                self.viewer.clipboard_pending = None
+
     def setUp(self):
         self.viewer = app.ViewerConnection("127.0.0.1", 1, "fixture", queue.Queue(), 42)
         self.viewer.sock = mock.Mock()

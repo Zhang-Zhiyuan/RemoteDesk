@@ -127,6 +127,7 @@ internal sealed class RemoteViewerWindow : Form
     private FfmpegH264Decoder? _h264Decoder;
     private MediaFoundationD3D11H264Decoder? _mediaFoundationH264Decoder;
     private D3D11HwndVideoPresenter? _d3d11VideoPresenter;
+    private bool _scaledEdgeEnhancement = true;
     private Size _h264DecoderSize = Size.Empty;
     private Size _mediaFoundationH264DecoderSize = Size.Empty;
     private Size _d3d11VideoPresenterSourceSize = Size.Empty;
@@ -384,6 +385,22 @@ internal sealed class RemoteViewerWindow : Form
         _statusMenu = new ContextMenuStrip();
         _statusMenu.Items.Add("复制当前状态", null, async (_, _) => await CopyStatusAsync());
         _statusMenu.Items.Add("打开本机接收目录", null, (_, _) => OpenReceivedFilesDirectory());
+        var enhancementMenuItem = new ToolStripMenuItem("GPU 清晰增强（缩放时）")
+        {
+            Checked = true,
+            CheckOnClick = true,
+            ToolTipText = "使用显卡边缘增强改善缩放观感；不支持时自动使用普通缩放，不会还原原生像素。"
+        };
+        enhancementMenuItem.CheckedChanged += (_, _) =>
+        {
+            Volatile.Write(ref _scaledEdgeEnhancement, enhancementMenuItem.Checked);
+            lock (_d3d11PresenterLock)
+                _d3d11VideoPresenter?.SetEdgeEnhancement(enhancementMenuItem.Checked);
+            SetStatus(enhancementMenuItem.Checked
+                ? "已允许 GPU 清晰增强；仅在显卡支持且画面缩放时生效。"
+                : "GPU 清晰增强已关闭，使用普通缩放。", MutedTextColor);
+        };
+        _statusMenu.Items.Add(enhancementMenuItem);
         _statusBar.ContextMenuStrip = _statusMenu;
         ConfigureFilePullToolTips();
 
@@ -3895,7 +3912,8 @@ internal sealed class RemoteViewerWindow : Form
                             sourceSize.Width,
                             sourceSize.Height,
                             DirectH264FramesPerSecond,
-                            GetD3D11VideoScaleMode());
+                            GetD3D11VideoScaleMode(),
+                            EnableEdgeEnhancement: Volatile.Read(ref _scaledEdgeEnhancement));
                     if (!D3D11HwndVideoPresenter.TryCreate(
                             deviceLease,
                             options,
@@ -4921,7 +4939,8 @@ internal sealed class RemoteViewerWindow : Form
                         sourceSize.Width,
                         sourceSize.Height,
                         DirectH264FramesPerSecond,
-                        GetD3D11VideoScaleMode());
+                        GetD3D11VideoScaleMode(),
+                        EnableEdgeEnhancement: Volatile.Read(ref _scaledEdgeEnhancement));
                 if (!D3D11HwndVideoPresenter.TryCreate(
                         deviceLease,
                         options,
@@ -7036,7 +7055,7 @@ internal sealed class RemoteViewerWindow : Form
                 {
                     clipboardSynced = await _client.SendClipboardTextToRemoteAsync(
                         text,
-                        "已同步本机文本剪贴板到远程。");
+                        "已同步本机文本剪贴板到远程。", forPasteShortcut: true);
                 }
                 catch (Exception ex) when (ex is InvalidDataException or InvalidOperationException or IOException)
                 {

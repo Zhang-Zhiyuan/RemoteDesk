@@ -6,6 +6,7 @@ namespace RemoteDesk;
 internal sealed class ClipboardRequestTracker
 {
     internal const int TimeoutMilliseconds = 8000;
+    internal const int RelayTimeoutMilliseconds = 30000;
     private readonly object _gate = new();
     private Request? _pending;
     private long _generation = -1;
@@ -14,7 +15,8 @@ internal sealed class ClipboardRequestTracker
 
     internal ClipboardRequestTracker(Func<long>? clock = null) => _clock = clock ?? (() => Environment.TickCount64);
 
-    internal Request? Begin(long generation, bool read, uint localSequence = 0)
+    internal Request? Begin(long generation, bool read, uint localSequence = 0,
+        int timeoutMilliseconds = TimeoutMilliseconds)
     {
         lock (_gate)
         {
@@ -26,7 +28,8 @@ internal sealed class ClipboardRequestTracker
                 _generation = generation;
             }
             if (_pending is not null) return null;
-            return _pending = new Request(generation, ++_revision, read, localSequence, _clock);
+            return _pending = new Request(generation, ++_revision, read, localSequence, _clock,
+                Math.Clamp(timeoutMilliseconds, TimeoutMilliseconds, RelayTimeoutMilliseconds));
         }
     }
 
@@ -49,14 +52,18 @@ internal sealed class ClipboardRequestTracker
                 !request.Expired && request.LocalSequence == currentSequence;
     }
 
-    internal sealed class Request(long generation, long revision, bool read, uint localSequence, Func<long> clock)
+    internal sealed class Request(long generation, long revision, bool read, uint localSequence, Func<long> clock,
+        int timeoutMilliseconds)
     {
         internal long Generation { get; } = generation;
         internal long Revision { get; } = revision;
         internal bool Read { get; } = read;
         internal uint LocalSequence { get; } = localSequence;
         private readonly long _startedAt = clock();
-        internal bool Expired => clock() - _startedAt >= TimeoutMilliseconds;
+        internal int ReplyTimeoutMilliseconds { get; } = timeoutMilliseconds;
+        internal int RemainingTimeoutMilliseconds => (int)Math.Clamp(
+            ReplyTimeoutMilliseconds - (clock() - _startedAt), 0, ReplyTimeoutMilliseconds);
+        internal bool Expired => clock() - _startedAt >= ReplyTimeoutMilliseconds;
         internal TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }

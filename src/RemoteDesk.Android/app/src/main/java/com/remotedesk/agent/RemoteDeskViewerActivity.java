@@ -543,7 +543,8 @@ public final class RemoteDeskViewerActivity extends Activity {
                 payload = RemoteDeskTransport.encodeClipboardSetText(text);
             }
         } catch (Exception failure) { toast("无法读取手机剪贴板：" + failure.getMessage()); return false; }
-        AndroidViewerClipboard.Request request = owner.clipboard.begin(read, localClipboardRevision.get(), SystemClock.elapsedRealtime());
+        AndroidViewerClipboard.Request request = owner.clipboard.begin(read, localClipboardRevision.get(),
+            SystemClock.elapsedRealtime(), relayOptions != null && !paste);
         if (request == null) { toast("上一项剪贴板操作仍在等待远端，请稍后重试；长时间无响应请重连"); return false; }
         long inputGeneration = owner.inputCapabilityGeneration.get();
         try {
@@ -563,6 +564,7 @@ public final class RemoteDeskViewerActivity extends Activity {
             if (!isCurrentConnectionOwner(owner)) return;
             sent = true;
             if (!sendControlMessageIfCurrent(owner, payload)) return;
+            updateStatus(owner, "正在等待远端剪贴板确认…");
             long remaining = Math.max(0, request.deadlineMillis - SystemClock.elapsedRealtime());
             if (!request.completed.await(remaining, TimeUnit.MILLISECONDS)) {
                 updateStatus(owner, "等待远端剪贴板超时，未覆盖手机内容或触发粘贴；可重新连接后重试。"); return;

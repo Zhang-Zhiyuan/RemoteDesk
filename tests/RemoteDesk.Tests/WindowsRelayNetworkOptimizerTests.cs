@@ -159,6 +159,24 @@ public sealed class WindowsRelayNetworkOptimizerTests
     }
 
     [Fact]
+    public async Task NewWifiTopologyDoesNotReusePreviousFailureCooldown()
+    {
+        var backend = new Backend();
+        RelayNetworkPath wifi = Wifi;
+        using var optimizer = new WindowsRelayNetworkOptimizer(backend,
+            (_, _) => Task.FromResult<IReadOnlyList<RelayNetworkPath>>([wifi, Wired]),
+            (_, path, _) => Task.FromResult(path?.LocalAddress.Equals(IPAddress.Parse("192.0.2.5")) == true ? 60d : 650d),
+            () => 1, maintain: false, disconnect: _ => { });
+        await optimizer.OptimizeAsync(Options, true, default);
+        Assert.Null(optimizer.ActivePath);
+        Assert.Equal(2, backend.Leases.Count);
+        wifi = Wifi with { LocalAddress = IPAddress.Parse("192.0.2.5"), Gateway = "192.0.2.1" };
+        await optimizer.OptimizeAsync(Options, true, default);
+        Assert.Equal(wifi, optimizer.ActivePath);
+        Assert.Equal(3, backend.Leases.Count);
+    }
+
+    [Fact]
     public async Task UnstableCandidateDoesNotTriggerSwitch()
     {
         var backend = new Backend();

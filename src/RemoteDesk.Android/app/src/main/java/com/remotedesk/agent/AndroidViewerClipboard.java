@@ -5,12 +5,18 @@ import java.util.concurrent.CountDownLatch;
 // One request per physical connection: legacy peers do not echo request IDs.
 final class AndroidViewerClipboard {
     static final long TIMEOUT_MILLIS = 8000;
+    static final long RELAY_TIMEOUT_MILLIS = 30000;
     private Request pending;
     private Request latest;
 
     synchronized Request begin(boolean read, long localRevision, long nowMillis) {
+        return begin(read, localRevision, nowMillis, false);
+    }
+
+    synchronized Request begin(boolean read, long localRevision, long nowMillis, boolean slowRelayReply) {
         if (pending != null) return null;
-        pending = latest = new Request(read, localRevision, nowMillis + TIMEOUT_MILLIS);
+        pending = latest = new Request(read, localRevision,
+            nowMillis + (slowRelayReply ? RELAY_TIMEOUT_MILLIS : TIMEOUT_MILLIS));
         return pending;
     }
 

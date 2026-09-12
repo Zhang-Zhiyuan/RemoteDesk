@@ -59,6 +59,8 @@ internal static class RelayWindowsUpdateProbe
         RelayOnlineDevice[] selected = selectedIds.Select(id => devices.Single(device => device.DeviceId == id)).ToArray();
         if (selected.Any(device => device.Platform != RemoteDevicePlatforms.Windows))
             throw new InvalidOperationException("Only explicitly selected online Windows devices can be updated.");
+        bool allowSessionTakeover = config.TryGetProperty("allowSessionTakeover", out var takeover) &&
+            takeover.ValueKind == JsonValueKind.True;
         var results = new List<object>();
         foreach (RelayOnlineDevice device in selected)
         {
@@ -73,7 +75,9 @@ internal static class RelayWindowsUpdateProbe
             };
             try
             {
-                if (device.Busy) throw new InvalidOperationException("Device has an active session; no update sent.");
+                if (device.Busy && !allowSessionTakeover)
+                    throw new InvalidOperationException("Device has an active session; no update sent.");
+                result["sessionTakeoverExplicitlyAllowed"] = allowSessionTakeover;
                 if (credentials.Count == 0) throw new InvalidOperationException("No saved or supplied device key; no authentication attempted.");
                 await ApplyAsync(options with { DeviceId = device.DeviceId }, device, credentials, package, expectedBuild, result);
                 result["success"] = true;
@@ -195,6 +199,8 @@ internal static class RelayWindowsUpdateProbe
                     if (after.BuildStamp != expectedBuild) throw new IOException("Authenticated endpoint has not applied the expected build.");
                     await Task.Delay(TimeSpan.FromSeconds(8));
                     if (!verifier.IsConnected) throw new IOException("Updated endpoint did not retain the verification connection.");
+                    if (Interlocked.Read(ref frames) == 0)
+                        throw new IOException("Updated endpoint did not deliver any verification frames.");
                     result["afterBuild"] = after.BuildStamp;
                     result["afterDeviceId"] = after.DeviceId;
                     result["verificationFrames"] = Interlocked.Read(ref frames);

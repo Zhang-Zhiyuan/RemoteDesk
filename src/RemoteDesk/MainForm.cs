@@ -33,7 +33,7 @@ public sealed partial class MainForm : Form
     private readonly RemoteDeskSettings _settings;
     private readonly RemoteHostServer _hostServer = new();
     private readonly RemoteViewerClient _viewerClient = new();
-    private readonly RelayHostConnector _relayHostConnector = new();
+    private readonly RelayHostConnector _relayHostConnector;
     private readonly WindowsRelayNetworkOptimizer _relayNetworkOptimizer = new();
     private readonly RelayProvisioner _relayProvisioner = new();
     private readonly CancellationTokenSource _relayOperationCancellation = new();
@@ -235,6 +235,8 @@ public sealed partial class MainForm : Form
         _startMinimizedToTray = startMinimizedToTray;
         _resumeHostAfterUpdate = resumeHostAfterUpdate;
         _settings = _settingsService.Load();
+        _relayHostConnector = new RelayHostConnector(prepareConnection: (options, token) =>
+            _relayNetworkOptimizer.OptimizeAsync(options, _settings.Relay.OptimizeNetworkRoute, token));
         _settings.Relay.DeviceId = RemoteDeviceIdentity.Normalize(_settings.Relay.DeviceId) ?? Guid.NewGuid().ToString("D");
         RemoteDeviceIdentity.LocalId = _settings.Relay.DeviceId;
         long settingsLoadedAt = Stopwatch.GetTimestamp();
@@ -855,7 +857,7 @@ public sealed partial class MainForm : Form
         _jpegQualityLabel = CreateMutedLabel("JPEG 85");
         _adaptiveQualityBox = new CheckBox
         {
-            Text = "清晰优先自适应",
+            Text = "自适应清晰 / 流畅",
             AutoSize = true,
             Checked = true
         };
@@ -1551,7 +1553,7 @@ public sealed partial class MainForm : Form
         SetToolTip(_captureScaleBox, "“100%（原生）+ 60 FPS”为 4K60；“最高 1440p + 60 FPS”为精确 1440p60。1440p 模式使用 GPU 表面缩放，低于该分辨率的屏幕保持原生。");
         SetToolTip(_hostFpsBox, "30 FPS 更节省带宽；60 FPS 仅在查看端声明高帧率能力且硬件捕获/编解码链路可用时启用。");
         SetToolTip(_jpegQualityTrack, "JPEG 画质越高越清晰，占用带宽和 CPU 也越高。");
-        SetToolTip(_adaptiveQualityBox, "压力变高时先降帧率和 JPEG 画质，持续严重拥塞才降低分辨率；恢复后优先拉回分辨率。");
+        SetToolTip(_adaptiveQualityBox, "H.264 传输持续受带宽限制时自动切到最高 1080p，保持高质量硬编；稳定后尝试恢复一次，失败则本次连接保持流畅档。不会修改系统分辨率。关闭后固定所选传输尺寸。JPEG 保留原有自适应策略。");
         SetToolTip(_hostToggleButton, "启动或停止本机被控端。");
 
         SetToolTip(_discoveredHostsBox, "选择扫描到的在线设备或最近连接设备。");

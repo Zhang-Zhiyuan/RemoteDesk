@@ -523,11 +523,16 @@ def authenticate(sock: socket.socket, password: str) -> SecureSession:
     return create_session(password, nonce)
 
 
-def write_message(sock: socket.socket, session: SecureSession, message_type: int, payload: bytes) -> None:
+def write_message(sock: socket.socket, session: SecureSession, message_type: int, payload: bytes) -> float:
     plain = bytes([message_type]) + struct.pack("<i", len(payload)) + payload
     encrypted = session.encrypt(plain)
     header = struct.pack("<i", len(encrypted))
-    sock.sendall(header + encrypted)
+    packet = header + encrypted
+    started = time.monotonic()
+    sock.sendall(packet)
+    # Return socket-write seconds, excluding packet construction/encryption.
+    # This is backpressure, not a measurement of network RTT.
+    return time.monotonic() - started
 
 
 def configure_low_latency_socket(sock: socket.socket) -> None:

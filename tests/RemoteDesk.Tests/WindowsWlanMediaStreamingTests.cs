@@ -1,9 +1,37 @@
+using System.Net;
+using System.Net.NetworkInformation;
 using Xunit;
 
 namespace RemoteDesk.Tests;
 
 public sealed class WindowsWlanMediaStreamingTests
 {
+    [Theory]
+    [InlineData("192.0.2.1", "192.0.2.1", true, true)]
+    [InlineData("192.0.2.1", "192.0.2.2", true, false)]
+    [InlineData("192.0.2.1", "192.0.2.1", false, false)]
+    [InlineData("127.0.0.1", "127.0.0.1", true, false)]
+    [InlineData("::ffff:192.0.2.1", "192.0.2.1", true, true)]
+    [InlineData("::ffff:127.0.0.1", "127.0.0.1", true, false)]
+    public void OnlyTheActualWirelessSocketInterfaceIsEligible(string local, string address, bool wireless, bool expected) =>
+        Assert.Equal(expected, WindowsWlanMediaStreaming.UsesWirelessInterface(IPAddress.Parse(local),
+            wireless ? NetworkInterfaceType.Wireless80211 : NetworkInterfaceType.Ethernet, [IPAddress.Parse(address)]));
+
+    [Fact]
+    public void UnusedWirelessInterfacesAreNotAdjusted()
+    {
+        Guid selected = Guid.NewGuid(), unused = Guid.NewGuid();
+        var api = new RecordingWlanApi(selected, unused);
+        using (WindowsWlanMediaStreaming.TryAcquire(true, api, selectedInterfaces: new HashSet<Guid> { selected }))
+            Assert.Equal([(selected, true)], api.SetCalls);
+        Assert.Equal([(selected, true), (selected, false)], api.SetCalls);
+        Assert.Equal(1, api.CloseCalls);
+        var wiredApi = new RecordingWlanApi(unused);
+        using (WindowsWlanMediaStreaming.TryAcquire(true, wiredApi, selectedInterfaces: new HashSet<Guid>())) { }
+        Assert.Equal(0, wiredApi.OpenCalls);
+        Assert.Empty(wiredApi.SetCalls);
+    }
+
     [Fact]
     public void SuccessfulLeaseBalancesEveryInterfaceAndClosesOnce()
     {

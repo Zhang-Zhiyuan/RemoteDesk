@@ -3329,7 +3329,11 @@ class ViewerConnection:
             if self.clipboard_pending is not None:
                 self._put_event("viewer_status", "上一项剪贴板操作仍在等待远端，请稍后重试；长时间无响应请重连。")
                 return False
-            request = ViewerClipboardRequest(read, baseline)
+            # Manual relay transfers may wait across a slow in-flight frame.
+            # Keep automatic paste short-lived so it cannot unexpectedly target
+            # another input field much later. Read replies retain local fences.
+            timeout = 30.0 if getattr(self, "relay_options", None) is not None and not paste else 8.0
+            request = ViewerClipboardRequest(read, baseline, deadline=time.monotonic() + timeout)
             self.clipboard_pending = self.clipboard_latest = request
         threading.Thread(target=self._exchange_clipboard,
                          args=(request, payload, paste, after_copy, paste_shift),
@@ -3350,6 +3354,8 @@ class ViewerConnection:
             # Mark before writing: an incomplete write may still reach the peer.
             sent = True
             self._send_control(payload)
+            if not request.completed.is_set():
+                self._put_event("viewer_status", "正在等待远端剪贴板确认…")
             while not request.completed.wait(0.1):
                 if self.stop_event.is_set():
                     return

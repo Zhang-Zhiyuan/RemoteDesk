@@ -2116,6 +2116,10 @@ public sealed class RemoteHostServerTests
                     sourceScalePercent: 100,
                     new Size(1920, 1080),
                     resolved));
+        Assert.True(RemoteHostServer.CanUseNativeWindowsGraphicsCapture(
+            screen, 100, new Size(1920, 1080), resolved, bandwidthLimited: true));
+        Assert.False(RemoteHostServer.CanUseNativeWindowsGraphicsCapture(
+            screen, 100, new Size(1280, 720), resolved, bandwidthLimited: true));
         Assert.False(
             RemoteHostServer
                 .CanUseNativeWindowsGraphicsCapture(

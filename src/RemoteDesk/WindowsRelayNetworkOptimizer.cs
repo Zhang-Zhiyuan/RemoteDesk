@@ -25,6 +25,7 @@ internal sealed class WindowsRelayNetworkOptimizer : IDisposable
     private IRelayRouteLease? _lease;
     private RelayConnectionOptions? _options;
     private string? _key;
+    private string? _topologyKey;
     private long _retryAfter;
     private int _healthFailures;
     private bool _disposed;
@@ -69,6 +70,7 @@ internal sealed class WindowsRelayNetworkOptimizer : IDisposable
                 ReleaseLease(disconnect: true);
                 _retryAfter = 0;
                 _key = key;
+                _topologyKey = null;
             }
             if (!enabled || Environment.GetEnvironmentVariable("REMOTEDESK_RELAY_SYSTEM_ROUTE_ONLY") == "1")
             {
@@ -77,8 +79,6 @@ internal sealed class WindowsRelayNetworkOptimizer : IDisposable
                 return;
             }
             if (ActivePath is not null) return; // Never re-route an established session to chase latency.
-            if (_now() < _retryAfter) return;
-            _retryAfter = _now() + 60_000;
             if (!_backend.Available)
             {
                 SetStatus("中继使用系统路由（临时路由优化需要管理员权限）");
@@ -91,6 +91,16 @@ internal sealed class WindowsRelayNetworkOptimizer : IDisposable
                 return;
             }
             IReadOnlyList<RelayNetworkPath> paths = await _paths(options.ServerAddress, deadline.Token).ConfigureAwait(false);
+            string topologyKey = string.Join('|', paths.Select(path => path.Identity).Order(StringComparer.Ordinal));
+            if (_topologyKey != topologyKey)
+            {
+                // A failed trial on the previous Wi-Fi must not suppress the
+                // first reconnect on a newly available address/gateway.
+                _topologyKey = topologyKey;
+                _retryAfter = 0;
+            }
+            if (_now() < _retryAfter) return;
+            _retryAfter = _now() + 60_000;
             if (paths.Select(path => path.InterfaceId).Distinct().Count() < 2) return;
             if (!_backend.CanChange(address))
             {

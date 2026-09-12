@@ -8,6 +8,17 @@ import static org.junit.Assert.assertTrue;
 
 public final class AndroidViewerH264DimensionsTest {
     @Test
+    public void bandwidthFallbackAndRecoveryReplaceBothDimensionsTogether() {
+        AndroidViewerH264Dimensions dimensions = new AndroidViewerH264Dimensions();
+        for (int[] size : new int[][] {{3840,2160}, {1920,1080}, {3840,2160}, {1080,1920}}) {
+            dimensions.set(size[0], size[1]);
+            AndroidViewerH264Dimensions.Snapshot current = dimensions.snapshot();
+            assertEquals(size[0], current.width);
+            assertEquals(size[1], current.height);
+        }
+    }
+
+    @Test
     public void widthAndHeightArePublishedAsOnePair() {
         AndroidViewerH264Dimensions dimensions = new AndroidViewerH264Dimensions();
         assertFalse(dimensions.snapshot().isValid());

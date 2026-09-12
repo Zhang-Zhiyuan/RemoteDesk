@@ -802,7 +802,6 @@ final class RemoteDeskHostServer {
 
                     state.lastFrameWidth.set(frame.width);
                     state.lastFrameHeight.set(frame.height);
-                    long sendStartedAt = System.nanoTime();
                     AndroidLowLatencyVideoTransport.Host udp = state.lowLatencyVideo;
                     boolean sentUdp = udp != null && udp.offerFrame(
                         RemoteDeskProtocol.MESSAGE_VIDEO_FRAME,
@@ -816,10 +815,13 @@ final class RemoteDeskHostServer {
                             frame.bytes,
                             frame.length));
                     if (!sentUdp) {
-                        RemoteDeskTransport.writeVideoFrame(output, frame, session, writeLock);
+                        double socketWriteMillis = RemoteDeskTransport.writeVideoFrame(output, frame, session, writeLock);
+                        adaptive.recordFrame(frame.length, socketWriteMillis);
                     }
-                    adaptive.recordFrame(frame.length, nanosToMillis(System.nanoTime() - sendStartedAt));
-                    int adaptiveRequestedBitrate = adaptive.updateIfNeeded();
+                    // UDP already has explicit receiver pressure feedback. Its
+                    // enqueue time cannot be used as TCP bandwidth evidence.
+                    if (sentUdp) adaptive.reset(System.nanoTime());
+                    int adaptiveRequestedBitrate = sentUdp ? 0 : adaptive.updateIfNeeded();
                     int currentBitrate = activeEncoder.getCurrentBitrate();
                     int udpTargetBitrate = state.udpTargetBitrate.get();
                     long bitrateDecisionAtNanos = System.nanoTime();
@@ -1828,14 +1830,14 @@ final class RemoteDeskHostServer {
             double averageSendMillis = sendMillis / frames;
             double budgetMillis = 1000d / targetFps;
             double bitsPerSecond = encodedBytes * 8d / Math.max(0.001d, elapsedSeconds);
-            boolean overloaded = averageSendMillis > budgetMillis * 0.55 || actualFps < targetFps * 0.72;
-            boolean outputTooHeavy = bitsPerSecond > currentBitrate * 1.18 && averageSendMillis > budgetMillis * 0.35;
+            boolean overloaded = AndroidH264BitratePolicy.isNetworkBound(
+                actualFps, targetFps, averageSendMillis, bitsPerSecond, currentBitrate);
             boolean comfortable = averageSendMillis < budgetMillis * 0.18 &&
                 actualFps > targetFps * 0.9 &&
                 bitsPerSecond < currentBitrate * 0.72;
 
             int nextBitrate = currentBitrate;
-            if (overloaded || outputTooHeavy) {
+            if (overloaded) {
                 nextBitrate = Math.max(MIN_BITRATE, (int) Math.round(currentBitrate * 0.78));
             } else if (comfortable && currentBitrate < maxBitrate) {
                 nextBitrate = Math.min(maxBitrate, (int) Math.round(currentBitrate * 1.12));

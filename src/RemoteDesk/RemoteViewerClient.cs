@@ -682,6 +682,8 @@ internal sealed class RemoteViewerClient : IDisposable
                     // owner. The queue invokes subscribers off-lock and preserves true -> false
                     // ordering even when the peer closes immediately after authentication.
                     _connectedEventOwner = cancellationTokenSource;
+                    _manualClipboardReplyTimeoutMilliseconds = relayRoute is null
+                        ? ClipboardRequestTracker.TimeoutMilliseconds : ClipboardRequestTracker.RelayTimeoutMilliseconds;
                     EnqueueConnectedChanged(true);
                     // An async method can execute inline until its first incomplete
                     // await. A host may already have buffered screen metadata, so
@@ -1440,8 +1442,10 @@ internal sealed class RemoteViewerClient : IDisposable
     }
 
     private readonly ClipboardRequestTracker _clipboardRequests = new();
+    private int _manualClipboardReplyTimeoutMilliseconds = ClipboardRequestTracker.TimeoutMilliseconds;
 
-    public async Task<bool> SendClipboardTextToRemoteAsync(string text, string? successMessage = null)
+    public async Task<bool> SendClipboardTextToRemoteAsync(string text, string? successMessage = null,
+        bool forPasteShortcut = false)
     {
         if (string.IsNullOrEmpty(text))
         {
@@ -1451,7 +1455,9 @@ internal sealed class RemoteViewerClient : IDisposable
 
         byte[] payload = RemoteMessageCodec.EncodeClipboardSetText(text);
         CancellationTokenSource? owner = _cancellationTokenSource;
-        ClipboardRequestTracker.Request? request = _clipboardRequests.Begin(InputConnectionGeneration, read: false);
+        ClipboardRequestTracker.Request? request = _clipboardRequests.Begin(InputConnectionGeneration, read: false,
+            timeoutMilliseconds: forPasteShortcut ? ClipboardRequestTracker.TimeoutMilliseconds
+                : _manualClipboardReplyTimeoutMilliseconds);
         if (request is null)
         {
             ClipboardStatusReceived?.Invoke("上一项剪贴板操作仍在等待远端，请稍后重试；长时间无响应请重连。");
@@ -1479,7 +1485,8 @@ internal sealed class RemoteViewerClient : IDisposable
     {
         CancellationTokenSource? owner = _cancellationTokenSource;
         ClipboardRequestTracker.Request? request = _clipboardRequests.Begin(
-            InputConnectionGeneration, read: true, ClipboardTextService.ReadClipboardSequenceNumber());
+            InputConnectionGeneration, read: true, ClipboardTextService.ReadClipboardSequenceNumber(),
+            timeoutMilliseconds: _manualClipboardReplyTimeoutMilliseconds);
         if (request is null)
         {
             if (notifyRequest) ClipboardStatusReceived?.Invoke("上一项剪贴板操作仍在等待远端，请稍后重试；长时间无响应请重连。");
@@ -1505,8 +1512,11 @@ internal sealed class RemoteViewerClient : IDisposable
     {
         try
         {
+            if (request.ReplyTimeoutMilliseconds > ClipboardRequestTracker.TimeoutMilliseconds &&
+                !request.Completion.Task.IsCompleted && IsCurrentConnection(owner))
+                ClipboardStatusReceived?.Invoke("正在等待远端剪贴板确认（公网慢链路最多等待 30 秒）。");
             return await request.Completion.Task.WaitAsync(TimeSpan.FromMilliseconds(
-                ClipboardRequestTracker.TimeoutMilliseconds), owner?.Token ?? new CancellationToken(true));
+                request.RemainingTimeoutMilliseconds), owner?.Token ?? new CancellationToken(true));
         }
         catch (TimeoutException)
         {

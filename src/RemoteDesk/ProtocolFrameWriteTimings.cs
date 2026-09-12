@@ -15,6 +15,10 @@ internal sealed class ProtocolFrameWriteTimingsWindow
     private int _count;
     private ProtocolFrameWriteTimings _total;
 
+    internal int Count => _count;
+    internal double AverageSocketWriteMilliseconds =>
+        _count == 0 ? 0 : _total.SocketWriteMilliseconds / _count;
+
     public void Record(ProtocolFrameWriteTimings timings)
     {
         _count++;

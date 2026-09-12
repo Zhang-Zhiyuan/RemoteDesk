@@ -87,7 +87,8 @@ def main():
             raise RuntimeError("Owned Linux Xvfb endpoint is unavailable")
         report["endpoint"] = endpoint
         config = dict(host=args.linux.split("@")[-1], port=endpoint["port"], password=password, output=str(output / "client"), **route)
-        result = subprocess.run([str(WINDOWS), "features"], input=json.dumps(config).encode(), capture_output=True, timeout=260)
+        result = subprocess.run([str(WINDOWS), "features"], input=json.dumps(config).encode(), capture_output=True,
+                                timeout=500 if relay else 260)
         print(result.stdout.decode(errors="replace"), flush=True)
         # Read only files from this newly allocated test host. Never touch the
         # user's real graphical-session clipboard or enumerate their directories.

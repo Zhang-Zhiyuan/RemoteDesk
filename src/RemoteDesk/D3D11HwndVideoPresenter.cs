@@ -81,7 +81,8 @@ internal sealed record D3D11HwndVideoPresenterOptions(
     D3D11HwndVideoScaleMode ScaleMode =
         D3D11HwndVideoScaleMode.Fit,
     bool PreferFlipDiscard = true,
-    bool PreferAllowTearing = true)
+    bool PreferAllowTearing = true,
+    bool EnableEdgeEnhancement = true)
 {
     internal const int MaximumDimension = 8192;
     internal const int MaximumFramesPerSecond = 120;
@@ -170,7 +171,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
     private const uint WaitFailed = 0xFFFFFFFF;
 
     private readonly object _sync = new();
-    private readonly D3D11HwndVideoPresenterOptions _options;
+    private D3D11HwndVideoPresenterOptions _options;
     private readonly ID3D11Device _device;
     private readonly ID3D11DeviceContext _context;
     private readonly ID3D11VideoDevice _videoDevice;
@@ -973,6 +974,16 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
         return Resize(width, height);
     }
 
+    internal void SetEdgeEnhancement(bool enabled)
+    {
+        lock (_sync)
+        {
+            if (_disposed) return;
+            _options = _options with { EnableEdgeEnhancement = enabled };
+            RefreshScaledEdgeEnhancement();
+        }
+    }
+
     internal D3D11HwndVideoPresenterResult SetScaleMode(
         D3D11HwndVideoScaleMode scaleMode)
     {
@@ -1662,7 +1673,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
         Size output,
         VideoProcessorCaps caps)
     {
-        if (!caps.FilterCaps.HasFlag(
+        if (!options.EnableEdgeEnhancement || !caps.FilterCaps.HasFlag(
                 VideoProcessorFilterCaps.EdgeEnhancement))
         {
             return false;

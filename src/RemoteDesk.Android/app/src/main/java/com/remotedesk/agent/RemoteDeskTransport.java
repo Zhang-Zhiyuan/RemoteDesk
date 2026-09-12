@@ -186,7 +186,7 @@ final class RemoteDeskTransport {
         writeEncrypted(output, plain, session, writeLock);
     }
 
-    static void writeVideoFrame(
+    static double writeVideoFrame(
         OutputStream output,
         AndroidH264ScreenEncoder.VideoFrame frame,
         SecureSession session,
@@ -209,7 +209,7 @@ final class RemoteDeskTransport {
         writeDoubleLittleEndian(plain, HEADER_LENGTH + 16, frame.captureMillis);
         writeDoubleLittleEndian(plain, HEADER_LENGTH + 24, frame.encodeMillis);
         System.arraycopy(frame.bytes, 0, plain, HEADER_LENGTH + VIDEO_FRAME_HEADER_LENGTH, frame.length);
-        writeEncrypted(output, plain, session, writeLock);
+        return writeEncrypted(output, plain, session, writeLock);
     }
 
     static ProtocolMessage readMessage(InputStream input, SecureSession session)
@@ -825,14 +825,19 @@ final class RemoteDeskTransport {
             Arrays.copyOfRange(payload, VIDEO_FRAME_HEADER_LENGTH, payload.length));
     }
 
-    private static void writeEncrypted(
+    private static double writeEncrypted(
         OutputStream output,
         byte[] plain,
         SecureSession session,
         Object writeLock) throws IOException, GeneralSecurityException {
         synchronized (writeLock) {
-            output.write(session.encryptPacket(plain));
+            byte[] encrypted = session.encryptPacket(plain);
+            long started = System.nanoTime();
+            output.write(encrypted);
             output.flush();
+            // Socket write/flush only: lock contention and encryption work are
+            // not network congestion (and this duration is not RTT).
+            return (System.nanoTime() - started) / 1_000_000d;
         }
     }
 

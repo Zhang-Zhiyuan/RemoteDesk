@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -621,6 +622,35 @@ class HostPressedInputState:
         self._pressed_key_identities.clear()
         self._pressed_mouse_buttons.clear()
         return tuple(releases)
+
+
+class HostWritePriority:
+    """Control responses go before the next frame, never inside an AES packet."""
+
+    def __init__(self) -> None:
+        self.condition = threading.Condition()
+        self.active = False
+        self.waiting_controls = 0
+
+    @contextmanager
+    def enter(self, video: bool):
+        with self.condition:
+            if not video:
+                self.waiting_controls += 1
+                self.condition.notify_all()
+            try:
+                while self.active or (video and self.waiting_controls):
+                    self.condition.wait()
+                self.active = True
+            finally:
+                if not video:
+                    self.waiting_controls -= 1
+        try:
+            yield
+        finally:
+            with self.condition:
+                self.active = False
+                self.condition.notify_all()
 
 
 class HostHeartbeatResponder:
@@ -2060,6 +2090,82 @@ def calculate_h264_bitrate(
     return max(MIN_H264_MAX_BITRATE_BPS, min(normalized_limit, estimated))
 
 
+class AdaptiveH264ResolutionController:
+    """Session-local TCP spatial fallback; preserve the user's size ceiling."""
+
+    def __init__(self, width: int, height: int, fps: float, enabled: bool = True) -> None:
+        self.requested_size = (max(2, int(width)) & ~1, max(2, int(height)) & ~1)
+        self.reduced_size = self.fit_full_hd(*self.requested_size)
+        self.output_size = self.requested_size
+        self.target_fps = max(1.0, min(60.0, fps))
+        self.enabled = enabled and self.reduced_size != self.requested_size
+        self.recovery_attempted = False
+        self.recovery_failed = False
+        self.pressure_seconds = self.comfortable_seconds = self.profile_seconds = 0.0
+        self._reset_window(time.monotonic())
+
+    @staticmethod
+    def fit_full_hd(width: int, height: int) -> tuple[int, int]:
+        width, height = max(2, width), max(2, height)
+        maximum = (1080, 1920) if height > width else (1920, 1080)
+        scale = min(1.0, maximum[0] / width, maximum[1] / height)
+        return max(2, int(width * scale)) & ~1, max(2, int(height * scale)) & ~1
+
+    def _reset_window(self, now: float) -> None:
+        self.window_started = now
+        self.frames = self.encoded_bytes = 0
+        self.write_seconds = 0.0
+
+    def record_frame(self, encoded_bytes: int, write_seconds: float, fps: float) -> bool:
+        now = time.monotonic()
+        if fps != self.target_fps:
+            self.target_fps = max(1.0, min(60.0, fps))
+            self.pressure_seconds = self.comfortable_seconds = 0.0
+            self._reset_window(now)
+        self.frames += 1
+        self.encoded_bytes += max(0, encoded_bytes)
+        self.write_seconds += write_seconds
+        elapsed = now - self.window_started
+        if elapsed < 1.0:
+            return False
+        changed = self.observe(elapsed, self.frames / elapsed,
+                               self.write_seconds * 1000 / self.frames,
+                               self.encoded_bytes * 8 / elapsed / 1_000_000)
+        self._reset_window(now)
+        return changed
+
+    def observe(self, seconds: float, fps: float, write_ms: float, mbps: float) -> bool:
+        if not self.enabled:
+            return False
+        if (not all(math.isfinite(value) for value in (seconds, fps, write_ms, mbps))
+                or seconds <= 0 or fps <= 0 or write_ms < 0 or mbps <= 0):
+            self.pressure_seconds = self.comfortable_seconds = 0.0
+            return False
+        self.profile_seconds += seconds
+        evidence = min(seconds, 1.5)
+        budget = 1000 / self.target_fps
+        if self.output_size == self.requested_size:
+            pressure = fps < self.target_fps * 0.80 and write_ms > budget * 1.10
+            self.pressure_seconds = self.pressure_seconds + evidence if pressure else 0.0
+            if self.pressure_seconds < 3:
+                return False
+            self.recovery_failed = self.recovery_attempted
+            self.output_size = self.reduced_size
+        else:
+            growth = max(1.0, calculate_h264_bitrate(*self.requested_size, self.target_fps) /
+                         calculate_h264_bitrate(*self.reduced_size, self.target_fps))
+            comfortable = fps >= self.target_fps * 0.95 and write_ms * growth < budget * 0.60
+            self.comfortable_seconds = self.comfortable_seconds + evidence if comfortable else 0.0
+            # One bounded trial; fast writes at low bitrate cannot prove spare
+            # WAN capacity and must not cause recurring resolution oscillation.
+            if self.recovery_failed or self.profile_seconds < 45 or self.comfortable_seconds < 10:
+                return False
+            self.output_size = self.requested_size
+            self.recovery_attempted = True
+        self.pressure_seconds = self.comfortable_seconds = self.profile_seconds = 0.0
+        return True
+
+
 def build_h264_hardware_encoder_commands(
     ffmpeg_path: str,
     display: str,
@@ -2329,6 +2435,25 @@ class ContinuousHardwareH264Capture:
             self.unavailable_logged = False
             self.selected_encoder_name = None
             self.latest_frame = None
+            process = self.process
+            self.process = None
+            self._ensure_selection_thread_locked()
+            self.condition.notify_all()
+        self._terminate_process(process)
+        return True
+
+    def update_output_size(self, width: int, height: int) -> bool:
+        """Restart only the encoder; never change the X11 display mode."""
+        size = (max(2, int(width)) & ~1, max(2, int(height)) & ~1)
+        with self.condition:
+            if self.closed or size == (self.width, self.height):
+                return False
+            self.width, self.height = size
+            self.generation += 1
+            self.exhausted = self.unavailable_logged = False
+            self.selected_encoder_name = None
+            self.latest_frame = None
+            self.cached_sps = self.cached_pps = None
             process = self.process
             self.process = None
             self._ensure_selection_thread_locked()
@@ -3086,6 +3211,7 @@ class LinuxHostSession:
             else threading.Lock()
         )
         self.inbound_liveness = HostInboundLivenessTracker()
+        self.write_priority = HostWritePriority()
         self.inbound_liveness_thread: threading.Thread | None = None
         self.heartbeat = HostHeartbeatResponder(
             lambda: self._write_message(MESSAGE_PONG, b""), self._heartbeat_failed)
@@ -3152,6 +3278,9 @@ class LinuxHostSession:
             str(args.capture),
             normalize_h264_max_bitrate_bps(args.max_video_bitrate_mbps),
         )
+        self.h264_resolution = AdaptiveH264ResolutionController(
+            self.frame_width, self.frame_height, self.hardware_h264_capture.fps,
+            enabled=not getattr(args, "no_adaptive_video", False))
         self._start_display_size_refresh_thread()
         if self.host_capabilities & CAPABILITY_INPUT_CONTROL:
             self.input_thread = threading.Thread(target=self._input_loop, name="RemoteDeskLinuxInput", daemon=True)
@@ -3435,7 +3564,15 @@ class LinuxHostSession:
                     capture_ms=0.0,
                     encode_ms=0.0,
                 )
-                self._write_message(MESSAGE_VIDEO_FRAME, payload)
+                write_seconds = self._write_message(MESSAGE_VIDEO_FRAME, payload)
+                adaptive = getattr(self, "h264_resolution", None)
+                if adaptive is not None and isinstance(write_seconds, (int, float)):
+                    if adaptive.record_frame(len(h264_frame.encoded), write_seconds,
+                                             self.hardware_h264_capture.fps):
+                        width, height = adaptive.output_size
+                        self.hardware_h264_capture.update_output_size(width, height)
+                        log(f"H.264 bandwidth profile: {width}x{height}; hardware encoding, "
+                            "display mode unchanged; one recovery trial per session")
                 return True
 
             if self.hardware_h264_capture.is_running() or self.hardware_h264_capture.is_starting():
@@ -4212,13 +4349,19 @@ class LinuxHostSession:
     def _write_control(self, payload: bytes) -> None:
         self._write_message(MESSAGE_CONTROL, payload)
 
-    def _write_message(self, message_type: int, payload: bytes) -> None:
+    def _write_message(self, message_type: int, payload: bytes) -> float:
         if self.session_stop.is_set():
             raise ConnectionError("RemoteDesk Linux session is closed")
-        with self.write_lock:
-            if self.session_stop.is_set():
-                raise ConnectionError("RemoteDesk Linux session is closed")
-            write_message(self.sock, self.session, message_type, payload)
+        priority = getattr(self, "write_priority", None)
+        admission = priority.enter(message_type in (MESSAGE_FRAME, MESSAGE_VIDEO_FRAME)) if priority else nullcontext()
+        with admission:
+            with self.write_lock:
+                if self.session_stop.is_set():
+                    raise ConnectionError("RemoteDesk Linux session is closed")
+                elapsed = write_message(self.sock, self.session, message_type, payload)
+                if isinstance(elapsed, (int, float)) and elapsed > 1:
+                    log(f"TCP write pressure: type={message_type}; bytes={len(payload)}; socket-write={elapsed:.2f}s (not RTT)")
+                return elapsed
 
     def _safe_status(self, success: bool, message: str) -> None:
         log(message)
@@ -5123,6 +5266,8 @@ def main() -> int:
         help="Maximum hardware H.264 bitrate in Mbps (default: 160).",
     )
     parser.add_argument("--width", type=int, default=1920)
+    parser.add_argument("--no-adaptive-video", action="store_true",
+                        help="Keep the requested H.264 size even if TCP video is bandwidth-bound.")
     parser.add_argument("--height", type=int, default=1080)
     parser.add_argument("--capture", choices=("x11", "placeholder"), default="x11")
     parser.add_argument("--display", help="X11 DISPLAY to use for capture, input, and clipboard. Auto-detected when omitted.")

@@ -365,7 +365,7 @@ internal static class InputInjector
         }
     }
 
-    private static Point GetPointerScreenPosition(
+    internal static Point GetPointerScreenPosition(
         RemoteInputCommand command,
         Rectangle captureBounds,
         Size frameSize)

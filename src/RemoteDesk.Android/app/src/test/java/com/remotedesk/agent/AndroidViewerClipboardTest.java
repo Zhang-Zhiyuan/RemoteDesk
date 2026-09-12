@@ -4,6 +4,16 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class AndroidViewerClipboardTest {
+    @Test public void relayReadWaitsLongerButNeverOverwritesANewerCopy() {
+        AndroidViewerClipboard clipboard = new AndroidViewerClipboard();
+        AndroidViewerClipboard.Request request = clipboard.begin(true, 4, 0, true);
+        assertTrue(clipboard.canApply(request, 4, 12000));
+        assertFalse(clipboard.canApply(request, 5, 12000));
+        assertFalse(clipboard.canApply(request, 4, 30000));
+        assertNull(clipboard.begin(false, 4, 30001));
+        assertTrue(clipboard.receive(true, true, "late", 30001));
+        assertNotNull(clipboard.begin(false, 4, 30002));
+    }
     @Test public void clipboardTextPreservesChineseEmojiAndNewlines() throws Exception {
         String text = "中文、繁體，emoji 😀\r\n第二行\t缩进\n";
         assertEquals(text, AndroidClipboardText.boundText(text));

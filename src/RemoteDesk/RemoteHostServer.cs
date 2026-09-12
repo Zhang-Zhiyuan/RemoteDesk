@@ -137,7 +137,7 @@ internal sealed class RemoteHostServer : IDisposable
             $"捕获：{captureTarget.DisplayName}，" +
             $"分辨率：{ScreenCaptureService.FormatScaleMode(loggedScalePercent)}，" +
             $"自适应：{(adaptiveQuality ? "开启" : "关闭")}");
-        string? captureLatencyHint = CreateCaptureLatencyHint(captureTarget, loggedScalePercent);
+        string? captureLatencyHint = CreateCaptureLatencyHint(captureTarget, loggedScalePercent, adaptiveQuality);
         if (captureLatencyHint is not null)
         {
             Log?.Invoke(captureLatencyHint);
@@ -149,7 +149,7 @@ internal sealed class RemoteHostServer : IDisposable
         return Task.CompletedTask;
     }
 
-    internal static string? CreateCaptureLatencyHint(ScreenCaptureTarget captureTarget, int scalePercent)
+    internal static string? CreateCaptureLatencyHint(ScreenCaptureTarget captureTarget, int scalePercent, bool adaptiveQuality = false)
     {
         long capturePixels = Math.Max(0, (long)captureTarget.Bounds.Width) * Math.Max(0, (long)captureTarget.Bounds.Height);
         if (capturePixels < LargeCaptureWarningPixels)
@@ -192,6 +192,8 @@ internal sealed class RemoteHostServer : IDisposable
                 $"当前 {scalePercent}% 是明确选择的缩放；如需最清晰画面，请改为 100%";
         }
 
+        if (adaptiveQuality)
+            clarityGuidance = "所选传输尺寸是清晰度上限；H.264 / TCP 持续受带宽限制时自动切到最高 1080p，稳定后尝试恢复一次，失败则本次连接保持流畅档。关闭自适应可固定所选尺寸，系统分辨率不变";
         return $"低延迟提示：当前选择{targetKind}，采集区域 {captureTarget.Bounds.Width}x{captureTarget.Bounds.Height}，发送约 {frameSize.Width}x{frameSize.Height}。{clarityGuidance}。";
     }
 
@@ -215,7 +217,8 @@ internal sealed class RemoteHostServer : IDisposable
         ScreenCaptureTarget target,
         int sourceScalePercent,
         Size outputSize,
-        WindowsGraphicsCaptureTarget? resolvedTarget)
+        WindowsGraphicsCaptureTarget? resolvedTarget,
+        bool bandwidthLimited = false)
     {
         ArgumentNullException.ThrowIfNull(target);
         return !target.IsAllScreens &&
@@ -227,9 +230,11 @@ internal sealed class RemoteHostServer : IDisposable
                 resolvedTarget.DeviceName,
                 StringComparison.OrdinalIgnoreCase) &&
             target.Bounds == resolvedTarget.Bounds &&
-            outputSize == CalculateH264FrameSize(
+            outputSize == (bandwidthLimited
+                ? AdaptiveH264ResolutionController.FitFullHd(CalculateH264FrameSize(target.Bounds, sourceScalePercent))
+                : CalculateH264FrameSize(
                 target.Bounds,
-                sourceScalePercent);
+                sourceScalePercent));
     }
 
     internal static bool IsWindowsGraphicsCaptureScaleMode(
@@ -724,6 +729,10 @@ internal sealed class RemoteHostServer : IDisposable
         return clampedSourceScale;
     }
 
+    internal static bool ShouldAdaptReliableH264Resolution(bool adaptiveQuality,
+        RemoteDeviceCapabilities viewerCapabilities) =>
+        adaptiveQuality && !viewerCapabilities.HasFlag(RemoteDeviceCapabilities.LowLatencyUdpVideo);
+
     internal static int LimitInteractiveH264SourceFramesPerSecond(
         Size outputSize,
         int configuredFramesPerSecond,
@@ -964,6 +973,7 @@ internal sealed class RemoteHostServer : IDisposable
 
                     using IDisposable wlanMediaStreaming =
                         WindowsWlanMediaStreaming.TryAcquireInteractive(
+                            client.Client.LocalEndPoint,
                             message => Log?.Invoke(message));
                     using var captureTargetPublicationCoordinator =
                         new CaptureTargetPublicationCoordinator();
@@ -2128,6 +2138,7 @@ internal sealed class RemoteHostServer : IDisposable
     private enum H264CaptureLoopExit
     {
         SelectionChanged,
+        ResolutionChanged,
         StartupUnavailable,
         RuntimeFailed
     }
@@ -2185,6 +2196,7 @@ internal sealed class RemoteHostServer : IDisposable
         long hardwareRetryAtMilliseconds =
             long.MaxValue;
         bool suppressWindowsGraphicsCapture = false;
+        AdaptiveH264ResolutionController? resolutionController = null;
         int lastLoggedEffectiveFramesPerSecond = -1;
         long interactiveDesktopCheckedAt = 0;
         WindowsInteractiveDesktopAvailability
@@ -2292,6 +2304,7 @@ internal sealed class RemoteHostServer : IDisposable
                 hardwareRetryAtMilliseconds =
                     long.MaxValue;
                 suppressWindowsGraphicsCapture = false;
+                resolutionController = null;
             }
 
             if (ShouldAttemptHardwareH264(
@@ -2303,6 +2316,10 @@ internal sealed class RemoteHostServer : IDisposable
                 CanAttemptHardwareH264OnCurrentDesktop(
                     codecs))
             {
+                resolutionController ??= new AdaptiveH264ResolutionController(
+                    CalculateH264FrameSize(captureState.LastCaptureBounds, scalePercent),
+                    effectiveFramesPerSecond,
+                    ShouldAdaptReliableH264Resolution(adaptiveQuality, viewerState.Capabilities));
                 H264CaptureLoopResult captureResult =
                     await RunHardwareH264CaptureLoopAsync(
                         stream,
@@ -2317,6 +2334,7 @@ internal sealed class RemoteHostServer : IDisposable
                         effectiveFramesPerSecond,
                         jpegQuality,
                         adaptiveQuality,
+                        resolutionController,
                         lowLatencyVideo,
                         interactionActivity,
                         desktopDuplicationCircuitBreaker,
@@ -2325,7 +2343,7 @@ internal sealed class RemoteHostServer : IDisposable
                         cancellationToken);
                 H264CaptureLoopExit exit =
                     captureResult.Exit;
-                if (exit == H264CaptureLoopExit.SelectionChanged)
+                if (exit is H264CaptureLoopExit.SelectionChanged or H264CaptureLoopExit.ResolutionChanged)
                 {
                     continue;
                 }
@@ -3127,6 +3145,7 @@ internal sealed class RemoteHostServer : IDisposable
             int fps,
             int jpegQuality,
             bool adaptiveQuality,
+            AdaptiveH264ResolutionController resolutionController,
             LowLatencyVideoHostTransport lowLatencyVideo,
             RemoteInteractionActivity interactionActivity,
             DesktopDuplicationCircuitBreaker
@@ -3152,9 +3171,7 @@ internal sealed class RemoteHostServer : IDisposable
             snapshot.Bounds,
             scalePercent,
             adaptiveQuality);
-        Size requestedOutputSize = CalculateH264FrameSize(
-            snapshot.Bounds,
-            sourceScalePercent);
+        Size requestedOutputSize = resolutionController.OutputSize;
         IReadOnlyList<WindowsGraphicsCaptureTarget>
             graphicsCaptureTargets = [];
         WindowsDesktopDuplicationTarget?
@@ -3189,7 +3206,7 @@ internal sealed class RemoteHostServer : IDisposable
                 snapshot.Target,
                 sourceScalePercent,
                 requestedOutputSize,
-                graphicsCaptureTargets[0]);
+                graphicsCaptureTargets[0], resolutionController.IsReduced);
         int sourceFramesPerSecond =
             InteractiveH264FrameController
                 .CalculateSourceFramesPerSecond(
@@ -3213,16 +3230,14 @@ internal sealed class RemoteHostServer : IDisposable
             sourceScalePercent,
             fps,
             sourceFramesPerSecond);
-        Size outputSize = CalculateH264FrameSize(
-            snapshot.Bounds,
-            sourceScalePercent);
+        Size outputSize = resolutionController.OutputSize;
         canUseWindowsGraphicsCapture =
             canUseWindowsGraphicsCapture &&
             CanUseNativeWindowsGraphicsCapture(
                 snapshot.Target,
                 sourceScalePercent,
                 outputSize,
-                graphicsCaptureTargets[0]);
+                graphicsCaptureTargets[0], resolutionController.IsReduced);
         if (!canUseWindowsGraphicsCapture)
         {
             graphicsCaptureTargets = [];
@@ -4159,6 +4174,18 @@ internal sealed class RemoteHostServer : IDisposable
                     networkMetrics +
                     shortGopMetrics +
                     tcpWriteTimings.DescribeAverage());
+
+                if (resolutionController.Observe(metricsElapsed, actualFps,
+                        tcpWriteTimings.AverageSocketWriteMilliseconds, megabitsPerSecond,
+                        reliableVideo: !lowLatencyVideo.IsRouteActive && tcpWriteTimings.Count == framesInWindow))
+                {
+                    Size nextSize = resolutionController.OutputSize;
+                    captureLog(resolutionController.IsReduced
+                        ? $"带宽自适应：持续发送积压，切换 {nextSize.Width}x{nextSize.Height} 高质量 H.264；保持硬编与目标帧率，未修改系统分辨率。"
+                        : $"带宽自适应：发送积压已持续缓解，尝试恢复 {nextSize.Width}x{nextSize.Height}；若再次拥塞，本次连接将保持流畅档，避免反复卡顿。");
+                    return new H264CaptureLoopResult(H264CaptureLoopExit.ResolutionChanged,
+                        Stopwatch.GetElapsedTime(activeRunStartedAt));
+                }
 
                 framesInWindow = 0;
                 bytesInWindow = 0;

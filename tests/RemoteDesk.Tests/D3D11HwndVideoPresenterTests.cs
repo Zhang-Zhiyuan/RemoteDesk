@@ -12,6 +12,16 @@ namespace RemoteDesk.Tests;
 public sealed class D3D11HwndVideoPresenterTests
 {
     [Fact]
+    public void ScaledEdgeEnhancementCanBeExplicitlyDisabled()
+    {
+        var options = new D3D11HwndVideoPresenterOptions((nint)1, 1920, 1080, 30);
+        Assert.True(options.EnableEdgeEnhancement);
+        var disabled = options with { EnableEdgeEnhancement = false };
+        Assert.False(disabled.EnableEdgeEnhancement);
+        Assert.Null(disabled.Validate());
+    }
+
+    [Fact]
     public void PresentedSurfaceValidationAcceptsOpaqueBlackPixels()
     {
         const int width = 16;
@@ -613,6 +623,8 @@ public sealed class D3D11HwndVideoPresenterTests
             Assert.Equal(
                 new Size(640, 360),
                 presenter.OutputSize);
+            presenter.SetEdgeEnhancement(false);
+            presenter.SetEdgeEnhancement(true);
 
             D3D11HwndVideoPresenterResult resizedPresent =
                 presenter.Present(

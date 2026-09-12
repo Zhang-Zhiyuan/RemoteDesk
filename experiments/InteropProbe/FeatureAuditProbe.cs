@@ -12,7 +12,10 @@ internal static class FeatureAuditProbe
     {
         var checks = new List<object>();
         string? failure = null;
-        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(4));
+        bool relayAudit = Program.RelayOptions(config) is not null;
+        // A deliberately slow real WAN may need >35s to deliver five JPEGs.
+        // This expands only the bounded harness, never product reply deadlines.
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(relayAudit ? 8 : 4));
         var token = deadline.Token;
         string incoming = Path.Combine(output, "incoming");
         Directory.CreateDirectory(incoming);
@@ -26,7 +29,8 @@ internal static class FeatureAuditProbe
             items[0].TransferName == "return-fixture.txt" && items[0].SizeBytes == returnedBytes.Length;
         using var log = new StreamWriter(Path.Combine(output, "client.log")) { AutoFlush = true };
         object logLock = new();
-        client.Log += text => { lock (logLock) log.WriteLine(text); };
+        client.Log += text => { lock (logLock) log.WriteLine($"{DateTimeOffset.Now:O} {text}"); };
+        client.ClipboardStatusReceived += text => { lock (logLock) log.WriteLine($"{DateTimeOffset.Now:O} CLIPBOARD: {text}"); };
         client.FileTransferStatusReceived += (ok, text) => { lock (logLock) log.WriteLine($"FILE {ok}: {text}"); };
         int frames = 0, jpeg = 0, h264 = 0, targetChanges = 0;
         CaptureTargetInfo[] targets = [];
@@ -49,7 +53,7 @@ internal static class FeatureAuditProbe
         async Task Until(Func<bool> condition)
         {
             var watch = Stopwatch.StartNew();
-            while (!condition() && watch.Elapsed.TotalSeconds < 35) await Task.Delay(100, token);
+            while (!condition() && watch.Elapsed.TotalSeconds < (relayAudit ? 75 : 35)) await Task.Delay(100, token);
             if (!condition()) throw new TimeoutException("Expected peer state did not arrive");
         }
         RelayConnectionOptions? relay = Program.RelayOptions(config);

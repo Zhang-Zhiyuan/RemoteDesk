@@ -22,6 +22,7 @@ internal sealed class RelayHostConnector : IDisposable
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
     private readonly SemaphoreSlim _addressRefresh = new(0, 1);
     private readonly Func<IReadOnlyList<string>> _addressProvider;
+    private readonly Func<RelayConnectionOptions, CancellationToken, Task>? _prepareConnection;
     private readonly ConcurrentDictionary<Guid, Task> _dataBridges = new();
     private readonly TimeSpan _handshakeTimeout;
     private readonly TimeSpan _heartbeatTimeout;
@@ -30,9 +31,11 @@ internal sealed class RelayHostConnector : IDisposable
     private bool _disposed;
 
     public RelayHostConnector(TimeSpan? handshakeTimeout = null, TimeSpan? heartbeatTimeout = null,
-        Func<IReadOnlyList<string>>? addressProvider = null)
+        Func<IReadOnlyList<string>>? addressProvider = null,
+        Func<RelayConnectionOptions, CancellationToken, Task>? prepareConnection = null)
     {
         _addressProvider = addressProvider ?? RelayAddressReport.LocalAddresses;
+        _prepareConnection = prepareConnection;
         _handshakeTimeout = handshakeTimeout ?? TimeSpan.FromSeconds(10);
         _heartbeatTimeout = heartbeatTimeout ?? TimeSpan.FromSeconds(45);
     }
@@ -101,9 +104,30 @@ internal sealed class RelayHostConnector : IDisposable
         {
             try
             {
+                // Reconnection used to bypass the desktop's route optimizer,
+                // permanently keeping the system fallback after a Wi-Fi change.
+                // Prepare before opening any replacement registration socket.
+                if (_prepareConnection is not null)
+                {
+                    try
+                    {
+                        await _prepareConnection(options, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch
+                    {
+                        // Optimization is optional; normal TLS below still
+                        // verifies the saved identity and reports its own errors.
+                        PublishStatus("中继线路优化暂不可用，继续尝试正常连接");
+                    }
+                }
                 await RunControlConnectionAsync(
                         options,
                         localHostPort,
+                        () => failedAttempts = 0,
                         cancellationToken)
                     .ConfigureAwait(false);
                 failedAttempts = 0;
@@ -149,6 +173,7 @@ internal sealed class RelayHostConnector : IDisposable
     private async Task RunControlConnectionAsync(
         RelayConnectionOptions options,
         int localHostPort,
+        Action registered,
         CancellationToken cancellationToken)
     {
         (TcpClient relayClient, SslStream relayStream) =
@@ -160,6 +185,7 @@ internal sealed class RelayHostConnector : IDisposable
             using var connectionStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             CancellationToken connectionToken = connectionStop.Token;
             using var writeLock = new SemaphoreSlim(1, 1);
+            IReadOnlyList<string> registeredAddresses = RelayAddressReport.Normalize(_addressProvider());
 
             await WriteControlJsonAsync(
                 relayStream,
@@ -173,7 +199,7 @@ internal sealed class RelayHostConnector : IDisposable
                     machineName = Environment.MachineName,
                     platform = "Windows",
                     buildStamp = RemoteDeskBuildInfo.BuildStamp,
-                    directAddresses = RelayAddressReport.Normalize(_addressProvider()),
+                    directAddresses = registeredAddresses,
                     directPort = localHostPort
                 },
                 cancellationToken)
@@ -193,6 +219,7 @@ internal sealed class RelayHostConnector : IDisposable
                     reportAck.ValueKind == JsonValueKind.True;
             }
 
+            registered();
             PublishStatus(
                 $"已上线到中继 {options.ServerAddress}:{options.Port} · 本地端点 " +
                 RelayNetworkPathSelector.DescribeLocalEndpoint(relayClient.Client.LocalEndPoint) +
@@ -201,6 +228,7 @@ internal sealed class RelayHostConnector : IDisposable
                 relayStream,
                 writeLock,
                 localHostPort,
+                registeredAddresses,
                 connectionToken);
             Task<JsonDocument>? pendingRead = null;
             try
@@ -308,7 +336,7 @@ internal sealed class RelayHostConnector : IDisposable
             TaskScheduler.Default);
     }
 
-    private static async Task RunDataBridgeAsync(
+    private async Task RunDataBridgeAsync(
         RelayConnectionOptions options,
         int localHostPort,
         string sessionId,
@@ -361,6 +389,13 @@ internal sealed class RelayHostConnector : IDisposable
                 RelayTls.EnsureSuccess(response.RootElement);
             }
             handshake.CancelAfter(Timeout.InfiniteTimeSpan);
+            PublishStatus("中继会话线路：" +
+                RelayNetworkPathSelector.DescribeLocalEndpoint(relayClient.Client.LocalEndPoint) +
+                $" → {options.ServerAddress}:{options.Port}");
+            // The host's socket is loopback for relay sessions. Only this actual
+            // WAN socket identifies whether a wireless interface is in use.
+            using IDisposable wlanMediaStreaming = WindowsWlanMediaStreaming.TryAcquireInteractive(
+                relayClient.Client.LocalEndPoint, PublishStatus);
 
             await RelayStreamBridge.RunAsync(
                     localClient.GetStream(),
@@ -384,12 +419,21 @@ internal sealed class RelayHostConnector : IDisposable
         Stream stream,
         SemaphoreSlim writeLock,
         int localHostPort,
+        IReadOnlyList<string> registeredAddresses,
         CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
             await _addressRefresh.WaitAsync(HeartbeatInterval, cancellationToken)
                 .ConfigureAwait(false);
+            IReadOnlyList<string> currentAddresses = RelayAddressReport.Normalize(_addressProvider());
+            if (_prepareConnection is not null && ShouldRefreshNetwork(registeredAddresses,
+                currentAddresses, _dataBridges.Values.Any(task => !task.IsCompleted)))
+            {
+                // Wait until the real session finishes; changing another NIC
+                // must not terminate an otherwise healthy active desktop.
+                throw new IOException("网络地址已变化，重新选择中继线路");
+            }
             await WriteControlJsonAsync(
                     stream,
                     writeLock,
@@ -398,13 +442,18 @@ internal sealed class RelayHostConnector : IDisposable
                         version = 1,
                         type = "heartbeat",
                         timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                        directAddresses = RelayAddressReport.Normalize(_addressProvider()),
+                        directAddresses = currentAddresses,
                         directPort = localHostPort
                     },
                     cancellationToken)
                 .ConfigureAwait(false);
         }
     }
+
+    internal static bool ShouldRefreshNetwork(IReadOnlyList<string> registeredAddresses,
+        IReadOnlyList<string> currentAddresses, bool hasActiveSession) =>
+        !hasActiveSession && currentAddresses.Count > 0 &&
+        !new HashSet<string>(registeredAddresses, StringComparer.Ordinal).SetEquals(currentAddresses);
 
     private static async Task WriteControlJsonAsync<T>(
         Stream stream,

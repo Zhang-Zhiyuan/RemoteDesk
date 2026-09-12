@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 
 namespace RemoteDesk;
@@ -31,21 +33,39 @@ internal static class WindowsWlanMediaStreaming
         new InactiveMediaStreamingLease();
 
     internal static IDisposable TryAcquireInteractive(
+        EndPoint? localEndPoint,
         Action<string>? diagnostic = null)
     {
-        return TryAcquire(
-            OperatingSystem.IsWindows(),
-            NativeWlanMediaStreamingApi.Instance,
-            diagnostic);
+        if (!OperatingSystem.IsWindows() || localEndPoint is not IPEndPoint endpoint ||
+            IPAddress.IsLoopback(endpoint.Address)) return InactiveLease;
+        try
+        {
+            var selected = NetworkInterface.GetAllNetworkInterfaces()
+                .Where(nic => nic.OperationalStatus == OperationalStatus.Up &&
+                    UsesWirelessInterface(endpoint.Address, nic.NetworkInterfaceType,
+                        nic.GetIPProperties().UnicastAddresses.Select(item => item.Address)))
+                .Select(nic => Guid.TryParse(nic.Id, out Guid id) ? id : Guid.Empty)
+                .Where(id => id != Guid.Empty).ToHashSet();
+            return TryAcquire(true, NativeWlanMediaStreamingApi.Instance, diagnostic, selected);
+        }
+        catch { return InactiveLease; } // Interface changes cannot prevent a session.
     }
+
+    internal static bool UsesWirelessInterface(IPAddress localAddress, NetworkInterfaceType type,
+        IEnumerable<IPAddress> interfaceAddresses) =>
+        type == NetworkInterfaceType.Wireless80211 && !IPAddress.IsLoopback(localAddress) &&
+        interfaceAddresses.Any(address => Normalize(address).Equals(Normalize(localAddress)));
+
+    private static IPAddress Normalize(IPAddress address) => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
 
     internal static IDisposable TryAcquire(
         bool isWindows,
         IWlanMediaStreamingApi api,
-        Action<string>? diagnostic = null)
+        Action<string>? diagnostic = null,
+        IReadOnlySet<Guid>? selectedInterfaces = null)
     {
         ArgumentNullException.ThrowIfNull(api);
-        if (!isWindows)
+        if (!isWindows || selectedInterfaces is { Count: 0 })
         {
             return InactiveLease;
         }
@@ -81,6 +101,8 @@ internal static class WindowsWlanMediaStreaming
                 return InactiveLease;
             }
 
+            if (selectedInterfaces is not null)
+                interfaceIds = interfaceIds.Where(selectedInterfaces.Contains).ToArray();
             if (interfaceIds.Count == 0)
             {
                 CloseBestEffort(api, clientHandle, diagnostic);
