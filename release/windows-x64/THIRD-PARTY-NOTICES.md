@@ -54,13 +54,16 @@ The full notice is included in the APK at
 `assets/third-party-licenses/JSch-LICENSE.txt` and in the source tree at
 `src/RemoteDesk.Android/app/src/main/assets/third-party-licenses/JSch-LICENSE.txt`.
 
-The Windows package includes an optional companion installer for the Gyan
+The Windows package includes a companion installer for the Gyan
 FFmpeg 8.1.2 release essentials build. The FFmpeg binary is not bundled with
 RemoteDesk. The installer downloads the pinned upstream archive, verifies both
 the archive and executable SHA-256 values, verifies the required `gfxcapture`
 filter and Windows hardware H.264 encoders, and installs the upstream
 `LICENSE` and `README.txt` beside the binary. Gyan's static builds are licensed
-under GPLv3:
+under GPLv3. When an authenticated host session requests H.264 but no usable
+FFmpeg is installed, RemoteDesk runs the same embedded, hash-pinned installer
+in the background. Its versioned per-user directory retains these upstream
+notices; it does not change system PATH or replace an existing system FFmpeg:
 
 - FFmpeg, <https://ffmpeg.org/>
 - Gyan FFmpeg Windows builds, <https://www.gyan.dev/ffmpeg/builds/>
