@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import queue
+import os
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 LINUX_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts" / "linux"
@@ -89,6 +92,92 @@ class LinuxAdaptiveLayoutTests(unittest.TestCase):
         self.assertEqual([(0, 0, 1920, 1080), (-1280, 0, 1280, 1024)], monitors)
         self.assertEqual((-1280, 0, 1280, 1024), app.choose_monitor_bounds(monitors, -400, 500))
         self.assertEqual((0, 0, 1920, 1080), app.choose_monitor_bounds(monitors, 2500, 500))
+
+    def test_remote_edges_remain_clickable_when_image_is_downscaled(self) -> None:
+        ui = app.RemoteDeskLinuxApp.__new__(app.RemoteDeskLinuxApp)
+        ui.last_photo = object()
+        ui.native_presenter_active = False
+        ui.frame_label = mock.Mock()
+        for remote in ((1920, 1080), (3840, 2160), (1080, 2400)):
+            for displayed in ((640, 360), (320, 240), (1, 1)):
+                ui.remote_width, ui.remote_height = remote
+                ui.display_width, ui.display_height = displayed
+                ui.frame_label.winfo_width.return_value = displayed[0] + 40
+                ui.frame_label.winfo_height.return_value = displayed[1] + 60
+                self.assertEqual((0, 0), ui._pointer_event_to_remote(SimpleNamespace(x=20, y=30)))
+                expected = (remote[0] - 1, remote[1] - 1) if displayed != (1, 1) else (0, 0)
+                self.assertEqual(expected, ui._pointer_event_to_remote(
+                    SimpleNamespace(x=20 + displayed[0] - 1, y=30 + displayed[1] - 1)))
+                self.assertIsNone(ui._pointer_event_to_remote(SimpleNamespace(x=19, y=30)))
+
+
+@unittest.skipUnless(os.environ.get("REMOTEDESK_RUN_TK_TESTS") == "1",
+                     "Set REMOTEDESK_RUN_TK_TESTS=1 on an owned display")
+class RealTkAdaptiveLayoutTests(unittest.TestCase):
+    def setUp(self):
+        self.root = app.tk.Tk()
+        self.root.geometry("640x400")
+        self.addCleanup(self.root.destroy)
+        self.ui = app.RemoteDeskLinuxApp.__new__(app.RemoteDeskLinuxApp)
+        self.ui.root = self.root
+        self.ui._configure_style()
+
+    def test_tab_scrolls_to_overflowing_inputs_and_tracks_new_rows(self):
+        notebook = app.ttk.Notebook(self.root)
+        notebook.pack(fill=app.tk.BOTH, expand=True)
+        content = self.ui._create_scrollable_tab(notebook, "Layout test")
+        app.ttk.Label(content, text="Test").pack()
+        self.root.update()
+        canvas = content.master
+        initial_height = content.winfo_height()
+        # Add controls after first layout; the viewport itself is unchanged.
+        for index in range(15):
+            app.ttk.Entry(content, width=140).pack(pady=4)
+        last = content.winfo_children()[-1]
+        self.root.update()
+        self.assertGreater(content.winfo_height(), initial_height)
+        self.assertGreater(content.winfo_width(), canvas.winfo_width())
+        last.event_generate("<FocusIn>")
+        self.root.update()
+        self.assertGreater(canvas.yview()[0], 0)
+        self.assertGreaterEqual(last.winfo_rooty(), canvas.winfo_rooty())
+        self.assertLessEqual(last.winfo_rooty() + last.winfo_height(),
+                             canvas.winfo_rooty() + canvas.winfo_height())
+        content.destroy()
+        self.root.update()  # Also verifies pending callbacks are detached.
+
+    def test_viewer_reserves_clickable_controls_before_large_image(self):
+        self.ui.viewer_window = None
+        self.ui.window_icon = None
+        self.ui.viewer = None
+        self.ui.native_presenter_active = False
+        self.ui.last_photo = None
+        self.ui.text_input = app.tk.StringVar(self.root)
+        self.ui._viewer_frame_focus_out = mock.Mock()
+        with mock.patch.object(app, "apply_adaptive_window_geometry"):
+            self.ui._open_viewer_window("layout-test.invalid", 56565)
+        viewer = self.ui.viewer_window
+        for scaling in (96 / 72, 144 / 72, 192 / 72):
+            self.root.tk.call("tk", "scaling", scaling)
+            for width, height in ((1280, 800), (640, 480), (480, 360), (800, 600)):
+                viewer.geometry(f"{width}x{height}")
+                image = app.tk.PhotoImage(master=viewer, width=1920, height=1080)
+                # Keep the image's large requested size for the layout check.
+                self.ui.frame_label.configure(image=image, text="")
+                self.root.update()
+                footer = self.ui.viewer_window_status.master
+                self.assertGreater(self.ui.frame_label.winfo_height(), 0)
+                for parent in (footer, *footer.winfo_children()):
+                    if parent is self.ui.viewer_target_bar:
+                        continue  # Deliberately hidden until multiple targets are advertised.
+                    for control in parent.winfo_children():
+                        if isinstance(control, (app.ttk.Button, app.ttk.Entry)):
+                            self.assertTrue(control.winfo_ismapped())
+                            self.assertGreaterEqual(control.winfo_rootx(), viewer.winfo_rootx())
+                            self.assertLessEqual(control.winfo_rootx() + control.winfo_width(), viewer.winfo_rootx() + viewer.winfo_width())
+                            self.assertLessEqual(control.winfo_rooty() + control.winfo_height(), viewer.winfo_rooty() + viewer.winfo_height())
+                            self.assertIs(control, viewer.winfo_containing(control.winfo_rootx() + control.winfo_width() // 2,
+                                                                         control.winfo_rooty() + control.winfo_height() // 2))
 
 
 if __name__ == "__main__":

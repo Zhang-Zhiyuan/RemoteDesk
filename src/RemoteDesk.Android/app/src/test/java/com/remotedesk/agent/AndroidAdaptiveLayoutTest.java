@@ -8,6 +8,14 @@ import org.junit.Test;
 
 public final class AndroidAdaptiveLayoutTest {
     @Test
+    public void smallScreensAndLargeFontsUseCompactBrandingWithoutShrinkingText() {
+        assertTrue(AndroidAdaptiveLayout.compactMainHeader(320, 1f));
+        assertTrue(AndroidAdaptiveLayout.compactMainHeader(480, 2f));
+        assertFalse(AndroidAdaptiveLayout.compactMainHeader(600, 2f));
+        assertFalse(AndroidAdaptiveLayout.compactMainHeader(800, Float.NaN));
+    }
+
+    @Test
     public void mainColumnsSwitchAtStandardMediumWidthBreakpoint() {
         assertFalse(AndroidAdaptiveLayout.useMainTwoColumns(599));
         assertTrue(AndroidAdaptiveLayout.useMainTwoColumns(600));

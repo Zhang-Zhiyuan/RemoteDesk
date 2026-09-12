@@ -24,6 +24,10 @@ final class AndroidAdaptiveLayout {
         return useMainTwoColumns(availableWidthDp, 1.0f);
     }
 
+    static boolean compactMainHeader(int availableWidthDp, float fontScale) {
+        return availableWidthDp < viewerToolbarStackThresholdDp(fontScale);
+    }
+
     static int mainTwoColumnThresholdDp(float fontScale) {
         float normalizedScale = normalizeFontScale(fontScale);
         return Math.round(

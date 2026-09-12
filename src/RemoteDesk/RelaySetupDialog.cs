@@ -58,7 +58,7 @@ internal sealed class RelaySetupDialog : Form
         var note = new Label
         {
             AutoSize = true,
-            MaximumSize = new Size(390, 0),
+            Dock = DockStyle.Top,
             ForeColor = Color.FromArgb(71, 85, 105),
             Text = loginOnly
                 ? "用服务器 root / 管理员密码登录，自动获取中继配置；不保存 root 密码、不更新或重启服务器。" +
@@ -68,7 +68,8 @@ internal sealed class RelaySetupDialog : Form
                 "云厂商安全组仍需放行所填 TCP 中继端口。",
             Margin = new Padding(0, 8, 0, 10)
         };
-        root.Controls.Add(note, 1, 5);
+        root.Controls.Add(note, 0, 5);
+        root.SetColumnSpan(note, 2);
 
         var showPassword = new CheckBox
         {
@@ -111,6 +112,7 @@ internal sealed class RelaySetupDialog : Form
         Controls.Add(root);
         AcceptButton = saveButton;
         CancelButton = cancelButton;
+        ResponsiveWindowLayout.ConfigureDialog(this, new Size(600, 460), new Size(380, 260));
     }
 
     public RelayProvisionRequest CreateRequest(

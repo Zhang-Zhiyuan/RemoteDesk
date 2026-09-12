@@ -206,6 +206,40 @@ public sealed class MainFormViewerWindowTests
                 input.Width);
     }
 
+    [Fact]
+    public void WrappedToolbarMeasuresFixedControlBoundsNotTextPreferredSize()
+    {
+        using var toolbar = new FlowLayoutPanel { WrapContents = true, Padding = new Padding(7) };
+        for (int index = 0; index < 3; index++)
+            toolbar.Controls.Add(new Button { Text = "A", AutoSize = false,
+                Size = new Size(180, 42), Margin = new Padding(3) });
+
+        Assert.Equal(14 + 3 * 48, MainForm.CalculateWrappedToolbarHeight(toolbar, 300));
+        Assert.Equal(14 + 48, MainForm.CalculateWrappedToolbarHeight(toolbar, 600));
+    }
+
+    [Fact]
+    public void WrappedToolbarHonorsExplicitLineBreaks()
+    {
+        using var toolbar = new FlowLayoutPanel { WrapContents = true };
+        var first = new Button { AutoSize = false, Size = new Size(100, 40), Margin = Padding.Empty };
+        toolbar.Controls.Add(first);
+        toolbar.Controls.Add(new Button { AutoSize = false, Size = new Size(100, 30), Margin = Padding.Empty });
+        toolbar.SetFlowBreak(first, true);
+
+        Assert.Equal(70, MainForm.CalculateWrappedToolbarHeight(toolbar, 600));
+    }
+
+    [Fact]
+    public void ToolbarUsesInnerParentWidthAndCanGrowBeyondPreviousWrappingLimit()
+    {
+        using var section = new Panel { ClientSize = new Size(360, 200), Padding = new Padding(14) };
+        using var toolbar = new FlowLayoutPanel { MaximumSize = new Size(180, 0), Margin = new Padding(3) };
+        Assert.Equal(326, MainForm.GetWrappedToolbarAvailableWidth(toolbar, section));
+        section.Width = 720;
+        Assert.Equal(686, MainForm.GetWrappedToolbarAvailableWidth(toolbar, section));
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(2)]

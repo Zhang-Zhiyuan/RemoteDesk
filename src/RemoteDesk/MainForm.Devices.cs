@@ -150,6 +150,7 @@ public sealed partial class MainForm
         var list = new ListBox { Dock = DockStyle.Fill }; list.Items.AddRange(options.Cast<object>().ToArray()); list.SelectedIndex = 0;
         var ok = new Button { Text = "选择", Dock = DockStyle.Bottom, Height = 40, DialogResult = DialogResult.OK };
         dialog.Controls.Add(list); dialog.Controls.Add(ok); dialog.AcceptButton = ok;
+        ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(560, 340), new Size(360, 220));
         return dialog.ShowDialog(this) == DialogResult.OK ? list.SelectedItem as DiscoveredHost : null;
     }
 
@@ -185,6 +186,7 @@ public sealed partial class MainForm
             }
             catch (ArgumentException ex) { error.Text = ex.Message; }
         };
+        ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(500, 400), new Size(360, 240));
         dialog.ShowDialog(this);
     }
 }

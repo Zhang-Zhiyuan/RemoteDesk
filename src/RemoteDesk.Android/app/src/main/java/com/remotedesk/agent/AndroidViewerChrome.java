@@ -93,7 +93,8 @@ final class AndroidViewerChrome {
             if (id != EditorInfo.IME_ACTION_SEND) return false;
             sendText(); return true;
         });
-        entry.addView(composer, new LinearLayout.LayoutParams(0, dp(48), 1));
+        composer.setMinimumHeight(dp(48));
+        entry.addView(composer, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         send = button("发送", v -> sendText()); send.setEnabled(false); entry.addView(send);
         composer.addTextChangedListener(new android.text.TextWatcher() {
             public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
@@ -108,15 +109,15 @@ final class AndroidViewerChrome {
         });
         compactClose = button("收起", v -> actions.keyboard(false));
         compactSwitch.setVisibility(View.GONE); compactClose.setVisibility(View.GONE);
-        keyboardPanel.addView(compactSwitch, new LinearLayout.LayoutParams(-2, dp(48)));
-        keyboardPanel.addView(compactClose, new LinearLayout.LayoutParams(-2, dp(48)));
+        keyboardPanel.addView(compactSwitch, new LinearLayout.LayoutParams(-2, -2));
+        keyboardPanel.addView(compactClose, new LinearLayout.LayoutParams(-2, -2));
         dock.addView(keyboardPanel);
 
         mousePanel = row(); mousePanel.setVisibility(View.GONE);
         weighted(mousePanel, button("左键", v -> actions.mouse(RemoteDeskProtocol.MOUSE_LEFT)));
         weighted(mousePanel, button("右键", v -> actions.mouse(RemoteDeskProtocol.MOUSE_RIGHT)));
         drag = button("拖动锁定", v -> actions.drag()); weighted(mousePanel, drag);
-        dock.addView(mousePanel);
+        dock.addView(scroll(mousePanel));
 
         mainRow = row();
         keyboard = button("键盘", v -> actions.keyboard(!keyboardOpen));
@@ -125,7 +126,13 @@ final class AndroidViewerChrome {
         screens = button("屏幕", v -> actions.screens());
         weighted(mainRow, keyboard); weighted(mainRow, mode); weighted(mainRow, mouse);
         weighted(mainRow, screens); weighted(mainRow, button("更多", v -> actions.more()));
-        dock.addView(mainRow);
+        // Keep usable hit targets on split-screen/small displays and with large
+        // system fonts. A weighted, fixed-width row used to squash five buttons
+        // to a few pixels; an overflow strip preserves their natural widths.
+        HorizontalScrollView mainStrip = scroll(mainRow);
+        mainStrip.setHorizontalScrollBarEnabled(true);
+        mainStrip.setContentDescription("远程操作栏，左右滑动可查看所有按钮");
+        dock.addView(mainStrip);
     }
 
     void keyboard(boolean open) {
@@ -151,6 +158,7 @@ final class AndroidViewerChrome {
 
     void adapt(boolean smallHeight) {
         compact = smallHeight;
+        composer.setMaxLines(smallHeight ? 1 : 2);
         health.setVisibility(smallHeight ? View.GONE : View.VISIBLE);
         hint.setVisibility(smallHeight || keyboardOpen ? View.GONE : View.VISIBLE);
         mainRow.setVisibility(smallHeight && keyboardOpen ? View.GONE : View.VISIBLE);
@@ -172,8 +180,8 @@ final class AndroidViewerChrome {
         LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) view.getLayoutParams();
         int width = horizontal ? 0 : ViewGroup.LayoutParams.MATCH_PARENT;
         float weight = horizontal ? 1 : 0;
-        if (params.width != width || params.height != dp(48) || params.weight != weight) {
-            view.setLayoutParams(new LinearLayout.LayoutParams(width, dp(48), weight));
+        if (params.width != width || params.height != ViewGroup.LayoutParams.WRAP_CONTENT || params.weight != weight) {
+            view.setLayoutParams(new LinearLayout.LayoutParams(width, ViewGroup.LayoutParams.WRAP_CONTENT, weight));
         }
     }
 
@@ -203,7 +211,7 @@ final class AndroidViewerChrome {
     }
     private Button button(String title, View.OnClickListener listener) {
         Button v = new Button(activity); AndroidUiTheme.styleViewerToolbarButton(activity, v);
-        v.setText(title); v.setTextSize(12); v.setMinWidth(0); v.setMinimumWidth(0);
+        v.setText(title); v.setTextSize(12); v.setMinWidth(dp(48)); v.setMinimumWidth(dp(48));
         v.setMinHeight(dp(48)); v.setMinimumHeight(dp(48)); v.setPadding(dp(6), 0, dp(6), 0);
         v.setSingleLine(true); v.setEllipsize(TextUtils.TruncateAt.END);
         v.setContentDescription(title); v.setOnClickListener(listener);
@@ -211,11 +219,12 @@ final class AndroidViewerChrome {
         return v;
     }
     private void weighted(LinearLayout row, View button) {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(48), 1);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
         params.setMargins(dp(2), dp(2), dp(2), dp(2)); row.addView(button, params);
     }
     private HorizontalScrollView scroll(View content) {
         HorizontalScrollView view = new HorizontalScrollView(activity);
+        view.setFillViewport(true);
         view.setHorizontalScrollBarEnabled(false); view.addView(content);
         return view;
     }

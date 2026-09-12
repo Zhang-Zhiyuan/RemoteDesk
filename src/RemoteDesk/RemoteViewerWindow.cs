@@ -357,6 +357,12 @@ internal sealed class RemoteViewerWindow : Form
             _statusBar,
             _fileTransferActionsPanel);
         _fileTransferActionsPanel.SizeChanged += (_, _) => UpdateStatusFooterLayout();
+        _fileTransferActionsPanel.VisibleChanged += (_, _) => UpdateStatusFooterLayout();
+        foreach (Control action in _fileTransferActionsPanel.Controls)
+        {
+            action.VisibleChanged += (_, _) => UpdateStatusFooterLayout();
+            action.TextChanged += (_, _) => UpdateStatusFooterLayout();
+        }
         _statusFooterPanel.ClientSizeChanged += (_, _) => UpdateStatusFooterLayout();
 
         _remoteFilePullProgressBar = new ProgressBar
@@ -1304,30 +1310,48 @@ internal sealed class RemoteViewerWindow : Form
             return;
         }
 
-        int dpi = requestedDpi ?? _statusBar.DeviceDpi;
-        int actionWidth = Math.Max(
-            _fileTransferActionsPanel.Width,
-            _fileTransferActionsPanel.PreferredSize.Width);
-        int statusWidth = Math.Max(0, _statusFooterPanel.ClientSize.Width - actionWidth);
-        int preferredHeight = CalculateStatusFooterPreferredHeight(
-            statusWidth,
-            _statusBar.Padding,
-            _statusBar.HasDetails,
-            _fileTransferActionsPanel.PreferredSize.Height,
-            dpi);
-        if (preferredHeight <= 0 || _statusFooterPanel.Height == preferredHeight)
-        {
-            return;
-        }
-
         _updatingStatusFooterLayout = true;
         try
         {
-            _statusFooterPanel.Height = preferredHeight;
+            LayoutStatusFooter(_statusFooterPanel, _statusBar, _fileTransferActionsPanel,
+                _statusBar.HasDetails, requestedDpi ?? _statusBar.DeviceDpi);
         }
         finally
         {
             _updatingStatusFooterLayout = false;
+        }
+    }
+
+    internal static void LayoutStatusFooter(
+        Panel footer, Control status, FlowLayoutPanel actions, bool hasDetails, int dpi)
+    {
+        int width = footer.ClientSize.Width;
+        if (width <= 0) return;
+        Size singleRow = ResponsiveWindowLayout.MeasureFlowLayout(actions, int.MaxValue);
+        bool stacked = width - singleRow.Width <
+            ResponsiveWindowLayout.ScaleLogical(180, dpi) + status.Padding.Horizontal;
+        int statusWidth = stacked ? width : width - singleRow.Width;
+        int statusHeight = CalculateStatusBarPreferredHeight(statusWidth, status.Padding, hasDetails, dpi);
+        int actionHeight = stacked
+            ? ResponsiveWindowLayout.MeasureFlowLayout(actions, width).Height
+            : singleRow.Height;
+
+        footer.SuspendLayout();
+        actions.SuspendLayout();
+        try
+        {
+            // On smaller monitors/large DPI, retain every button and put the
+            // status on its own row. Shrink back when more room is available.
+            actions.AutoSize = false;
+            actions.WrapContents = stacked;
+            actions.Dock = stacked ? DockStyle.Bottom : DockStyle.Right;
+            actions.Size = new Size(stacked ? width : singleRow.Width, actionHeight);
+            footer.Height = stacked ? statusHeight + actionHeight : Math.Max(statusHeight, actionHeight);
+        }
+        finally
+        {
+            actions.ResumeLayout(performLayout: true);
+            footer.ResumeLayout(performLayout: true);
         }
     }
 

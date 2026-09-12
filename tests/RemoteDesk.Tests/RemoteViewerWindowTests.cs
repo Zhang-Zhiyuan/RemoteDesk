@@ -522,6 +522,45 @@ public sealed class RemoteViewerWindowTests
     }
 
     [Theory]
+    [InlineData(320, 96)]
+    [InlineData(480, 120)]
+    [InlineData(640, 144)]
+    [InlineData(800, 192)]
+    [InlineData(1024, 240)]
+    [InlineData(1366, 288)]
+    [InlineData(1920, 192)]
+    public void ViewerFooterKeepsEveryActionClickableAfterResize(int width, int dpi)
+    {
+        using var footer = new Panel { ClientSize = new Size(width, 30) };
+        var status = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
+        var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Dock = DockStyle.Right };
+        foreach (string label in new[] { "取回文件", "接收目录", "远端输入法", "切换屏幕", "允许放大", "全屏" })
+            actions.Controls.Add(new Button { Text = label, AutoSize = true,
+                MinimumSize = new Size(ResponsiveWindowLayout.ScaleLogical(90, dpi),
+                    ResponsiveWindowLayout.ScaleLogical(28, dpi)),
+                Margin = new Padding(2) });
+        RemoteViewerWindow.ConfigureStatusFooterChildren(footer, status, actions);
+
+        foreach (int resizedWidth in new[] { width, width * 3, width })
+        {
+            footer.Width = resizedWidth;
+            RemoteViewerWindow.LayoutStatusFooter(footer, status, actions, hasDetails: true, dpi);
+            footer.PerformLayout();
+            actions.PerformLayout();
+            Assert.True(status.Width > 0 && status.Height > 0);
+            Assert.False(status.Bounds.IntersectsWith(actions.Bounds));
+            Assert.True(footer.ClientRectangle.Contains(actions.Bounds));
+            foreach (Control action in actions.Controls)
+            {
+                Assert.True(actions.ClientRectangle.Contains(action.Bounds),
+                    $"{action.Text}: {action.Bounds} outside {actions.ClientRectangle}, width {resizedWidth}, DPI {dpi}");
+                Assert.Same(action, actions.GetChildAtPoint(new Point(action.Left + action.Width / 2,
+                    action.Top + action.Height / 2)));
+            }
+        }
+    }
+
+    [Theory]
     [InlineData(true, Keys.Control | Keys.Shift | Keys.R, true)]
     [InlineData(true, Keys.Control | Keys.R, false)]
     [InlineData(false, Keys.Control | Keys.Shift | Keys.R, false)]
@@ -1905,6 +1944,29 @@ public sealed class RemoteViewerWindowTests
         Assert.Empty(commands);
         Assert.False(RemoteViewerWindow.TryCreateRemotePasteTriggerCommands(
             new KeyEventArgs(keys), out _, out _));
+    }
+
+    [Fact]
+    public void ResizedViewerMapsFrameEdgesWithoutDoubleDpiScaling()
+    {
+        foreach (int dpi in new[] { 96, 120, 144, 192, 288 })
+        foreach (Size source in new[] { new Size(1920, 1080), new Size(3840, 2160), new Size(1080, 2400) })
+        foreach (Size viewport in new[] { new Size(320, 240), new Size(800, 600), new Size(1920, 1080) })
+        foreach (bool enlarge in new[] { false, true })
+        {
+            var client = new Rectangle(23, 37,
+                ResponsiveWindowLayout.ScaleLogical(viewport.Width, dpi),
+                ResponsiveWindowLayout.ScaleLogical(viewport.Height, dpi));
+            Rectangle image = RemoteViewerWindow.CalculateDisplayedImageRectangle(client, source, enlarge);
+            Assert.True(client.Contains(image));
+            Assert.True(RemoteViewerWindow.TryMapZoomedImagePoint(image.Location, source, image, 0, out Point first));
+            Assert.Equal(Point.Empty, first);
+            Assert.True(RemoteViewerWindow.TryMapZoomedImagePoint(new Point(image.Right - 1, image.Bottom - 1),
+                source, image, 0, out Point last));
+            Assert.Equal(new Point(source.Width - 1, source.Height - 1), last);
+            Assert.False(RemoteViewerWindow.TryMapZoomedImagePoint(new Point(image.Left - 1, image.Top),
+                source, image, 0, out _));
+        }
     }
 
     [Theory]

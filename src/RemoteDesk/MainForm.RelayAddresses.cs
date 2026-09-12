@@ -33,6 +33,7 @@ public sealed partial class MainForm
         var use = new Button { Text = "填入 IP 直连", Dock = DockStyle.Bottom, Height = 42,
             DialogResult = DialogResult.OK, Enabled = !RelayDeviceSelectionPolicy.IsLocalDevice(device, _settings.Relay.DeviceId) };
         dialog.Controls.Add(list); dialog.Controls.Add(note); dialog.Controls.Add(use); dialog.AcceptButton = use;
+        ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(580, 350), new Size(360, 230));
         if (dialog.ShowDialog(this) != DialogResult.OK || list.SelectedIndex < 0 || !use.Enabled) return;
         _selectedHistoryDevice = GetRecentDevices().FirstOrDefault(saved => RemoteDeviceIdentity.Same(saved.DeviceId, id));
         _viewerHostBox.Text = device.DirectAddresses[list.SelectedIndex];

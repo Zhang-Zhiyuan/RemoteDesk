@@ -47,6 +47,7 @@ public sealed partial class MainForm
         buttons.Controls.Add(connect); buttons.Controls.Add(cancel); panel.Controls.Add(buttons);
         dialog.Controls.Add(panel); dialog.AcceptButton = connect; dialog.CancelButton = cancel;
         dialog.Shown += (_, _) => key.Focus();
+        ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(480, 260), new Size(360, 200));
         return dialog;
     }
 

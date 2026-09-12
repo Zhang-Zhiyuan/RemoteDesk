@@ -1682,9 +1682,7 @@ public sealed partial class MainForm : Form
             }
 
             int dpi = toolbar.DeviceDpi;
-            int availableWidth = Math.Max(
-                toolbar.ClientSize.Width,
-                toolbar.Parent?.ClientSize.Width ?? 0);
+            int availableWidth = GetWrappedToolbarAvailableWidth(toolbar, toolbarSection);
             if (!toolbar.IsHandleCreated)
             {
                 availableWidth = Math.Max(
@@ -1741,7 +1739,16 @@ public sealed partial class MainForm : Form
         toolbar.Resize += (_, _) => Apply();
         toolbar.ParentChanged += (_, _) => Apply();
         toolbar.HandleCreated += (_, _) => Apply();
+        toolbar.DpiChangedAfterParent += (_, _) => Apply();
+        toolbarSection.ClientSizeChanged += (_, _) => Apply();
         Apply();
+    }
+
+    internal static int GetWrappedToolbarAvailableWidth(Control toolbar, Control section)
+    {
+        // Subtract the parent's padding, but do not use the toolbar's old
+        // MaximumSize-capped width: that would prevent it from growing again.
+        return Math.Max(0, section.ClientSize.Width - section.Padding.Horizontal - toolbar.Margin.Horizontal);
     }
 
     private static void ConfigureWrappedActionRow(FlowLayoutPanel actions)
@@ -1836,53 +1843,7 @@ public sealed partial class MainForm : Form
         FlowLayoutPanel toolbar,
         int availableWidth)
     {
-        ArgumentNullException.ThrowIfNull(toolbar);
-        if (availableWidth <= 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(availableWidth));
-        }
-
-        int contentWidth = Math.Max(
-            1,
-            availableWidth - toolbar.Padding.Horizontal);
-        int occupiedWidth = 0;
-        int rowHeight = 0;
-        int totalHeight = toolbar.Padding.Vertical;
-        foreach (Control control in toolbar.Controls)
-        {
-            if (!control.Visible)
-            {
-                continue;
-            }
-
-            Size preferred = control.GetPreferredSize(
-                Size.Empty);
-            int itemWidth = Math.Max(
-                    control.MinimumSize.Width,
-                    preferred.Width) +
-                control.Margin.Horizontal;
-            int itemHeight = Math.Max(
-                    control.MinimumSize.Height,
-                    preferred.Height) +
-                control.Margin.Vertical;
-            if (occupiedWidth > 0 &&
-                occupiedWidth + itemWidth > contentWidth)
-            {
-                totalHeight += rowHeight;
-                occupiedWidth = 0;
-                rowHeight = 0;
-            }
-
-            occupiedWidth += itemWidth;
-            rowHeight = Math.Max(
-                rowHeight,
-                itemHeight);
-        }
-
-        return Math.Max(
-            1,
-            totalHeight + rowHeight);
+        return ResponsiveWindowLayout.MeasureFlowLayout(toolbar, availableWidth).Height;
     }
 
     private void PopulateViewerVideoModes()
@@ -5996,6 +5957,7 @@ public sealed partial class MainForm : Form
             input.SelectAll();
         };
 
+        ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(480, 270), new Size(360, 210));
         if (dialog.ShowDialog(this) != DialogResult.OK)
         {
             remark = null;

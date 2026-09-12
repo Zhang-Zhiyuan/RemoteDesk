@@ -25,6 +25,40 @@ internal static class ResponsiveWindowLayout
             availablePhysicalPixels < ScaleLogical(logicalBreakpoint, dpi);
     }
 
+    // Match FlowLayoutPanel: fixed-size children use their assigned bounds;
+    // only AutoSize children are measured from their content. Width includes
+    // padding/margins, and an explicit FlowBreak starts the next row.
+    internal static Size MeasureFlowLayout(FlowLayoutPanel panel, int availableWidth)
+    {
+        ArgumentNullException.ThrowIfNull(panel);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(availableWidth);
+        int contentWidth = Math.Max(1, availableWidth - panel.Padding.Horizontal);
+        int rowWidth = 0, rowHeight = 0, totalHeight = panel.Padding.Vertical, maximumWidth = 0;
+        foreach (Control control in panel.Controls)
+        {
+            if (!control.Visible) continue;
+            Size size = control.AutoSize ? control.GetPreferredSize(Size.Empty) : control.Size;
+            int width = Math.Max(control.MinimumSize.Width, size.Width) + control.Margin.Horizontal;
+            int height = Math.Max(control.MinimumSize.Height, size.Height) + control.Margin.Vertical;
+            if (rowWidth > 0 && rowWidth + width > contentWidth)
+            {
+                maximumWidth = Math.Max(maximumWidth, rowWidth);
+                totalHeight += rowHeight;
+                rowWidth = rowHeight = 0;
+            }
+            rowWidth += width;
+            rowHeight = Math.Max(rowHeight, height);
+            if (panel.GetFlowBreak(control))
+            {
+                maximumWidth = Math.Max(maximumWidth, rowWidth);
+                totalHeight += rowHeight;
+                rowWidth = rowHeight = 0;
+            }
+        }
+        return new Size(Math.Max(1, Math.Max(maximumWidth, rowWidth) + panel.Padding.Horizontal),
+            Math.Max(1, totalHeight + rowHeight));
+    }
+
     internal static ResponsiveWindowMetrics Calculate(
         Rectangle workingArea,
         int dpi,
@@ -159,6 +193,78 @@ internal static class ResponsiveWindowLayout
             logicalMinimumSize,
             logicalMinimumSize);
         form.MinimumSize = metrics.MinimumSize;
+    }
+
+    internal static void ConfigureDialog(Form form, Size logicalPreferredSize, Size logicalMinimumSize)
+    {
+        form.SuspendLayout();
+        try
+        {
+            form.AutoScaleMode = AutoScaleMode.Dpi;
+            form.AutoScaleDimensions = new SizeF(DesignDpi, DesignDpi);
+            form.MinimumSize = Size.Empty;
+            form.FormBorderStyle = FormBorderStyle.Sizable;
+            if (form.Controls.Count == 1 && form.Controls[0] is TableLayoutPanel content)
+            {
+                // A dialog must remain usable even when its complete form is
+                // taller/wider than the monitor. Let the content retain its
+                // required height and scroll it; never shrink away the buttons.
+                form.Controls.Remove(content);
+                var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = content.BackColor };
+                content.AutoScroll = false;
+                content.AutoSize = true;
+                content.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+                content.Dock = DockStyle.Top;
+                content.MinimumSize = new Size(content.ColumnCount > 1 ? 320 : 0, 0);
+                if (content.ColumnCount == 1)
+                {
+                    content.ColumnStyles.Clear();
+                    content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+                }
+                foreach (RowStyle row in content.RowStyles) row.SizeType = SizeType.AutoSize;
+                scroll.Controls.Add(content);
+                form.Controls.Add(scroll);
+                // WinForms ignores horizontal overflow of a Top-docked child
+                // when computing scrollbars. Include its minimum-width bounds
+                // explicitly, otherwise ScrollControlIntoView cannot reach it.
+                void UpdateScrollExtent() => scroll.AutoScrollMinSize = new Size(content.MinimumSize.Width, content.Height);
+                content.SizeChanged += (_, _) => UpdateScrollExtent();
+                UpdateScrollExtent();
+                void TrackFocus(Control parent)
+                {
+                    foreach (Control child in parent.Controls)
+                    {
+                        child.Enter += (_, _) => scroll.ScrollControlIntoView(child);
+                        TrackFocus(child);
+                    }
+                }
+                TrackFocus(content);
+                bool focusRefreshPending = false;
+                scroll.ClientSizeChanged += (_, _) =>
+                {
+                    if (focusRefreshPending || !scroll.IsHandleCreated) return;
+                    focusRefreshPending = true;
+                    scroll.BeginInvoke((Action)(() =>
+                    {
+                        focusRefreshPending = false;
+                        if (!scroll.IsDisposed) scroll.ScrollControlIntoView(form.ActiveControl);
+                    }));
+                };
+            }
+        }
+        finally { form.ResumeLayout(performLayout: true); }
+
+        form.Load += (_, _) => ApplyTo(form, logicalPreferredSize, logicalMinimumSize, applyPreferredBounds: true);
+        form.ResizeEnd += (_, _) => ApplyTo(form, logicalPreferredSize, logicalMinimumSize, applyPreferredBounds: false);
+        form.DpiChanged += (_, _) =>
+        {
+            // The public event precedes WinForms' automatic DPI scaling.
+            // Clamp only after that pass has applied the new control sizes.
+            form.BeginInvoke((Action)(() =>
+            {
+                if (!form.IsDisposed) ApplyTo(form, logicalPreferredSize, logicalMinimumSize, applyPreferredBounds: false);
+            }));
+        };
     }
 
     private static Rectangle GetAvailableWorkingArea(Rectangle workingArea, int dpi)

@@ -5,6 +5,39 @@ namespace RemoteDesk.Tests;
 
 public sealed class ResponsiveWindowLayoutTests
 {
+    [Fact]
+    public void DialogContentRetainsInputsAndActionsWhenViewportIsSmaller()
+    {
+        using var form = new Form();
+        var table = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        table.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        table.Controls.Add(new Label { AutoSize = true, Text = string.Join("\n", Enumerable.Repeat("Dialog explanation", 12)) });
+        var input = new TextBox { Dock = DockStyle.Top, Text = "Keep draft" };
+        var accept = new Button { Text = "Confirm", AutoSize = true };
+        table.Controls.Add(input);
+        table.Controls.Add(accept);
+        form.Controls.Add(table);
+        ResponsiveWindowLayout.ConfigureDialog(form, new Size(480, 360), new Size(320, 220));
+        var scroll = Assert.IsType<Panel>(Assert.Single(form.Controls.Cast<Control>()));
+        Assert.True(scroll.AutoScroll);
+        Assert.Equal(FormBorderStyle.Sizable, form.FormBorderStyle);
+        Assert.Equal(AutoScaleMode.Dpi, form.AutoScaleMode);
+        Assert.All(table.RowStyles.Cast<RowStyle>(), row => Assert.Equal(SizeType.AutoSize, row.SizeType));
+        foreach (Size viewport in new[] { new Size(260, 160), new Size(700, 480), new Size(320, 220) })
+        {
+            form.ClientSize = viewport;
+            form.PerformLayout();
+            scroll.PerformLayout();
+            table.PerformLayout();
+            Assert.True(table.ClientRectangle.Contains(input.Bounds));
+            Assert.True(table.ClientRectangle.Contains(accept.Bounds));
+            Assert.Equal("Keep draft", input.Text);
+        }
+    }
+
     [Theory]
     [InlineData(15, 96, 15)]
     [InlineData(15, 120, 19)]

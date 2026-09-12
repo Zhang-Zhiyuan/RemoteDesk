@@ -5370,9 +5370,13 @@ class RemoteDeskLinuxApp:
             orient=tk.VERTICAL,
             command=canvas.yview,
         )
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        horizontal = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=canvas.xview)
+        canvas.configure(yscrollcommand=scrollbar.set, xscrollcommand=horizontal.set)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+        scrollbar.grid(row=0, column=1, sticky=tk.NS)
+        canvas.grid(row=0, column=0, sticky=tk.NSEW)
+        horizontal.grid(row=1, column=0, sticky=tk.EW)
 
         content = ttk.Frame(canvas, padding=12, style="App.TFrame")
         content_window = canvas.create_window(
@@ -5381,18 +5385,52 @@ class RemoteDeskLinuxApp:
             anchor=tk.NW,
         )
 
-        def sync_scroll_region(_event: tk.Event[Any] | None = None) -> None:
-            bounds = canvas.bbox("all")
-            if bounds is not None:
-                canvas.configure(scrollregion=bounds)
+        pending_sync: str | None = None
 
-        def resize_content(event: tk.Event[Any]) -> None:
-            canvas.itemconfigure(content_window, width=max(1, int(event.width)))
-            canvas.itemconfigure(
-                content_window,
-                height=max(int(event.height), content.winfo_reqheight()),
-            )
+        def sync_scroll_region() -> None:
+            nonlocal pending_sync
+            if pending_sync is not None:
+                canvas.after_cancel(pending_sync)
+            pending_sync = None
+            # Request sizes can change without the canvas resizing (new device
+            # rows, wrapped buttons, larger fonts). Recompute both axes; forcing
+            # a too-wide form into the viewport permanently clips its inputs.
+            width = max(1, canvas.winfo_width(), content.winfo_reqwidth())
+            height = max(1, canvas.winfo_height(), content.winfo_reqheight())
+            canvas.itemconfigure(content_window, width=width, height=height)
+            canvas.configure(scrollregion=(0, 0, width, height))
+            if width > canvas.winfo_width():
+                horizontal.grid()
+            else:
+                horizontal.grid_remove()
+
+        def queue_sync(_event: tk.Event[Any] | None = None) -> None:
+            nonlocal pending_sync
+            if pending_sync is None:
+                pending_sync = canvas.after_idle(sync_scroll_region)
+
+        def is_content(widget: tk.Misc) -> bool:
+            return str(widget) == str(content) or str(widget).startswith(str(content) + ".")
+
+        def content_changed(event: tk.Event[Any]) -> None:
+            if is_content(event.widget):
+                queue_sync()
+
+        def reveal_focus(event: tk.Event[Any]) -> None:
+            widget = event.widget
+            if not is_content(widget) or widget is content:
+                return
             sync_scroll_region()
+            for axis in ("x", "y"):
+                root_position = getattr(widget, "winfo_root" + axis)()
+                canvas_position = getattr(canvas, "winfo_root" + axis)()
+                size = widget.winfo_width() if axis == "x" else widget.winfo_height()
+                viewport = canvas.winfo_width() if axis == "x" else canvas.winfo_height()
+                total = content.winfo_width() if axis == "x" else content.winfo_height()
+                offset = getattr(canvas, "canvas" + axis)(0)
+                start = root_position - canvas_position + offset
+                target = min(offset, start - 8) if start < offset else max(offset, start + min(size, viewport) + 8 - viewport)
+                getattr(canvas, axis + "view_moveto")(max(0, target) / max(1, total))
 
         def scroll_content(event: tk.Event[Any], delta: int | None = None) -> str:
             wheel_delta = delta if delta is not None else int(getattr(event, "delta", 0))
@@ -5415,8 +5453,22 @@ class RemoteDeskLinuxApp:
             for child in widget.winfo_children():
                 bind_scroll_tree(child)
 
-        content.bind("<Configure>", sync_scroll_region, add="+")
-        canvas.bind("<Configure>", resize_content, add="+")
+        canvas.bind("<Configure>", queue_sync, add="+")
+        # Toplevel bindtags also receive descendants' geometry/focus events,
+        # including controls added later. Scope and remove these subscriptions.
+        toplevel = content.winfo_toplevel()
+        bindings = [(sequence, toplevel.bind(sequence, callback, add="+")) for sequence, callback in (
+            ("<Configure>", content_changed), ("<Map>", content_changed), ("<FocusIn>", reveal_focus))]
+
+        def dispose(event: tk.Event[Any]) -> None:
+            if event.widget is not content:
+                return
+            if pending_sync is not None:
+                canvas.after_cancel(pending_sync)
+            for sequence, binding in bindings:
+                toplevel.unbind(sequence, binding)
+
+        content.bind("<Destroy>", dispose, add="+")
         content.after_idle(lambda: bind_scroll_tree(content))
         return content
 
@@ -5567,7 +5619,8 @@ class RemoteDeskLinuxApp:
 
         def update_viewer_actions(event: tk.Event[Any] | None = None) -> None:
             available_width = int(getattr(event, "width", buttons.winfo_width()))
-            mode = "wide" if available_width >= 900 else "medium" if available_width >= 620 else "compact"
+            actions_width = sum(control.winfo_reqwidth() + 8 for control in viewer_actions)
+            mode = "wide" if available_width >= actions_width + text_frame.winfo_reqwidth() + 16 else "medium" if available_width >= actions_width else "compact"
             if mode == action_layout_state["mode"]:
                 return
             action_layout_state["mode"] = mode
@@ -6088,6 +6141,11 @@ class RemoteDeskLinuxApp:
             except tk.TclError:
                 pass
 
+        # Reserve the controls before allocating space to the image. A large
+        # PhotoImage otherwise consumes the entire pack cavity on window shrink
+        # and hides the text entry, clipboard/file buttons and disconnect action.
+        footer = ttk.Frame(window, style="ViewerToolbar.TFrame")
+        footer.pack(side=tk.BOTTOM, fill=tk.X)
         frame_label = tk.Label(
             window,
             text="正在建立加密连接…\n画面将在握手完成后显示",
@@ -6116,7 +6174,7 @@ class RemoteDeskLinuxApp:
         frame_label.bind("<Configure>", self._viewer_frame_resized, add="+")
 
         target_bar = ttk.Frame(
-            window,
+            footer,
             style="ViewerToolbar.TFrame",
             padding=(10, 7, 10, 0),
         )
@@ -6138,8 +6196,8 @@ class RemoteDeskLinuxApp:
             self._viewer_capture_target_selected,
         )
 
-        controls = ttk.Frame(window, style="ViewerToolbar.TFrame", padding=(10, 8, 10, 8))
-        clipboard_bar = ttk.Frame(window, style="ViewerToolbar.TFrame", padding=(10, 4))
+        controls = ttk.Frame(footer, style="ViewerToolbar.TFrame", padding=(10, 8, 10, 8))
+        clipboard_bar = ttk.Frame(footer, style="ViewerToolbar.TFrame", padding=(10, 4))
         clipboard_bar.pack(fill=tk.X)
         clipboard_buttons = []
         for label, action in (("发送本机剪贴板", lambda: self.viewer_clipboard()),
@@ -6200,8 +6258,9 @@ class RemoteDeskLinuxApp:
         toolbar_layout_state = {"mode": ""}
 
         def update_toolbar_layout(event: tk.Event[Any] | None = None) -> None:
-            available_width = int(getattr(event, "width", controls.winfo_width()))
-            mode = "wide" if available_width >= 860 else "medium" if available_width >= 600 else "compact"
+            available_width = int(getattr(event, "width", controls.winfo_width())) - 20
+            actions_width = sum(button.winfo_reqwidth() + 8 for button in viewer_buttons)
+            mode = "wide" if available_width >= actions_width + entry.winfo_reqwidth() + 8 else "medium" if available_width >= actions_width else "compact"
             if mode == toolbar_layout_state["mode"]:
                 return
             toolbar_layout_state["mode"] = mode
@@ -6237,7 +6296,7 @@ class RemoteDeskLinuxApp:
         controls.bind("<Configure>", update_toolbar_layout, add="+")
         controls.after_idle(update_toolbar_layout)
 
-        status = ttk.Label(window, text="正在连接...", style="ViewerStatus.TLabel")
+        status = ttk.Label(footer, text="正在连接...", style="ViewerStatus.TLabel")
         status.pack(fill=tk.X)
         window.bind("<Unmap>", self._viewer_window_unmapped, add="+")
         window.protocol("WM_DELETE_WINDOW", self._viewer_window_closed)
@@ -6999,8 +7058,8 @@ class RemoteDeskLinuxApp:
         local_y = int(event.y) - image_top
         if local_x < 0 or local_y < 0 or local_x >= image_width or local_y >= image_height:
             return None
-        x = max(0, min(self.remote_width - 1, int(local_x * self.remote_width / image_width)))
-        y = max(0, min(self.remote_height - 1, int(local_y * self.remote_height / image_height)))
+        x = round(local_x * (self.remote_width - 1) / max(1, image_width - 1))
+        y = round(local_y * (self.remote_height - 1) / max(1, image_height - 1))
         return x, y
 
     def _poll_events(self) -> None:

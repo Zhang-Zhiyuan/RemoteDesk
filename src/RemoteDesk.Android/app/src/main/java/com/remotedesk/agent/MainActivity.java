@@ -23,6 +23,7 @@ import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.InputType;
+import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -409,14 +410,14 @@ public final class MainActivity extends Activity {
         screen.addView(scrollView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         LinearLayout navigation = new LinearLayout(this);
         navigation.setPadding(dp(8), dp(4), dp(8), dp(4));
-        String[] pages = { "设备", "本机被控", "设置" };
+        String[] pages = { "设备", "被控", "设置" };
         for (int i = 0; i < pages.length; i++) {
             final int page = i;
             Button button = new Button(this); button.setText(pages[i]);
-            button.setContentDescription(pages[i]);
+            button.setContentDescription(i == 1 ? "本机被控" : pages[i]);
             button.setOnClickListener(view -> selectPage(page, true));
             navigationButtons[i] = button;
-            navigation.addView(button, new LinearLayout.LayoutParams(0, dp(48), 1));
+            navigation.addView(button, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         }
         screen.addView(navigation, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         screen.setOnApplyWindowInsetsListener(this::applyMainWindowInsets);
@@ -516,6 +517,8 @@ public final class MainActivity extends Activity {
         title.setText(R.string.app_name);
         title.setTextColor(Color.WHITE);
         title.setTextSize(23.0f);
+        title.setSingleLine(true);
+        title.setEllipsize(TextUtils.TruncateAt.END);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         copy.addView(title, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -525,6 +528,8 @@ public final class MainActivity extends Activity {
         subtitle.setText(R.string.header_subtitle);
         subtitle.setTextColor(AndroidUiTheme.HEADER_MUTED);
         subtitle.setTextSize(12.5f);
+        subtitle.setMaxLines(2);
+        subtitle.setEllipsize(TextUtils.TruncateAt.END);
         LinearLayout.LayoutParams subtitleParams = new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -556,6 +561,13 @@ public final class MainActivity extends Activity {
             0,
             ViewGroup.LayoutParams.WRAP_CONTENT,
             1.0f));
+        header.addOnLayoutChangeListener((view, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
+            int widthDp = Math.round((right - left) / getResources().getDisplayMetrics().density);
+            boolean compact = AndroidAdaptiveLayout.compactMainHeader(widthDp,
+                getResources().getConfiguration().fontScale);
+            mark.setVisibility(compact ? View.GONE : View.VISIBLE);
+            badge.setVisibility(compact ? View.GONE : View.VISIBLE);
+        });
         return header;
     }
 
