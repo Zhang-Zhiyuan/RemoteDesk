@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application>
+        <provider android:name=".RemoteDeskFileProvider"
+            android:authorities="${applicationId}.files" tools:replace="android:authorities" />
+        <!-- Development-only synthetic GPU test, never present in release APKs. -->
+        <activity android:name=".UpscaleProbeActivity" android:exported="true"
+            android:theme="@style/ViewerTheme" />
+    </application>
+</manifest>

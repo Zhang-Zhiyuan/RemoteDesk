@@ -7,6 +7,10 @@ gradlew text eol=lf
 *.bat text eol=crlf
 *.ps1 text eol=crlf
 
+# Preserve the pinned upstream shader/license formatting, including its few
+# trailing comment spaces. Local adapters and tests remain whitespace-checked.
+src/RemoteDesk/ThirdParty/NIS/* text eol=lf whitespace=-blank-at-eol
+
 # Bundled assets and the Gradle wrapper are binary.
 *.png binary
 *.ico binary

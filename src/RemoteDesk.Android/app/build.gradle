@@ -37,8 +37,8 @@ android {
         applicationId "com.remotedesk.agent"
         minSdk 26
         targetSdk 36
-        versionCode 24
-        versionName "1.0.21"
+        versionCode 25
+        versionName "1.0.22"
     }
 
     compileOptions {
@@ -58,6 +58,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Isolate GPU/device probes from the user's installed release and
+            // its saved devices, keys and permissions. Normal debug is unchanged.
+            if (project.hasProperty("upscaleProbe")) {
+                applicationIdSuffix ".upscaleprobe"
+            }
+        }
         release {
             minifyEnabled false
             shrinkResources false

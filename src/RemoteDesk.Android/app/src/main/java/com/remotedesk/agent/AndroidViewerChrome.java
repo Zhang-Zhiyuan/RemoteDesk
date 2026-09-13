@@ -24,6 +24,8 @@ final class AndroidViewerChrome {
         void drag();
         void more();
         void screens();
+        void zoom();
+        void upscale();
         void diagnostics();
         void shortcut(int... keys);
         boolean text(String text);
@@ -33,7 +35,7 @@ final class AndroidViewerChrome {
     final TextView status, health, hint;
     final View indicator;
     final EditText composer;
-    final Button mode, keyboard, mouse, drag, screens, send;
+    final Button mode, keyboard, mouse, drag, screens, send, upscale;
     boolean keyboardOpen, mouseOpen;
     private boolean compact;
     private boolean compactKeys;
@@ -125,7 +127,11 @@ final class AndroidViewerChrome {
         mouse = button("鼠标", v -> { setMouseOpen(!mouseOpen); });
         screens = button("屏幕", v -> actions.screens());
         weighted(mainRow, keyboard); weighted(mainRow, mode); weighted(mainRow, mouse);
-        weighted(mainRow, screens); weighted(mainRow, button("更多", v -> actions.more()));
+        weighted(mainRow, screens);
+        weighted(mainRow, button("缩放", v -> actions.zoom()));
+        upscale = button("新版放大：关", v -> actions.upscale());
+        weighted(mainRow, upscale);
+        weighted(mainRow, button("更多", v -> actions.more()));
         // Keep usable hit targets on split-screen/small displays and with large
         // system fonts. A weighted, fixed-width row used to squash five buttons
         // to a few pixels; an overflow strip preserves their natural widths.
@@ -154,6 +160,12 @@ final class AndroidViewerChrome {
         updateSendState();
         keyboardPanel.setAlpha(enabled ? 1 : 0.45f);
         if (!enabled) { actions.keyboard(false); setMouseOpen(false); }
+    }
+
+    void upscaling(boolean enabled) {
+        upscale.setText(enabled ? "新版放大：开" : "新版放大：关");
+        upscale.setContentDescription(enabled ? "新版放大（实验）已开启，点击恢复原版" : "新版放大（实验）已关闭，点击开启");
+        mark(upscale, enabled);
     }
 
     void adapt(boolean smallHeight) {

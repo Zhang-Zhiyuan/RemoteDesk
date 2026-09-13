@@ -82,7 +82,9 @@ internal sealed record D3D11HwndVideoPresenterOptions(
         D3D11HwndVideoScaleMode.Fit,
     bool PreferFlipDiscard = true,
     bool PreferAllowTearing = true,
-    bool EnableEdgeEnhancement = true)
+    bool EnableEdgeEnhancement = true,
+    bool EnableExperimentalUpscaling = false,
+    ExperimentalUpscalingAlgorithm UpscalingAlgorithm = ExperimentalUpscalingAlgorithm.CatmullRom)
 {
     internal const int MaximumDimension = 8192;
     internal const int MaximumFramesPerSecond = 120;
@@ -116,6 +118,7 @@ internal sealed record D3D11HwndVideoPresenterOptions(
                 $"{MaximumFramesPerSecond} FPS.";
         }
 
+        if (!Enum.IsDefined(UpscalingAlgorithm)) return "The upscaling algorithm is invalid.";
         if (!Enum.IsDefined(ScaleMode))
         {
             return "The video scale mode is invalid.";
@@ -193,6 +196,15 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
     private int _outputHeight;
     private D3D11HwndVideoScaleMode _scaleMode;
     private bool _edgeEnhancementEnabled;
+    private D3D11ExperimentalUpscaler? _experimentalUpscaler;
+    private Size _experimentalSourceSize;
+    private bool _experimentalUpscalingFailed;
+    internal bool ExperimentalUpscalingActive { get; private set; }
+    internal string ExperimentalUpscalingDetail { get; private set; } = string.Empty;
+    // Optional borrowed queries for the synthetic GPU comparison probe. The
+    // installed application never sets these; no timing/readback on normal frames.
+    internal (ID3D11Query Begin, ID3D11Query End)? RenderTimingQueriesForTests { get; set; }
+    internal event Action<D3D11HwndVideoPresenter, string>? ExperimentalUpscalingFailed;
     private bool _targetMinimized;
     private bool _disposed;
 
@@ -538,6 +550,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
             // before every guard so minimized, invalid, or unavailable calls
             // cannot leave a stale frame eligible for qualification.
             _validationSourceReady = false;
+            ExperimentalUpscalingActive = false;
             if (_disposed)
             {
                 return CreateResult(
@@ -661,49 +674,54 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
                         _enumerator,
                         inputViewDescription);
 
-                ConfigureVideoProcessor(
-                    _videoContext,
-                    _processor,
-                    geometry);
-
-                var stream = new VideoProcessorStream
+                if (RenderTimingQueriesForTests is { } startTiming) _context.End(startTiming.Begin);
+                if (!TryPresentExperimental(inputView, geometry))
                 {
-                    Enable = true,
-                    InputSurface = inputView
-                };
-                Result blitResult =
-                    _videoContext.VideoProcessorBlt(
+                    ConfigureVideoProcessor(
+                        _videoContext,
                         _processor,
-                        _outputView,
-                        0,
-                        [stream]);
-                int completedBltRetries = 0;
-                while (ShouldRetryVideoProcessorBlt(
-                        blitResult.Failure,
-                        _edgeEnhancementEnabled,
-                        completedBltRetries))
-                {
-                    completedBltRetries++;
-                    if (!TryDisableEdgeEnhancementForRetry())
-                    {
-                        break;
-                    }
+                        geometry);
 
-                    blitResult =
+                    var stream = new VideoProcessorStream
+                    {
+                        Enable = true,
+                        InputSurface = inputView
+                    };
+                    Result blitResult =
                         _videoContext.VideoProcessorBlt(
                             _processor,
                             _outputView,
                             0,
                             [stream]);
+                    int completedBltRetries = 0;
+                    while (ShouldRetryVideoProcessorBlt(
+                            blitResult.Failure,
+                            _edgeEnhancementEnabled,
+                            completedBltRetries))
+                    {
+                        completedBltRetries++;
+                        if (!TryDisableEdgeEnhancementForRetry())
+                        {
+                            break;
+                        }
+
+                        blitResult =
+                            _videoContext.VideoProcessorBlt(
+                                _processor,
+                                _outputView,
+                                0,
+                                [stream]);
+                    }
+
+                    if (blitResult.Failure)
+                    {
+                        return CreateFailureResult(
+                            blitResult.Code,
+                            "VideoProcessorBlt failed.");
+                    }
                 }
 
-                if (blitResult.Failure)
-                {
-                    return CreateFailureResult(
-                        blitResult.Code,
-                        "VideoProcessorBlt failed.");
-                }
-
+                if (RenderTimingQueriesForTests is { } endTiming) _context.End(endTiming.End);
                 if (captureValidation)
                 {
                     try
@@ -981,6 +999,64 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
             if (_disposed) return;
             _options = _options with { EnableEdgeEnhancement = enabled };
             RefreshScaledEdgeEnhancement();
+        }
+    }
+
+    internal void SetExperimentalUpscaling(bool enabled, ExperimentalUpscalingAlgorithm? algorithm = null)
+    {
+        lock (_sync)
+        {
+            if (_disposed) return;
+            if (algorithm is not null && !Enum.IsDefined(algorithm.Value))
+                throw new ArgumentOutOfRangeException(nameof(algorithm));
+            bool changed = algorithm is not null && _options.UpscalingAlgorithm != algorithm.Value;
+            _options = _options with
+            {
+                EnableExperimentalUpscaling = enabled,
+                UpscalingAlgorithm = algorithm ?? _options.UpscalingAlgorithm
+            };
+            _experimentalUpscalingFailed = false;
+            ExperimentalUpscalingActive = false;
+            ExperimentalUpscalingDetail = string.Empty;
+            if (!enabled || changed)
+            {
+                TryDispose(_experimentalUpscaler);
+                _experimentalUpscaler = null;
+            }
+        }
+    }
+
+    private bool TryPresentExperimental(ID3D11VideoProcessorInputView input,
+        D3D11HwndVideoPresentationGeometry geometry)
+    {
+        ExperimentalUpscalingDetail = string.Empty;
+        if (_experimentalUpscalingFailed || !D3D11ExperimentalUpscaler.ShouldApply(
+                _options.EnableExperimentalUpscaling, geometry.Source.Size, geometry.Destination.Size))
+            return false;
+        try
+        {
+            if (_experimentalUpscaler is null || _experimentalSourceSize != geometry.Source.Size)
+            {
+                TryDispose(_experimentalUpscaler);
+                _experimentalUpscaler = null;
+                _experimentalUpscaler = new D3D11ExperimentalUpscaler(
+                    _device, _context, _videoDevice, _enumerator!, geometry.Source.Size, _options.UpscalingAlgorithm);
+                _experimentalSourceSize = geometry.Source.Size;
+            }
+            _experimentalUpscaler.Render(_videoContext, input, _backBuffer!, geometry);
+            ExperimentalUpscalingActive = true;
+            ExperimentalUpscalingDetail = _experimentalUpscaler.ActiveAlgorithm;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // One failure disables this experiment, not hardware decoding or
+            // the connection. Present the same frame through the old path.
+            _experimentalUpscalingFailed = true;
+            TryDispose(_experimentalUpscaler);
+            _experimentalUpscaler = null;
+            ExperimentalUpscalingFailed?.Invoke(this, FormatFailure(ex));
+            return false;
         }
     }
 
@@ -1548,7 +1624,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
         }
     }
 
-    private static void ConfigureVideoProcessor(
+    internal static void ConfigureVideoProcessor(
         ID3D11VideoContext context,
         ID3D11VideoProcessor processor,
         D3D11HwndVideoPresentationGeometry geometry)
@@ -1977,6 +2053,9 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
 
     private void ReleaseVideoProcessorResources()
     {
+        TryDispose(_experimentalUpscaler);
+        _experimentalUpscaler = null;
+        ExperimentalUpscalingActive = false;
         _validationSourceReady = false;
         TryDispose(_validationReadback);
         _validationReadback = null;

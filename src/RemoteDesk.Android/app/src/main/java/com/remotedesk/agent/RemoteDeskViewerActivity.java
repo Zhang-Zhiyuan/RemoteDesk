@@ -92,6 +92,8 @@ public final class RemoteDeskViewerActivity extends Activity {
     private TextView healthView;
     private ImageView imageView;
     private SurfaceView surfaceView;
+    private volatile AndroidExperimentalUpscaler experimentalUpscaler;
+    private volatile boolean experimentalUpscaling;
     private RemoteTouchFrameLayout viewerFrame;
     private FrameLayout rootLayout, videoLayer;
     private LinearLayout toolbar;
@@ -247,6 +249,8 @@ public final class RemoteDeskViewerActivity extends Activity {
             }
             public void more() { showViewerMenu(); }
             public void screens() { showScreenSelector(); }
+            public void zoom() { showZoomOptions(); }
+            public void upscale() { toggleExperimentalUpscaling(); }
             public void diagnostics() { showDiagnostics(); }
             public void shortcut(int... keys) { sendKeyboard(null, keys); }
             public boolean text(String text) { return sendKeyboard(text); }
@@ -320,6 +324,9 @@ public final class RemoteDeskViewerActivity extends Activity {
         if (videoLayer == null || gestures == null) return;
         videoLayer.setScaleX(viewport.zoom); videoLayer.setScaleY(viewport.zoom);
         videoLayer.setTranslationX(viewport.panX); videoLayer.setTranslationY(viewport.panY);
+        AndroidExperimentalUpscaler upscaler = experimentalUpscaler;
+        if (upscaler != null) upscaler.geometry(viewport.left(), viewport.top(),
+            viewport.frameWidth * viewport.scale(), viewport.frameHeight * viewport.scale());
         cursorOverlay.invalidate();
         chrome.mode(gestures.trackpad, gestures.lockedDrag);
     }
@@ -621,7 +628,89 @@ public final class RemoteDeskViewerActivity extends Activity {
                 else if (which == 1) viewport.originalSize();
                 else viewport.zoomAt(which == 2 ? 1.5f : 1 / 1.5f, viewport.viewWidth / 2f, viewport.viewHeight / 2f);
                 refreshInteraction();
-            }).show();
+            }).setNeutralButton(experimentalUpscaling ? "新版放大：开" : "新版放大：关",
+                (dialog, which) -> toggleExperimentalUpscaling()).show();
+    }
+
+    private void toggleExperimentalUpscaling() {
+        releaseViewerGesture();
+        experimentalUpscaling = !experimentalUpscaling;
+        chrome.upscaling(experimentalUpscaling);
+        ViewerConnectionOwner owner = connectionOwner;
+        if (owner != null) owner.h264FirstFramePresented.set(false);
+        if (h264Decoder != null) h264Decoder.resetCandidateFailuresForRendererChange();
+        if (experimentalUpscaling) replaceExperimentalUpscaler();
+        else {
+            removeExperimentalUpscaler();
+            if (h264SurfaceActive) { surfaceView.setVisibility(View.VISIBLE); surfaceView.setAlpha(1f); }
+            attachCurrentDecoderSurface();
+        }
+        if (owner != null) requestVideoKeyFrame(owner.generation, "viewer spatial scaler changed");
+        toast(experimentalUpscaling ? "新版放大（实验）已开启：仅放大 H.264 画面时增强，不改变缩放比例；JPEG 保持原版。" :
+            "新版放大已关闭，恢复原版显示。");
+    }
+
+    private void removeExperimentalUpscaler() {
+        AndroidExperimentalUpscaler old = experimentalUpscaler;
+        experimentalUpscaler = null;
+        if (old != null) {
+            AndroidH264SurfaceDecoder decoder = h264Decoder;
+            if (decoder != null) decoder.setOutputSurface(null);
+            old.close(); viewerFrame.removeView(old);
+        }
+    }
+
+    private void replaceExperimentalUpscaler() {
+        removeExperimentalUpscaler();
+        ViewerConnectionOwner owner = connectionOwner;
+        if (!experimentalUpscaling || owner == null || frameWidth <= 0 || frameHeight <= 0 ||
+            owner.presentation.encoding() != RemoteDeskProtocol.FRAME_ENCODING_H264_ANNEX_B) return;
+        long presentation = owner.presentation.version();
+        ViewerH264DecoderListener renderedListener = new ViewerH264DecoderListener(owner.generation);
+        AndroidExperimentalUpscaler renderer = new AndroidExperimentalUpscaler(this, frameWidth, frameHeight,
+            new AndroidExperimentalUpscaler.Listener() {
+                private boolean current(AndroidExperimentalUpscaler source) {
+                    return experimentalUpscaling && experimentalUpscaler == source && isCurrentConnectionOwner(owner) &&
+                        owner.presentation.current(presentation, RemoteDeskProtocol.FRAME_ENCODING_H264_ANNEX_B);
+                }
+                public void surfaceChanged(AndroidExperimentalUpscaler source, Surface surface) {
+                    if (!current(source)) return;
+                    owner.h264FirstFramePresented.set(false);
+                    if (owner.decoder != null) owner.decoder.setOutputSurface(surface);
+                    if (surface != null) requestVideoKeyFrame(owner.generation, "experimental GPU surface ready");
+                }
+                public void frameDrawn(AndroidExperimentalUpscaler source) {
+                    if (!current(source)) return;
+                    // MediaCodec's callback only confirms delivery to our input
+                    // texture; count presentation after the GPU swap instead.
+                    renderedListener.confirmFirstFrame(true);
+                }
+                public void failed(AndroidExperimentalUpscaler source, String reason) {
+                    if (!current(source)) return;
+                    fallbackExperimentalUpscaling(owner, source, reason);
+                }
+            });
+        experimentalUpscaler = renderer;
+        // Full viewport, not the already-scaled videoLayer: a parent zoom must
+        // not stretch a small GPU result a second time. Input mapping is untouched.
+        viewerFrame.addView(renderer, 1, new FrameLayout.LayoutParams(-1, -1));
+        refreshInteraction();
+    }
+
+    private void fallbackExperimentalUpscaling(ViewerConnectionOwner owner, AndroidExperimentalUpscaler source, String reason) {
+        runOnUiThread(() -> {
+            if (source != experimentalUpscaler || !experimentalUpscaling || !isCurrentConnectionOwner(owner)) return;
+            AndroidSessionLog.info("Experimental upscaling fell back: " + reason);
+            experimentalUpscaling = false; chrome.upscaling(false);
+            removeExperimentalUpscaler();
+            owner.h264FirstFramePresented.set(false);
+            if (owner.decoder != null) owner.decoder.resetCandidateFailuresForRendererChange();
+            surfaceView.setVisibility(View.VISIBLE);
+            surfaceView.setAlpha(h264SurfaceActive ? 1f : 0f);
+            attachCurrentDecoderSurface();
+            requestVideoKeyFrame(owner.generation, "experimental upscale fallback");
+            toast("新版放大不兼容，已自动关闭并恢复原版。");
+        });
     }
 
     private void showScreenSelector() {
@@ -838,6 +927,7 @@ public final class RemoteDeskViewerActivity extends Activity {
         closeQuietly(pendingConnectionSocket);
         pendingConnectionSocket = null;
         closeSocketFromUi();
+        removeExperimentalUpscaler();
         clearDisplayedFrame();
         releaseViewerWifiLock();
         jpegDecodeExecutor.shutdownNow();
@@ -1367,6 +1457,7 @@ public final class RemoteDeskViewerActivity extends Activity {
             // vendors. Recreate it BEFORE waiting for a hardware output callback.
             frameWidth = frame.width; frameHeight = frame.height;
             updateH264SurfaceLayout();
+            if (experimentalUpscaling) replaceExperimentalUpscaler();
             // A new screen can retain the same dimensions and Surface. Reset
             // the decoder's surface generation as well so callback-less codecs
             // repeat their one-shot PixelCopy confirmation for this presentation.
@@ -1642,6 +1733,7 @@ public final class RemoteDeskViewerActivity extends Activity {
         }
 
         surfaceView.setVisibility(AndroidTouchInputPolicy.jpegVideoSurfaceVisibility());
+        removeExperimentalUpscaler();
         h264SurfaceActive = false;
         imageView.setVisibility(View.VISIBLE);
         imageView.setImageBitmap(nextFrame.bitmap);
@@ -1667,6 +1759,7 @@ public final class RemoteDeskViewerActivity extends Activity {
         // A target announcement invalidates input immediately. Do not leave a
         // still-visible old hardware frame labelled as the newly selected screen.
         if (surfaceView != null) surfaceView.setAlpha(0f);
+        removeExperimentalUpscaler();
         h264SurfaceActive = false;
         if (cursorOverlay != null) cursorOverlay.invalidate();
 
@@ -1690,6 +1783,15 @@ public final class RemoteDeskViewerActivity extends Activity {
             return;
         }
 
+        AndroidExperimentalUpscaler upscaler = experimentalUpscaler;
+        if (upscaler != null && !upscaler.matchesSourceSize(width, height)) {
+            frameWidth = width; frameHeight = height;
+            owner.displayGeometryReady = false;
+            owner.h264FirstFramePresented.set(false);
+            updateH264SurfaceLayout();
+            replaceExperimentalUpscaler();
+            return;
+        }
         imageView.setImageDrawable(null);
         imageView.setVisibility(View.GONE);
         DecodedViewerFrame previousFrame = displayedFrame;
@@ -1702,7 +1804,8 @@ public final class RemoteDeskViewerActivity extends Activity {
         owner.displayGeometryReady = true;
         updateH264SurfaceLayout();
         surfaceView.setVisibility(View.VISIBLE);
-        surfaceView.setAlpha(1.0f);
+        surfaceView.setAlpha(experimentalUpscaler == null ? 1.0f : 0f);
+        if (experimentalUpscaler != null) experimentalUpscaler.setAlpha(1f);
         h264SurfaceActive = true;
     }
 
@@ -1771,7 +1874,8 @@ public final class RemoteDeskViewerActivity extends Activity {
     private void attachDecoderSurface(Surface surface) {
         AndroidH264SurfaceDecoder decoder = h264Decoder;
         if (decoder != null) {
-            decoder.setOutputSurface(surface);
+            AndroidExperimentalUpscaler upscaler = experimentalUpscaler;
+            decoder.setOutputSurface(upscaler == null ? surface : upscaler.decoderSurface());
         }
     }
 
@@ -2827,11 +2931,13 @@ public final class RemoteDeskViewerActivity extends Activity {
 
         @Override
         public void onFrameRendered() {
+            if (experimentalUpscaler != null) return;
             confirmFirstFrame(true);
         }
 
         @Override
         public void onSurfaceBufferAvailable() {
+            if (experimentalUpscaler != null) return;
             confirmFirstFrame(false);
         }
 
@@ -2865,6 +2971,12 @@ public final class RemoteDeskViewerActivity extends Activity {
 
         @Override
         public void onDecoderUnavailable(String reason) {
+            ViewerConnectionOwner owner = connectionOwner;
+            AndroidExperimentalUpscaler upscaler = experimentalUpscaler;
+            if (upscaler != null && owner != null && owner.generation == generation) {
+                fallbackExperimentalUpscaling(owner, upscaler, reason);
+                return;
+            }
             requestJpegFallback(generation, reason);
         }
     }

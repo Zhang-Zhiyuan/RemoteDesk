@@ -462,9 +462,11 @@ public sealed class D3D11HwndVideoPresenterTests
             capability.Status);
     }
 
-    [Fact]
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     [Trait("Category", "HardwareSmoke")]
-    public void Nv12TexturePresentsWhenHardwareSmokeIsEnabled()
+    public void Nv12TexturePresentsWhenHardwareSmokeIsEnabled(bool experimental)
     {
         if (!string.Equals(
             Environment.GetEnvironmentVariable(
@@ -502,7 +504,8 @@ public sealed class D3D11HwndVideoPresenterTests
                     handle,
                     SourceWidth: 64,
                     SourceHeight: 64,
-                    FramesPerSecond: 30),
+                    FramesPerSecond: 30,
+                    EnableExperimentalUpscaling: experimental),
                 out D3D11HwndVideoPresenter? presenter,
                 out D3D11HwndVideoPresenterCapability
                     capability);
@@ -511,6 +514,8 @@ public sealed class D3D11HwndVideoPresenterTests
             created,
             $"{capability.Status}: {capability.Detail}");
         Assert.NotNull(presenter);
+        var upscaleFailures = new List<string>();
+        presenter.ExperimentalUpscalingFailed += (_, reason) => upscaleFailures.Add(reason);
         Assert.True(capability.IsAvailable);
         Assert.Equal(
             D3D11HwndVideoPresenter.LowLatencyBufferCount,
@@ -574,6 +579,8 @@ public sealed class D3D11HwndVideoPresenterTests
                 if (result.Status ==
                     D3D11HwndVideoPresenterStatus.Presented)
                 {
+                    Assert.Empty(upscaleFailures);
+                    Assert.Equal(experimental, presenter.ExperimentalUpscalingActive);
                     D3D11HwndVideoValidationResult validation =
                         presenter.ValidatePresentedFrame();
                     Assert.True(
@@ -635,6 +642,8 @@ public sealed class D3D11HwndVideoPresenterTests
             if (resizedPresent.Status ==
                 D3D11HwndVideoPresenterStatus.Presented)
             {
+                Assert.Empty(upscaleFailures);
+                Assert.Equal(experimental, presenter.ExperimentalUpscalingActive);
                 D3D11HwndVideoValidationResult validation =
                     presenter.ValidatePresentedFrame();
                 Assert.True(
@@ -647,6 +656,9 @@ public sealed class D3D11HwndVideoPresenterTests
                     D3D11HwndVideoValidationResult.NotAttempted,
                     presenter.ValidatePresentedFrame());
             }
+            presenter.SetExperimentalUpscaling(false);
+            presenter.Present(texture, 0, new Rectangle(0, 0, 64, 64));
+            Assert.False(presenter.ExperimentalUpscalingActive);
         }
     }
 

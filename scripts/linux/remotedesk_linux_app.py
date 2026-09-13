@@ -2052,6 +2052,46 @@ def query_mpv_ipc_properties(
     return properties
 
 
+def set_mpv_ipc_properties(ipc_socket_path: str, properties: dict[str, Any],
+                           timeout_seconds: float = 0.3) -> bool:
+    """Bounded, acknowledged property changes; never run on the Tk thread."""
+    if not properties or not hasattr(socket, "AF_UNIX"):
+        return False
+    pending = set(range(1, len(properties) + 1))
+    request = b"".join(json.dumps({"command": ["set_property", name, value],
+        "request_id": index}, separators=(",", ":")).encode("utf-8") + b"\n"
+        for index, (name, value) in enumerate(properties.items(), 1))
+    deadline = time.monotonic() + max(0.01, timeout_seconds)
+    buffer = bytearray()
+    received = 0
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as ipc:
+            ipc.settimeout(max(0.01, timeout_seconds))
+            ipc.connect(ipc_socket_path)
+            ipc.sendall(request)
+            while pending and received < 64 * 1024:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                ipc.settimeout(remaining)
+                chunk = ipc.recv(4096)
+                if not chunk:
+                    return False
+                received += len(chunk)
+                buffer.extend(chunk)
+                while b"\n" in buffer:
+                    raw, _, rest = buffer.partition(b"\n")
+                    buffer = bytearray(rest)
+                    reply = json.loads(raw)
+                    if isinstance(reply, dict) and reply.get("request_id") in pending:
+                        if reply.get("error") != "success":
+                            return False
+                        pending.remove(reply["request_id"])
+        return not pending
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def parse_mpv_active_hardware_decoder(line: str) -> str | None:
     match = re.search(r"using hardware decoding\s*\(([^)]+)\)", line, re.IGNORECASE)
     return match.group(1).strip().lower() if match else None
@@ -2181,6 +2221,9 @@ class MpvNativeH264Presenter:
         self.decoder_confirmed = False
         self.surface_confirmed = False
         self.compatibility_preview_claimed = False
+        self.upscale_lock = threading.Lock()
+        self.experimental_upscaling = False
+        self.original_scale_properties: dict[str, Any] | None = None
         self.activation_failure = ""
         self.error_tail = ""
         self.writer_thread = threading.Thread(
@@ -2257,6 +2300,43 @@ class MpvNativeH264Presenter:
             prefix = f"mpv exited with code {code}"
             return prefix + (f": {detail}" if detail else "")
         return detail
+
+    def set_experimental_upscaling(self, enabled: bool) -> bool:
+        with self.upscale_lock:
+            if not self.is_native_surface_active:
+                return False
+            if enabled == self.experimental_upscaling:
+                return True
+            names = ("scale", "scale-antiring", "cscale")
+            if enabled and self.original_scale_properties is None:
+                original = query_mpv_ipc_properties(self.ipc_socket_path, names)
+                if any(name not in original for name in names):
+                    return False  # Never modify a setting we cannot restore.
+                self.original_scale_properties = original
+            original = self.original_scale_properties
+            if original is None:
+                return False
+            # An unset cscale inherits scale on some mpv versions. Freeze its
+            # original choice so a luma upscaling experiment cannot also alter
+            # chroma reconstruction during native-size/downscaled viewing.
+            chroma = original["cscale"]
+            if chroma in ("", "auto"):
+                chroma = original["scale"]
+            desired = {"cscale": chroma, "scale-antiring": 1.0, "scale": "catmull_rom"} if enabled else original
+            applied = set_mpv_ipc_properties(self.ipc_socket_path, desired)
+            observed = query_mpv_ipc_properties(self.ipc_socket_path, names) if applied else {}
+            if applied and all(observed.get(name) == value for name, value in desired.items()):
+                self.experimental_upscaling = enabled
+                return True
+            # Restore every property if a renderer/version accepts only part of
+            # the change. If IPC itself has failed, the existing native-surface
+            # recovery will replace this renderer with the unmodified path.
+            restored = set_mpv_ipc_properties(self.ipc_socket_path, original)
+            self.experimental_upscaling = False
+            if not restored:
+                with self.state_lock:
+                    self.activation_failure = "新版放大设置无法恢复，切回原版呈现后端"
+            return False
 
     def activation_timed_out(self, now: float | None = None) -> bool:
         with self.state_lock:
@@ -3244,6 +3324,19 @@ class ViewerConnection:
         self.native_presenter_windowing_system = str(windowing_system or "")
         self.native_presenter_display = str(display or "")
 
+    def set_experimental_upscaling(self, enabled: bool) -> None:
+        with self.native_h264_presenter_lock:
+            presenter = self.native_h264_presenter
+        success = presenter is not None and presenter.set_experimental_upscaling(enabled)
+        with self.native_h264_presenter_lock:
+            current = self.native_h264_presenter is presenter
+        active = bool(success and enabled and current)
+        self._put_event("viewer_upscaling", active)
+        self._put_event("viewer_status", (
+            "新版放大（实验）已开启，仅 GPU 放大时生效；传输分辨率与输入坐标不变。" if active else
+            "已恢复原版放大。" if success else
+            "新版放大未启用：需要已激活的 mpv 原生 GPU 画面；JPEG / 兼容显示保持原版。"))
+
     def close(self) -> None:
         self._signal_stop_and_release_decoder()
         current_thread = threading.current_thread()
@@ -3969,6 +4062,9 @@ class ViewerConnection:
             if selected_presenter is not presenter:
                 presenter.close()
                 return selected_presenter
+            # Reconnect/backend replacement starts with the original renderer.
+            # Do not leave the old window's button claiming the experiment is on.
+            self._put_event("viewer_upscaling", False)
             self._put_event(
                 "viewer_status",
                 f"已预热 mpv/{backend.label}；收到恢复帧后验证原生硬解与 "
@@ -3982,6 +4078,7 @@ class ViewerConnection:
         presenter: MpvNativeH264Presenter,
     ) -> bool:
         was_active = self.reported_native_h264_presenter_backend == presenter.backend.key
+        self._put_event("viewer_upscaling", False)
         self.failed_native_h264_presenter_backends.add(presenter.backend.key)
         with self.native_h264_presenter_lock:
             if self.native_h264_presenter is presenter:
@@ -6245,6 +6342,21 @@ class RemoteDeskLinuxApp:
             state=tk.DISABLED,
             style="Viewer.TButton",
         )
+        upscale_button = ttk.Button(controls, text="新版放大：关", style="Viewer.TButton")
+        self.viewer_upscale_button = upscale_button
+        self.viewer_experimental_upscaling = False
+
+        def toggle_upscaling() -> None:
+            viewer = self.viewer
+            if viewer is None:
+                self._set_viewer_status("请先连接设备；新版放大默认关闭。")
+                return
+            enabled = not self.viewer_experimental_upscaling
+            upscale_button.configure(state=tk.DISABLED)
+            threading.Thread(target=viewer.set_experimental_upscaling, args=(enabled,),
+                name="RemoteDeskUpscaleSwitch", daemon=True).start()
+
+        upscale_button.configure(command=toggle_upscaling)
         viewer_buttons = (
             ttk.Button(
                 controls,
@@ -6254,6 +6366,7 @@ class RemoteDeskLinuxApp:
             ),
             viewer_window_send_file_button,
             viewer_window_send_folder_button,
+            upscale_button,
             ttk.Button(
                 controls,
                 text="断开",
@@ -6273,7 +6386,7 @@ class RemoteDeskLinuxApp:
             entry.grid_forget()
             for button in viewer_buttons:
                 button.grid_forget()
-            for column in range(5):
+            for column in range(len(viewer_buttons) + 1):
                 controls.columnconfigure(column, weight=0)
 
             if mode == "wide":
@@ -6282,7 +6395,7 @@ class RemoteDeskLinuxApp:
                 for column, button in enumerate(viewer_buttons, start=1):
                     button.grid(row=0, column=column, padx=(0 if column == 1 else 8, 0))
             elif mode == "medium":
-                entry.grid(row=0, column=0, columnspan=4, sticky=tk.EW, pady=(0, 8))
+                entry.grid(row=0, column=0, columnspan=len(viewer_buttons), sticky=tk.EW, pady=(0, 8))
                 for column, button in enumerate(viewer_buttons):
                     button.grid(row=1, column=column, sticky=tk.EW, padx=(0 if column == 0 else 4, 4))
                     controls.columnconfigure(column, weight=1)
@@ -7149,6 +7262,13 @@ class RemoteDeskLinuxApp:
                 if message is not None:
                     self._set_viewer_status(str(message))
                     messagebox.showwarning("文件传输未完成", str(message), parent=self.viewer_window or self.root)
+            elif event == "viewer_upscaling":
+                enabled = self._unpack_viewer_event(value)
+                if enabled is not None:
+                    self.viewer_experimental_upscaling = bool(enabled)
+                    button = getattr(self, "viewer_upscale_button", None)
+                    if button is not None and button.winfo_exists():
+                        button.configure(text="新版放大：开" if enabled else "新版放大：关", state=tk.NORMAL)
             elif event == "viewer_status":
                 message = self._unpack_viewer_event(value)
                 if message is not None:

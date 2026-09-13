@@ -251,6 +251,19 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
         }
     }
 
+    void resetCandidateFailuresForRendererChange() {
+        synchronized (stateLock) {
+            if (closed) return;
+            // A codec can reject a SurfaceTexture yet support the original
+            // SurfaceView. Only an explicit renderer change resets this list;
+            // ordinary Surface lifecycle recovery keeps its existing policy.
+            failedCodecNames.clear();
+            unavailableReported = false;
+            beginRecoveryLocked();
+            stateLock.notifyAll();
+        }
+    }
+
     void setOutputSurface(Surface surface) {
         boolean surfaceUsable = surface != null && surface.isValid();
         boolean reportRecovery = false;

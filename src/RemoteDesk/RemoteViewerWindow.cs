@@ -98,6 +98,7 @@ internal sealed class RemoteViewerWindow : Form
     private readonly Button _remoteInputMethodButton;
     private readonly Button _switchCaptureTargetButton;
     private readonly Button _displayScaleButton;
+    private readonly Button _experimentalUpscaleButton;
     private readonly Button _fullScreenButton;
     private readonly ProgressBar _remoteFilePullProgressBar;
     private readonly ToolTip _toolTip;
@@ -128,6 +129,10 @@ internal sealed class RemoteViewerWindow : Form
     private MediaFoundationD3D11H264Decoder? _mediaFoundationH264Decoder;
     private D3D11HwndVideoPresenter? _d3d11VideoPresenter;
     private bool _scaledEdgeEnhancement = true;
+    private bool _experimentalUpscaling;
+    private int _experimentalUpscalingAlgorithm = (int)ExperimentalUpscalingAlgorithm.Nis;
+    private readonly ToolStripMenuItem _nisUpscaleMenuItem;
+    private readonly ToolStripMenuItem _bicubicUpscaleMenuItem;
     private Size _h264DecoderSize = Size.Empty;
     private Size _mediaFoundationH264DecoderSize = Size.Empty;
     private Size _d3d11VideoPresenterSourceSize = Size.Empty;
@@ -324,6 +329,8 @@ internal sealed class RemoteViewerWindow : Form
         _switchCaptureTargetButton.Visible = false;
         _displayScaleButton =
             CreateStatusActionButton("允许放大");
+        _experimentalUpscaleButton = CreateStatusActionButton("新版放大：关");
+        _experimentalUpscaleButton.AccessibleName = "新版放大（实验），关闭";
         _fullScreenButton = CreateStatusActionButton("全屏");
         _fileTransferActionsPanel = new FlowLayoutPanel
         {
@@ -344,6 +351,7 @@ internal sealed class RemoteViewerWindow : Form
             _switchCaptureTargetButton);
         _fileTransferActionsPanel.Controls.Add(
             _displayScaleButton);
+        _fileTransferActionsPanel.Controls.Add(_experimentalUpscaleButton);
         _fileTransferActionsPanel.Controls.Add(_fullScreenButton);
         _statusFooterPanel = new ViewerFooterPanel
         {
@@ -401,8 +409,22 @@ internal sealed class RemoteViewerWindow : Form
                 : "GPU 清晰增强已关闭，使用普通缩放。", MutedTextColor);
         };
         _statusMenu.Items.Add(enhancementMenuItem);
+        var upscaleMenu = new ToolStripMenuItem("新版放大算法（实验）");
+        _nisUpscaleMenuItem = new ToolStripMenuItem("NIS 边缘自适应（1～2 倍）", null,
+            (_, _) => SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.Nis)) { Checked = true };
+        _bicubicUpscaleMenuItem = new ToolStripMenuItem("双三次＋防光晕（兼容 / 对照）", null,
+            (_, _) => SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.CatmullRom));
+        upscaleMenu.DropDownItems.AddRange([_nisUpscaleMenuItem, _bicubicUpscaleMenuItem]);
+        _statusMenu.Items.Add(upscaleMenu);
         _statusBar.ContextMenuStrip = _statusMenu;
+        _experimentalUpscaleButton.ContextMenuStrip = _statusMenu;
         ConfigureFilePullToolTips();
+        _toolTip.SetToolTip(_experimentalUpscaleButton,
+            "实验性 GPU 放大。默认关闭，点击可切回原版；右键选择 NIS / 双三次对照。\n" +
+            "NIS 适用于 1～2 倍，不兼容或超出范围时使用双三次；底部显示实际算法。\n" +
+            "只在允许放大且 H.264 GPU 直显画面实际被放大时生效；不改变缩放比例。\n" +
+            "JPEG / 软件显示保持原版，不会用 AI 猜测文字。");
+        _experimentalUpscaleButton.Click += (_, _) => ToggleExperimentalUpscaling();
 
         Controls.Add(_pictureBox);
         Controls.Add(_remoteFilePullProgressBar);
@@ -1372,6 +1394,63 @@ internal sealed class RemoteViewerWindow : Form
         }
     }
 
+    internal void ToggleExperimentalUpscaling()
+    {
+        if (_isClosing || IsDisposed) return;
+        bool enabled = !Volatile.Read(ref _experimentalUpscaling);
+        Volatile.Write(ref _experimentalUpscaling, enabled);
+        UpdateExperimentalUpscaleButton();
+        lock (_d3d11PresenterLock)
+            _d3d11VideoPresenter?.SetExperimentalUpscaling(enabled,
+                (ExperimentalUpscalingAlgorithm)Volatile.Read(ref _experimentalUpscalingAlgorithm));
+        SetStatus(!enabled ? "已关闭新版放大，恢复原版显示路径。" :
+            "新版放大（实验）已开启；仅在允许放大且 H.264 GPU 画面实际放大时生效，其他情况保持原版。",
+            MutedTextColor);
+        _pictureBox.Invalidate();
+        RequestH264KeyFrameIfDue();
+        _pictureBox.Focus();
+    }
+
+    private void UpdateExperimentalUpscaleButton()
+    {
+        bool enabled = Volatile.Read(ref _experimentalUpscaling);
+        _experimentalUpscaleButton.Text = enabled ? "新版放大：开" : "新版放大：关";
+        _experimentalUpscaleButton.AccessibleName = enabled ? "新版放大（实验），开启" : "新版放大（实验），关闭";
+    }
+
+    internal void SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm algorithm)
+    {
+        if (!Enum.IsDefined(algorithm)) throw new ArgumentOutOfRangeException(nameof(algorithm));
+        if (_isClosing || IsDisposed) return;
+        Volatile.Write(ref _experimentalUpscalingAlgorithm, (int)algorithm);
+        _nisUpscaleMenuItem.Checked = algorithm == ExperimentalUpscalingAlgorithm.Nis;
+        _bicubicUpscaleMenuItem.Checked = algorithm == ExperimentalUpscalingAlgorithm.CatmullRom;
+        // Selection alone does not silently enable the opt-in feature.
+        lock (_d3d11PresenterLock)
+            _d3d11VideoPresenter?.SetExperimentalUpscaling(Volatile.Read(ref _experimentalUpscaling), algorithm);
+        SetStatus(algorithm == ExperimentalUpscalingAlgorithm.Nis
+            ? "已选择 NIS（实验）；开启新版放大且实际放大 1～2 倍时使用，不支持时自动使用双三次。"
+            : "已选择双三次＋防光晕，可与 NIS 对照；新版放大的开关状态不变。", MutedTextColor);
+        RequestH264KeyFrameIfDue();
+        _pictureBox.Focus();
+    }
+
+    private void OnExperimentalUpscalingFailed(D3D11HwndVideoPresenter presenter, string reason)
+    {
+        OnUi(() =>
+        {
+            lock (_d3d11PresenterLock)
+            {
+                if (!ReferenceEquals(_d3d11VideoPresenter, presenter)) return;
+                Volatile.Write(ref _experimentalUpscaling, false);
+                presenter.SetExperimentalUpscaling(false);
+            }
+            UpdateExperimentalUpscaleButton();
+            DiagnosticLog.Append("VIEWER", "新版放大自动回退：" + reason);
+            SetStatus("新版放大不兼容，已自动关闭并恢复原版；连接不受影响。", MutedTextColor);
+        });
+    }
+
     public void CloseAfterDisconnect()
     {
         _closeFromDisconnect = true;
@@ -1408,6 +1487,9 @@ internal sealed class RemoteViewerWindow : Form
 
     internal Button DisplayScaleButtonForEntityTests =>
         _displayScaleButton;
+
+    internal Button ExperimentalUpscaleButtonForEntityTests => _experimentalUpscaleButton;
+    internal bool ExperimentalUpscalingForEntityTests => Volatile.Read(ref _experimentalUpscaling);
 
     internal bool AllowDisplayUpscalingForEntityTests =>
         Volatile.Read(
@@ -3913,7 +3995,9 @@ internal sealed class RemoteViewerWindow : Form
                             sourceSize.Height,
                             DirectH264FramesPerSecond,
                             GetD3D11VideoScaleMode(),
-                            EnableEdgeEnhancement: Volatile.Read(ref _scaledEdgeEnhancement));
+                            EnableEdgeEnhancement: Volatile.Read(ref _scaledEdgeEnhancement),
+                            EnableExperimentalUpscaling: Volatile.Read(ref _experimentalUpscaling),
+                            UpscalingAlgorithm: (ExperimentalUpscalingAlgorithm)Volatile.Read(ref _experimentalUpscalingAlgorithm));
                     if (!D3D11HwndVideoPresenter.TryCreate(
                             deviceLease,
                             options,
@@ -3932,6 +4016,7 @@ internal sealed class RemoteViewerWindow : Form
                     }
 
                     _d3d11VideoPresenter = presenter;
+                    presenter.ExperimentalUpscalingFailed += OnExperimentalUpscalingFailed;
                     _d3d11VideoPresenterDevicePointer =
                         devicePointer;
                     _d3d11VideoPresenterSourceSize =
@@ -4940,7 +5025,9 @@ internal sealed class RemoteViewerWindow : Form
                         sourceSize.Height,
                         DirectH264FramesPerSecond,
                         GetD3D11VideoScaleMode(),
-                        EnableEdgeEnhancement: Volatile.Read(ref _scaledEdgeEnhancement));
+                        EnableEdgeEnhancement: Volatile.Read(ref _scaledEdgeEnhancement),
+                        EnableExperimentalUpscaling: Volatile.Read(ref _experimentalUpscaling),
+                        UpscalingAlgorithm: (ExperimentalUpscalingAlgorithm)Volatile.Read(ref _experimentalUpscalingAlgorithm));
                 if (!D3D11HwndVideoPresenter.TryCreate(
                         deviceLease,
                         options,
@@ -4957,6 +5044,7 @@ internal sealed class RemoteViewerWindow : Form
                 }
 
                 _d3d11VideoPresenter = presenter;
+                presenter.ExperimentalUpscalingFailed += OnExperimentalUpscalingFailed;
                 _d3d11VideoPresenterDevicePointer =
                     deviceLease.NativePointer;
                 _d3d11VideoPresenterSourceSize =
@@ -5758,6 +5846,9 @@ internal sealed class RemoteViewerWindow : Form
                     allowUpscaling:
                         Volatile.Read(
                             ref _allowDisplayUpscaling) != 0);
+            string upscaleDetail = _d3d11VideoPresenter?.ExperimentalUpscalingDetail ?? string.Empty;
+            if (Volatile.Read(ref _experimentalUpscaling) && upscaleDetail.Length != 0)
+                displayScaleText += " / " + upscaleDetail;
             performanceStatus =
                 $"{encodingName} {frame.Width}x{frame.Height}" +
                 $"{displayScaleText} | {fps:F1} FPS | " +

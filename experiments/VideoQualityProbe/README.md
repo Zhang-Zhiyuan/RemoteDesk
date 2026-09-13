@@ -1,5 +1,18 @@
 # Synthetic hardware video quality probe
 
+For the viewer-only NIS / bicubic / legacy GPU comparison:
+
+```powershell
+dotnet run --project experiments/VideoQualityProbe -c Release -- --upscale artifacts/upscale-comparison-new
+```
+
+This generates Chinese text and line charts, downsamples them, feeds NV12 to
+the real D3D11 presenter, and saves the rendered pixels and GPU timestamp
+results. The reference uses the same native-resolution NV12/color conversion.
+Timers exclude DXGI frame-latency wait, Present, warm-up and validation readback.
+Background GPU work and clock changes can still affect timings. The output
+directory must not already exist. PSNR is not text readability or network latency.
+
 This Windows-only experiment compares the product's actual NVENC arguments with
 bounded parameter experiments. It does **not** change the product video policy.
 It draws a synthetic light/dark text desktop in memory, writes it to a new unique

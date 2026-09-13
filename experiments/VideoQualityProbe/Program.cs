@@ -9,6 +9,12 @@ using RemoteDesk;
 
 // Synthetic pixels only: never captures the desktop, injects input, connects to
 // a remote host, modifies settings, or replaces a running release executable.
+if (args.ElementAtOrDefault(0) == "--upscale")
+{
+    if (args.Length != 2) throw new ArgumentException("Usage: --upscale <new-output-directory>");
+    UpscaleComparisonProbe.Run(args[1]);
+    return;
+}
 if (args.ElementAtOrDefault(0) == "--recovery")
 {
     if (args.Length != 3)

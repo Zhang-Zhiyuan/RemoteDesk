@@ -534,7 +534,7 @@ public sealed class RemoteViewerWindowTests
         using var footer = new Panel { ClientSize = new Size(width, 30) };
         var status = new Panel { Dock = DockStyle.Fill, Padding = new Padding(10) };
         var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Dock = DockStyle.Right };
-        foreach (string label in new[] { "取回文件", "接收目录", "远端输入法", "切换屏幕", "允许放大", "全屏" })
+        foreach (string label in new[] { "取回文件", "接收目录", "远端输入法", "切换屏幕", "允许放大", "新版放大：关", "全屏" })
             actions.Controls.Add(new Button { Text = label, AutoSize = true,
                 MinimumSize = new Size(ResponsiveWindowLayout.ScaleLogical(90, dpi),
                     ResponsiveWindowLayout.ScaleLogical(28, dpi)),
