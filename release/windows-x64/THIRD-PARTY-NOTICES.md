@@ -1,5 +1,11 @@
 # Third-party notices
 
+RemoteDesk's optional Windows NIS upscaler includes NVIDIA Image Scaling SDK
+1.0.3 (MIT), Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights
+reserved. Source revision `35e13ba316c98eeecf16f37eae70ce88019911f6`:
+<https://github.com/NVIDIAGameWorks/NVIDIAImageScaling>.
+The MIT permission and warranty terms below apply to this component as well.
+
 RemoteDesk's optional Windows Media Foundation / D3D11 video path uses the
 following MIT-licensed packages:
 
