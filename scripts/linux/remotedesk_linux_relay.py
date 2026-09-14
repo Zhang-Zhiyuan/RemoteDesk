@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -371,15 +372,105 @@ def _abort_relay_connection(connection):
         connection[1].transport.abort()
 
 
+class RelayPathStability:
+    """Millisecond policy shared with Windows/Android; future dials only."""
+    PROBE_INTERVAL_MS, MINIMUM_HOLD_MS, HISTORY_MS = 30_000, 180_000, 600_000
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.samples = {}
+        self.selected = self.challenger = None
+        self.selected_at = self.last_use = self.wins = 0
+        self.last_probe = self.last_round = None
+
+    def preferred(self, now):
+        with self.lock:
+            if self.selected is not None and now - self.last_use >= self.HISTORY_MS:
+                self.selected = None
+                self._reset_challenge()
+                self.samples.clear()
+            self.last_use = now
+            return self.selected
+
+    def connected(self, path, now, failed_preferred=None):
+        with self.lock:
+            self.last_use = now
+            if self.selected is None or self.selected == failed_preferred:
+                self._select(path, now)
+
+    def begin_probe(self, now):
+        with self.lock:
+            if self.last_probe is not None and now - self.last_probe < self.PROBE_INTERVAL_MS:
+                return False
+            self.last_probe = now
+            return True
+
+    def observe_round(self, now, observations):
+        with self.lock:
+            if self.last_round is not None and now - self.last_round < self.PROBE_INTERVAL_MS:
+                return
+            self.last_round = now
+            for path, value in observations.items():
+                history = [item for item in self.samples.get(path, []) if now - item[0] < self.HISTORY_MS][-7:]
+                history.append((now, value if math.isfinite(value) and value >= 0 else math.inf))
+                self.samples[path] = history
+            if self.selected is None or self.selected not in observations:
+                self._reset_challenge()
+                return
+            current = self._score(self.selected, now, False)
+            best, best_score = None, math.inf
+            for path in sorted(observations):
+                if path == self.selected:
+                    continue
+                score = self._score(path, now, True)
+                if score < best_score and self.worth_switching(current, score):
+                    best, best_score = path, score
+            if best is None:
+                self._reset_challenge()
+                return
+            self.wins = self.wins + 1 if best == self.challenger else 1
+            self.challenger = best
+            if self.wins >= 3 and now - self.selected_at >= self.MINIMUM_HOLD_MS:
+                self._select(best, now)
+
+    @staticmethod
+    def worth_switching(current, candidate):
+        return (math.isfinite(current) and math.isfinite(candidate) and candidate >= 0 and
+                current - candidate >= 8 and candidate <= current * .75)
+
+    def _score(self, path, now, candidate):
+        values = [value for at, value in self.samples.get(path, []) if now - at < self.HISTORY_MS]
+        ok = sorted(value for value in values if math.isfinite(value))
+        if len(values) < 3 or candidate and (len(ok) < 3 or any(not math.isfinite(value) for value in values[-3:])):
+            return math.inf
+        if not ok:
+            return 2000
+        median = (ok[(len(ok) - 1) // 2] + ok[len(ok) // 2]) / 2
+        # One old spike/failure must not count as several independent wins.
+        p80 = ok[math.ceil(len(ok) * .8) - 1]
+        return median + .75 * (p80 - median) + 500 * max(0, len(values) - len(ok) - 1) / len(values)
+
+    def _select(self, path, now):
+        self.selected, self.selected_at = path, now
+        self._reset_challenge()
+
+    def _reset_challenge(self):
+        self.challenger, self.wins = None, 0
+
+
 class RelayNetworkPathSelector:
-    CACHE_SECONDS = 60
     HEAD_START_SECONDS = .15
     DISCOVERY_SECONDS = .25
 
-    def __init__(self, paths=None, connect=None, clock=time.monotonic, discovery_seconds=None):
+    def __init__(self, paths=None, connect=None, clock=time.monotonic, discovery_seconds=None, background_probes=False):
         self.paths, self.attempt, self.clock = paths, connect, clock
         self.preferred, self.lock = {}, threading.Lock()
         self.discovery_seconds = self.DISCOVERY_SECONDS if discovery_seconds is None else discovery_seconds
+        self.background_probes, self.probing = background_probes, False
+
+    @staticmethod
+    def identity(path):
+        return repr(path) if path is not None else "<system>"
 
     async def discover(self, options):
         task = asyncio.create_task((self.paths or relay_network_paths)(options))
@@ -411,28 +502,90 @@ class RelayNetworkPathSelector:
             return await attempt(options, None)
         key = (options.server_address.lower(), options.port, options.tls_certificate_sha256, tuple(paths))
         with self.lock:
-            cached = self.preferred.get(key)
-        if cached is not None and cached[1] <= self.clock():
-            cached = None
+            if len(self.preferred) >= 32 and key not in self.preferred:
+                self.preferred.clear()
+            stability = self.preferred.setdefault(key, RelayPathStability())
+        cached = stability.preferred(self.clock() * 1000)
         candidates = [None, *paths]
-        if cached is not None and cached[0] in candidates:
-            candidates.remove(cached[0])
-            candidates.insert(0, cached[0])
+        matching = [path for path in candidates if self.identity(path) == cached]
+        if matching:
+            candidates.remove(matching[0])
+            candidates.insert(0, matching[0])
         else:
             cached = None
-        try:
-            path, connection = await self.race(options, candidates, attempt,
-                                             self.HEAD_START_SECONDS if cached else 0)
-        except BaseException:
-            with self.lock:
-                self.preferred.pop(key, None)
-            raise
-        with self.lock:
-            if len(self.preferred) >= 32:
-                self.preferred.clear()
-            expires = cached[1] if cached is not None and cached[0] == path else self.clock() + self.CACHE_SECONDS
-            self.preferred[key] = (path, expires)
+        failed_preferred = False
+
+        async def observed(options, path):
+            nonlocal failed_preferred
+            try:
+                return await attempt(options, path)
+            except Exception:
+                if not asyncio.current_task().cancelling() and self.identity(path) == cached:
+                    failed_preferred = True
+                raise
+
+        path, connection = await self.race(options, candidates, observed, self.HEAD_START_SECONDS if cached else 0)
+        stability.connected(self.identity(path), self.clock() * 1000, cached if failed_preferred else None)
+        if self.background_probes:
+            self._start_probe(stability, options, candidates, attempt)
         return connection
+
+    def _start_probe(self, stability, options, paths, attempt):
+        with self.lock:
+            scheduled_at = self.clock() * 1000
+            if self.probing or not stability.begin_probe(scheduled_at):
+                return
+            self.probing = True
+
+        def run():
+            async def audit():
+                current = await self.discover(options)
+                if {self.identity(path) for path in current} != {self.identity(path) for path in paths if path is not None}:
+                    return  # A new VPN, gateway, or address invalidates this snapshot.
+                await self.probe_round(stability, options, paths, attempt, observed_at=scheduled_at)
+            try:
+                # The UI may close its per-call asyncio loop after a directory
+                # request. A single bounded daemon owns these TLS-only probes.
+                time.sleep(1)
+                asyncio.run(audit())
+            except Exception:
+                pass
+            finally:
+                with self.lock:
+                    self.probing = False
+
+        try:
+            threading.Thread(target=run, name="RelayPathQuality", daemon=True).start()
+        except RuntimeError:
+            with self.lock:
+                self.probing = False
+
+    async def probe_round(self, stability, options, paths, attempt, timeout=2, observed_at=None):
+        round_at = self.clock() * 1000 if observed_at is None else observed_at
+        async def measure(path):
+            started, connection = time.monotonic(), None
+            try:
+                connection = await attempt(options, path)
+                return math.inf if asyncio.current_task().cancelling() else (time.monotonic() - started) * 1000
+            except (Exception, asyncio.CancelledError):
+                return math.inf
+            finally:
+                if connection is not None:
+                    _abort_relay_connection(connection)
+
+        tasks = [asyncio.create_task(measure(path)) for path in paths]
+        try:
+            done, _ = await asyncio.wait(tasks, timeout=timeout)
+            observations = {self.identity(path): task.result() if task in done else math.inf
+                            for path, task in zip(paths, tasks)}
+            stability.observe_round(round_at, observations)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            # Keep the only audit slot until uncooperative native work ends.
+            # This wait is never on the foreground connection's event loop.
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     @staticmethod
     async def race(options, paths, connect, head_start=0):
@@ -524,7 +677,7 @@ async def _connect_tls_path(options, path):
         raise
 
 
-_relay_path_selector = RelayNetworkPathSelector()
+_relay_path_selector = RelayNetworkPathSelector(background_probes=True)
 
 
 async def _relay_deadline(operation):

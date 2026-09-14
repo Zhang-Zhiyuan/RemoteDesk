@@ -254,3 +254,12 @@ shortens only its test lease to 8 seconds and withholds renewal; it does not dis
 a NIC. All trials dispose their own leases and report route snapshots. The normal
 production lifetime is 90 seconds. No default route, NIC metric, forwarding setting,
 server configuration or remote-desktop input is changed by these probes.
+
+`relay-path-quality` samples the owner's saved, pinned public relay on two
+already-connected physical uplinks. Supply stdin with `expectedServer` and a new
+`output` directory. Eight rounds, 31 seconds apart, exercise the production TLS
+sampler and preference policy in an isolated selector, including subsequent dials.
+It sends no relay credentials/role and does not change routes, installed sessions,
+Wi-Fi associations, or settings. The result is handshake timing, not video latency
+or bandwidth. Tests in `tests/data/relay-path-stability.tsv` also cover sustained
+improvement, jitter, isolated spikes, failure recovery, and the three-minute hold.

@@ -155,7 +155,7 @@ public sealed class RelayNetworkPathSelectorTests
     }
 
     [Fact]
-    public async Task CacheAvoidsExtraHandshakesAndExpiresWithoutSliding()
+    public async Task HealthyPreferenceSurvivesOneMinuteAndExpiresAfterTenMinutesIdle()
     {
         long now = 100;
         var selector = new RelayNetworkPathSelector((_, _) => Task.FromResult<IReadOnlyList<RelayNetworkPath>>([Wifi, Wired]), () => now);
@@ -178,6 +178,10 @@ public sealed class RelayNetworkPathSelectorTests
         Assert.Equal(new[] { "wifi" }, calls);
         calls.Clear();
         now += 30_001;
+        using (await selector.ConnectAsync(Options, Connect, CancellationToken.None)) { }
+        Assert.Equal(new[] { "wifi" }, calls);
+        calls.Clear();
+        now += RelayPathStability.HistoryMilliseconds;
         using (await selector.ConnectAsync(Options, Connect, CancellationToken.None)) { }
         Assert.Equal(3, calls.Count);
     }
@@ -213,6 +217,129 @@ public sealed class RelayNetworkPathSelectorTests
             return Task.FromResult(new Connection());
         }, CancellationToken.None);
         Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task FailedPreferredPathIsReplacedWithoutWaitingForHold()
+    {
+        var selector = new RelayNetworkPathSelector((_, _) => Task.FromResult<IReadOnlyList<RelayNetworkPath>>([Wifi, Wired]));
+        using (await selector.ConnectAsync(Options, (path, token) => path == Wifi ?
+            Task.FromResult(new Connection()) : Slow(token), default)) { }
+        using (await selector.ConnectAsync(Options, (path, token) => path == Wifi ?
+            Task.FromException<Connection>(new IOException("offline")) : path == Wired ?
+            Task.FromResult(new Connection()) : Slow(token), default)) { }
+        var called = new List<RelayNetworkPath?>();
+        using (await selector.ConnectAsync(Options, (path, token) =>
+        {
+            called.Add(path);
+            return Task.FromResult(new Connection());
+        }, default)) { }
+        Assert.Equal(new[] { Wired }, called);
+        static async Task<Connection> Slow(CancellationToken token)
+        { await Task.Delay(Timeout.Infinite, token); return new Connection(); }
+    }
+
+    [Fact]
+    public async Task ProbeRoundDisposesOnlyItsOwnConnections()
+    {
+        using var live = new Connection();
+        var measured = new List<Connection>();
+        var state = new RelayPathStability();
+        state.Connected(Wifi.Identity, 0);
+        await new RelayNetworkPathSelector().ProbeRoundAsync(state, [Wifi, Wired], (_, _) =>
+        {
+            var connection = new Connection(); measured.Add(connection);
+            return Task.FromResult(connection);
+        });
+        Assert.Equal(2, measured.Count);
+        Assert.All(measured, connection => Assert.True(connection.Disposed.Task.IsCompleted));
+        Assert.False(live.Disposed.Task.IsCompleted);
+    }
+
+    [Fact]
+    public async Task QualifiedImprovementAffectsNextDialButDoesNotCloseExistingConnection()
+    {
+        long now = 0;
+        var selector = new RelayNetworkPathSelector((_, _) => Task.FromResult<IReadOnlyList<RelayNetworkPath>>([Wifi, Wired]), () => now);
+        using Connection live = await selector.ConnectAsync(Options, async (path, token) =>
+        {
+            if (path != Wifi) await Task.Delay(Timeout.Infinite, token);
+            return new Connection();
+        }, default);
+        var state = selector.GetStability(Options, [Wifi, Wired]);
+        for (int round = 0; round <= 6; round++)
+        {
+            now = round * 30_000;
+            state.ObserveRound(now, new Dictionary<string, double> { [Wifi.Identity] = 40, [Wired.Identity] = 12 });
+        }
+        var called = new List<RelayNetworkPath?>();
+        using (await selector.ConnectAsync(Options, (path, token) =>
+        {
+            called.Add(path); return Task.FromResult(new Connection());
+        }, default)) { }
+        Assert.Equal(new[] { Wired }, called);
+        Assert.False(live.Disposed.Task.IsCompleted);
+    }
+
+    [Fact]
+    public async Task BackgroundProbesNeverHoldUpForegroundOrAccumulateDuringReconnects()
+    {
+        long now = 0;
+        int calls = 0;
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var measured = new System.Collections.Concurrent.ConcurrentBag<Connection>();
+        var selector = new RelayNetworkPathSelector((_, _) => Task.FromResult<IReadOnlyList<RelayNetworkPath>>([Wifi]),
+            () => now, backgroundProbes: true);
+        using Connection live = await selector.ConnectAsync(Options, async (path, token) =>
+        {
+            if (Interlocked.Increment(ref calls) <= 2)
+            {
+                if (path is null) await Task.Delay(Timeout.Infinite, token);
+                return new Connection();
+            }
+            started.TrySetResult();
+            await release.Task; // Deliberately ignore audit cancellation.
+            var connection = new Connection(); measured.Add(connection); return connection;
+        }, default);
+        try
+        {
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            for (int i = 0; i < 20; i++)
+            {
+                now += 31_000;
+                using var foreground = await selector.ConnectAsync(Options,
+                    (_, _) => Task.FromResult(new Connection()), default).WaitAsync(TimeSpan.FromSeconds(2));
+            }
+            Assert.InRange(Volatile.Read(ref calls), 3, 4);
+            Assert.False(live.Disposed.Task.IsCompleted);
+        }
+        finally { release.TrySetResult(); }
+        using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        while (measured.Count != 2 || measured.Any(item => !item.Disposed.Task.IsCompleted))
+            await Task.Delay(10, limit.Token);
+    }
+
+    [Fact]
+    public async Task TimedOutAuditRetainsOwnershipUntilLateNativeWorkEnds()
+    {
+        var release = new TaskCompletionSource<Connection>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var expired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var late = new Connection();
+        Task audit = new RelayNetworkPathSelector().ProbeRoundAsync(new RelayPathStability(), [Wifi],
+            async (_, token) =>
+            {
+                using var registration = token.Register(() => expired.TrySetResult());
+                return await release.Task;
+            }, TimeSpan.FromMilliseconds(30));
+        try
+        {
+            await expired.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.False(audit.IsCompleted);
+        }
+        finally { release.TrySetResult(late); }
+        await audit.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.True(late.Disposed.Task.IsCompleted);
     }
 
     [Fact]

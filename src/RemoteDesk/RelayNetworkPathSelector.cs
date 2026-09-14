@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -30,25 +31,25 @@ internal sealed record RelayNetworkPath(
 /// </summary>
 internal sealed class RelayNetworkPathSelector
 {
-    internal static readonly RelayNetworkPathSelector Shared = new();
-    internal const int CacheLifetimeMilliseconds = 60_000;
+    internal static readonly RelayNetworkPathSelector Shared = new(backgroundProbes: true);
     internal const int CachedPathHeadStartMilliseconds = 150;
     internal const int DiscoveryTimeoutMilliseconds = 250;
-    private readonly ConcurrentDictionary<string, Preference> _preferred = new();
+    private readonly ConcurrentDictionary<string, RelayPathStability> _preferred = new();
     private readonly Func<string, CancellationToken, Task<IReadOnlyList<RelayNetworkPath>>> _paths;
     private readonly Func<long> _now;
     private readonly TimeSpan _discoveryTimeout;
-
-    private sealed record Preference(string? Identity, long ExpiresAt);
+    private readonly bool _backgroundProbes;
+    private readonly SemaphoreSlim _probeGate = new(1, 1);
 
     internal RelayNetworkPathSelector(
         Func<string, CancellationToken, Task<IReadOnlyList<RelayNetworkPath>>>? paths = null,
         Func<long>? now = null,
-        TimeSpan? discoveryTimeout = null)
+        TimeSpan? discoveryTimeout = null, bool backgroundProbes = false)
     {
         _paths = paths ?? GetPathsAsync;
         _now = now ?? (() => Environment.TickCount64);
         _discoveryTimeout = discoveryTimeout ?? TimeSpan.FromMilliseconds(DiscoveryTimeoutMilliseconds);
+        _backgroundProbes = backgroundProbes;
     }
 
     internal async Task<T> ConnectAsync<T>(RelayConnectionOptions options,
@@ -64,15 +65,13 @@ internal sealed class RelayNetworkPathSelector
 
         // A changed address, interface index, gateway or DNS answer invalidates
         // the preference. No credentials or device IDs belong in this cache.
-        string key = $"{options.ServerAddress.ToLowerInvariant()}:{options.Port}/{options.TlsCertificateSha256}/" +
-            string.Join('|', paths.Select(path => path.Identity).Order(StringComparer.Ordinal));
-        _preferred.TryGetValue(key, out Preference? cached);
-        if (cached is not null && cached.ExpiresAt <= _now()) cached = null;
+        RelayPathStability stability = GetStability(options, paths);
+        string? cached = stability.Preferred(_now());
         var candidates = new List<RelayNetworkPath?> { null }; // Preserve normal IPv4/IPv6/DNS routing.
         candidates.AddRange(paths);
         if (cached is not null)
         {
-            int index = candidates.FindIndex(path => path?.Identity == cached.Identity);
+            int index = candidates.FindIndex(path => Identity(path) == cached);
             if (index >= 0)
             {
                 RelayNetworkPath? first = candidates[index];
@@ -82,23 +81,88 @@ internal sealed class RelayNetworkPathSelector
             else cached = null;
         }
 
-        try
+        int preferredFailed = 0;
+        async Task<T> Attempt(RelayNetworkPath? path, CancellationToken token)
         {
-            (RelayNetworkPath? path, T connection) = await RaceAsync(candidates, connect,
-                cached is null ? TimeSpan.Zero : TimeSpan.FromMilliseconds(CachedPathHeadStartMilliseconds),
-                cancellationToken).ConfigureAwait(false);
-            if (_preferred.Count >= 32) _preferred.Clear();
-            // Do not extend a hot cache forever; re-evaluate on a new connection
-            // at least once per minute without breaking an active video stream.
-            long expires = cached is not null && cached.Identity == path?.Identity
-                ? cached.ExpiresAt : _now() + CacheLifetimeMilliseconds;
-            _preferred[key] = new Preference(path?.Identity, expires);
-            return connection;
+            try { return await connect(path, token).ConfigureAwait(false); }
+            catch
+            {
+                if (!token.IsCancellationRequested && Identity(path) == cached)
+                    Interlocked.Exchange(ref preferredFailed, 1);
+                throw;
+            }
         }
-        catch
+        (RelayNetworkPath? path, T connection) = await RaceAsync(candidates, Attempt,
+            cached is null ? TimeSpan.Zero : TimeSpan.FromMilliseconds(CachedPathHeadStartMilliseconds),
+            cancellationToken).ConfigureAwait(false);
+        stability.Connected(Identity(path), _now(), Volatile.Read(ref preferredFailed) != 0 ? cached : null);
+        if (_backgroundProbes && _probeGate.Wait(0))
         {
-            _preferred.TryRemove(key, out _);
-            throw;
+            long scheduledAt = _now();
+            if (stability.BeginProbe(scheduledAt))
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        // Let initial video/authentication start first. This is
+                        // detached, bounded TLS-only sampling, never a relay role.
+                        await Task.Delay(1000).ConfigureAwait(false);
+                        using var discoveryStop = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+                        var current = await DiscoverPathsAsync(options.ServerAddress, discoveryStop.Token).ConfigureAwait(false);
+                        if (!current.Select(item => item.Identity).Order(StringComparer.Ordinal)
+                            .SequenceEqual(paths.Select(item => item.Identity).Order(StringComparer.Ordinal))) return;
+                        await ProbeRoundAsync(stability, candidates, connect, observedAt: scheduledAt).ConfigureAwait(false);
+                    }
+                    catch { /* Optional measurement cannot break a live connection. */ }
+                    finally { _probeGate.Release(); }
+                });
+            else _probeGate.Release();
+        }
+        return connection;
+    }
+
+    private static string Identity(RelayNetworkPath? path) => path?.Identity ?? RelayPathStability.SystemPath;
+
+    internal RelayPathStability GetStability(RelayConnectionOptions options, IReadOnlyList<RelayNetworkPath> paths)
+    {
+        string key = $"{options.ServerAddress.ToLowerInvariant()}:{options.Port}/{options.TlsCertificateSha256}/" +
+            string.Join('|', paths.Select(path => path.Identity).Order(StringComparer.Ordinal));
+        if (_preferred.Count >= 32 && !_preferred.ContainsKey(key)) _preferred.Clear();
+        return _preferred.GetOrAdd(key, _ => new());
+    }
+
+    internal async Task ProbeRoundAsync<T>(RelayPathStability stability, IReadOnlyList<RelayNetworkPath?> paths,
+        Func<RelayNetworkPath?, CancellationToken, Task<T>> connect, TimeSpan? timeout = null, long? observedAt = null)
+        where T : class, IDisposable
+    {
+        long roundAt = observedAt ?? _now();
+        using var stop = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(2));
+        var raw = new List<Task<double>>();
+        foreach (RelayNetworkPath? path in paths)
+            raw.Add(Measure(path));
+        var observations = new Dictionary<string, double>();
+        for (int i = 0; i < raw.Count; i++)
+        {
+            double value;
+            try { value = await raw[i].WaitAsync(stop.Token).ConfigureAwait(false); }
+            catch { value = double.PositiveInfinity; }
+            observations[Identity(paths[i])] = value;
+        }
+        stability.ObserveRound(roundAt, observations);
+        stop.Cancel();
+        // Retain the single audit slot until even cancellation-ignoring native
+        // work ends. Repeated reconnects cannot accumulate stranded probes.
+        await Task.WhenAll(raw).ConfigureAwait(false);
+
+        async Task<double> Measure(RelayNetworkPath? path)
+        {
+            var watch = Stopwatch.StartNew();
+            try
+            {
+                using T result = await connect(path, stop.Token).ConfigureAwait(false);
+                return stop.IsCancellationRequested ? double.PositiveInfinity : watch.Elapsed.TotalMilliseconds;
+            }
+            catch { return double.PositiveInfinity; }
         }
     }
 

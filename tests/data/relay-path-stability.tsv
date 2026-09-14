@@ -1,0 +1,85 @@
+# Shared Windows/Android/Linux policy vectors. Times and samples are milliseconds.
+# reset time preferred; round time wifi wired expected; connected time path failed-preferred expected.
+# Sustained improvement waits three minutes, then reverse improvement must wait again.
+reset 0 wifi
+round 0 40 12 wifi
+round 30000 40 12 wifi
+round 60000 40 12 wifi
+round 90000 40 12 wifi
+round 120000 40 12 wifi
+round 150000 40 12 wifi
+round 180000 40 12 wired
+round 210000 10 60 wired
+round 240000 10 60 wired
+round 270000 10 60 wired
+round 300000 10 60 wired
+round 330000 10 60 wired
+round 360000 10 60 wifi
+# A small improvement does not cause a switch.
+reset 0 wifi
+round 0 18 14 wifi
+round 30000 18 14 wifi
+round 60000 18 14 wifi
+round 90000 18 14 wifi
+round 120000 18 14 wifi
+round 150000 18 14 wifi
+round 180000 18 14 wifi
+round 210000 18 14 wifi
+# Consistently unstable low median loses to a slightly higher but stable median.
+reset 0 wifi
+round 0 10 14 wifi
+round 30000 12 14 wifi
+round 60000 70 14 wifi
+round 90000 11 14 wifi
+round 120000 60 14 wifi
+round 150000 10 14 wifi
+round 180000 12 14 wired
+# One spike must not become three independent wins in overlapping windows.
+reset 0 wifi
+round 0 20 16 wifi
+round 30000 20 16 wifi
+round 60000 90 16 wifi
+round 90000 20 16 wifi
+round 120000 20 16 wifi
+round 150000 20 16 wifi
+round 180000 20 16 wifi
+round 210000 20 16 wifi
+round 240000 20 16 wifi
+# One probe failure is tolerated, repeated failures favor the healthy path.
+reset 0 wifi
+round 0 20 16 wifi
+round 30000 20 16 wifi
+round 60000 inf 16 wifi
+round 90000 20 16 wifi
+round 120000 20 16 wifi
+round 150000 20 16 wifi
+round 180000 20 16 wifi
+round 210000 20 16 wifi
+round 240000 inf 16 wifi
+round 270000 inf 16 wifi
+round 300000 20 16 wired
+# An actual foreground failure bypasses the hold; a hedged winner alone does not.
+reset 0 wifi
+connected 100 wired - wifi
+connected 200 wired wifi wired
+connected 300 wifi - wired
+connected 400 wifi wired wifi
+# A candidate with recent failures or invalid timings cannot win.
+reset 0 wifi
+round 0 40 inf wifi
+round 30000 40 -1 wifi
+round 60000 40 nan wifi
+round 90000 40 2 wifi
+round 120000 40 inf wifi
+round 150000 40 2 wifi
+round 180000 40 2 wifi
+# Repeated calls in one round cannot manufacture consecutive evidence.
+reset 0 wifi
+round 180000 40 12 wifi
+round 180001 40 12 wifi
+round 180002 40 12 wifi
+round 180003 40 12 wifi
+round 210000 40 12 wifi
+round 240000 40 12 wifi
+round 270000 40 12 wifi
+round 300000 40 12 wired

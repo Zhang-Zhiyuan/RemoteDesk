@@ -2,6 +2,10 @@ plugins {
     id "com.android.application"
 }
 
+tasks.withType(org.gradle.api.tasks.testing.Test).configureEach {
+    inputs.file(rootProject.file("../../tests/data/relay-path-stability.tsv"))
+}
+
 def releaseSigningProperties = new Properties()
 def releaseSigningFile = rootProject.file("release-signing.properties")
 if (releaseSigningFile.exists()) {
@@ -37,8 +41,8 @@ android {
         applicationId "com.remotedesk.agent"
         minSdk 26
         targetSdk 36
-        versionCode 26
-        versionName "1.0.23"
+        versionCode 27
+        versionName "1.0.24"
     }
 
     compileOptions {

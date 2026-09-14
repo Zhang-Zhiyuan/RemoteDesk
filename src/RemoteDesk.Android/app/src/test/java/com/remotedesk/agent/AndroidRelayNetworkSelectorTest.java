@@ -91,7 +91,7 @@ public final class AndroidRelayNetworkSelectorTest {
         raw.close(); tls.close();
     }
 
-    @Test public void cachedWinnerAvoidsOtherHandshakesButExpires() throws Exception {
+    @Test public void healthyPreferenceSurvivesOneMinuteAndExpiresAfterTenMinutesIdle() throws Exception {
         AtomicLong now = new AtomicLong();
         AndroidRelayNetworkSelector.Selector selector = new AndroidRelayNetworkSelector.Selector(now::get);
         List<String> calls = new CopyOnWriteArrayList<>();
@@ -116,6 +116,11 @@ public final class AndroidRelayNetworkSelectorTest {
         try (AndroidRelayNetworkSelector.Dial dial = new AndroidRelayNetworkSelector.Dial()) {
             selector.connect("relay", List.of("wifi"), dial, connect).close();
         }
+        assertEquals(List.of("wifi"), calls);
+        calls.clear(); now.set(TimeUnit.SECONDS.toNanos(661));
+        try (AndroidRelayNetworkSelector.Dial dial = new AndroidRelayNetworkSelector.Dial()) {
+            selector.connect("relay", List.of("wifi"), dial, connect).close();
+        }
         assertTrue(calls.contains("default")); assertTrue(calls.contains("wifi"));
     }
 
@@ -127,6 +132,66 @@ public final class AndroidRelayNetworkSelectorTest {
             assertEquals(List.of("default"), calls);
             result.close();
         }
+    }
+
+    @Test public void failedPreferredPathChangesImmediatelyAndDoesNotWaitForHold() throws Exception {
+        AndroidRelayNetworkSelector.Selector selector = new AndroidRelayNetworkSelector.Selector(System::nanoTime);
+        try (AndroidRelayNetworkSelector.Dial dial = new AndroidRelayNetworkSelector.Dial()) {
+            selector.connect("relay", List.of("wifi"), dial, (path, owner) -> {
+                TestSocket socket = new TestSocket(); owner.add(socket);
+                if (path.equals("default")) { socket.closed.await(3, TimeUnit.SECONDS); owner.checkOpen(); }
+                return socket;
+            }).close();
+        }
+        try (AndroidRelayNetworkSelector.Dial dial = new AndroidRelayNetworkSelector.Dial()) {
+            selector.connect("relay", List.of("wifi"), dial, (path, owner) -> {
+                if (path.equals("wifi")) throw new IOException("offline");
+                TestSocket socket = new TestSocket(); owner.add(socket); return socket;
+            }).close();
+        }
+        List<String> calls = new CopyOnWriteArrayList<>();
+        try (AndroidRelayNetworkSelector.Dial dial = new AndroidRelayNetworkSelector.Dial()) {
+            selector.connect("relay", List.of("wifi"), dial, (path, owner) -> {
+                calls.add(path); TestSocket socket = new TestSocket(); owner.add(socket); return socket;
+            }).close();
+        }
+        assertEquals(List.of("default"), calls);
+    }
+
+    @Test public void probeRoundClosesOnlyItsOwnSockets() throws Exception {
+        TestSocket live = new TestSocket();
+        List<TestSocket> measured = new CopyOnWriteArrayList<>();
+        new AndroidRelayNetworkSelector.Selector(System::nanoTime).probeRound(new RelayPathStability(),
+            List.of("default", "wifi"), (path, owner) -> {
+                TestSocket socket = new TestSocket(); measured.add(socket); owner.add(socket); return socket;
+            }, 1000);
+        assertEquals(2, measured.size());
+        for (TestSocket socket : measured) assertTrue(socket.isClosed());
+        assertFalse(live.isClosed()); live.close();
+    }
+
+    @Test public void timedOutProbeRetainsOwnershipUntilNativeWorkReallyEnds() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        TestSocket late = new TestSocket();
+        java.util.concurrent.ExecutorService caller = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            java.util.concurrent.Future<?> audit = caller.submit(() -> {
+                try {
+                    new AndroidRelayNetworkSelector.Selector(System::nanoTime).probeRound(new RelayPathStability(),
+                        List.of("wifi"), (path, owner) -> {
+                            owner.add(late);
+                            while (release.getCount() != 0) {
+                                try { release.await(); } catch (InterruptedException ignored) { }
+                            }
+                            return late;
+                        }, 30);
+                } catch (Exception error) { throw new RuntimeException(error); }
+            });
+            assertTrue(late.closed.await(3, TimeUnit.SECONDS));
+            assertFalse(audit.isDone());
+            release.countDown();
+            audit.get(3, TimeUnit.SECONDS);
+        } finally { release.countDown(); caller.shutdownNow(); }
     }
 
     @Test public void singleNetworkHasAnOverallDeadlineEvenWhenDnsIgnoresCancellation() throws Exception {

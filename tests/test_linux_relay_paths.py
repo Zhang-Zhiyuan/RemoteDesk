@@ -115,7 +115,7 @@ class RelayPathTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(.01)
         self.assertEqual(2, len(stopped))
 
-    async def test_preference_is_cached_but_not_extended_forever(self):
+    async def test_healthy_preference_survives_minute_but_expires_after_ten_minutes_idle(self):
         clock, calls = [0], []
         async def paths(options):
             return [WIFI, WIRED]
@@ -136,6 +136,11 @@ class RelayPathTests(unittest.IsolatedAsyncioTestCase):
         calls.clear()
         clock[0] = 61
         await selector.connect(OPTIONS)
+        await asyncio.sleep(.01)
+        self.assertEqual([WIFI], calls)
+        calls.clear()
+        clock[0] = 661
+        await selector.connect(OPTIONS)
         self.assertEqual(3, len(calls))
 
     async def test_address_change_invalidates_preference(self):
@@ -154,6 +159,59 @@ class RelayPathTests(unittest.IsolatedAsyncioTestCase):
         current[0] = [replace(WIFI, local_address="10.16.169.190"), WIRED]
         await selector.connect(OPTIONS)
         self.assertEqual(3, len(calls))
+
+    async def test_foreground_failure_bypasses_preference_hold(self):
+        phase, calls = [0], []
+        async def connect(options, path):
+            calls.append(path)
+            if phase[0] == 0 and path != WIFI:
+                await asyncio.Event().wait()
+            if phase[0] == 1:
+                if path == WIFI:
+                    raise OSError("offline")
+                if path != WIRED:
+                    await asyncio.Event().wait()
+            return None, mock.Mock()
+        selector = relay.RelayNetworkPathSelector(mock.AsyncMock(return_value=[WIFI, WIRED]), connect)
+        await selector.connect(OPTIONS)
+        phase[0] = 1
+        await selector.connect(OPTIONS)
+        calls.clear()
+        phase[0] = 2
+        await selector.connect(OPTIONS)
+        self.assertEqual([WIRED], calls)
+
+    async def test_probe_round_closes_only_owned_connections(self):
+        live, measured = (None, mock.Mock()), []
+        async def attempt(options, path):
+            connection = None, mock.Mock()
+            measured.append(connection)
+            return connection
+        await relay.RelayNetworkPathSelector().probe_round(relay.RelayPathStability(), OPTIONS, [WIFI, WIRED], attempt)
+        self.assertEqual(2, len(measured))
+        for connection in measured:
+            connection[1].transport.abort.assert_called_once()
+        live[1].transport.abort.assert_not_called()
+
+    async def test_probe_timeout_retains_ownership_of_late_native_result(self):
+        expired, release = asyncio.Event(), asyncio.Event()
+        late = None, mock.Mock()
+        async def attempt(options, path):
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                expired.set()
+                await release.wait()
+            return late
+        task = asyncio.create_task(relay.RelayNetworkPathSelector().probe_round(
+            relay.RelayPathStability(), OPTIONS, [WIFI], attempt, timeout=.03))
+        try:
+            await asyncio.wait_for(expired.wait(), 2)
+            self.assertFalse(task.done())
+        finally:
+            release.set()
+        await asyncio.wait_for(task, 2)
+        late[1].transport.abort.assert_called_once()
 
     async def test_private_and_ipv6_targets_do_not_probe_interfaces(self):
         with mock.patch.object(relay, "_local_relay_interfaces") as interfaces:

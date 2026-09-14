@@ -14,6 +14,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -33,13 +35,16 @@ final class AndroidRelayNetworkSelector {
         thread.setDaemon(true);
         return thread;
     });
-    private static final Selector SHARED = new Selector(System::nanoTime);
+    private static final Selector SHARED = new Selector(System::nanoTime, AndroidRelay.TIMEOUT_MS, WORKERS, true);
     private AndroidRelayNetworkSelector() { }
 
     /** A pending-connection handle: the existing UI/service cancellation closes every candidate. */
     static final class Dial extends Socket {
         private final Set<Socket> owned = new HashSet<>();
+        final boolean probeOnly;
         private boolean closed;
+        Dial() { this(false); }
+        Dial(boolean probeOnly) { this.probeOnly = probeOnly; }
         synchronized void checkOpen() throws IOException {
             if (closed || Thread.currentThread().isInterrupted()) throw new IOException("中转连接已取消。");
         }
@@ -74,38 +79,50 @@ final class AndroidRelayNetworkSelector {
         final T socket;
         Result(String path, T socket) { this.path = path; this.socket = socket; }
     }
-    private static final class Preference {
-        final String path;
-        final long expires;
-        Preference(String path, long expires) { this.path = path; this.expires = expires; }
-    }
-
     /** Pure-Java policy is tested without requiring a specific handset or Android network stack. */
     static final class Selector {
-        private final Map<String, Preference> cache = new HashMap<>();
+        private final Map<String, RelayPathStability> cache = new HashMap<>();
         private final LongSupplier clock;
         private final long timeoutNanos;
         private final ExecutorService workers;
+        private final boolean backgroundProbes;
+        private final AtomicBoolean probing = new AtomicBoolean();
         Selector(LongSupplier clock) { this(clock, AndroidRelay.TIMEOUT_MS); }
         Selector(LongSupplier clock, long timeoutMillis) {
             this(clock, timeoutMillis, WORKERS);
         }
         Selector(LongSupplier clock, long timeoutMillis, ExecutorService workers) {
+            this(clock, timeoutMillis, workers, false);
+        }
+        Selector(LongSupplier clock, long timeoutMillis, ExecutorService workers, boolean backgroundProbes) {
             this.clock = clock;
             this.timeoutNanos = TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
             this.workers = workers;
+            this.backgroundProbes = backgroundProbes;
         }
+
+        private long nowMillis() { return TimeUnit.NANOSECONDS.toMillis(clock.getAsLong()); }
 
         <T extends Socket> T connect(String endpointKey, List<String> alternatives,
                 Dial dial, Connector<T> connector) throws Exception {
+            return connect(endpointKey, alternatives, dial, connector, true);
+        }
+
+        <T extends Socket> T connect(String endpointKey, List<String> alternatives,
+                Dial dial, Connector<T> connector, boolean allowProbes) throws Exception {
             List<String> paths = new ArrayList<>();
             paths.add("default"); paths.addAll(alternatives);
             String key = endpointKey + "/" + alternatives;
-            Preference cached;
-            synchronized (cache) { cached = cache.get(key); }
-            if (cached != null && cached.expires <= clock.getAsLong()) cached = null;
-            if (cached != null && paths.remove(cached.path)) paths.add(0, cached.path);
+            RelayPathStability stability;
+            synchronized (cache) {
+                if (cache.size() >= 32 && !cache.containsKey(key)) cache.clear();
+                stability = cache.computeIfAbsent(key, unused -> new RelayPathStability());
+            }
+            String cached = stability.preferred(nowMillis());
+            if (cached != null && paths.remove(cached)) paths.add(0, cached);
             else cached = null;
+            final String preferredPath = cached;
+            AtomicBoolean preferredFailed = new AtomicBoolean();
             ExecutorCompletionService<Result<T>> completed = new ExecutorCompletionService<>(workers);
             List<Future<Result<T>>> tasks = new ArrayList<>();
             // Even a single network uses this deadline. A synchronous DNS call
@@ -118,10 +135,7 @@ final class AndroidRelayNetworkSelector {
                 int initial = cached == null ? paths.size() : 1;
                 for (int index = 0; index < initial; index++) {
                     String path = paths.get(index);
-                    tasks.add(completed.submit(() -> {
-                        dial.checkOpen();
-                        return new Result<>(path, connector.connect(path, dial));
-                    }));
+                    tasks.add(completed.submit(() -> attempt(path, dial, connector, preferredPath, preferredFailed)));
                     remaining++;
                 }
                 long hedgeAt = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(150);
@@ -137,11 +151,9 @@ final class AndroidRelayNetworkSelector {
                         try {
                             Result<T> result = item.get();
                             T selected = dial.take(result.socket);
-                            long expires = cached != null && cached.path.equals(result.path)
-                                ? cached.expires : clock.getAsLong() + TimeUnit.SECONDS.toNanos(60);
-                            if (!alternatives.isEmpty()) synchronized (cache) {
-                                if (cache.size() >= 32) cache.clear();
-                                cache.put(key, new Preference(result.path, expires));
+                            if (!alternatives.isEmpty()) {
+                                stability.connected(result.path, nowMillis(), preferredFailed.get() ? preferredPath : null);
+                                if (backgroundProbes && allowProbes) startProbe(stability, paths, connector);
                             }
                             return selected;
                         } catch (java.util.concurrent.ExecutionException error) {
@@ -154,23 +166,85 @@ final class AndroidRelayNetworkSelector {
                         othersStarted = true;
                         for (int index = 1; index < paths.size(); index++) {
                             String path = paths.get(index);
-                            tasks.add(completed.submit(() -> {
-                                dial.checkOpen();
-                                return new Result<>(path, connector.connect(path, dial));
-                            }));
+                            tasks.add(completed.submit(() -> attempt(path, dial, connector, preferredPath, preferredFailed)));
                             remaining++;
                         }
                     }
                 }
                 throw failure == null ? new IOException("没有可用的中转网络路径。") : failure;
             } catch (Exception error) {
-                synchronized (cache) { cache.remove(key); }
                 if (error instanceof RejectedExecutionException)
                     throw new IOException("中转连接过于频繁，请稍后重试。", error);
                 throw error;
             } finally {
                 dial.close(); // Winner was detached. Every late/queued loser remains owned.
                 for (Future<?> task : tasks) task.cancel(true);
+            }
+        }
+
+        private static <T extends Socket> Result<T> attempt(String path, Dial dial, Connector<T> connector,
+                String preferred, AtomicBoolean failed) throws Exception {
+            try { dial.checkOpen(); return new Result<>(path, connector.connect(path, dial)); }
+            catch (Exception error) {
+                if (!dial.isClosed() && !Thread.currentThread().isInterrupted() && path.equals(preferred)) failed.set(true);
+                throw error;
+            }
+        }
+
+        private <T extends Socket> void startProbe(RelayPathStability stability, List<String> paths, Connector<T> connector) {
+            if (!probing.compareAndSet(false, true)) return;
+            long scheduledAt = nowMillis();
+            if (!stability.beginProbe(scheduledAt)) { probing.set(false); return; }
+            Thread audit = new Thread(() -> {
+                try {
+                    Thread.sleep(1000); // Never delay initial authentication/video.
+                    probeRound(stability, paths, connector, 2000, scheduledAt);
+                } catch (Exception ignored) { /* Optional TLS-only measurement. */ }
+                finally { probing.set(false); }
+            }, "RelayPathQuality");
+            audit.setDaemon(true);
+            try { audit.start(); } catch (RuntimeException unavailable) { probing.set(false); }
+        }
+
+        <T extends Socket> void probeRound(RelayPathStability stability, List<String> paths,
+                Connector<T> connector, long timeoutMillis) throws Exception {
+            probeRound(stability, paths, connector, timeoutMillis, nowMillis());
+        }
+
+        private <T extends Socket> void probeRound(RelayPathStability stability, List<String> paths,
+                Connector<T> connector, long timeoutMillis, long observedAt) throws Exception {
+            List<Dial> owners = new ArrayList<>();
+            List<Future<Double>> tasks = new ArrayList<>();
+            CountDownLatch finished = new CountDownLatch(paths.size());
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+            try {
+                for (String path : paths) {
+                    Dial owner = new Dial(true); owners.add(owner);
+                    tasks.add(workers.submit(() -> {
+                        T result = null;
+                        long started = System.nanoTime();
+                        try {
+                            owner.checkOpen(); result = connector.connect(path, owner);
+                            return owner.isClosed() ? Double.POSITIVE_INFINITY : (System.nanoTime() - started) / 1_000_000.0;
+                        } catch (Exception error) { return Double.POSITIVE_INFINITY; }
+                        finally { AndroidRelay.close(result); owner.close(); finished.countDown(); }
+                    }));
+                }
+                Map<String, Double> observations = new HashMap<>();
+                for (int i = 0; i < tasks.size(); i++) {
+                    double value;
+                    try { value = tasks.get(i).get(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS); }
+                    catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException error) { value = Double.POSITIVE_INFINITY; }
+                    observations.put(paths.get(i), value);
+                }
+                stability.observeRound(observedAt, observations);
+            } finally {
+                for (Dial owner : owners) owner.close();
+                for (int i = tasks.size(); i < paths.size(); i++) finished.countDown();
+                // Closing each owned socket cancels networking. Keep the one
+                // audit slot until queued/native work actually ends; do not use
+                // Future.cancel(), which marks an uninterruptible call done early.
+                finished.await();
             }
         }
     }
@@ -191,6 +265,7 @@ final class AndroidRelayNetworkSelector {
         Map<String, Network> networks = new HashMap<>();
         List<String> alternatives = new ArrayList<>();
         String defaultKey = "system";
+        boolean allowProbes = false;
         try {
             ConnectivityManager manager = context == null ? null :
                 (ConnectivityManager) context.getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
@@ -198,6 +273,7 @@ final class AndroidRelayNetworkSelector {
                 Network active = manager.getActiveNetwork();
                 NetworkCapabilities activeCaps = manager.getNetworkCapabilities(active);
                 boolean vpn = activeCaps != null && activeCaps.hasTransport(NetworkCapabilities.TRANSPORT_VPN);
+                allowProbes = !vpn && activeCaps != null && activeCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
                 defaultKey = String.valueOf(active) + "/" + String.valueOf(manager.getLinkProperties(active));
                 // Only already-connected, validated, unmetered alternatives.
                 // No requestNetwork(), cellular activation or process-wide binding.
@@ -220,8 +296,28 @@ final class AndroidRelayNetworkSelector {
         } catch (RuntimeException unavailable) { networks.clear(); alternatives.clear(); }
         java.util.Collections.sort(alternatives);
         String key = options.serverAddress + ":" + options.port + "/" + options.tlsCertificateSha256 + "/" + defaultKey;
+        final String expectedNetwork = defaultKey;
         return SHARED.connect(key, alternatives, dial,
-            (path, owner) -> AndroidRelay.connectBoundSocket(options, networks.get(path), owner, configure));
+            (path, owner) -> {
+                if (owner.probeOnly && !probeNetworkUnchanged(context, expectedNetwork))
+                    throw new IOException("网络已变化，跳过旧线路采样。");
+                return AndroidRelay.connectBoundSocket(options, networks.get(path), owner, configure);
+            }, allowProbes);
+    }
+
+    private static boolean probeNetworkUnchanged(Context context, String expected) {
+        try {
+            ConnectivityManager manager = context == null ? null :
+                (ConnectivityManager) context.getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (manager == null) return false;
+            Network active = manager.getActiveNetwork();
+            NetworkCapabilities caps = manager.getNetworkCapabilities(active);
+            return caps != null && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) &&
+                expected.equals(String.valueOf(active) + "/" + String.valueOf(manager.getLinkProperties(active)));
+        } catch (RuntimeException unavailable) { return false; }
     }
 
     private static boolean isLocalHost(String host) {

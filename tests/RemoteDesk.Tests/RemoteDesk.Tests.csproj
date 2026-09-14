@@ -19,6 +19,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\RemoteDesk\RemoteDesk.csproj" />
+    <None Include="..\data\relay-path-stability.tsv" Link="relay-path-stability.tsv" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
