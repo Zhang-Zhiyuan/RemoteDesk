@@ -65,7 +65,7 @@ final class AndroidViewerChrome {
 
         dock = column(); dock.setBackgroundColor(0xff111d30); dock.setElevation(dp(8));
         dock.setPadding(dp(8), dp(5), dp(8), dp(5));
-        hint = text(10, 0xffa6b7cf); hint.setGravity(Gravity.CENTER); hint.setMaxLines(1);
+        hint = text(10, 0xffa6b7cf); hint.setGravity(Gravity.CENTER); hint.setMaxLines(2);
         hint.setPadding(0, dp(3), 0, dp(5));
         hint.setText("轻触点击 · 长按拖动 · 双指滚动 / 缩放");
         dock.addView(hint);
@@ -137,6 +137,7 @@ final class AndroidViewerChrome {
         // to a few pixels; an overflow strip preserves their natural widths.
         HorizontalScrollView mainStrip = scroll(mainRow);
         mainStrip.setHorizontalScrollBarEnabled(true);
+        mainStrip.setScrollbarFadingEnabled(false);
         mainStrip.setContentDescription("远程操作栏，左右滑动可查看所有按钮");
         dock.addView(mainStrip);
     }

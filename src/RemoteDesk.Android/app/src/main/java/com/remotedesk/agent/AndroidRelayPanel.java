@@ -88,13 +88,19 @@ final class AndroidRelayPanel extends LinearLayout {
         });
         server = field("服务器地址 / IP", false);
         adminPassword = field("服务器 root / 管理员密码", true);
-        adminPassword.setHint("仅本次 SSH 登录使用，不保存；已登录可留空");
+        adminPassword.setHint("服务器管理员密码");
+        configuration.addView(AndroidUiTheme.createSectionSubtitle(context,
+            "管理员密码仅用于本次登录，不保存；已登录时可留空。"), layout());
         adminPassword.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
         LinearLayout advanced = new LinearLayout(context);
         advanced.setOrientation(VERTICAL);
         advanced.setVisibility(GONE);
-        Button advancedButton = button("高级设置（通常不用改）", false);
-        advancedButton.setOnClickListener(view -> advanced.setVisibility(advanced.getVisibility() == VISIBLE ? GONE : VISIBLE));
+        Button advancedButton = button("展开高级设置", false);
+        advancedButton.setOnClickListener(view -> {
+            boolean expanded = advanced.getVisibility() != VISIBLE;
+            advanced.setVisibility(expanded ? VISIBLE : GONE);
+            advancedButton.setText(expanded ? "收起高级设置" : "展开高级设置");
+        });
         configuration.addView(advancedButton, layout());
         sshPort = field(advanced, "SSH 端口（默认 22）", false);
         sshPort.setInputType(InputType.TYPE_CLASS_NUMBER);

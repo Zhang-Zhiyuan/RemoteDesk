@@ -14,6 +14,7 @@ internal static class Program
     {
         Console.InputEncoding = System.Text.Encoding.UTF8;
         if (args.Length > 0 && args[0] == "layout-isolated") return AdaptiveLayoutProbe.Run();
+        if (args.Length > 0 && args[0] == "software-paint-isolated") return AdaptiveLayoutProbe.Run(softwarePaint: true);
         if (args.Length > 0 && args[0] == "clipboard-isolated") return ClipboardSystemProbe.Run();
         if (args.Length > 0 && args[0] == "clipboard-shortcuts-isolated") return ClipboardSystemProbe.Run(shortcuts: true);
         if (args.Length > 0 && args[0] == "file-relay-isolated") return ClipboardSystemProbe.Run(relayFiles: true);

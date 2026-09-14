@@ -8,6 +8,15 @@ import org.junit.Test;
 
 public final class AndroidAdaptiveLayoutTest {
     @Test
+    public void discoveryActionsStackBeforeTextAndHitTargetsAreCramped() {
+        assertTrue(AndroidAdaptiveLayout.stackDiscoveryActions(252, 1f));
+        assertFalse(AndroidAdaptiveLayout.stackDiscoveryActions(320, 1f));
+        assertTrue(AndroidAdaptiveLayout.stackDiscoveryActions(320, 1.5f));
+        assertFalse(AndroidAdaptiveLayout.stackDiscoveryActions(480, 2f));
+        assertFalse(AndroidAdaptiveLayout.stackDiscoveryActions(320, Float.NaN));
+        assertTrue(AndroidAdaptiveLayout.stackDiscoveryActions(200, 3f));
+    }
+    @Test
     public void portraitKeyboardUsesRemainingHeightInsteadOfFullConfigurationHeight() {
         assertFalse(AndroidAdaptiveLayout.compactViewerChrome(960, 0, 1.5f, 640));
         assertTrue(AndroidAdaptiveLayout.compactViewerChrome(960, 614, 1.5f, 640));

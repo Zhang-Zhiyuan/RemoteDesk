@@ -28,6 +28,10 @@ final class AndroidAdaptiveLayout {
         return availableWidthDp < viewerToolbarStackThresholdDp(fontScale);
     }
 
+    static boolean stackDiscoveryActions(int availableWidthDp, float fontScale) {
+        return availableWidthDp < Math.round(280 + (normalizeFontScale(fontScale) - 1f) * 160);
+    }
+
     static int mainTwoColumnThresholdDp(float fontScale) {
         float normalizedScale = normalizeFontScale(fontScale);
         return Math.round(

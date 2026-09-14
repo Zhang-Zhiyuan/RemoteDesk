@@ -105,13 +105,20 @@ final class AndroidConnectionHistoryPanel extends LinearLayout implements AutoCl
         content.setPadding(dp(24), dp(8), dp(24), 0);
         EditText address = new EditText(activity), port = new EditText(activity), password = new EditText(activity), remark = new EditText(activity);
         EditText[] fields = {address, port, password, remark};
-        String[] hints = {"IP / 主机名", "端口（留空自动探测）", "设备密钥", "备注（可选）"};
+        String[] hints = {"IP / 主机名", "端口（选填）", "设备密钥", "备注（可选）"};
         for (int i=0; i<fields.length; i++) {
             fields[i].setSingleLine(true); fields[i].setHint(hints[i]); fields[i].setSaveEnabled(false);
             fields[i].setContentDescription(hints[i]);
             AndroidUiTheme.styleInput(activity, fields[i]);
             content.addView(fields[i], new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         }
+        // Keep the rule visible after typing, and let it wrap with large system
+        // fonts instead of clipping it inside a single-line input hint.
+        android.widget.TextView help = AndroidUiTheme.createSectionSubtitle(activity,
+            "端口留空时自动探测；设备密钥填写对方设备设置的密钥。");
+        LinearLayout.LayoutParams helpParams = new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
+        helpParams.topMargin = dp(8);
+        content.addView(help, helpParams);
         password.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
         port.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         remark.setFilters(new InputFilter[]{new InputFilter.LengthFilter(64)});

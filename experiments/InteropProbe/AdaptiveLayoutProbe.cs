@@ -7,7 +7,7 @@ using RemoteDesk;
 // the user's desktop, and no networking/services/settings are started.
 internal static class AdaptiveLayoutProbe
 {
-    internal static int Run()
+    internal static int Run(bool softwarePaint = false)
     {
         using var config = JsonDocument.Parse(Console.ReadLine()!);
         string output = Path.GetFullPath(config.RootElement.GetProperty("output").GetString()!);
@@ -24,7 +24,8 @@ internal static class AdaptiveLayoutProbe
                 if (!SetThreadDesktop(desktop)) throw new Win32Exception();
                 Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
                 Application.EnableVisualStyles();
-                Verify(output);
+                if (softwarePaint) SoftwarePaintProbe.Verify(output);
+                else Verify(output);
             }
             catch (Exception error) { failure = error; }
         });
@@ -37,6 +38,58 @@ internal static class AdaptiveLayoutProbe
     private static void Verify(string output)
     {
         var evidence = new List<object>();
+        using (var main = new MainForm(new RemoteDeskSettings(), Path.Combine(output, "preview-log")))
+        {
+            main.Show(); Application.DoEvents();
+            var tabs = Descendants(main).OfType<TabControl>().Single();
+            foreach (int logicalWidth in new[] { 1120, 800, 640, 1120 })
+            {
+                main.Size = new Size(ResponsiveWindowLayout.ScaleLogical(logicalWidth, main.DeviceDpi), 900);
+                for (int index = 0; index < tabs.TabPages.Count; index++)
+                {
+                    tabs.SelectedIndex = index;
+                    Application.DoEvents();
+                    TabPage page = tabs.SelectedTab!;
+                    page.AutoScrollPosition = Point.Empty;
+                    Application.DoEvents();
+                    using var bitmap = new Bitmap(main.Width, main.Height);
+                    main.DrawToBitmap(bitmap, new Rectangle(Point.Empty, main.Size));
+                    bitmap.Save(Path.Combine(output, $"main-{index}-{logicalWidth}.png"));
+                    var controls = Descendants(page).Where(c => c is TextBox or NumericUpDown or ComboBox or Button or CheckBox or TrackBar).ToArray();
+                    evidence.Add(new { main = true, page = index, logicalWidth, controls = controls.Select(c => new {
+                        kind = c.GetType().Name, caption = c is Button ? c.Text : "", c.Bounds, c.Visible,
+                        onPage = c.Visible && tabs.SelectedTab!.RectangleToScreen(tabs.SelectedTab.ClientRectangle).Contains(c.RectangleToScreen(c.ClientRectangle))
+                    }).ToArray() });
+                    foreach (Control control in controls.Where(c => c.Visible))
+                    {
+                        // Disabled transfer actions must also remain visible;
+                        // scroll explicitly without invoking any action.
+                        page.ScrollControlIntoView(control);
+                        Application.DoEvents();
+                        Rectangle bounds = control.RectangleToScreen(control.ClientRectangle);
+                        Rectangle viewport = page.RectangleToScreen(page.ClientRectangle);
+                        if (bounds.Width < 24 || bounds.Height < 12 || !viewport.Contains(bounds))
+                            throw new InvalidOperationException($"Main page {index} at {logicalWidth}: {control.GetType().Name} {control.Text} {bounds} outside {viewport}; scroll={page.AutoScrollPosition}/{page.AutoScrollMinSize}");
+                        for (Control? parent = control.Parent; parent is not null && parent != page; parent = parent.Parent)
+                            if (!parent.RectangleToScreen(parent.ClientRectangle).Contains(bounds))
+                                throw new InvalidOperationException($"Main page {index}: {control.GetType().Name} {control.Text} clipped by {parent.GetType().Name} {parent.ClientRectangle}");
+                    }
+                    using var scrolled = new Bitmap(main.Width, main.Height);
+                    main.DrawToBitmap(scrolled, new Rectangle(Point.Empty, main.Size));
+                    scrolled.Save(Path.Combine(output, $"main-{index}-{logicalWidth}-scrolled.png"));
+                    if (page.HorizontalScroll.Visible)
+                        throw new InvalidOperationException($"Main page {index} at {logicalWidth}: unexpected whole-page horizontal overflow");
+                    int idleLayouts = 0;
+                    LayoutEventHandler counted = (_, _) => idleLayouts++;
+                    page.Controls[0].Layout += counted;
+                    for (int tick = 0; tick < 10; tick++) { Thread.Sleep(10); Application.DoEvents(); }
+                    page.Controls[0].Layout -= counted;
+                    if (idleLayouts > 2)
+                        throw new InvalidOperationException($"Main page {index}: did not settle after resize ({idleLayouts} idle layouts)");
+                }
+            }
+            main.Close(); Application.DoEvents();
+        }
         var device = new RelayOnlineDevice(Guid.NewGuid().ToString(), "Layout test", "Windows", null, false, 0)
             { SharedName = "Test", OriginalMachineName = "Synthetic-PC" };
         Func<Form>[] factories = [
@@ -76,7 +129,7 @@ internal static class AdaptiveLayoutProbe
             }
             form.Close(); Application.DoEvents();
         }
-        Program.Save(Path.Combine(output, "layout.json"), new { passed = true, scope = "private Windows desktop; real shown dialogs", cases = evidence });
+        Program.Save(Path.Combine(output, "layout.json"), new { passed = true, scope = "private Windows desktop; real main pages and dialogs; every input/action reachable", cases = evidence });
     }
 
     private static IEnumerable<Control> Descendants(Control root)

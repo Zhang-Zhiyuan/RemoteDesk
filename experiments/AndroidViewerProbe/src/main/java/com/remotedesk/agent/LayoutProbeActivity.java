@@ -34,6 +34,8 @@ public final class LayoutProbeActivity extends Activity {
             public void drag() { actions++; }
             public void more() { actions++; }
             public void screens() { actions++; }
+            public void zoom() { actions++; }
+            public void upscale() { actions++; }
             public void diagnostics() { actions++; }
             public void shortcut(int... keys) { actions++; }
             public boolean text(String text) { actions++; return true; }
@@ -77,7 +79,8 @@ public final class LayoutProbeActivity extends Activity {
             if (stage == 0) {
                 for (int i = 0; i < chrome.mainRow.getChildCount(); i++) tap(chrome.mainRow.getChildAt(i));
             } else if (stage == 1) {
-                require(actions == 4, "Coordinate taps missed callbacks: " + actions);
+                require(chrome.mainRow.getChildCount() == 7 && actions == 6,
+                    "Coordinate taps missed callbacks (including zoom/upscale): " + actions);
                 chrome.keyboard(true); chrome.adapt(compact);
             } else if (stage == 2) {
                 Rect editor = new Rect();
@@ -88,12 +91,12 @@ public final class LayoutProbeActivity extends Activity {
                 require("布局输入 Layout 123".contentEquals(chrome.composer.getText()), "Resize lost text");
                 tap(chrome.send);
             } else if (stage == 3) {
-                require(chrome.composer.length() == 0 && actions == 5, "Send click failed");
+                require(chrome.composer.length() == 0 && actions == 7, "Send click failed");
                 chrome.keyboard(false); chrome.setMouseOpen(true);
             } else if (stage == 4) {
                 for (int i = 0; i < chrome.mousePanel.getChildCount(); i++) tap(chrome.mousePanel.getChildAt(i));
             } else {
-                require(actions == 8, "Mouse action taps missed callbacks: " + actions);
+                require(actions == 10, "Mouse action taps missed callbacks: " + actions);
                 result.put("passed", true); result.put("coordinateTaps", hits);
                 result.put("widthDp", getIntent().getIntExtra("width", 320));
                 result.put("heightDp", getIntent().getIntExtra("height", 640));

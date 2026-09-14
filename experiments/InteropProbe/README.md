@@ -114,6 +114,13 @@ It neither deploys nor restarts the relay. No real secret is put in argv/reports
 All viewers use product relay APIs, with UDP disabled and no direct-LAN fallback.
 The product's internal loopback adapters are not SSH/ADB tunnels.
 
+Alternatively, `--relay-server <explicit-server> --relay-stdin` accepts an already
+approved relay configuration (server, port, access token and verified TLS pin) on
+stdin, before spawning any children. Do not supply SSH/pin arguments in this mode.
+The server must match, test registrations receive fresh IDs, and evidence records
+that no new SSH identity check was performed. This lets a caller reuse its local
+encrypted configuration without another administrator login or logging secrets.
+
 Build/install AndroidRelayHostProbe as well when adding `--android-host`. This
 mode uses that separate sandbox/keystore, the actual product MainActivity,
 foreground host and accessibility service, and the reused owned input target.
@@ -263,3 +270,25 @@ It sends no relay credentials/role and does not change routes, installed session
 Wi-Fi associations, or settings. The result is handshake timing, not video latency
 or bandwidth. Tests in `tests/data/relay-path-stability.tsv` also cover sustained
 improvement, jitter, isolated spikes, failure recovery, and the three-minute hold.
+
+`software-paint-isolated` compares Windows' original software paint path with the
+prepared native bitmap path on a private desktop. Supply a new `output` directory
+on stdin. It uses synthetic 4K frames, explicitly drives native `WM_PRINTCLIENT`,
+warms both paths, and records paint time, UI heartbeat gaps and decoded-frame to
+completed-paint latency. No network, input, clipboard, settings or services are
+used. See `docs/WindowsUiCheck-20260914.md` for the measured scope and caveats.
+
+`../Measure-WindowsUi.ps1 -TaskProcessId <pid> -Action Sample` performs bounded
+`WM_NULL` checks on that RemoteDesk main window without changing its UI. The
+explicit `Tabs`, `Resize` and `Permissions` actions manipulate only that window
+and restore their selection/bounds; do not use them during someone's active
+session. Use Windows PowerShell for UI Automation actions. `Screenshot` requires
+a new output path and captures only the specified main window.
+
+`layout-isolated` now also shows the actual main form with disposable settings
+on a private desktop. It checks every visible action/input after scrolling,
+checks ancestor clipping and layout convergence, and captures the three pages
+at repeated widths. It does not start app services or load/save user settings.
+`Measure-WindowsUi.ps1 -Action AuditLayout -ScreenshotPath <new-directory>`
+captures those pages on an explicitly selected installed instance and restores
+its bounds/tab. Evidence and limitations: `docs/UiAudit-20260915.md`.

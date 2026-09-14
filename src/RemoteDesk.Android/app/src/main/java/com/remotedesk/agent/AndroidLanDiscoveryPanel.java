@@ -57,6 +57,17 @@ final class AndroidLanDiscoveryPanel extends LinearLayout implements AutoCloseab
         });
         actions.addView(refresh, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1));
         actions.addView(detectPort, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1));
+        actions.addOnLayoutChangeListener((view, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
+            int widthDp = Math.round((right - left) / getResources().getDisplayMetrics().density);
+            boolean stacked = AndroidAdaptiveLayout.stackDiscoveryActions(widthDp, getResources().getConfiguration().fontScale);
+            int orientation = stacked ? VERTICAL : HORIZONTAL;
+            if (actions.getOrientation() == orientation) return;
+            actions.setOrientation(orientation);
+            for (Button action : new Button[] { refresh, detectPort }) {
+                action.setLayoutParams(new LinearLayout.LayoutParams(
+                    stacked ? LayoutParams.MATCH_PARENT : 0, LayoutParams.WRAP_CONTENT, stacked ? 0 : 1));
+            }
+        });
         addView(actions);
         status.setPadding(0, dp(6), 0, dp(6)); addView(status);
         devices = new LinearLayout(activity); devices.setOrientation(VERTICAL); addView(devices);

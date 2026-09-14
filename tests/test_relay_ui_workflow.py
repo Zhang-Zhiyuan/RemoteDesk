@@ -1,5 +1,6 @@
 from dataclasses import replace
 from pathlib import Path
+import os
 import queue
 import sys
 import tempfile
@@ -15,6 +16,7 @@ B = '22222222-2222-4222-8222-222222222222'
 SAVED = relay.RelayOptions('relay.test', 56567, 'owned-test-internal-relay-token-only', 'AB' * 32, A, True).validate()
 
 
+@unittest.skipUnless(os.name == 'posix', 'Device-key file ownership/modes require POSIX; run on Linux')
 class RelayDeviceKeyTests(unittest.TestCase):
     def test_keys_are_encrypted_and_scoped_to_device_and_server_identity(self):
         with tempfile.TemporaryDirectory() as directory:

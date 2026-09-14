@@ -3,7 +3,28 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
-from android_viewer_ui_verify import StableLayout
+from android_viewer_ui_verify import PACKAGE, StableLayout, toolbar_swipe
+
+
+class ToolbarSwipeTests(unittest.TestCase):
+    def strip(self, **changes):
+        return {"package": PACKAGE, "class": "android.widget.HorizontalScrollView",
+                "content-desc": "远程操作栏，左右滑动可查看所有按钮", "bounds": "[20,800][420,860]", **changes}
+
+    def test_reveal_far_controls_only_within_owned_strip(self):
+        for label in ("更多", "新版放大"):
+            self.assertEqual((380, 830, 60, 830), toolbar_swipe([self.strip()], label))
+        for label in ("键盘", "鼠标", "屏幕", "缩放", "触控板", "直接触摸"):
+            self.assertEqual((60, 830, 380, 830), toolbar_swipe([self.strip()], label))
+
+    def test_unrelated_ambiguous_or_invalid_views_are_not_swiped(self):
+        for nodes in ([], [self.strip(), self.strip()], [self.strip(package="another.application")],
+                      [self.strip(**{"content-desc": "remote desktop"})],
+                      [self.strip(bounds="[20,800][20,860]")], [self.strip(bounds="[20,860][420,800]")],
+                      [self.strip(bounds="[-20,800][420,860]")], [self.strip(bounds="invalid")]):
+            with self.subTest(nodes=nodes):
+                self.assertIsNone(toolbar_swipe(nodes, "更多"))
+        self.assertIsNone(toolbar_swipe([self.strip()], "删除"))
 
 
 class StableLayoutTests(unittest.TestCase):

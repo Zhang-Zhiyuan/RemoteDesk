@@ -984,9 +984,8 @@ public sealed class FfmpegH264DecoderTests
                         accessUnits[index].Bytes).WaitAsync(
                         TimeSpan.FromSeconds(2));
                 results.Add(result);
-                Assert.Equal(
-                    FfmpegH264DecodeStatus.Frame,
-                    result.Status);
+                Assert.True(result.Status == FfmpegH264DecodeStatus.Frame,
+                    $"submission {index + 1}: {result.Status}; {decoder.FailureDetail}");
                 Assert.True(
                     result.Bitmap is not null,
                     $"submission {index + 1} failed: {decoder.FailureDetail}");

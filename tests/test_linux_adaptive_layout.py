@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import queue
+import gc
+import tempfile
 import os
 import sys
 import unittest
@@ -117,10 +119,20 @@ class RealTkAdaptiveLayoutTests(unittest.TestCase):
     def setUp(self):
         self.root = app.tk.Tk()
         self.root.geometry("640x400")
-        self.addCleanup(self.root.destroy)
+        self.addCleanup(self.cleanup_tk)
         self.ui = app.RemoteDeskLinuxApp.__new__(app.RemoteDeskLinuxApp)
         self.ui.root = self.root
         self.ui._configure_style()
+
+    def cleanup_tk(self):
+        try:
+            self.root.destroy()
+        except app.tk.TclError:
+            pass  # The full application closes its own root.
+        self.ui = self.root = None
+        # The next test starts worker threads. Collect this test's destroyed
+        # interpreter/callback cycles on its owning thread before they start.
+        gc.collect()
 
     def test_tab_scrolls_to_overflowing_inputs_and_tracks_new_rows(self):
         notebook = app.ttk.Notebook(self.root)
@@ -145,6 +157,44 @@ class RealTkAdaptiveLayoutTests(unittest.TestCase):
                              canvas.winfo_rooty() + canvas.winfo_height())
         content.destroy()
         self.root.update()  # Also verifies pending callbacks are detached.
+
+    def test_main_pages_fit_narrow_viewports_at_large_font_scale(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": directory}), \
+                mock.patch.object(app.DevicePanel, "scan"):
+            self.root.tk.call("tk", "scaling", 192 / 72)
+            ui = app.RemoteDeskLinuxApp(self.root)
+            try:
+                self.root.minsize(1, 1)
+                for width in (1180, 800, 640, 800, 1180):
+                    self.root.geometry(f"{width}x600")
+                    for page in range(3):
+                        ui.main_notebook.select(page)
+                        self.root.update()
+                        tab = ui.main_notebook.nametowidget(ui.main_notebook.select())
+                        canvas = next(c for c in tab.winfo_children() if isinstance(c, app.tk.Canvas))
+                        with self.subTest(width=width, page=page):
+                            self.assertEqual((0.0, 1.0), canvas.xview())
+                self.assertGreater(app.ttk.Style(self.root).lookup("Treeview", "rowheight"), 20)
+            finally:
+                ui.close()
+
+    def test_wrapped_actions_keep_callbacks_and_fit_after_repeated_resize(self):
+        panel = app.ttk.Frame(self.root)
+        panel.pack(fill=app.tk.X)
+        hits = []
+        buttons = [app.ttk.Button(panel, text="按钮" * n, command=lambda n=n: hits.append(n)) for n in (2, 5, 3, 4)]
+        for button in buttons:
+            button.pack(side=app.tk.LEFT)
+        app.RemoteDeskLinuxApp._wrap_action_buttons(panel, buttons)
+        for width in (700, 320, 460, 700, 320):
+            self.root.geometry(f"{width}x400")
+            self.root.update()
+            for button in buttons:
+                self.assertGreaterEqual(button.winfo_x(), 0)
+                self.assertLessEqual(button.winfo_x() + button.winfo_width(), panel.winfo_width())
+                button.invoke()
+        self.assertEqual([2, 5, 3, 4] * 5, hits)
 
     def test_viewer_reserves_clickable_controls_before_large_image(self):
         self.ui.viewer_window = None

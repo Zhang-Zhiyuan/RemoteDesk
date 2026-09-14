@@ -112,6 +112,27 @@ def require_h264_evidence(value, required):
     return value
 
 
+def read_supplied_relay(reader, expected_server):
+    """Reuse an explicitly selected, already trusted relay without an SSH login."""
+    sys.path.insert(0, str(ROOT / "scripts/linux"))
+    from remotedesk_linux_relay import RelayOptions
+    try:
+        raw = reader.readline(16385)
+        if len(raw) > 16384:
+            raise ValueError()
+        value = json.loads(raw)
+        if not isinstance(value, dict) or not expected_server:
+            raise ValueError()
+        value["deviceId"] = str(uuid.uuid4())
+        value["publish"] = True
+        options = RelayOptions.from_dict(value)
+        if options.server_address.casefold() != expected_server.casefold():
+            raise ValueError()
+        return options.to_dict()
+    except (TypeError, ValueError, AttributeError, OverflowError):
+        raise ValueError("Invalid or unexpected relay configuration on stdin; contents omitted") from None
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
     parser = argparse.ArgumentParser()
@@ -121,6 +142,8 @@ def main():
     parser.add_argument("--relay-server", help="Use native product relay transport in every selected direction, never LAN fallback")
     parser.add_argument("--relay-ssh-pin")
     parser.add_argument("--relay-tls-pin")
+    parser.add_argument("--relay-stdin", action="store_true",
+                        help="Read an already-approved relay configuration on stdin; --relay-server must match, no SSH credentials needed")
     parser.add_argument("--require-android-h264", action="store_true",
                         help="Android viewer directions must finish with active H.264 presentation")
     parser.add_argument("--require-android-host-h264", action="store_true",
@@ -134,6 +157,8 @@ def main():
     parser.add_argument("--pairs", nargs="+", choices=("WindowsToLinux", "AndroidToLinux", "LinuxToWindows", "AndroidToWindows", "WindowsToAndroid", "LinuxToAndroid"),
                         default=["WindowsToLinux", "AndroidToLinux", "LinuxToWindows", "AndroidToWindows"])
     args = parser.parse_args()
+    if args.relay_stdin and (not args.relay_server or args.relay_ssh_pin or args.relay_tls_pin):
+        parser.error("--relay-stdin requires --relay-server and obtains the TLS pin from stdin, not SSH")
     if not math.isfinite(args.min_android_fps) or not 0 <= args.min_android_fps <= 240:
         parser.error("--min-android-fps must be finite and between 0 and 240")
     if any(pair.endswith("ToAndroid") for pair in args.pairs) and not args.android_host:
@@ -150,9 +175,13 @@ def main():
     relay_config = None
     relay_ids = {platform: str(uuid.uuid4()) for platform in ("Windows", "Linux", "Android")}
     if args.relay_server:
-        if not args.relay_ssh_pin or not args.relay_tls_pin: parser.error("Both verified fingerprints are required")
-        from relay_public_config import read_config
-        relay_config = read_config(args.relay_server, args.relay_ssh_pin, args.relay_tls_pin)
+        if args.relay_stdin:
+            relay_config = read_supplied_relay(sys.stdin, args.relay_server)
+            args.relay_tls_pin = relay_config["tlsCertificateSha256"]
+        else:
+            if not args.relay_ssh_pin or not args.relay_tls_pin: parser.error("Both verified fingerprints are required")
+            from relay_public_config import read_config
+            relay_config = read_config(args.relay_server, args.relay_ssh_pin, args.relay_tls_pin)
         sys.path.insert(0, str(ROOT / "scripts/linux"))
         import remotedesk_linux_relay as native_relay
     def relay_for(platform):
@@ -160,7 +189,7 @@ def main():
     def route_config(platform): return {"relay": relay_for(platform)} if relay_config else {}
     route_label = "native public relay TLS/TCP; no UDP/LAN fallback" if relay_config else "direct LAN"
     output = Path(args.output).resolve(); output.mkdir(parents=True, exist_ok=False)
-    ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", args.linux]
+    ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5", args.linux]
     adb = [args.adb, "-s", args.serial]
     linux_ip = args.linux.split("@")[-1]
     password = secrets.token_urlsafe(24)
@@ -168,7 +197,8 @@ def main():
               "pairs": {}, "complete": False}
     if relay_config:
         report.update(scope="Physical Windows/Linux/Android product clients and owned OS targets through public TLS relay",
-                      relayServer=args.relay_server, relayPort=relay_config["port"], sshIdentityVerified=True,
+                      relayServer=args.relay_server, relayPort=relay_config["port"], sshIdentityVerified=not args.relay_stdin,
+                      relayConfigSource="approved caller stdin" if args.relay_stdin else "pinned SSH read",
                       tlsCertificateSha256=args.relay_tls_pin, deviceIds=relay_ids, directoryEvidence=[])
         hashes = {}
         required_apks = required_android_relay_probes(selected)

@@ -43,7 +43,8 @@ public sealed partial class MainForm : Form
         Interval = 10_000
     };
     private readonly NetworkDiscoveryResponder _presenceResponder = new();
-    private readonly WindowsDiagnosticLog _diagnosticLog = WindowsDiagnosticLog.CreateDefault();
+    private readonly WindowsDiagnosticLog _diagnosticLog;
+    private readonly bool _layoutPreview;
     private readonly object _presenceLock = new();
     private readonly object _viewerReconnectLock = new();
     private readonly object _viewerTelemetryLock = new();
@@ -226,7 +227,22 @@ public sealed partial class MainForm : Form
         bool startMinimizedToTray = false,
         bool resumeHostAfterUpdate = false,
         long applicationStartedAt = 0)
+        : this(startMinimizedToTray, resumeHostAfterUpdate, applicationStartedAt, null, null)
     {
+    }
+
+    // In-process diagnostics use the actual controls on a private desktop,
+    // without loading/saving user settings or starting any app services.
+    internal MainForm(RemoteDeskSettings previewSettings, string diagnosticDirectory)
+        : this(false, false, 0, previewSettings, diagnosticDirectory)
+    {
+    }
+
+    private MainForm(bool startMinimizedToTray, bool resumeHostAfterUpdate, long applicationStartedAt,
+        RemoteDeskSettings? previewSettings, string? diagnosticDirectory)
+    {
+        _layoutPreview = previewSettings is not null;
+        _diagnosticLog = _layoutPreview ? new WindowsDiagnosticLog(diagnosticDirectory!) : WindowsDiagnosticLog.CreateDefault();
         _applicationStartedAt =
             applicationStartedAt > 0
                 ? applicationStartedAt
@@ -234,7 +250,7 @@ public sealed partial class MainForm : Form
         long phaseStartedAt = Stopwatch.GetTimestamp();
         _startMinimizedToTray = startMinimizedToTray;
         _resumeHostAfterUpdate = resumeHostAfterUpdate;
-        _settings = _settingsService.Load();
+        _settings = previewSettings ?? _settingsService.Load();
         _relayHostConnector = new RelayHostConnector(prepareConnection: (options, token) =>
             _relayNetworkOptimizer.OptimizeAsync(options, _settings.Relay.OptimizeNetworkRoute, token));
         _settings.Relay.DeviceId = RemoteDeviceIdentity.Normalize(_settings.Relay.DeviceId) ?? Guid.NewGuid().ToString("D");
@@ -257,6 +273,11 @@ public sealed partial class MainForm : Form
         ApplyDpiMetrics(GetInitialSystemDpi());
         long interfaceBuiltAt = Stopwatch.GetTimestamp();
         ConfigureToolTips();
+        if (_layoutPreview)
+        {
+            ResumeLayout(performLayout: true);
+            return;
+        }
         InitializeTray();
         WireEvents();
         long chromeConfiguredAt = Stopwatch.GetTimestamp();
@@ -359,6 +380,23 @@ public sealed partial class MainForm : Form
 
     protected override void Dispose(bool disposing)
     {
+        if (disposing && _layoutPreview)
+        {
+            _isClosing = true;
+            _presenceResponder.Dispose();
+            _hostServer.Dispose();
+            _viewerClient.Dispose();
+            _relayHostConnector.Dispose();
+            _relayNetworkOptimizer.Dispose();
+            _relayOperationCancellation.Dispose();
+            _relayRefreshTimer.Dispose();
+            _toolTip.Dispose();
+            _savedDeviceMenu?.Dispose();
+            _viewerStatusMenu?.Dispose();
+            _diagnosticLog.Dispose();
+            base.Dispose(disposing);
+            return;
+        }
         if (disposing)
         {
             _isClosing = true;
@@ -953,11 +991,12 @@ public sealed partial class MainForm : Form
         Control permissions = BuildHostPermissionsPanel();
         permissions.Visible = false;
         var permissionsButton = CreateSecondaryButton("被控权限设置…");
-        permissionsButton.Click += (_, _) =>
+        permissionsButton.Click += async (_, _) =>
         {
-            _refreshPermissionStatus?.Invoke();
             permissions.Visible = !permissions.Visible;
             permissionsButton.Text = permissions.Visible ? "收起权限设置" : "被控权限设置…";
+            if (permissions.Visible && _refreshPermissionStatus is not null)
+                await _refreshPermissionStatus();
         };
         actions.Controls.Add(permissionsButton);
         actions.Controls.Add(refreshIpButton);
@@ -1006,6 +1045,7 @@ public sealed partial class MainForm : Form
         root.Controls.Add(permissions, 0, 2);
         root.Controls.Add(logSection.Parent!, 0, 3);
         page.Controls.Add(root);
+        ResponsiveWindowLayout.ConfigureScrollablePage(page, root);
         return page;
     }
 
@@ -1093,7 +1133,7 @@ public sealed partial class MainForm : Form
         _pullRemoteFilesButton = CreateSecondaryButton(RemoteFilePullUi.DefaultButtonText);
         _pullRemoteFilesButton.Enabled = false;
         _openReceivedFilesButton = CreateSecondaryButton("接收目录");
-        _remoteUpdateButton = CreateSecondaryButton("同步更新");
+        _remoteUpdateButton = CreateSecondaryButton("同步程序版本");
         _remoteUpdateButton.Enabled = false;
         _viewerToggleButton = CreatePrimaryButton("连接");
         _viewerStatusLabel = CreateStatusLine("未连接");
@@ -1127,7 +1167,7 @@ public sealed partial class MainForm : Form
                 _viewerCaptureTargetBox));
         toolbar.Controls.Add(
             CreateNonWrappingToolbarField(
-                "模式",
+                "画面模式",
                 _viewerVideoModeBox));
         toolbar.Controls.Add(_sendClipboardButton);
         toolbar.Controls.Add(_readClipboardButton);
@@ -1278,6 +1318,7 @@ public sealed partial class MainForm : Form
         root.Controls.Add(toolbarSection.Parent!, 0, 0);
         root.Controls.Add(workspace, 0, 1);
         page.Controls.Add(root);
+        ResponsiveWindowLayout.ConfigureScrollablePage(page, root);
         long pageCompletedAt = Stopwatch.GetTimestamp();
         _diagnosticLog.Append(
             "PERF",
@@ -1452,6 +1493,7 @@ public sealed partial class MainForm : Form
         root.Controls.Add(configuration.Parent!, 0, 0);
         root.Controls.Add(online.Parent!, 0, 1);
         page.Controls.Add(root);
+        ResponsiveWindowLayout.ConfigureScrollablePage(page, root);
         return page;
     }
 
@@ -1573,8 +1615,8 @@ public sealed partial class MainForm : Form
         SetToolTip(_viewerCaptureTargetBox, "连接后可切换远程屏幕。");
         SetToolTip(
             _viewerVideoModeBox,
-            "自动低延迟会在 H.264 不可用时保持 JPEG 连接；" +
-            "仅 H.264 适合编码链路已确认可用的设备，否则会断开。");
+            ViewerVideoModeDescription);
+        SetToolTip(_relayVideoModeBox, ViewerVideoModeDescription);
         SetToolTip(_viewerStatusLabel, "右键可复制当前状态，或打开本机文件接收目录。");
         SetToolTip(_openReceivedFilesButton, "打开本机 RemoteDesk 文件接收目录，连接断开时也可使用。");
         SetToolTip(
@@ -1604,12 +1646,13 @@ public sealed partial class MainForm : Form
         }
     }
 
-    private static void ConfigureResponsiveHostSettings(
+    internal static void ConfigureResponsiveHostSettings(
         TableLayoutPanel settingsArea,
         Control networkSection,
         Control captureSection)
     {
         bool applying = false;
+        (bool Compact, int Dpi)? appliedLayout = null;
         void Apply()
         {
             if (applying)
@@ -1624,7 +1667,13 @@ public sealed partial class MainForm : Form
                 dpi);
             int sectionGap = ResponsiveWindowLayout.ScaleLogical(12, dpi);
 
+            // A height change or another pixel of width does not change the
+            // table's structure. Recreating its styles invalidates every
+            // nested preferred-size cache and triggers another full layout.
+            if (appliedLayout == (compact, dpi)) return;
+
             applying = true;
+            appliedLayout = (compact, dpi);
             settingsArea.SuspendLayout();
             try
             {
@@ -1668,6 +1717,7 @@ public sealed partial class MainForm : Form
 
         settingsArea.Resize += (_, _) => Apply();
         settingsArea.HandleCreated += (_, _) => Apply();
+        settingsArea.DpiChangedAfterParent += (_, _) => Apply();
         Apply();
     }
 
@@ -1678,7 +1728,7 @@ public sealed partial class MainForm : Form
         bool applying = false;
         void Apply()
         {
-            if (applying)
+            if (applying || !toolbar.Visible)
             {
                 return;
             }
@@ -1738,6 +1788,7 @@ public sealed partial class MainForm : Form
             }
         }
 
+        toolbar.VisibleChanged += (_, _) => Apply();
         toolbar.Resize += (_, _) => Apply();
         toolbar.ParentChanged += (_, _) => Apply();
         toolbar.HandleCreated += (_, _) => Apply();
@@ -1853,21 +1904,26 @@ public sealed partial class MainForm : Form
         PopulateViewerVideoModes(_viewerVideoModeBox);
     }
 
-    private static void PopulateViewerVideoModes(
+    internal const string ViewerVideoModeDescription =
+        "自动（推荐）：优先使用 H.264，支持时使用硬件加速与清晰增强；不可用时自动回退 JPEG。\n" +
+        "清晰（JPEG）：适合静态文字，带宽占用更高，慢速网络可能卡顿。";
+
+    internal static void PopulateViewerVideoModes(
         ComboBox videoModeBox)
     {
         videoModeBox.Items.Clear();
-        videoModeBox.Items.Add(new ViewerVideoModeItem(ViewerVideoMode.Automatic, "自动（H.264 清晰增强）"));
-        videoModeBox.Items.Add(new ViewerVideoModeItem(ViewerVideoMode.StableJpeg, "文字清晰（JPEG）"));
+        videoModeBox.Items.Add(new ViewerVideoModeItem(ViewerVideoMode.Automatic, "自动（推荐）"));
+        videoModeBox.Items.Add(new ViewerVideoModeItem(ViewerVideoMode.StableJpeg, "清晰（JPEG）"));
         videoModeBox.SelectedIndex = 0;
     }
 
-    private void ConfigureResponsiveViewerWorkspace(
+    internal static void ConfigureResponsiveViewerWorkspace(
         TableLayoutPanel workspace,
         Control hostsSection,
         Control statusSection)
     {
         bool applying = false;
+        (bool Compact, int Dpi)? appliedLayout = null;
         void Apply()
         {
             if (applying)
@@ -1882,12 +1938,17 @@ public sealed partial class MainForm : Form
                 dpi);
             int sectionGap = ResponsiveWindowLayout.ScaleLogical(12, dpi);
 
+            if (appliedLayout == (compact, dpi)) return;
+
             applying = true;
+            appliedLayout = (compact, dpi);
             workspace.SuspendLayout();
             try
             {
                 workspace.ColumnStyles.Clear();
                 workspace.RowStyles.Clear();
+                workspace.MinimumSize = new Size(0,
+                    ResponsiveWindowLayout.ScaleLogical(compact ? 440 : 220, dpi));
                 if (compact)
                 {
                     workspace.ColumnCount = 1;
@@ -1926,6 +1987,7 @@ public sealed partial class MainForm : Form
 
         workspace.Resize += (_, _) => Apply();
         workspace.HandleCreated += (_, _) => Apply();
+        workspace.DpiChangedAfterParent += (_, _) => Apply();
         Apply();
     }
 
@@ -3520,7 +3582,7 @@ public sealed partial class MainForm : Form
         finally
         {
             if (!_isClosing && !IsDisposed) _persistentStartupButton.Enabled = true;
-            _refreshPermissionStatus?.Invoke();
+            if (_refreshPermissionStatus is not null) await _refreshPermissionStatus();
         }
     }
 
@@ -3550,7 +3612,14 @@ public sealed partial class MainForm : Form
         {
             if (!_isClosing && !IsDisposed) MessageBox.Show(this, ex.Message, "锁屏控制", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
-        finally { if (!_isClosing && !IsDisposed) { _secureDesktopButton.Enabled = true; _refreshPermissionStatus?.Invoke(); } }
+        finally
+        {
+            if (!_isClosing && !IsDisposed)
+            {
+                _secureDesktopButton.Enabled = true;
+                if (_refreshPermissionStatus is not null) await _refreshPermissionStatus();
+            }
+        }
     }
 
     private async Task ToggleHostAsync()
@@ -5323,13 +5392,21 @@ public sealed partial class MainForm : Form
         try
         {
             int hostProbePort = (int)_viewerPortBox.Value;
-            IReadOnlyList<DiscoveredHost> discoveredHosts = await NetworkDiscoveryService.DiscoverAsync(
-                TimeSpan.FromMilliseconds(900),
-                scanCancellation.Token,
-                hostProbePort: hostProbePort,
-                directTargets: GetDiscoveryProbeTargets(),
-                includeDirectedTcpProbes: false);
-            IReadOnlyList<DiscoveredHost> hosts = RemoveLocalDiscoveredHosts(discoveredHosts, out int ignoredLocalHosts);
+            IReadOnlyList<DiscoveryProbeTarget> probeTargets = GetDiscoveryProbeTargets();
+            // Both adapter enumeration (before the first await) and filtering
+            // local addresses synchronously query Windows network state. Keep
+            // them off the UI thread, including during automatic refreshes.
+            var (hosts, ignoredLocalHosts) = await Task.Run(async () =>
+            {
+                IReadOnlyList<DiscoveredHost> discoveredHosts = await NetworkDiscoveryService.DiscoverAsync(
+                    TimeSpan.FromMilliseconds(900),
+                    scanCancellation.Token,
+                    hostProbePort: hostProbePort,
+                    directTargets: probeTargets,
+                    includeDirectedTcpProbes: false).ConfigureAwait(false);
+                IReadOnlyList<DiscoveredHost> remoteHosts = RemoveLocalDiscoveredHosts(discoveredHosts, out int ignored);
+                return (remoteHosts, ignored);
+            }, scanCancellation.Token);
 
             if (scanCancellation.IsCancellationRequested || _isClosing || IsDisposed)
             {
@@ -8406,6 +8483,17 @@ public sealed partial class MainForm : Form
     {
         table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         StyleInput(control);
+        if (control is TextBox or ComboBox)
+        {
+            // A fixed, unanchored input in an AutoSize percent column can
+            // retain a zero-width measurement from an initially hidden tab.
+            // Let the actual settings column assign its width instead.
+            control.Dock = DockStyle.Top;
+        }
+        else if (control is NumericUpDown)
+        {
+            control.MinimumSize = new Size(control.Width, control.MinimumSize.Height);
+        }
         table.Controls.Add(CreateFieldLabel(label), 0, row);
         table.Controls.Add(control, 1, row);
     }

@@ -21,10 +21,14 @@ import remotedesk_linux_devices as model
 @unittest.skipUnless(sys.platform.startswith("linux") and os.environ.get("DISPLAY"), "Tk display required; run with xvfb-run")
 class DevicePanelUiTests(unittest.TestCase):
     def setUp(self):
+        from remotedesk_linux_app import RemoteDeskLinuxApp
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = tk.Tk(); self.root.geometry("900x400"); self.addCleanup(self.root.destroy)
         self.app = SimpleNamespace(root=self.root, viewer=None, viewer_host=tk.StringVar(), viewer_port=tk.StringVar(),
-                                   viewer_password=tk.StringVar(), connect_viewer=mock.Mock())
+                                   viewer_password=tk.StringVar(), connect_viewer=mock.Mock(),
+                                   _wrap_action_buttons=RemoteDeskLinuxApp._wrap_action_buttons,
+                                   _wrapping_label=RemoteDeskLinuxApp._wrapping_label,
+                                   _device_table=RemoteDeskLinuxApp._device_table)
         store = model.Store(Path(self.temp.name) / "devices")
         with mock.patch.object(model, "Store", return_value=store):
             self.panel = panel.DevicePanel(self.app, self.root)

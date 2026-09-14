@@ -195,6 +195,57 @@ internal static class ResponsiveWindowLayout
         form.MinimumSize = metrics.MinimumSize;
     }
 
+    internal static void ConfigureScrollablePage(TabPage page, TableLayoutPanel content)
+    {
+        // One scroll owner: nested Fill-docked scroll panels retain their old
+        // virtual width, preventing children from seeing a narrower viewport.
+        page.AutoScroll = true;
+        content.AutoScroll = false;
+        content.Dock = DockStyle.Top;
+        content.AutoSize = false;
+        content.ColumnStyles.Clear();
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        bool queued = false;
+        bool applying = false;
+        void Reflow()
+        {
+            queued = false;
+            if (page.IsDisposed || !page.Visible || page.ClientSize.Width <= 0) return;
+            applying = true;
+            try
+            {
+                // GetPreferredSize is a measurement, not AutoSize: allowing the
+                // outer table to AutoSize also shrinks fixed-width inputs to 0.
+                int height = Math.Max(page.ClientSize.Height,
+                    content.GetPreferredSize(new Size(page.ClientSize.Width, 0)).Height);
+                if (content.Height != height) content.Height = height;
+                var extent = new Size(0, height);
+                if (page.AutoScrollMinSize != extent) page.AutoScrollMinSize = extent;
+            }
+            finally { applying = false; }
+        }
+        void QueueReflow()
+        {
+            if (queued || applying || !page.IsHandleCreated || page.IsDisposed) return;
+            queued = true;
+            page.BeginInvoke((Action)Reflow);
+        }
+        page.ClientSizeChanged += (_, _) => QueueReflow();
+        page.VisibleChanged += (_, _) => QueueReflow();
+        page.HandleCreated += (_, _) => QueueReflow();
+        content.Layout += (_, _) => QueueReflow();
+        void TrackFocus(Control parent)
+        {
+            foreach (Control child in parent.Controls)
+            {
+                child.Enter += (_, _) => page.ScrollControlIntoView(child);
+                TrackFocus(child);
+            }
+        }
+        TrackFocus(content);
+        QueueReflow();
+    }
+
     internal static void ConfigureDialog(Form form, Size logicalPreferredSize, Size logicalMinimumSize)
     {
         form.SuspendLayout();

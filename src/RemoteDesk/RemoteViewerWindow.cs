@@ -117,6 +117,9 @@ internal sealed partial class RemoteViewerWindow : Form
     private readonly Dictionary<long, PendingMediaFoundationInput>
         _pendingMediaFoundationInputs = new();
     private readonly LatestFrameMailbox<DecodedRemoteFrame> _decodedFrameMailbox = new();
+    private readonly LatestFrameMailbox<DecodedRemoteFrame> _softwarePreparationMailbox = new();
+    private int _softwarePreparationDisabled;
+    private long _softwarePresentationEpoch;
     private readonly ArrayPool<byte> _encodedFramePool;
     private readonly RemoteInputOwnershipTracker
         _remoteInputOwnership = new();
@@ -1377,6 +1380,12 @@ internal sealed partial class RemoteViewerWindow : Form
         int actionHeight = stacked
             ? ResponsiveWindowLayout.MeasureFlowLayout(actions, width).Height
             : singleRow.Height;
+        var actionSize = new Size(stacked ? width : singleRow.Width, actionHeight);
+        DockStyle actionDock = stacked ? DockStyle.Bottom : DockStyle.Right;
+        int footerHeight = stacked ? statusHeight + actionHeight : Math.Max(statusHeight, actionHeight);
+        if (!actions.AutoSize && actions.WrapContents == stacked && actions.Dock == actionDock &&
+            actions.Size == actionSize && footer.Height == footerHeight)
+            return;
 
         footer.SuspendLayout();
         actions.SuspendLayout();
@@ -1386,9 +1395,9 @@ internal sealed partial class RemoteViewerWindow : Form
             // status on its own row. Shrink back when more room is available.
             actions.AutoSize = false;
             actions.WrapContents = stacked;
-            actions.Dock = stacked ? DockStyle.Bottom : DockStyle.Right;
-            actions.Size = new Size(stacked ? width : singleRow.Width, actionHeight);
-            footer.Height = stacked ? statusHeight + actionHeight : Math.Max(statusHeight, actionHeight);
+            actions.Dock = actionDock;
+            actions.Size = actionSize;
+            footer.Height = footerHeight;
         }
         finally
         {
@@ -2158,8 +2167,9 @@ internal sealed partial class RemoteViewerWindow : Form
                 PictureBox_HandleCreated;
             _pictureBox.HandleDestroyed -=
                 PictureBox_HandleDestroyed;
-            _pictureBox.Image = null;
+            _pictureBox.SetFrameImage(null, null);
             _decodedFrameMailbox.Close()?.Dispose();
+            _softwarePreparationMailbox.Close()?.Dispose();
             _currentImage?.Dispose();
             _pictureBox.DirectPresentationActive = false;
             DisposeD3D11VideoPresenter();
@@ -2450,10 +2460,11 @@ internal sealed partial class RemoteViewerWindow : Form
         {
             ClearPendingVideoFramesForShutdown();
             _decodedFrameMailbox.TakeLatest()?.Dispose();
+            _softwarePreparationMailbox.TakeLatest()?.Dispose();
             ResetH264Decoder();
             DeactivateD3D11Presentation(
                 disposePresenter: true);
-            _pictureBox.Image = null;
+            _pictureBox.SetFrameImage(null, null);
             Image? oldImage = _currentImage;
             _currentImage = null;
             oldImage?.Dispose();
@@ -3062,6 +3073,9 @@ internal sealed partial class RemoteViewerWindow : Form
                                 .FrameReady &&
                         directDecode.Frame is not null)
                     {
+                        // A delayed CPU preview must never replace a newer
+                        // directly presented GPU frame after a codec switch.
+                        Interlocked.Increment(ref _softwarePresentationEpoch);
                         _h264DecodeMisses = 0;
                         RemoteFrameMetadata hardwareSourceFrame =
                             directDecode.SourceFrame ??
@@ -4511,10 +4525,56 @@ internal sealed partial class RemoteViewerWindow : Form
             alreadyPresented: false,
             presentedAtTimestamp: 0,
             presentationGeneration);
+        if (bitmap is not null)
+        {
+            decodedFrame.SoftwarePresentationEpoch = Interlocked.Read(ref _softwarePresentationEpoch);
+            LatestFrameOffer<DecodedRemoteFrame> preparation = _softwarePreparationMailbox.Offer(decodedFrame);
+            preparation.Replaced?.Dispose();
+            if (!preparation.Accepted) decodedFrame.Dispose();
+            else if (preparation.ShouldSchedule) _ = Task.Run(PrepareLatestSoftwareFrames);
+            return;
+        }
+        QueueDecodedRemoteImage(decodedFrame);
+    }
+
+    private void PrepareLatestSoftwareFrames()
+    {
+        // Separate from JPEG decoding so decode and scale remain pipelined.
+        // Just one pending latest frame: no growing queue and no timer delay.
+        do
+        {
+            DecodedRemoteFrame? frame = _softwarePreparationMailbox.TakeLatest();
+            if (frame is null) continue;
+            try
+            {
+                if (_isClosing || IsDisposed || !CanPresentCaptureGeneration(frame.PresentationGeneration)) continue;
+                if (Volatile.Read(ref _softwarePreparationDisabled) == 0)
+                {
+                    try
+                    {
+                        frame.PrepareSoftwareBitmap(new Size(Volatile.Read(ref _pictureBoxClientWidth),
+                            Volatile.Read(ref _pictureBoxClientHeight)), Volatile.Read(ref _allowDisplayUpscaling) != 0);
+                    }
+                    catch (Exception ex) when (ex is ArgumentException or ExternalException or OutOfMemoryException)
+                    {
+                        Interlocked.Exchange(ref _softwarePreparationDisabled, 1);
+                        DiagnosticLog.Append("VIEWER", $"后台画面缩放不可用，使用兼容绘制：{ex.Message}");
+                    }
+                }
+                QueueDecodedRemoteImage(frame);
+                frame = null; // Ownership moved to the UI mailbox (or disposed there).
+            }
+            finally { frame?.Dispose(); }
+        } while (_softwarePreparationMailbox.CompleteDispatch());
+    }
+
+    private void QueueDecodedRemoteImage(DecodedRemoteFrame decodedFrame)
+    {
         if (_isClosing ||
             IsDisposed ||
+            (decodedFrame.IsSoftwareFrame && decodedFrame.SoftwarePresentationEpoch != Interlocked.Read(ref _softwarePresentationEpoch)) ||
             !CanPresentCaptureGeneration(
-                presentationGeneration))
+                decodedFrame.PresentationGeneration))
         {
             decodedFrame.Dispose();
             return;
@@ -4638,6 +4698,7 @@ internal sealed partial class RemoteViewerWindow : Form
             {
                 return;
             }
+            if (decodedFrame.IsSoftwareFrame && decodedFrame.SoftwarePresentationEpoch != Interlocked.Read(ref _softwarePresentationEpoch)) return;
 
             RemoteFrameMetadata frame =
                 decodedFrame.Frame;
@@ -4691,7 +4752,7 @@ internal sealed partial class RemoteViewerWindow : Form
                             new Size(
                                 frame.Width,
                                 frame.Height));
-                        _pictureBox.Image = bitmap;
+                        _pictureBox.SetFrameImage(bitmap, decodedFrame.DetachPreparedSoftwareBitmap());
                         Image? oldImage = _currentImage;
                         _currentImage = bitmap;
                         imageAssigned = true;
@@ -5311,7 +5372,7 @@ internal sealed partial class RemoteViewerWindow : Form
 
         if (_pictureBox.Image is not null)
         {
-            _pictureBox.Image = null;
+            _pictureBox.SetFrameImage(null, null);
         }
 
         Image? oldImage = _currentImage;
@@ -5505,6 +5566,9 @@ internal sealed partial class RemoteViewerWindow : Form
     internal sealed class DecodedRemoteFrame : IDisposable
     {
         private Bitmap? _bitmap;
+        private PreparedSoftwareBitmap? _preparedSoftwareBitmap;
+        internal bool IsSoftwareFrame => _bitmap is not null;
+        internal long SoftwarePresentationEpoch { get; set; }
         private MediaFoundationD3D11DecodedFrame? _hardwareFrame;
         private int _disposed;
 
@@ -5631,6 +5695,16 @@ internal sealed partial class RemoteViewerWindow : Form
                 ref _bitmap,
                 null);
 
+        internal void PrepareSoftwareBitmap(Size viewport, bool allowUpscaling)
+        {
+            if (_bitmap is not null)
+                Interlocked.Exchange(ref _preparedSoftwareBitmap,
+                    PreparedSoftwareBitmap.Create(_bitmap, viewport, allowUpscaling))?.Dispose();
+        }
+
+        internal PreparedSoftwareBitmap? DetachPreparedSoftwareBitmap() =>
+            Interlocked.Exchange(ref _preparedSoftwareBitmap, null);
+
         public MediaFoundationD3D11DecodedFrame?
             DetachHardwareFrame() =>
                 Interlocked.Exchange(
@@ -5649,6 +5723,7 @@ internal sealed partial class RemoteViewerWindow : Form
             Interlocked.Exchange(
                 ref _bitmap,
                 null)?.Dispose();
+            Interlocked.Exchange(ref _preparedSoftwareBitmap, null)?.Dispose();
             Interlocked.Exchange(
                 ref _hardwareFrame,
                 null)?.Dispose();
@@ -8207,12 +8282,15 @@ internal sealed partial class RemoteViewerWindow : Form
         UpdateStatusToolTip(text);
     }
 
-    private void SetPerformanceStatus(string text)
+    internal void SetPerformanceStatus(string text)
     {
+        bool hadDetails = _statusBar.HasDetails;
         _statusBar.SetDetails(text, MutedTextColor);
         UpdateStatusToolTip(
             _statusBar.StatusText);
-        UpdateStatusFooterLayout();
+        // The layout depends on whether a details row exists, not on changing
+        // FPS/latency digits. Reflowing all buttons here stalls the shared UI.
+        if (hadDetails != _statusBar.HasDetails) UpdateStatusFooterLayout();
     }
 
     internal static (Rectangle StatusBounds, Rectangle DetailsBounds) CalculateStatusBarLayout(
@@ -8558,6 +8636,26 @@ internal sealed partial class RemoteViewerWindow : Form
 
     internal sealed class BufferedPictureBox : PictureBox
     {
+        private PreparedSoftwareBitmap? _preparedSoftwareBitmap;
+
+        internal void SetFrameImage(Bitmap? image, PreparedSoftwareBitmap? prepared)
+        {
+            PreparedSoftwareBitmap? previous = _preparedSoftwareBitmap;
+            _preparedSoftwareBitmap = prepared;
+            try { Image = image; }
+            finally { previous?.Dispose(); }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _preparedSoftwareBitmap?.Dispose();
+                _preparedSoftwareBitmap = null;
+            }
+            base.Dispose(disposing);
+        }
+
         private bool _directPresentationActive;
         private bool _localImeEnabled;
         private long _compositionGeneration;
@@ -8622,6 +8720,31 @@ internal sealed partial class RemoteViewerWindow : Form
 
         protected override void WndProc(ref Message message)
         {
+            // WinForms' Graphics-backed paint path can still contend with
+            // background GDI+ scaling. Present an already-prepared DIB directly
+            // to the native paint DC, leaving input and the rest of the UI free.
+            if (!_directPresentationActive &&
+                _preparedSoftwareBitmap?.Matches(Image, ClientSize, SizeMode) == true)
+            {
+                if (message.Msg == 0x000F) // WM_PAINT
+                {
+                    nint target = BeginPaint(Handle, out NativePaint paint);
+                    bool rendered;
+                    try { rendered = _preparedSoftwareBitmap.TryDraw(target, paintBackground: true); }
+                    finally { _ = EndPaint(Handle, ref paint); }
+                    if (rendered) { message.Result = 0; return; }
+                    // A failed native blit must retain the original fallback.
+                    _preparedSoftwareBitmap.Dispose();
+                    _preparedSoftwareBitmap = null;
+                    Invalidate();
+                }
+                else if (message.Msg == 0x0318 && message.WParam != 0 &&
+                    _preparedSoftwareBitmap.TryDraw(message.WParam, paintBackground: true)) // WM_PRINTCLIENT
+                {
+                    message.Result = 0;
+                    return;
+                }
+            }
             const int wmImeStartComposition = 0x010D;
             const int wmImeEndComposition = 0x010E;
             const int wmImeComposition = 0x010F;
@@ -8694,6 +8817,16 @@ internal sealed partial class RemoteViewerWindow : Form
 
         [DllImport("imm32.dll")]
         private static extern nint ImmGetContext(nint window);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativePaint
+        {
+            public nint Hdc;
+            public int Erase, Left, Top, Right, Bottom, Restore, IncUpdate;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)] public byte[] Reserved;
+        }
+        [DllImport("user32.dll")] private static extern nint BeginPaint(nint window, out NativePaint paint);
+        [DllImport("user32.dll")] private static extern bool EndPaint(nint window, ref NativePaint paint);
         [DllImport("imm32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool ImmReleaseContext(nint window, nint context);
@@ -8730,6 +8863,7 @@ internal sealed partial class RemoteViewerWindow : Form
         {
             if (!_directPresentationActive)
             {
+                if (_preparedSoftwareBitmap?.TryDraw(args.Graphics, Image, ClientSize, SizeMode) == true) return;
                 args.Graphics.InterpolationMode =
                     System.Drawing.Drawing2D.InterpolationMode
                         .HighQualityBicubic;

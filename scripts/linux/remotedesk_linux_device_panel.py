@@ -21,11 +21,12 @@ class DevicePanel(ttk.LabelFrame):
         for title, action in (("查找附近设备", lambda:self.scan()), ("探测此 IP 的端口", self.detect),
                               ("新增设备", self.add), ("修改备注", self.rename), ("删除记录", self.remove)):
             ttk.Button(actions, text=title, command=action).pack(side=tk.LEFT, padx=(0, 5))
-        self.status = ttk.Label(self, text="正在读取已保存设备…", wraplength=800); self.status.pack(fill=tk.X, pady=6)
-        self.tree = ttk.Treeview(self, columns=("address", "state"), show="tree headings", height=4, selectmode="browse")
+        app._wrap_action_buttons(actions, actions.winfo_children())
+        self.status = app._wrapping_label(self, text="正在读取已保存设备…"); self.status.pack(fill=tk.X, pady=6)
+        self.tree = app._device_table(self, columns=("address", "state"), show="tree headings", height=4, selectmode="browse")
         self.tree.heading("#0", text="设备 / 备注"); self.tree.heading("address", text="IP / 端口"); self.tree.heading("state", text="状态")
         self.tree.column("#0", width=220); self.tree.column("address", width=210); self.tree.column("state", width=180)
-        self.tree.pack(fill=tk.X); self.rows = {}
+        self.rows = {}
         # Programmatic selection during refresh must not overwrite edited fields.
         self.tree.bind("<ButtonRelease-1>", self.fill_selection)
         self.tree.bind("<KeyRelease-Up>", self.fill_selection)

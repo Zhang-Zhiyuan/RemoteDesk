@@ -33,7 +33,7 @@ internal sealed class RelaySetupDialog : Form
             Padding = new Padding(20),
             BackColor = Color.White
         };
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
         _serverBox = CreateTextBox(
@@ -43,7 +43,7 @@ internal sealed class RelaySetupDialog : Form
         _usernameBox = CreateTextBox(
             settings.AdminUsername ?? "root",
             "root 或有 sudo 权限的账号");
-        _passwordBox = CreateTextBox(string.Empty, "仅本次 SSH 登录使用，不保存");
+        _passwordBox = CreateTextBox(string.Empty, "本次登录使用，不保存");
         _passwordBox.UseSystemPasswordChar = true;
         _relayPortBox = CreatePortBox(
             settings.RelayPort,
@@ -52,7 +52,7 @@ internal sealed class RelaySetupDialog : Form
         AddRow(root, 0, "公网服务器", _serverBox);
         AddRow(root, 1, "SSH 端口", _sshPortBox);
         AddRow(root, 2, "管理员账号", _usernameBox);
-        AddRow(root, 3, "root / 管理员密码", _passwordBox);
+        AddRow(root, 3, "管理员密码", _passwordBox);
         if (!loginOnly) AddRow(root, 4, "中继端口", _relayPortBox);
 
         var note = new Label
@@ -61,11 +61,10 @@ internal sealed class RelaySetupDialog : Form
             Dock = DockStyle.Top,
             ForeColor = Color.FromArgb(71, 85, 105),
             Text = loginOnly
-                ? "用服务器 root / 管理员密码登录，自动获取中继配置；不保存 root 密码、不更新或重启服务器。" +
-                  "之后自动连接，控制设备时使用各自的设备密钥。首次登录记住服务器身份，变化时停止登录。"
-                : "首次保存会通过 SSH 自动安装/更新 systemd 服务并放行本机防火墙。" +
-                "管理员密码不会保存；首次连接会记录 SSH 主机指纹，之后指纹变化将被拒绝。" +
-                "云厂商安全组仍需放行所填 TCP 中继端口。",
+                ? "填写服务器 root / 管理员密码，不是设备密钥。登录后自动获取配置，不保存管理员密码，也不更新或重启服务器。\n" +
+                  "之后自动连接；服务器身份变化时会停止登录。"
+                : "通过 SSH 安装或更新中继服务，并放行服务器防火墙；云安全组仍需放行中继 TCP 端口。\n" +
+                  "root / 管理员密码不保存。首次连接记录服务器身份，身份变化时停止部署。",
             Margin = new Padding(0, 8, 0, 10)
         };
         root.Controls.Add(note, 0, 5);

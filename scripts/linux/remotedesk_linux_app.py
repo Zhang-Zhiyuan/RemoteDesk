@@ -45,7 +45,7 @@ if __name__ == "__main__" and sys.platform.startswith("linux"):
 
 try:
     import tkinter as tk
-    from tkinter import filedialog, messagebox, simpledialog, ttk
+    from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 except Exception as ex:  # pragma: no cover - exercised on target desktops.
     print(f"RemoteDesk Linux GUI requires tkinter: {ex}", file=sys.stderr)
     raise SystemExit(2)
@@ -4829,7 +4829,7 @@ class RemoteDeskLinuxApp:
             self.root.after_idle(lambda: None if self.closing else self._refresh_relay())
 
     def _build_relay_tab(self, notebook):
-        tab = self._create_scrollable_tab(notebook, "公网中转")
+        tab = self._create_scrollable_tab(notebook, "公网中继")
         load_error = ""
         try:
             self.relay_options = relay.load_settings()
@@ -4852,7 +4852,7 @@ class RemoteDeskLinuxApp:
         self.relay_publish = tk.BooleanVar(value=options.publish if options else True)
         self.relay_password = tk.StringVar()
         self.relay_key_selection = None
-        self.relay_server_summary = ttk.Label(tab, text='', style='PanelSubtitle.TLabel')
+        self.relay_server_summary = self._wrapping_label(tab, text='', style='PanelSubtitle.TLabel')
         self.relay_server_summary.pack(fill=tk.X, pady=(0, 8))
         self.relay_manage_button = ttk.Button(tab, text='服务器设置', command=self._toggle_relay_form)
         self.relay_manage_button.pack(anchor=tk.W, pady=(0, 8))
@@ -4862,24 +4862,28 @@ class RemoteDeskLinuxApp:
         self.relay_setup_controls = []
         for row, label, variable, secret in (
             (0, "服务器地址 / IP", self.relay_server, False),
-            (1, "服务器 root / 管理员密码", self.relay_admin_password, True)):
+            (1, "管理员密码", self.relay_admin_password, True)):
             self.relay_setup_controls.append(self._row_entry(form, row, label, variable, show="*" if secret else ""))
         advanced = ttk.Frame(form)
         advanced.grid(row=4, column=0, columnspan=3, sticky=tk.EW)
         self.relay_setup_controls.append(self._row_entry(advanced, 0, "SSH 端口（默认 22）", self.relay_ssh_port))
         self.relay_setup_controls.append(self._row_entry(advanced, 1, "管理员账号（默认 root）", self.relay_admin_user))
-        ttk.Label(advanced, text="中继端口和内部连接配置自动获取，无需填写密钥或证书。",
+        self._wrapping_label(advanced, text="中继配置自动获取，无需填写证书或内部密钥。",
                   wraplength=680, style="PanelSubtitle.TLabel").grid(row=2, column=0, columnspan=2, sticky=tk.W)
         advanced.grid_remove()
-        ttk.Button(form, text="高级设置（通常不用改）", command=lambda:
-                   advanced.grid_remove() if advanced.winfo_manager() else advanced.grid()).grid(
-                       row=3, column=0, columnspan=3, sticky=tk.W, pady=6)
-        publish = ttk.Checkbutton(tab, text="允许本机在此服务器上线（立即生效）", variable=self.relay_publish,
+        advanced_button = ttk.Button(form, text="展开高级设置")
+        def toggle_advanced():
+            expanded = bool(advanced.winfo_manager())
+            advanced.grid_remove() if expanded else advanced.grid()
+            advanced_button.configure(text="展开高级设置" if expanded else "收起高级设置")
+        advanced_button.configure(command=toggle_advanced)
+        advanced_button.grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=6)
+        publish = ttk.Checkbutton(tab, text="允许本机在此服务器上线", variable=self.relay_publish,
                                   command=self._change_relay_publish)
         publish.pack(anchor=tk.W, pady=8)
         self.relay_publish_control = publish
         self.relay_setup_controls.append(publish)
-        ttk.Label(form, text="首次用 root 密码登录，之后自动连接；root 密码不保存，已登录可留空。设备控制使用各自的设备密钥。",
+        self._wrapping_label(form, text="填写服务器 root / 管理员密码，不是设备密钥。登录后自动获取配置，管理员密码不保存；已登录时可留空。",
                   wraplength=680, style="PanelSubtitle.TLabel").grid(row=6, column=0, columnspan=3, sticky=tk.W)
         actions = ttk.Frame(form)
         actions.grid(row=7, column=0, columnspan=3, sticky=tk.EW, pady=10)
@@ -4890,15 +4894,17 @@ class RemoteDeskLinuxApp:
         self.relay_cancel_button.pack(side=tk.LEFT, padx=8)
         self.relay_logout_button = ttk.Button(actions, text="退出服务器", command=self._logout_relay)
         self.relay_logout_button.pack(side=tk.LEFT, padx=8)
+        self._wrap_action_buttons(actions, (save, self.relay_cancel_button, self.relay_logout_button))
         directory_actions = ttk.Frame(tab)
         directory_actions.pack(fill=tk.X, pady=8)
         ttk.Button(directory_actions, text="刷新在线设备", command=self._refresh_relay).pack(side=tk.LEFT)
         ttk.Button(directory_actions, text="立即上报本机 IP", command=self._report_relay_address).pack(side=tk.LEFT, padx=8)
-        self.relay_rename_button = ttk.Button(directory_actions, text="共享名称", command=self._rename_relay_device)
+        self.relay_rename_button = ttk.Button(directory_actions, text="修改共享名称", command=self._rename_relay_device)
         self.relay_rename_button.pack(side=tk.LEFT)
-        self.relay_status = ttk.Label(tab, text=load_error or ("服务器登录已保存，点击刷新查看在线设备。" if options else "尚未登录，请填写服务器地址和管理员密码。"), wraplength=700)
+        self._wrap_action_buttons(directory_actions, directory_actions.winfo_children())
+        self.relay_status = self._wrapping_label(tab, text=load_error or ("服务器登录已保存，点击刷新查看在线设备。" if options else "尚未登录，请填写服务器地址和管理员密码。"), wraplength=700)
         self.relay_status.pack(fill=tk.X, pady=6)
-        self.relay_list = ttk.Treeview(tab, columns=("platform", "status", "address"), show="tree headings", height=7)
+        self.relay_list = self._device_table(tab, columns=("platform", "status", "address"), show="tree headings", height=7)
         self.relay_list.heading("#0", text="设备")
         self.relay_list.heading("platform", text="平台")
         self.relay_list.heading("status", text="状态")
@@ -4907,10 +4913,6 @@ class RemoteDeskLinuxApp:
         self.relay_list.column("status", width=150)
         self.relay_list.heading("address", text="直连 IP / 端口")
         self.relay_list.column("address", width=280)
-        self.relay_list.pack(fill=tk.BOTH, expand=True, pady=8)
-        address_scroll = ttk.Scrollbar(tab, orient=tk.HORIZONTAL, command=self.relay_list.xview)
-        self.relay_list.configure(xscrollcommand=address_scroll.set)
-        address_scroll.pack(fill=tk.X)
         self.relay_list.bind("<Double-1>", lambda _event: self._connect_relay())
         self.relay_list.bind('<<TreeviewSelect>>', lambda _event: self._select_relay_key())
         password_form = ttk.Frame(tab)
@@ -5319,6 +5321,9 @@ class RemoteDeskLinuxApp:
         except tk.TclError:
             pass
         style.configure(".", font=("DejaVu Sans", 10), background=APP_BG, foreground=TEXT_COLOR)
+        # Treeview's default fixed row height clips device names at large DPI.
+        row_font = tkfont.Font(root=self.root, font=style.lookup("Treeview", "font"))
+        style.configure("Treeview", rowheight=row_font.metrics("linespace") + 10)
         style.configure("TFrame", background=APP_BG)
         style.configure("App.TFrame", background=APP_BG)
         style.configure("Header.TFrame", background=HEADER_BG)
@@ -5425,7 +5430,7 @@ class RemoteDeskLinuxApp:
         )
         badge = tk.Label(
             header,
-            text="加密局域网",
+            text="直连 / 私有中继",
             bg="#172554",
             fg="#bfdbfe",
             font=("DejaVu Sans", 9, "bold"),
@@ -5441,7 +5446,7 @@ class RemoteDeskLinuxApp:
 
         def update_header_layout(event: tk.Event[Any] | None = None) -> None:
             available_width = int(getattr(event, "width", header.winfo_width()))
-            compact = available_width < 620
+            compact = available_width < brand.winfo_reqwidth() + title.winfo_reqwidth() + badge.winfo_reqwidth() + 90
             if compact == compact_state["value"] and available_width > 1:
                 return
             compact_state["value"] = compact
@@ -5452,6 +5457,64 @@ class RemoteDeskLinuxApp:
 
         header.bind("<Configure>", update_header_layout, add="+")
         header.after_idle(update_header_layout)
+
+    @staticmethod
+    def _wrapping_label(parent, **options):
+        options.setdefault("wraplength", 400)
+        options.setdefault("justify", tk.LEFT)
+        label = ttk.Label(parent, **options)
+        label._remotedesk_wrap = True
+        return label
+
+    @staticmethod
+    def _wrap_action_buttons(parent, buttons):
+        """Wrap natural-size actions without retaining the old row's width."""
+        buttons = tuple(buttons)
+        for button in buttons:
+            button.pack_forget()
+        for index, button in enumerate(buttons):
+            button.grid(row=index, column=0, sticky=tk.W, padx=(0, 6), pady=(0, 6))
+        previous = None
+        def reflow(_event=None):
+            nonlocal previous
+            available = max(1, parent.winfo_width())
+            # Grid columns share their maximum width across rows. Measuring
+            # each row separately can make those shared columns wider than
+            # the viewport and oscillate indefinitely between two layouts.
+            width = max((button.winfo_reqwidth() + 6 for button in buttons), default=1)
+            columns = max(1, min(len(buttons), available // width))
+            positions = [(index // columns, index % columns) for index in range(len(buttons))]
+            signature = tuple(positions)
+            if signature == previous:
+                return
+            previous = signature
+            for button in buttons:
+                button.grid_forget()
+            for button, (row, column) in zip(buttons, positions):
+                button.grid(row=row, column=column, sticky=tk.W, padx=(0, 6), pady=(0, 6))
+        parent.bind("<Configure>", reflow, add="+")
+        parent.after_idle(reflow)
+
+    @staticmethod
+    def _device_table(parent, **options):
+        """A wide table scrolls inside its own viewport, never the whole page."""
+        viewport = ttk.Frame(parent, width=1)
+        viewport.pack(fill=tk.X, pady=8)
+        viewport.grid_propagate(False)
+        viewport.rowconfigure(0, weight=1)
+        viewport.columnconfigure(0, weight=1)
+        tree = ttk.Treeview(viewport, **options)
+        vertical = ttk.Scrollbar(viewport, orient=tk.VERTICAL, command=tree.yview)
+        horizontal = ttk.Scrollbar(viewport, orient=tk.HORIZONTAL, command=tree.xview)
+        tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        tree.grid(row=0, column=0, sticky=tk.NSEW)
+        vertical.grid(row=0, column=1, sticky=tk.NS)
+        horizontal.grid(row=1, column=0, sticky=tk.EW)
+        def fit_height(_event=None):
+            viewport.configure(height=tree.winfo_reqheight() + horizontal.winfo_reqheight())
+        tree.bind("<<ThemeChanged>>", fit_height, add="+")
+        viewport.after_idle(fit_height)
+        return tree
 
     def _create_scrollable_tab(
         self,
@@ -5495,6 +5558,18 @@ class RemoteDeskLinuxApp:
             if pending_sync is not None:
                 canvas.after_cancel(pending_sync)
             pending_sync = None
+            # Marked descriptions wrap to the actual viewport, not their old
+            # requested width. Row captions and intentionally wide controls
+            # retain the horizontal-scroll fallback below.
+            def wrap_descriptions(parent):
+                for child in parent.winfo_children():
+                    if getattr(child, "_remotedesk_wrap", False):
+                        left = max(0, child.winfo_rootx() - content.winfo_rootx())
+                        length = max(80, canvas.winfo_width() - left * 2 - 28)
+                        if int(child.cget("wraplength")) != length:
+                            child.configure(wraplength=length)
+                    wrap_descriptions(child)
+            wrap_descriptions(content)
             # Request sizes can change without the canvas resizing (new device
             # rows, wrapped buttons, larger fonts). Recompute both axes; forcing
             # a too-wide form into the viewport permanently clips its inputs.
@@ -5588,9 +5663,9 @@ class RemoteDeskLinuxApp:
         self.host_size = tk.StringVar(value=DEFAULT_HOST_SIZE)
         self.host_machine_name = tk.StringVar(value=socket.gethostname() or "Linux")
 
-        ttk.Label(
+        self._wrapping_label(
             form,
-            text="设置本机监听身份与画面质量；启动后，同一局域网设备可通过设备密钥建立加密连接。",
+            text="设置本机设备密钥后启动被控；其他设备可通过 IP 直连，或登录同一公网中继连接本机。",
             style="PanelSubtitle.TLabel",
             wraplength=760,
             justify=tk.LEFT,
@@ -5628,9 +5703,9 @@ class RemoteDeskLinuxApp:
 
         self.host_remember = tk.BooleanVar(value=True)
         self.host_login_start = tk.BooleanVar(value=True)
-        ttk.Checkbutton(form, text="记住设备密钥与被控状态（本机加密保存）", variable=self.host_remember,
+        ttk.Checkbutton(form, text="加密保存设备密钥与被控状态", variable=self.host_remember,
                         command=self._save_host_preferences).grid(row=8, column=0, columnspan=3, sticky=tk.W, pady=6)
-        ttk.Checkbutton(form, text="登录桌面后自动启动（需记住设备密钥）", variable=self.host_login_start,
+        ttk.Checkbutton(form, text="登录桌面后自动启动", variable=self.host_login_start,
                         command=self._save_host_preferences).grid(row=9, column=0, columnspan=3, sticky=tk.W, pady=6)
 
         buttons = ttk.Frame(tab, style="App.TFrame")
@@ -5645,8 +5720,9 @@ class RemoteDeskLinuxApp:
             style="Danger.TButton",
         )
         self.stop_host_button.pack(side=tk.LEFT, padx=(8, 0))
+        self._wrap_action_buttons(buttons, (self.start_host_button, self.stop_host_button))
 
-        self.host_status = ttk.Label(
+        self.host_status = self._wrapping_label(
             tab,
             text="首次设置设备密钥并启动后会记住被控状态；点击停止后不会自动恢复。",
             style="StatusCard.TLabel",
@@ -5657,6 +5733,7 @@ class RemoteDeskLinuxApp:
         self.host_log = tk.Text(
             tab,
             height=20,
+            width=1,
             wrap=tk.WORD,
             bg="#111827",
             fg="#d1d5db",
@@ -5679,7 +5756,7 @@ class RemoteDeskLinuxApp:
         self.viewer_host = tk.StringVar(value="")
         self.viewer_port = tk.StringVar(value="")
         self.viewer_password = tk.StringVar(value="")
-        ttk.Label(
+        self._wrapping_label(
             form,
             text="点选附近或已保存设备，或输入 IP 和设备密钥；端口留空自动探测。",
             style="PanelSubtitle.TLabel",
@@ -5703,9 +5780,10 @@ class RemoteDeskLinuxApp:
         self.send_file_button = ttk.Button(buttons, text="发送文件", command=self.send_viewer_files, state=tk.DISABLED)
         self.send_folder_button = ttk.Button(buttons, text="发送文件夹", command=self.send_viewer_folder, state=tk.DISABLED)
 
-        text_frame = ttk.Frame(buttons)
+        text_frame = ttk.Frame(tab)
+        text_frame.pack(fill=tk.X, pady=(0, 8))
         self.text_input = tk.StringVar(value="")
-        text_entry = ttk.Entry(text_frame, textvariable=self.text_input)
+        text_entry = ttk.Entry(text_frame, textvariable=self.text_input, width=12)
         text_entry.grid(row=0, column=0, sticky=tk.EW)
         text_entry.bind("<Return>", lambda _event: self.send_viewer_text())
         send_text_button = ttk.Button(text_frame, text="发送文本", command=self.send_viewer_text)
@@ -5718,47 +5796,9 @@ class RemoteDeskLinuxApp:
             self.send_folder_button,
         )
 
-        action_layout_state = {"mode": ""}
+        self._wrap_action_buttons(buttons, viewer_actions)
 
-        def update_viewer_actions(event: tk.Event[Any] | None = None) -> None:
-            available_width = int(getattr(event, "width", buttons.winfo_width()))
-            actions_width = sum(control.winfo_reqwidth() + 8 for control in viewer_actions)
-            mode = "wide" if available_width >= actions_width + text_frame.winfo_reqwidth() + 16 else "medium" if available_width >= actions_width else "compact"
-            if mode == action_layout_state["mode"]:
-                return
-            action_layout_state["mode"] = mode
-            for control in (*viewer_actions, text_frame):
-                control.grid_forget()
-            for column in range(5):
-                buttons.columnconfigure(column, weight=0)
-
-            if mode == "wide":
-                for column, control in enumerate(viewer_actions):
-                    control.grid(row=0, column=column, sticky=tk.W, padx=(0, 8))
-                text_frame.grid(row=0, column=4, sticky=tk.EW, padx=(16, 0))
-                buttons.columnconfigure(4, weight=1)
-            elif mode == "medium":
-                for column, control in enumerate(viewer_actions):
-                    control.grid(row=0, column=column, sticky=tk.W, padx=(0, 8))
-                text_frame.grid(row=1, column=0, columnspan=4, sticky=tk.EW, pady=(8, 0))
-                buttons.columnconfigure(3, weight=1)
-            else:
-                for index, control in enumerate(viewer_actions):
-                    control.grid(
-                        row=index // 2,
-                        column=index % 2,
-                        sticky=tk.EW,
-                        padx=(0 if index % 2 == 0 else 4, 4 if index % 2 == 0 else 0),
-                        pady=(0, 6),
-                    )
-                text_frame.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=(2, 0))
-                buttons.columnconfigure(0, weight=1)
-                buttons.columnconfigure(1, weight=1)
-
-        buttons.bind("<Configure>", update_viewer_actions, add="+")
-        buttons.after_idle(update_viewer_actions)
-
-        self.viewer_status = ttk.Label(
+        self.viewer_status = self._wrapping_label(
             tab,
             text="未连接。",
             style="StatusCard.TLabel",
@@ -5778,13 +5818,14 @@ class RemoteDeskLinuxApp:
         browse: bool = False,
     ) -> ttk.Entry:
         ttk.Label(parent, text=label, style="Panel.TLabel").grid(row=row, column=0, sticky=tk.W, pady=6, padx=(0, 12))
-        entry = ttk.Entry(parent, textvariable=variable, show=show or "")
+        entry = ttk.Entry(parent, textvariable=variable, show=show or "", width=12)
         entry.grid(row=row, column=1, sticky=tk.EW, pady=6)
         parent.columnconfigure(1, weight=1)
         if browse:
             ttk.Button(
                 parent,
                 text="浏览",
+                width=4,
                 command=lambda: self._browse_directory(variable),
             ).grid(row=row, column=2, sticky=tk.W, padx=(8, 0), pady=6)
         return entry

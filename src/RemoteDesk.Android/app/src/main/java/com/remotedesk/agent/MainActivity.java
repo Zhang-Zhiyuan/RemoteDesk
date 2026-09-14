@@ -1433,6 +1433,9 @@ public final class MainActivity extends Activity {
     }
 
     private String currentHeadline() {
+        // This page controls another device. A missing local capture service
+        // must not imply that connecting out requires screen-sharing permission.
+        if (selectedPage == 0) return "选择设备即可远控\n控制其他设备无需本机录屏授权";
         if (RemoteDeskForegroundService.isHostRunning()) {
             if (AndroidScreenCaptureSession.getInstance().isAccessibilityCapture()) {
                 return "免重复授权被控正在运行\n" + AndroidScreenCaptureSession.getInstance().captureStatus();
@@ -1454,7 +1457,6 @@ public final class MainActivity extends Activity {
             return "发现常驻中";
         }
 
-        if (selectedPage == 0) return "选择设备即可远控\n控制其他设备无需本机录屏授权";
         return AndroidHostResume.compatibleSelected(this)
             ? "已打开，可被局域网扫描\n点击启动兼容被控，无需录屏授权"
             : "已打开，可被局域网扫描\n等待屏幕录制授权";

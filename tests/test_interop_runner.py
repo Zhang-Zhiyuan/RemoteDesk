@@ -15,6 +15,29 @@ SPEC.loader.exec_module(runner)
 
 
 class InteropRunnerTests(unittest.TestCase):
+    def test_supplied_relay_validates_identity_and_uses_fresh_test_registration(self):
+        source = dict(serverAddress="relay.example.test", port=56567, accessToken="a" * 64,
+                      tlsCertificateSha256="b" * 64, deviceId="installed-host", publish=False)
+        reader = io.StringIO(runner.json.dumps(source) + "\nnext line\n")
+        first = runner.read_supplied_relay(reader, "RELAY.EXAMPLE.TEST")
+        second = runner.read_supplied_relay(io.StringIO(runner.json.dumps(source)), "relay.example.test")
+        self.assertEqual("B" * 64, first["tlsCertificateSha256"])
+        self.assertTrue(first["publish"])
+        self.assertNotEqual(source["deviceId"], first["deviceId"])
+        self.assertNotEqual(first["deviceId"], second["deviceId"])
+        self.assertEqual("next line\n", reader.read())
+
+    def test_supplied_relay_never_echoes_invalid_or_unexpected_secret_material(self):
+        valid = dict(serverAddress="relay.example.test", port=56567, accessToken="a" * 64,
+                     tlsCertificateSha256="b" * 64)
+        for raw, server in (("secret-not-json", "relay.example.test"), (" " * 16385, "relay.example.test"),
+                            ("null", "relay.example.test"), ("[]", "relay.example.test"),
+                            (runner.json.dumps(valid), "unexpected.example.test"),
+                            (runner.json.dumps({**valid, "tlsCertificateSha256": ""}), "relay.example.test")):
+            with self.subTest(server=server), self.assertRaisesRegex(ValueError,
+                    "^Invalid or unexpected relay configuration on stdin; contents omitted$"):
+                runner.read_supplied_relay(io.StringIO(raw), server)
+
     def test_h264_requirement_rejects_otherwise_healthy_jpeg(self):
         for encoding in (1, "Jpeg", None):
             value = runner.require_h264_evidence(dict(complete=True, encoding=encoding), True)

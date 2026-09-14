@@ -16,6 +16,27 @@ from android_viewer_fixture_server import save_snapshot
 PACKAGE = "com.remotedesk.viewerprobe"
 
 
+def toolbar_swipe(nodes, label):
+    """Return a bounded gesture on this probe's overflow strip, never its desktop."""
+    labels = {"更多", "键盘", "鼠标", "屏幕", "缩放", "触控板", "直接触摸", "新版放大"}
+    if label not in labels:
+        return None
+    strips = [n for n in nodes if n.get("package") == PACKAGE and
+              n.get("class") == "android.widget.HorizontalScrollView" and
+              n.get("content-desc") == "远程操作栏，左右滑动可查看所有按钮"]
+    if len(strips) != 1:
+        return None
+    bounds = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", strips[0].get("bounds", ""))
+    if bounds is None:
+        return None
+    left, top, right, bottom = map(int, bounds.groups())
+    if right - left < 32 or bottom <= top:
+        return None
+    inset = max(8, (right - left) // 10)
+    start, end = (right-inset, left+inset) if label in {"更多", "新版放大"} else (left+inset, right-inset)
+    return start, (top+bottom)//2, end, (top+bottom)//2
+
+
 class StableLayout:
     """Wait out actual IME/layout animation without relaxing any UI assertion."""
     def __init__(self, seconds):
@@ -141,7 +162,24 @@ def main():
         return [n for n in data.iter("node") if n.get("package") == PACKAGE]
 
     def tap(text, prefix=False):
-        matches = [n for n in ui() if (n.get("text", "").startswith(text) if prefix else n.get("text") == text)]
+        def find(nodes):
+            return [n for n in nodes if (n.get("text", "").startswith(text) if prefix else n.get("text") == text)]
+        nodes = ui()
+        matches = find(nodes)
+        # The product toolbar intentionally overflows on narrow/high-density
+        # phones. Reveal only its allowlisted controls, never swipe the desktop
+        # or another application's view to make a missing-control check pass.
+        if not matches:
+            for _ in range(3):
+                gesture = toolbar_swipe(nodes, text)
+                if gesture is None:
+                    break
+                adb("shell", "input", "swipe", *gesture, 300)
+                time.sleep(.3)
+                nodes = ui()
+                matches = find(nodes)
+                if matches:
+                    break
         if len(matches) != 1:
             raise RuntimeError("Expected unique visible probe control: " + text)
         bounds = list(map(int, re.findall(r"\d+", matches[0].get("bounds"))))
