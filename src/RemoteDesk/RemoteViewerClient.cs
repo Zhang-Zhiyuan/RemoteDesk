@@ -65,7 +65,7 @@ internal sealed class RemoteSessionRejectedException : IOException
     }
 }
 
-internal sealed class RemoteViewerClient : IDisposable
+internal sealed partial class RemoteViewerClient : IDisposable
 {
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(10);
     internal static readonly TimeSpan DeviceInfoHandshakeTimeout =
@@ -665,9 +665,7 @@ internal sealed class RemoteViewerClient : IDisposable
                     stream,
                     MessageType.Control,
                     RemoteMessageCodec.EncodeViewerCapabilities(
-                        relayRoute is null
-                            ? LocalViewerCapabilities
-                            : RelayViewerCapabilities),
+                        NegotiatedViewerCapabilities(relayRoute is not null)),
                     session,
                     _writeLock,
                     connectionAttemptToken);
@@ -1155,6 +1153,7 @@ internal sealed class RemoteViewerClient : IDisposable
 
     private void ResetRemotePeerState()
     {
+        ResetNativeConnection();
         Interlocked.Exchange(ref _remoteCapabilitiesReady, null)?.TrySetResult(false);
         Volatile.Write(ref _remoteCapabilitiesInitialized, 0);
         _remoteCapabilities = RemoteDeviceCapabilities.None;
@@ -1273,6 +1272,7 @@ internal sealed class RemoteViewerClient : IDisposable
     private bool TryQueueInputLocked(
         RemoteInputCommand command)
     {
+        InvalidateNativeDetails();
         if (command.Kind == RemoteInputKind.MouseMove &&
             _pendingReliablePointerInputs == 0 &&
             Environment.TickCount64 >=
@@ -1397,6 +1397,7 @@ internal sealed class RemoteViewerClient : IDisposable
                 return new RemoteTextInputResult(0, false);
             }
 
+            InvalidateNativeDetails();
             result = QueueTextInput(_inputQueue, text);
         }
 
@@ -2360,7 +2361,8 @@ internal sealed class RemoteViewerClient : IDisposable
 
     private async Task<bool> SendControlAsync(
         ReadOnlyMemory<byte> payload,
-        CancellationTokenSource? expectedConnection)
+        CancellationTokenSource? expectedConnection,
+        MessageType messageType = MessageType.Control)
     {
         TcpClient? tcpClient = _tcpClient;
         NetworkStream? stream = _stream;
@@ -2380,7 +2382,7 @@ internal sealed class RemoteViewerClient : IDisposable
 
         try
         {
-            await Protocol.WriteMessageAsync(stream, MessageType.Control, payload, session, _writeLock, cancellationTokenSource.Token);
+            await Protocol.WriteMessageAsync(stream, messageType, payload, session, _writeLock, cancellationTokenSource.Token);
             return true;
         }
         catch (Exception ex) when (ex is OperationCanceledException or IOException or SocketException or ObjectDisposedException or CryptographicException)
@@ -2393,6 +2395,7 @@ internal sealed class RemoteViewerClient : IDisposable
 
     public async Task SelectCaptureTargetAsync(string targetId)
     {
+        InvalidateNativeDetails();
         NetworkStream? stream = _stream;
         SecureSession? session = _session;
         CancellationTokenSource? cancellationTokenSource = _cancellationTokenSource;
@@ -2424,6 +2427,7 @@ internal sealed class RemoteViewerClient : IDisposable
         }
 
         _incomingFileReceiver.Dispose();
+        NativeDetails.Dispose();
         if (disconnected)
         {
             _writeLock.Dispose();
@@ -2450,6 +2454,24 @@ internal sealed class RemoteViewerClient : IDisposable
 
                 switch (message.Type)
                 {
+                    case MessageType.NativeDetailUdpResume:
+                        try { ReceiveNativeResume(ownerCancellationTokenSource, message.PayloadSpan); }
+                        catch (Exception ex) when (ex is InvalidDataException or ArgumentException)
+                        { Log?.Invoke($"已忽略无效视频恢复边界：{ex.Message}"); }
+                        break;
+                    case MessageType.NativeDetailOffer:
+                        try { ReceiveNativeOffer(ownerCancellationTokenSource, message.PayloadSpan); }
+                        catch (Exception ex) when (ex is InvalidDataException or ArgumentException)
+                        { Log?.Invoke($"已忽略无效原生补清能力：{ex.Message}"); }
+                        break;
+                    case MessageType.NativeVideoFrame:
+                        try { ReceiveNativeBase(ownerCancellationTokenSource, message.PayloadMemory); }
+                        catch (Exception ex) when (ex is InvalidDataException or ArgumentException or ObjectDisposedException)
+                        { Log?.Invoke($"已忽略无效原生补清底图：{ex.Message}"); }
+                        break;
+                    case MessageType.NativeDetailChunk:
+                        ReceiveNativeChunk(ownerCancellationTokenSource, message.PayloadSpan);
+                        break;
                     case MessageType.Frame:
                         try
                         {
@@ -2873,6 +2895,7 @@ internal sealed class RemoteViewerClient : IDisposable
                 }
                 break;
             case RemoteControlKind.CaptureTargetChanged:
+                InvalidateNativeDetails();
                 if (!string.IsNullOrWhiteSpace(control.TargetId) && !string.IsNullOrWhiteSpace(control.DisplayName))
                 {
                     var target = new CaptureTargetInfo(
@@ -3181,19 +3204,22 @@ internal sealed class RemoteViewerClient : IDisposable
     {
         lock (_connectionStateLock)
         {
-            return ReferenceEquals(_cancellationTokenSource, ownerConnection) &&
+            return !ReferenceEquals(_cancellationTokenSource, ownerConnection) ||
+                ownerConnection.IsCancellationRequested ||
                 _lowLatencyVideoTransport?.ShouldIgnoreTcpFrames == true;
         }
     }
 
     private void PublishTcpVideoFrame(
         CancellationTokenSource ownerConnection,
-        RemoteFrame frame)
+        RemoteFrame frame,
+        bool nativeEnvelope = false)
     {
         lock (_framePublishLock)
         {
             if (!ShouldIgnoreTcpVideoFrames(ownerConnection))
             {
+                if (!nativeEnvelope) NativeDetails.ObserveLegacyBase();
                 FrameReceived?.Invoke(frame);
             }
         }
@@ -3279,7 +3305,8 @@ internal sealed class RemoteViewerClient : IDisposable
                 features,
                 localAddress: localAddress,
                 abortConnection: () =>
-                    AbortConnectionOwner(ownerConnection));
+                    AbortConnectionOwner(ownerConnection),
+                framePublicationGate: _framePublishLock);
 
             bool installed;
             lock (_connectionStateLock)

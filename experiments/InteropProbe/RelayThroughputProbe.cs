@@ -12,6 +12,8 @@ internal static class RelayThroughputProbe
     internal static async Task<int> RunAsync(JsonElement config, string output)
     {
         RelayConnectionOptions options = ReadOptions(config);
+        if (config.TryGetProperty("linuxFeatureAuditTarget", out var featureTarget))
+            return await LinuxFeatureRelayProbe.RunAsync(options, featureTarget.GetString()!, output);
         if (config.TryGetProperty("routeLeaseAudit", out var routeAudit) && routeAudit.GetBoolean())
             return await WindowsRelayRouteProbe.RunAsync(options, output);
         if (config.TryGetProperty("linuxProbePath", out var linuxProbePath))

@@ -44,7 +44,6 @@ public sealed class RelayTunnelIntegrationTests
             byte[] certificateBytes = CreateCertificate(
                 certificatePath,
                 keyPath);
-            int relayPort = ReserveTcpPort();
             string token = Convert.ToHexString(
                 RandomNumberGenerator.GetBytes(32))
                 .ToLowerInvariant();
@@ -58,7 +57,10 @@ public sealed class RelayTunnelIntegrationTests
                     {
                         ["access_token"] = token,
                         ["bind"] = "127.0.0.1",
-                        ["port"] = relayPort,
+                        // The test launcher replaces only the listening port
+                        // with 0 and reports the OS-assigned, still-owned port.
+                        // Production config validation remains unchanged.
+                        ["port"] = 56567,
                         ["cert_file"] = certificatePath,
                         ["key_file"] = keyPath
                     }));
@@ -66,6 +68,11 @@ public sealed class RelayTunnelIntegrationTests
             serverProcess = StartPythonServer(
                 serverScript,
                 configPath);
+            int relayPort = await ReadBoundPortAsync(serverProcess, timeout.Token);
+            // The readiness message must describe a socket which is ALREADY
+            // owned, not a candidate another parallel test could take over.
+            using (var competingListener = new TcpListener(IPAddress.Loopback, relayPort) { ExclusiveAddressUse = true })
+                Assert.Throws<SocketException>(() => competingListener.Start());
             string deviceId = Guid.NewGuid().ToString("D");
             var options = new RelayConnectionOptions(
                 "127.0.0.1",
@@ -335,17 +342,6 @@ public sealed class RelayTunnelIntegrationTests
         await release.WaitAsync(cancellationToken);
     }
 
-    private static int ReserveTcpPort()
-    {
-        var listener = new TcpListener(
-            IPAddress.Loopback,
-            0);
-        listener.Start();
-        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
-    }
-
     private static Process StartPythonServer(
         string serverScript,
         string configPath)
@@ -358,11 +354,42 @@ public sealed class RelayTunnelIntegrationTests
             RedirectStandardOutput = true,
             RedirectStandardError = true
         };
+        // Never "reserve" and release a port before another process binds it:
+        // a concurrent loopback test can take it, and readiness probes then
+        // send TLS bytes to that unrelated test's RDK authentication listener.
+        // Run the REAL relay entry point; only socket port selection is adapted
+        // in this child process. Its listener stays bound until test cleanup.
+        startInfo.ArgumentList.Add("-c");
+        startInfo.ArgumentList.Add("""
+            import asyncio, json, runpy, sys
+            relay = runpy.run_path(sys.argv[1], run_name="remotedesk_relay_test")
+            real_start_server = asyncio.start_server
+            async def start_owned_listener(callback, host=None, port=None, **kwargs):
+                if host != "127.0.0.1":
+                    raise RuntimeError("Relay fixture must bind loopback only")
+                server = await real_start_server(callback, host, 0, **kwargs)
+                print(json.dumps({"port": server.sockets[0].getsockname()[1]}), flush=True)
+                return server
+            asyncio.start_server = start_owned_listener
+            asyncio.run(relay["run"](sys.argv[2]))
+            """);
         startInfo.ArgumentList.Add(serverScript);
         startInfo.ArgumentList.Add(configPath);
         return Process.Start(startInfo) ??
             throw new InvalidOperationException(
                 "无法启动本地中继测试服务。");
+    }
+
+    private static async Task<int> ReadBoundPortAsync(Process process, CancellationToken cancellationToken)
+    {
+        string? ready = await process.StandardOutput.ReadLineAsync(cancellationToken);
+        if (ready is null)
+            throw new InvalidOperationException("本地中继没有启动：" + await process.StandardError.ReadToEndAsync(cancellationToken));
+        if (ready.Length > 128) throw new InvalidDataException("Invalid relay fixture readiness message.");
+        using var document = JsonDocument.Parse(ready);
+        int port = document.RootElement.GetProperty("port").GetInt32();
+        if (port is < 1 or > 65535) throw new InvalidDataException("Invalid bound relay fixture port.");
+        return port;
     }
 
     private static async Task WaitForRelayAsync(

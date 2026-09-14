@@ -7,8 +7,107 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using RemoteDesk;
 
-// Synthetic pixels only: never captures the desktop, injects input, connects to
-// a remote host, modifies settings, or replaces a running release executable.
+// Synthetic fixtures only. Capture modes copy their own test window, not the
+// user's other windows. Host probes type only into their owned field; relay
+// mode requires an explicitly selected server. No installed-settings changes
+// or replacement of a running release executable.
+// --native-details uses only its own authenticated ephemeral loopback endpoint.
+if (args.ElementAtOrDefault(0) == "--native-detail-vectors")
+{
+    if (args.Length != 2) throw new ArgumentException("Usage: --native-detail-vectors <new-output-file>");
+    NativeDetailGolden.Write(args[1]);
+    return;
+}
+if (args.ElementAtOrDefault(0) == "--native-detail-host")
+{
+    if (args.Length != 3) throw new ArgumentException("Usage: --native-detail-host <text-fixtures> <new-output-directory>");
+    NativeDetailHostProbe.Run(args[1], args[2]);
+    return;
+}
+if (args.ElementAtOrDefault(0) == "--native-detail-host-relay")
+{
+    if (args.Length != 4) throw new ArgumentException("Usage: --native-detail-host-relay <expected-server> <text-fixtures> <new-output-directory>");
+    NativeDetailHostProbe.Run(args[2], args[3], args[1]);
+    return;
+}
+if (args.ElementAtOrDefault(0) == "--native-detail-session")
+{
+    if (args.Length != 3) throw new ArgumentException("Usage: --native-detail-session <text-fixtures> <new-output-directory>");
+    NativeDetailSessionProbe.Run(args[1], args[2]);
+    return;
+}
+if (args.ElementAtOrDefault(0) == "--native-damage-refinement")
+{
+    if (args.Length != 2) throw new ArgumentException("Usage: --native-damage-refinement <new-output-directory>");
+    NativeDamageRefinementProbe.Run(args[1]);
+    return;
+}
+if (args.ElementAtOrDefault(0) is "--native-detail-capture" or "--native-detail-capture-coarse" or "--native-detail-capture-redraw")
+{
+    if (args.Length != 3) throw new ArgumentException("Usage: --native-detail-capture <text-fixtures> <new-output-directory>");
+    NativeDetailCaptureProbe.Run(args[1], args[2], args[0] == "--native-detail-capture-coarse", args[0] == "--native-detail-capture-redraw");
+    return;
+}
+if (args.ElementAtOrDefault(0) == "--native-detail-encoder")
+{
+    if (args.Length != 2) throw new ArgumentException("Usage: --native-detail-encoder <new-output-directory>");
+    NativeDetailEncoderProbe.Run(args[1]);
+    return;
+}
+if (args.ElementAtOrDefault(0) == "--native-detail-pacing")
+{
+    if (args.Length != 4) throw new ArgumentException("Usage: --native-detail-pacing <text-fixtures> <native-detail-run> <new-output-directory>");
+    NativeDetailPacingProbe.Run(args[1], args[2], args[3]);
+    return;
+}
+if (args.ElementAtOrDefault(0) == "--native-detail-live")
+{
+    if (args.Length != 4) throw new ArgumentException("Usage: --native-detail-live <ffmpeg> <text-fixtures> <new-output-directory>");
+    NativeDetailLiveProbe.Run(args[1], args[2], args[3]);
+    return;
+}
+if (args.ElementAtOrDefault(0) == "--native-detail-gpu")
+{
+    if (args.Length != 4) throw new ArgumentException("Usage: --native-detail-gpu <text-fixtures> <native-detail-run> <new-output-directory>");
+    NativeDetailGpuProbe.Run(args[1], args[2], args[3]);
+    return;
+}
+if (args.ElementAtOrDefault(0) == "--native-details")
+{
+    if (args.Length != 4) throw new ArgumentException("Usage: --native-details <ffmpeg> <text-fixture-directory> <new-output-directory>");
+    await NativeDetailProbe.RunAsync(args[1], args[2], args[3]);
+    return;
+}
+if (args.ElementAtOrDefault(0) == "--text-clarity")
+{
+    if (args.Length != 3) throw new ArgumentException("Usage: --text-clarity <ffmpeg> <new-output-directory>");
+    await TextClarityProbe.RunAsync(args[1], args[2]);
+    return;
+}
+if (args.ElementAtOrDefault(0) == "--text-short-gop")
+{
+    if (args.Length != 4) throw new ArgumentException("Usage: --text-short-gop <ffmpeg> <fixture-directory> <new-output-directory>");
+    await TextClarityProbe.RunAsync(args[1], args[3], shortGop: true, fixtureDirectory: args[2]);
+    return;
+}
+if (args.ElementAtOrDefault(0) == "--text-recovery")
+{
+    if (args.Length != 3) throw new ArgumentException("Usage: --text-recovery <fixture-directory> <new-report-path>");
+    TextClarityProbe.RunRecovery(args[1], args[2]);
+    return;
+}
+if (args.ElementAtOrDefault(0) == "--text-temporal")
+{
+    if (args.Length != 3) throw new ArgumentException("Usage: --text-temporal <fixture-directory> <new-output-directory>");
+    TextClarityProbe.RunTemporal(args[1], args[2]);
+    return;
+}
+if (args.ElementAtOrDefault(0) == "--text-comparison")
+{
+    if (args.Length != 2) throw new ArgumentException("Usage: --text-comparison <fixture-directory>");
+    TextClarityProbe.RefreshComparison(args[1]);
+    return;
+}
 if (args.ElementAtOrDefault(0) == "--upscale")
 {
     if (args.Length != 2) throw new ArgumentException("Usage: --upscale <new-output-directory>");

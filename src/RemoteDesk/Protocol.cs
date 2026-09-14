@@ -14,7 +14,14 @@ internal enum MessageType : byte
     Control = 3,
     Ping = 4,
     Pong = 5,
-    VideoFrame = 6
+    VideoFrame = 6,
+    NativeVideoFrame = 7,
+    NativeDetailChunk = 8,
+    NativeDetailRequest = 9,
+    NativeDetailFeedback = 10,
+    NativeDetailOffer = 11,
+    NativeDetailUdpResume = 12,
+    NativeDetailUdpResumeAck = 13
 }
 
 // Buffer is the dedicated decrypted message array returned by SecureSession.Decrypt; it is never
@@ -185,6 +192,41 @@ internal static class Protocol
             CryptographicOperations.ZeroMemory(plainBuffer.AsSpan(0, plainLength));
             ArrayPool<byte>.Shared.Return(plainBuffer);
             ArrayPool<byte>.Shared.Return(packetBuffer);
+        }
+    }
+
+    // Native fragments are optional. Never enqueue a write-lock waiter behind
+    // input/control/base work; admission and the send-counter publication are
+    // checked under the same encryption lock before consuming a nonce.
+    internal static async Task<bool> TryWriteNativeChunkAsync(NetworkStream stream,
+        ReadOnlyMemory<byte> payload, SecureSession session, SemaphoreSlim writeLock,
+        Func<bool> mayWrite, Action beforeWrite, CancellationToken cancellationToken)
+    {
+        if (payload.Length is <= 0 or > NativeDetailSessionProtocol.MaximumChunkPayloadBytes)
+            throw new InvalidDataException("Invalid native fragment size.");
+        if (!mayWrite() || !await writeLock.WaitAsync(0, cancellationToken).ConfigureAwait(false)) return false;
+        byte[]? plain = null, packet = null;
+        int plainBytes = HeaderLength + payload.Length;
+        int encryptedBytes = plainBytes + AesTagLength;
+        try
+        {
+            if (!mayWrite()) return false;
+            plain = ArrayPool<byte>.Shared.Rent(plainBytes);
+            packet = ArrayPool<byte>.Shared.Rent(EncryptedHeaderLength + encryptedBytes);
+            plain[0] = (byte)MessageType.NativeDetailChunk;
+            BinaryPrimitives.WriteInt32LittleEndian(plain.AsSpan(1), payload.Length);
+            payload.CopyTo(plain.AsMemory(HeaderLength));
+            BinaryPrimitives.WriteInt32LittleEndian(packet, encryptedBytes);
+            beforeWrite();
+            session.Encrypt(plain.AsSpan(0, plainBytes), packet.AsSpan(EncryptedHeaderLength, encryptedBytes));
+            await stream.WriteAsync(packet.AsMemory(0, EncryptedHeaderLength + encryptedBytes), cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        finally
+        {
+            if (plain is not null) { CryptographicOperations.ZeroMemory(plain.AsSpan(0, plainBytes)); ArrayPool<byte>.Shared.Return(plain); }
+            if (packet is not null) ArrayPool<byte>.Shared.Return(packet);
+            writeLock.Release();
         }
     }
 
@@ -489,6 +531,12 @@ internal static class Protocol
         return messageType switch
         {
             MessageType.Frame or MessageType.VideoFrame => MaxFramePayloadBytes,
+            MessageType.NativeVideoFrame => NativeDetailSessionProtocol.MaximumBasePayloadBytes,
+            MessageType.NativeDetailChunk => NativeDetailSessionProtocol.MaximumChunkPayloadBytes,
+            MessageType.NativeDetailRequest => NativeDetailSessionProtocol.RequestBytes,
+            MessageType.NativeDetailFeedback => NativeDetailSessionProtocol.FeedbackBytes,
+            MessageType.NativeDetailOffer => NativeDetailSessionProtocol.OfferBytes,
+            MessageType.NativeDetailUdpResume or MessageType.NativeDetailUdpResumeAck => NativeDetailSessionProtocol.ResumeBytes,
             MessageType.Input => RemoteMessageCodec.InputPayloadLength,
             MessageType.Control => RemoteMessageCodec.MaxControlPayloadBytes,
             MessageType.Ping or MessageType.Pong => 0,

@@ -6,7 +6,7 @@ using System.Security.Cryptography;
 
 namespace RemoteDesk;
 
-internal sealed class RemoteHostServer : IDisposable
+internal sealed partial class RemoteHostServer : IDisposable
 {
     private static readonly TimeSpan AuthenticationTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan AuthenticationFailureDelay = TimeSpan.FromMilliseconds(250);
@@ -110,7 +110,7 @@ internal sealed class RemoteHostServer : IDisposable
             _cancellationTokenSource = new CancellationTokenSource();
             _listener = new TcpListener(IPAddress.Any, port);
             _listener.Start();
-            Volatile.Write(ref _listeningPort, port);
+            Volatile.Write(ref _listeningPort, ((IPEndPoint)_listener.LocalEndpoint).Port);
             _acceptLoopTask = AcceptLoopAsync(
                 password,
                 clampedFps,
@@ -133,7 +133,7 @@ internal sealed class RemoteHostServer : IDisposable
 
         int loggedScalePercent = Math.Clamp(scalePercent, 25, 100);
         Log?.Invoke(
-            $"被控端已启动，监听 0.0.0.0:{port}，" +
+            $"被控端已启动，监听 0.0.0.0:{ListeningPort}，" +
             $"捕获：{captureTarget.DisplayName}，" +
             $"分辨率：{ScreenCaptureService.FormatScaleMode(loggedScalePercent)}，" +
             $"自适应：{(adaptiveQuality ? "开启" : "关闭")}");
@@ -144,7 +144,7 @@ internal sealed class RemoteHostServer : IDisposable
         }
 
         ClientStatusChanged?.Invoke(
-            $"正在监听 0.0.0.0:{port}");
+            $"正在监听 0.0.0.0:{ListeningPort}");
         RunningChanged?.Invoke(true);
         return Task.CompletedTask;
     }
@@ -993,6 +993,11 @@ internal sealed class RemoteHostServer : IDisposable
                     var viewerState = new ViewerSessionState();
                     var interactionActivity =
                         new RemoteInteractionActivity();
+                    await using var nativeDetails = new NativeDetailHostSession(
+                        viewerState.NotifyCaptureBackendChanged, interactionActivity,
+                        message => { viewerState.VideoDiagnostics.Record(message); Log?.Invoke(message); },
+                        captureState.PreserveNativeCaptureOutputSize);
+                    viewerState.NativeDetails = nativeDetails;
                     await using var lowLatencyVideo = new LowLatencyVideoHostTransport(
                         message => Log?.Invoke(message),
                         clientCancellation.Token,
@@ -1659,6 +1664,8 @@ internal sealed class RemoteHostServer : IDisposable
 
     internal sealed class ViewerSessionState
     {
+        internal NativeDetailHostSession? NativeDetails { get; set; }
+        internal NativeDetailOffer? LastNativeOffer { get; set; }
         internal HostVideoDiagnostics VideoDiagnostics { get; } = new();
         private readonly object _clipboardFileReturnLock = new();
         private readonly object _clipboardInputSequenceLock = new();
@@ -1796,6 +1803,20 @@ internal sealed class RemoteHostServer : IDisposable
             // released, the canceled source is eligible for collection.
             changed.Cancel();
             _videoSelectionReady.TrySetResult();
+        }
+
+        internal void NotifyCaptureBackendChanged()
+        {
+            CancellationTokenSource changed;
+            lock (_videoSelectionChangeLock)
+            {
+                long observed = Volatile.Read(ref _videoSelection);
+                Volatile.Write(ref _videoSelection, PackVideoSelection((RemoteVideoCodecs)(uint)observed,
+                    unchecked((int)(uint)(observed >> 32) + 1)));
+                changed = _videoSelectionChanged;
+                _videoSelectionChanged = new();
+            }
+            changed.Cancel();
         }
 
         public async Task WaitForInitialVideoSelectionAsync(
@@ -2277,6 +2298,17 @@ internal sealed class RemoteHostServer : IDisposable
                 ResolveNegotiatedH264FramesPerSecond(
                     fps,
                     viewerState.Capabilities);
+            await ConfigureNativeCaptureAsync(stream, session, writePriority, captureState,
+                viewerState, scalePercent, effectiveFramesPerSecond, codecs, cancellationToken);
+            if (viewerState.NativeDetails is { Request.Enabled: true, Worker: { IsReady: true } nativeWorker } &&
+                nativeWorker.Profile.TargetGeneration == targetVersion &&
+                codecs.HasFlag(RemoteVideoCodecs.H264AnnexB))
+            {
+                await RunNativeCaptureLoopAsync(stream, session, writePriority, captureState,
+                    captureTargetPublicationCoordinator, viewerState, nativeWorker, lowLatencyVideo,
+                    captureLog, cancellationToken);
+                continue;
+            }
             if (effectiveFramesPerSecond !=
                 lastLoggedEffectiveFramesPerSecond)
             {
@@ -4809,6 +4841,45 @@ internal sealed class RemoteHostServer : IDisposable
 
                 switch (message.Type)
                 {
+                    case MessageType.NativeDetailRequest:
+                        if (viewerState.Capabilities.HasFlag(RemoteDeviceCapabilities.NativeDetailV1))
+                        {
+                            try
+                            {
+                                var request = NativeDetailSessionProtocol.DecodeRequest(message.PayloadSpan);
+                                if (viewerState.NativeDetails?.Accept(request) == true && !request.Enabled &&
+                                    lowLatencyVideo.PrepareNativeResume(request.Context) is { } resume)
+                                {
+                                    using (writePriority.BeginControlWritePriority())
+                                        await Protocol.WriteMessageAsync(stream, MessageType.NativeDetailUdpResume,
+                                            NativeDetailSessionProtocol.EncodeResume(resume), session, writePriority.Lock, cancellationToken);
+                                }
+                            }
+                            catch (Exception ex) when (ex is InvalidDataException or ArgumentException)
+                            { clipboardLog("已忽略无效原生补清请求：" + ex.Message); }
+                        }
+                        break;
+                    case MessageType.NativeDetailUdpResumeAck:
+                        if (viewerState.Capabilities.HasFlag(RemoteDeviceCapabilities.NativeDetailV1))
+                        {
+                            try
+                            {
+                                var resume = NativeDetailSessionProtocol.DecodeResume(message.PayloadSpan);
+                                if (viewerState.NativeDetails?.Request is { Enabled: false } stopped && stopped.Context == resume.Context)
+                                    lowLatencyVideo.CompleteNativeResume(resume);
+                            }
+                            catch (Exception ex) when (ex is InvalidDataException or ArgumentException)
+                            { clipboardLog("已忽略无效视频恢复确认：" + ex.Message); }
+                        }
+                        break;
+                    case MessageType.NativeDetailFeedback:
+                        if (viewerState.Capabilities.HasFlag(RemoteDeviceCapabilities.NativeDetailV1))
+                        {
+                            try { viewerState.NativeDetails?.ObserveFeedback(NativeDetailSessionProtocol.DecodeFeedback(message.PayloadSpan)); }
+                            catch (Exception ex) when (ex is InvalidDataException or ArgumentException)
+                            { clipboardLog("已忽略无效原生补清反馈：" + ex.Message); }
+                        }
+                        break;
                     case MessageType.Input:
                         try
                         {
@@ -7442,6 +7513,20 @@ internal sealed class RemoteHostServer : IDisposable
                 {
                     return _lastFrameSize;
                 }
+            }
+        }
+
+        public NativeCaptureProfile PreserveNativeCaptureOutputSize(NativeCaptureProfile profile)
+        {
+            lock (_syncRoot)
+            {
+                if (_targetVersion != profile.TargetGeneration || !_isTargetAvailable) return profile;
+                Size output = ChooseNativeCaptureOutputSize(profile.OutputSize, _lastFrameSize);
+                return output == profile.OutputSize ? profile : profile with
+                {
+                    OutputSize = output,
+                    BitrateBitsPerSecond = FfmpegDesktopH264Capture.CalculateBitrateBitsPerSecond(output, profile.FramesPerSecond)
+                };
             }
         }
 

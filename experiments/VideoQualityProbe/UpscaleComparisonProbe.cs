@@ -175,7 +175,7 @@ internal static class UpscaleComparisonProbe
         return bytes;
     }
 
-    private static Bitmap ReadPixels(ID3D11Device device, D3D11HwndVideoPresenter presenter, Size size)
+    internal static Bitmap ReadPixels(ID3D11Device device, D3D11HwndVideoPresenter presenter, Size size)
     {
         var source = (ID3D11Texture2D)typeof(D3D11HwndVideoPresenter).GetField("_validationSource", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(presenter)!;
         var description = source.Description; description.Usage = ResourceUsage.Staging;

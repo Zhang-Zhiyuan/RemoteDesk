@@ -9,5 +9,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\RemoteDesk\RemoteDesk.csproj" />
+    <ProjectReference Include="..\..\src\RemoteDesk.NativeDetail\RemoteDesk.NativeDetail.csproj" />
   </ItemGroup>
 </Project>

@@ -36,7 +36,10 @@ internal enum RemoteDeviceCapabilities
     DeviceIdentity = 1 << 22,
     ClipboardPasteShortcut = 1 << 23,
     FileTransferReceipt = 1 << 24,
-    HostVideoDiagnostics = 1 << 25
+    HostVideoDiagnostics = 1 << 25,
+    // Reserved negotiated tier. Do not advertise until the endpoint's full
+    // native capture/request/render path is enabled and qualified.
+    NativeDetailV1 = 1 << 26
 }
 
 internal static class RemoteDevicePlatforms
@@ -120,6 +123,7 @@ internal static class RemoteDeviceCapabilityInfo
             RemoteDeviceCapabilities.ShortGopH264 |
             RemoteDeviceCapabilities.HighFrameRateH264 |
             RemoteDeviceCapabilities.AuthenticatedUdpHeartbeat |
+            RemoteDeviceCapabilities.NativeDetailV1 |
             RemoteDeviceCapabilities.HighQualityJpeg;
 
         if (RemoteUpdater.CanApplyRemoteUpdate)
@@ -264,6 +268,8 @@ internal static class RemoteDeviceCapabilityInfo
         {
             names.Add("远程启动");
         }
+
+        if (capabilities.HasFlag(RemoteDeviceCapabilities.NativeDetailV1)) names.Add("原生文字补清");
 
         return names.Count == 0 ? "能力未知" : string.Join("/", names);
     }

@@ -70,7 +70,8 @@ internal readonly record struct RemoteFrame(
     int EncodedLength,
     double CaptureMilliseconds,
     double EncodeMilliseconds,
-    long ReceivedAtTimestamp = 0);
+    long ReceivedAtTimestamp = 0,
+    NativeDetailFrameIdentity? NativeDetails = null);
 
 internal readonly record struct RemoteFrameMetadata(
     int Width,
@@ -80,7 +81,8 @@ internal readonly record struct RemoteFrameMetadata(
     int EncodedLength,
     double CaptureMilliseconds,
     double EncodeMilliseconds,
-    long ReceivedAtTimestamp)
+    long ReceivedAtTimestamp,
+    NativeDetailFrameIdentity? NativeDetails = null)
 {
     public static RemoteFrameMetadata FromFrame(
         RemoteFrame frame) =>
@@ -92,7 +94,8 @@ internal readonly record struct RemoteFrameMetadata(
             frame.EncodedLength,
             frame.CaptureMilliseconds,
             frame.EncodeMilliseconds,
-            frame.ReceivedAtTimestamp);
+            frame.ReceivedAtTimestamp,
+            frame.NativeDetails);
 }
 
 internal enum RemoteControlKind : byte

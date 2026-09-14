@@ -226,6 +226,21 @@ through child pipes. It does not deploy/restart the relay, reuse an installed
 device's registration, change routes or fall back to LAN. The report identifies
 the selected transport; file verification still uses key-authenticated SSH.
 
+For this repository's explicitly authorized lab, the `transport` mode can run
+that audit using the current user's saved pinned relay login, without exporting
+the token through the shell:
+
+```powershell
+'{"useInstalledRelay":true,"expectedServer":"8.138.5.232","linuxFeatureAuditTarget":"zzy@10.7.163.74","output":"artifacts/relay-features-new"}' | & experiments/InteropProbe/bin/Release/net8.0-windows/RemoteDesk.InteropProbe.exe transport
+```
+
+This wrapper deliberately allows only the named lab targets. It passes the
+decrypted token directly to the existing Python runner on stdin; the runner
+allocates its own random node and writes evidence under `linux-features/`.
+It neither installs nor upgrades the apps, and does not certify the new native
+detail protocol. Inspect `result.json`, copy the evidence, and validate each
+generated remote temporary path before cleaning it up.
+
 `desktop-status` reads Windows desktop availability without capture/input. A host
 probe that loses foreground records its desktop/pointer/owned-button geometry and
 stops even if diagnostic writing fails. It never silently refocuses another app.

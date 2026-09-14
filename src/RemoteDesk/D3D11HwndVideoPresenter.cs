@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Drawing;
 using System.Runtime.InteropServices;
@@ -205,6 +206,18 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
     // installed application never sets these; no timing/readback on normal frames.
     internal (ID3D11Query Begin, ID3D11Query End)? RenderTimingQueriesForTests { get; set; }
     internal event Action<D3D11HwndVideoPresenter, string>? ExperimentalUpscalingFailed;
+    private D3D11NativeDetailCompositor? _nativeDetailCompositor;
+    private ID3D11RenderTargetView? _nativeDetailRenderTarget;
+    private bool _nativeDetailFailed;
+    private Task<bool>? _nativeDetailPreparation;
+    private long _nativeDetailGeneration;
+    private long? _nativeDetailRequestedGeneration;
+    internal bool NativeDetailActive { get; private set; }
+    internal string NativeDetailStatus { get; private set; } = string.Empty;
+    internal int NativeDetailUploadedTiles { get; private set; }
+    internal int NativeDetailAtlasBytes => _nativeDetailCompositor is null ? 0 : D3D11NativeDetailCompositor.AtlasBytes;
+    internal Action? NativeDetailAfterDrawForTests { get; set; }
+    internal Action? NativeDetailPreparationForTests { get; set; }
     private bool _targetMinimized;
     private bool _disposed;
 
@@ -503,7 +516,9 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
     internal D3D11HwndVideoPresenterResult Present(
         MediaFoundationD3D11DecodedFrame? frame,
         Rectangle visibleSource,
-        bool captureValidation = false)
+        bool captureValidation = false,
+        NativeDetailPresentation? nativeDetails = null,
+        NativeDetailRenderBudget nativeDetailBudget = default)
     {
         // Any attempted Present supersedes the previous validation snapshot,
         // including a rejected or unavailable decoded frame.
@@ -523,7 +538,10 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
                 textureLease,
                 frame.SubresourceIndex,
                 visibleSource,
-                captureValidation);
+                captureValidation,
+                nativeDetails,
+                frame.HasExplicitSampleTime ? frame.SampleTime100Nanoseconds : null,
+                nativeDetailBudget);
         }
         catch (Exception ex)
         {
@@ -542,7 +560,10 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
         ID3D11Texture2D? borrowedTexture,
         uint subresourceIndex,
         Rectangle visibleSource,
-        bool captureValidation = false)
+        bool captureValidation = false,
+        NativeDetailPresentation? nativeDetails = null,
+        long? explicitSampleTime100Nanoseconds = null,
+        NativeDetailRenderBudget nativeDetailBudget = default)
     {
         lock (_sync)
         {
@@ -551,6 +572,9 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
             // cannot leave a stale frame eligible for qualification.
             _validationSourceReady = false;
             ExperimentalUpscalingActive = false;
+            NativeDetailActive = false;
+            if (nativeDetails is null && !_nativeDetailFailed) NativeDetailStatus = string.Empty;
+            NativeDetailUploadedTiles = 0;
             if (_disposed)
             {
                 return CreateResult(
@@ -675,49 +699,45 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
                         inputViewDescription);
 
                 if (RenderTimingQueriesForTests is { } startTiming) _context.End(startTiming.Begin);
-                if (!TryPresentExperimental(inputView, geometry))
+                var baseFailure = RenderBase(inputView, geometry);
+                if (baseFailure is { } failure) return failure;
+
+                if (nativeDetails is not null && !_nativeDetailFailed)
                 {
-                    ConfigureVideoProcessor(
-                        _videoContext,
-                        _processor,
-                        geometry);
-
-                    var stream = new VideoProcessorStream
+                    if (!nativeDetails.Matches(explicitSampleTime100Nanoseconds))
+                        NativeDetailStatus = "原生补清等待匹配的视频帧";
+                    else if (_nativeDetailCompositor is null)
+                        NativeDetailStatus = "原生补清未就绪，直接显示底图";
+                    else if (!nativeDetailBudget.Allows(Stopwatch.GetTimestamp()))
+                        NativeDetailStatus = "原生补清暂停，优先输入和底图";
+                    else
                     {
-                        Enable = true,
-                        InputSurface = inputView
-                    };
-                    Result blitResult =
-                        _videoContext.VideoProcessorBlt(
-                            _processor,
-                            _outputView,
-                            0,
-                            [stream]);
-                    int completedBltRetries = 0;
-                    while (ShouldRetryVideoProcessorBlt(
-                            blitResult.Failure,
-                            _edgeEnhancementEnabled,
-                            completedBltRetries))
-                    {
-                        completedBltRetries++;
-                        if (!TryDisableEdgeEnhancementForRetry())
+                        try
                         {
-                            break;
+                            // Resource creation happens ONLY in explicit async
+                            // preparation, never on this presentation path.
+                            if (D3D11NativeDetailCompositor.CanRender(nativeDetails, visibleSource, geometry))
+                            {
+                                NativeDetailActive = _nativeDetailCompositor.Render(nativeDetails, visibleSource, geometry, _nativeDetailRenderTarget!, nativeDetailBudget);
+                                NativeDetailUploadedTiles = _nativeDetailCompositor.UploadedTilesLastRender;
+                            }
+                            else _nativeDetailCompositor?.Clear();
+                            NativeDetailStatus = NativeDetailActive ? "原生补清" : "原生补清等待可用区域";
+                            if (NativeDetailActive) NativeDetailAfterDrawForTests?.Invoke();
                         }
-
-                        blitResult =
-                            _videoContext.VideoProcessorBlt(
-                                _processor,
-                                _outputView,
-                                0,
-                                [stream]);
-                    }
-
-                    if (blitResult.Failure)
-                    {
-                        return CreateFailureResult(
-                            blitResult.Code,
-                            "VideoProcessorBlt failed.");
+                        catch (Exception ex)
+                        {
+                            _nativeDetailFailed = true;
+                            NativeDetailActive = false;
+                            NativeDetailStatus = "原生补清已回退：" + FormatFailure(ex);
+                            TryDispose(_nativeDetailCompositor);
+                            _nativeDetailCompositor = null;
+                            // Failure can happen AFTER part of a GPU overlay was
+                            // drawn. Redraw this SAME base before Present; never
+                            // expose a partial native layer or reset the decoder.
+                            baseFailure = RenderBase(inputView, geometry);
+                            if (baseFailure is { } rollbackFailure) return rollbackFailure;
+                        }
                     }
                 }
 
@@ -792,7 +812,132 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
         lock (_sync)
         {
             _validationSourceReady = false;
+            NativeDetailActive = false;
+            NativeDetailUploadedTiles = 0;
         }
+    }
+
+    // Call when a locally enabled session has useful native work to prepare.
+    // The presentation loop must NEVER await this task. Until it completes it
+    // continues rendering the base. Tests may await outside measured frames.
+    internal Task<bool> PrepareNativeDetailsAsync()
+    {
+        lock (_sync)
+        {
+            if (_disposed || _nativeDetailFailed || _backBuffer is null) return Task.FromResult(false);
+            if (_nativeDetailCompositor is not null) return Task.FromResult(true);
+            ID3D11Device? leaseDevice = null;
+            ID3D11DeviceContext? leaseContext = null;
+            try
+            {
+                // This cheap target view is owned ONLY by this generation.
+                // The slow worker must not retain a swap-chain buffer lease:
+                // that would make a simultaneous ResizeBuffers fail.
+                _nativeDetailRenderTarget ??= _device.CreateRenderTargetView(_backBuffer);
+                _nativeDetailRequestedGeneration = _nativeDetailGeneration;
+                // Shader/atlas preparation depends on the device, not window
+                // size. A new EXPLICIT opt-in may join the one active worker.
+                // Rapid toggles must not enqueue many blocking compiler tasks.
+                if (_nativeDetailPreparation is { IsCompleted: false }) return _nativeDetailPreparation;
+                leaseDevice = _device.QueryInterface<ID3D11Device>();
+                leaseContext = _context.QueryInterface<ID3D11DeviceContext>();
+            }
+            catch (Exception ex)
+            {
+                TryDispose(leaseContext); TryDispose(leaseDevice);
+                _nativeDetailFailed = true;
+                NativeDetailStatus = "原生补清准备失败：" + FormatFailure(ex);
+                return Task.FromResult(false);
+            }
+            Action? preparationHook = NativeDetailPreparationForTests;
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _nativeDetailPreparation = completion.Task;
+            _ = Task.Run(() =>
+            {
+                using (leaseDevice)
+                using (leaseContext)
+                {
+                    D3D11NativeDetailCompositor? prepared = null;
+                    try
+                    {
+                        preparationHook?.Invoke();
+                        lock (_sync)
+                            if (!NativeDetailPreparationRequested())
+                            { completion.TrySetResult(false); return; }
+                        prepared = new D3D11NativeDetailCompositor(leaseDevice, leaseContext);
+                        lock (_sync)
+                        {
+                            if (!NativeDetailPreparationRequested())
+                            { completion.TrySetResult(false); return; }
+                            _nativeDetailCompositor = prepared; prepared = null;
+                            NativeDetailStatus = "原生补清资源已就绪";
+                            // Complete under the same lock as publication. A
+                            // new request must not join a worker which already
+                            // decided to exit but whose Task is not finished yet.
+                            completion.TrySetResult(true);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        lock (_sync)
+                        {
+                            if (NativeDetailPreparationRequested())
+                            { _nativeDetailFailed = true; NativeDetailStatus = "原生补清准备失败：" + FormatFailure(ex); }
+                            completion.TrySetResult(false);
+                        }
+                    }
+                    finally { TryDispose(prepared); }
+                }
+            });
+            return _nativeDetailPreparation;
+        }
+    }
+
+    // Read only under _sync. Completion is never authorization to enable an
+    // old session; a current explicit local request and target view are required.
+    private bool NativeDetailPreparationRequested() => !_disposed && !_nativeDetailFailed &&
+        _nativeDetailRequestedGeneration == _nativeDetailGeneration && _nativeDetailRenderTarget is not null;
+
+    internal void DisableNativeDetails()
+    {
+        lock (_sync)
+        {
+            ReleaseNativeDetailResources();
+            _nativeDetailFailed = false;
+            NativeDetailStatus = string.Empty;
+        }
+    }
+
+    private void ReleaseNativeDetailResources()
+    {
+        _nativeDetailGeneration++;
+        _nativeDetailRequestedGeneration = null;
+        // In-flight work remains single-flight across off/on/resize. Disable
+        // still returns immediately and clears the authorization to publish.
+        if (_nativeDetailPreparation is { IsCompleted: true }) _nativeDetailPreparation = null;
+        TryDispose(_nativeDetailCompositor);
+        _nativeDetailCompositor = null;
+        TryDispose(_nativeDetailRenderTarget);
+        _nativeDetailRenderTarget = null;
+        NativeDetailActive = false;
+        NativeDetailUploadedTiles = 0;
+    }
+
+    private D3D11HwndVideoPresenterResult? RenderBase(
+        ID3D11VideoProcessorInputView inputView, D3D11HwndVideoPresentationGeometry geometry)
+    {
+        if (TryPresentExperimental(inputView, geometry)) return null;
+        ConfigureVideoProcessor(_videoContext, _processor!, geometry);
+        var stream = new VideoProcessorStream { Enable = true, InputSurface = inputView };
+        Result blitResult = _videoContext.VideoProcessorBlt(_processor!, _outputView!, 0, [stream]);
+        int completedBltRetries = 0;
+        while (ShouldRetryVideoProcessorBlt(blitResult.Failure, _edgeEnhancementEnabled, completedBltRetries))
+        {
+            completedBltRetries++;
+            if (!TryDisableEdgeEnhancementForRetry()) break;
+            blitResult = _videoContext.VideoProcessorBlt(_processor!, _outputView!, 0, [stream]);
+        }
+        return blitResult.Failure ? CreateFailureResult(blitResult.Code, "VideoProcessorBlt failed.") : null;
     }
 
     internal D3D11HwndVideoValidationResult ValidatePresentedFrame()
@@ -2053,6 +2198,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
 
     private void ReleaseVideoProcessorResources()
     {
+        ReleaseNativeDetailResources();
         TryDispose(_experimentalUpscaler);
         _experimentalUpscaler = null;
         ExperimentalUpscalingActive = false;

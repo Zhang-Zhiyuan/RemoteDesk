@@ -9,7 +9,7 @@
     <ApplicationIcon>Assets\RemoteDesk.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.0.22</Version>
+    <Version>1.0.23</Version>
     <RemoteDeskBuildStamp Condition="'$(RemoteDeskBuildStamp)' == ''">$([System.DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))</RemoteDeskBuildStamp>
     <InformationalVersion>$(Version)+remotedesk.$(RemoteDeskBuildStamp)</InformationalVersion>
   </PropertyGroup>
@@ -37,6 +37,10 @@
     <PackageReference Include="SSH.NET" Version="2026.0.0" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="Vortice.MediaFoundation" Version="3.8.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RemoteDesk.NativeDetail\RemoteDesk.NativeDetail.csproj" />
   </ItemGroup>
 
   <ItemGroup>

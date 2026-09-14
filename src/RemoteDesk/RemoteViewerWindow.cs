@@ -49,7 +49,7 @@ internal readonly record struct RemoteViewerFullScreenRestoreState(
     bool StatusFooterVisible,
     bool ProgressBarVisible);
 
-internal sealed class RemoteViewerWindow : Form
+internal sealed partial class RemoteViewerWindow : Form
 {
     private const int H264DecodeMissFallbackThreshold = 8;
     private const int H264KeyFrameRequestInterval = 3;
@@ -352,6 +352,7 @@ internal sealed class RemoteViewerWindow : Form
         _fileTransferActionsPanel.Controls.Add(
             _displayScaleButton);
         _fileTransferActionsPanel.Controls.Add(_experimentalUpscaleButton);
+        InitializeNativeDetailControls();
         _fileTransferActionsPanel.Controls.Add(_fullScreenButton);
         _statusFooterPanel = new ViewerFooterPanel
         {
@@ -419,6 +420,7 @@ internal sealed class RemoteViewerWindow : Form
         _statusBar.ContextMenuStrip = _statusMenu;
         _experimentalUpscaleButton.ContextMenuStrip = _statusMenu;
         ConfigureFilePullToolTips();
+        UpdateNativeDetailButton();
         _toolTip.SetToolTip(_experimentalUpscaleButton,
             "实验性 GPU 放大。默认关闭，点击可切回原版；右键选择 NIS / 双三次对照。\n" +
             "NIS 适用于 1～2 倍，不兼容或超出范围时使用双三次；底部显示实际算法。\n" +
@@ -431,6 +433,7 @@ internal sealed class RemoteViewerWindow : Form
         Controls.Add(_statusFooterPanel);
 
         _client.FrameReceived += OnFrameReceived;
+        _client.NativeDetailRequested += ScheduleNativeDetailPreparation;
         _client.Log += OnClientLog;
         _client.RoundTripUpdated += OnRoundTripUpdated;
         _client.CaptureTargetSelectionChanged +=
@@ -2139,6 +2142,8 @@ internal sealed class RemoteViewerWindow : Form
             CancelRemoteDragOut(status: null, cancelTransfer: true);
             CancelPendingClipboardPull();
             _client.FrameReceived -= OnFrameReceived;
+            _client.NativeDetailRequested -= ScheduleNativeDetailPreparation;
+            DisposeNativeDetailControls();
             _client.Log -= OnClientLog;
             _client.RoundTripUpdated -= OnRoundTripUpdated;
             _client.CaptureTargetSelectionChanged -=
@@ -3088,7 +3093,8 @@ internal sealed class RemoteViewerWindow : Form
                                         new Size(
                                             hardwareSourceFrame.Width,
                                             hardwareSourceFrame.Height),
-                                        presentationGeneration)
+                                        presentationGeneration,
+                                        hardwareSourceFrame)
                                     : new(
                                         D3D11HwndVideoPresenterStatus.Disposed,
                                         HResult: 0,
@@ -3475,7 +3481,7 @@ internal sealed class RemoteViewerWindow : Form
     {
         _pendingMediaFoundationInputs[sampleTime100Nanoseconds] =
             new(
-                frame,
+                frame with { NativeDetails = frame.NativeDetails?.BindDecoderSample(sampleTime100Nanoseconds) },
                 decodeStartedAtTimestamp);
         while (_pendingMediaFoundationInputs.Count >
             MaxPendingMediaFoundationInputs)
@@ -3546,13 +3552,17 @@ internal sealed class RemoteViewerWindow : Form
                         staleSampleTime);
                 }
 
-                return resolved;
+                // Preserve the original no-extra-allocation path when native
+                // detail is off (the default for installed clients).
+                if (resolved.Frame.NativeDetails is null) return resolved;
+                return resolved with { Frame = MatchNativeDetailDecoderOutput(resolved.Frame,
+                    decodedFrame.HasExplicitSampleTime ? decodedFrame.SampleTime100Nanoseconds : null) };
             }
 
             _pendingMediaFoundationInputs.Remove(
                 currentSampleTime100Nanoseconds);
             return new(
-                currentFrame,
+                currentFrame with { NativeDetails = null },
                 currentDecodeStartedAtTimestamp);
         }
     }
@@ -4016,6 +4026,7 @@ internal sealed class RemoteViewerWindow : Form
                     }
 
                     _d3d11VideoPresenter = presenter;
+                    if (_client.NativeDetails.IsEnabled) ScheduleNativeDetailPreparation();
                     presenter.ExperimentalUpscalingFailed += OnExperimentalUpscalingFailed;
                     _d3d11VideoPresenterDevicePointer =
                         devicePointer;
@@ -4652,7 +4663,8 @@ internal sealed class RemoteViewerWindow : Form
                                 decodedFrame.HardwareDecoderGeneration,
                                 new Size(
                                     frame.Width,
-                                    frame.Height));
+                                    frame.Height),
+                                frame);
                         if (!IsNonFatalPresentationResult(
                                 presentResult.Status))
                         {
@@ -4757,7 +4769,8 @@ internal sealed class RemoteViewerWindow : Form
             MediaFoundationD3D11DecodedFrame frame,
             long decoderGeneration,
             Size sourceSize,
-            long presentationGeneration)
+            long presentationGeneration,
+            RemoteFrameMetadata sourceMetadata = default)
     {
         return _capturePresentationTransitionGate.Run(() =>
         {
@@ -4825,6 +4838,7 @@ internal sealed class RemoteViewerWindow : Form
                 }
             }
 
+            var (nativeDetails, nativeBudget) = NativePresentationForFrame(sourceMetadata, frame);
             D3D11HwndVideoPresenterResult result =
                 presenter.Present(
                     frame,
@@ -4833,7 +4847,9 @@ internal sealed class RemoteViewerWindow : Form
                         new Size(
                             frame.VisibleWidth,
                             frame.VisibleHeight)),
-                    captureValidation: true);
+                    captureValidation: true,
+                    nativeDetails: nativeDetails,
+                    nativeDetailBudget: nativeBudget);
             return CanPresentCaptureGeneration(
                     presentationGeneration)
                 ? result
@@ -4849,7 +4865,8 @@ internal sealed class RemoteViewerWindow : Form
     private D3D11HwndVideoPresenterResult PresentHardwareFrame(
         MediaFoundationD3D11DecodedFrame frame,
         long decoderGeneration,
-        Size sourceSize)
+        Size sourceSize,
+        RemoteFrameMetadata sourceMetadata = default)
     {
         if (!IsCurrentMediaFoundationDecoderGeneration(
                 decoderGeneration))
@@ -4945,10 +4962,13 @@ internal sealed class RemoteViewerWindow : Form
                 new Size(
                     frame.VisibleWidth,
                     frame.VisibleHeight));
+        var (nativeDetails, nativeBudget) = NativePresentationForFrame(sourceMetadata, frame);
         D3D11HwndVideoPresenterResult result =
             presenter.Present(
                 frame,
-                visibleSource);
+                visibleSource,
+                nativeDetails: nativeDetails,
+                nativeDetailBudget: nativeBudget);
         if (result.Status !=
             D3D11HwndVideoPresenterStatus.WrongDevice)
         {
@@ -4972,7 +4992,9 @@ internal sealed class RemoteViewerWindow : Form
 
         return presenter?.Present(
                 frame,
-                visibleSource) ??
+                visibleSource,
+                nativeDetails: nativeDetails,
+                nativeDetailBudget: nativeBudget) ??
             new(
                 D3D11HwndVideoPresenterStatus.Failed,
                 HResult: 0,
@@ -5044,6 +5066,7 @@ internal sealed class RemoteViewerWindow : Form
                 }
 
                 _d3d11VideoPresenter = presenter;
+                if (_client.NativeDetails.IsEnabled) ScheduleNativeDetailPreparation();
                 presenter.ExperimentalUpscalingFailed += OnExperimentalUpscalingFailed;
                 _d3d11VideoPresenterDevicePointer =
                     deviceLease.NativePointer;
@@ -5310,6 +5333,7 @@ internal sealed class RemoteViewerWindow : Form
         object? sender,
         EventArgs args)
     {
+        _client.InvalidateNativeDetails();
         Size clientSize =
             CachePictureBoxClientSize();
         UpdatePictureBoxDisplayMode(
@@ -5360,6 +5384,7 @@ internal sealed class RemoteViewerWindow : Form
         object? sender,
         EventArgs args)
     {
+        _client.InvalidateNativeDetails();
         if (_pictureBox.AllowDrop)
         {
             _ = TrySetFileDropRegistration(
@@ -6941,6 +6966,55 @@ internal sealed class RemoteViewerWindow : Form
             Keys.OemPeriod or Keys.Oemplus => true,
             _ => false
         };
+    }
+
+    internal static RemoteFrameMetadata MatchNativeDetailDecoderOutput(RemoteFrameMetadata frame,
+        long? explicitSampleTime) => frame with
+        { NativeDetails = frame.NativeDetails?.MatchDecoderOutput(explicitSampleTime) };
+
+    private int _nativePreparationPosted;
+
+    private void ScheduleNativeDetailPreparation()
+    {
+        if (_isClosing || IsDisposed || !IsHandleCreated ||
+            Interlocked.CompareExchange(ref _nativePreparationPosted, 1, 0) != 0) return;
+        try
+        {
+            // Always post, including on the UI thread. Shader/device setup is
+            // never awaited by the current base-frame presentation.
+            BeginInvoke(new Action(() =>
+            {
+                Interlocked.Exchange(ref _nativePreparationPosted, 0);
+                if (_isClosing || IsDisposed) return;
+                D3D11HwndVideoPresenter? presenter;
+                lock (_d3d11PresenterLock) presenter = _d3d11VideoPresenter;
+                if (presenter is null) return;
+                if (_client.NativeDetails.IsEnabled) _ = presenter.PrepareNativeDetailsAsync();
+                else presenter.DisableNativeDetails();
+            }));
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
+        { Interlocked.Exchange(ref _nativePreparationPosted, 0); }
+    }
+
+    private (NativeDetailPresentation? Details, NativeDetailRenderBudget Budget) NativePresentationForFrame(
+        RemoteFrameMetadata metadata, MediaFoundationD3D11DecodedFrame decoded)
+    {
+        if (metadata.NativeDetails is null || !_client.NativeDetails.IsEnabled ||
+            metadata.Width != decoded.VisibleWidth || metadata.Height != decoded.VisibleHeight) return default;
+        bool backlogged = true;
+        if (Monitor.TryEnter(_pendingFrameLock))
+        {
+            try { backlogged = _h264Frames.Count > 0 || _pendingFrame is not null; }
+            finally { Monitor.Exit(_pendingFrameLock); }
+        }
+        // Local receive-to-submit budget, not a sender-clock estimate or a
+        // claim of end-to-end latency. Late/queued frames stay base-only.
+        var budget = new NativeDetailRenderBudget(metadata.ReceivedAtTimestamp > 0
+                ? metadata.ReceivedAtTimestamp + Stopwatch.Frequency / DirectH264FramesPerSecond : 0,
+            InputPending: !_client.NativeDetails.IsEnabled, BaseFrameBacklogged: backlogged);
+        return (_client.NativeDetails.TryPresent(metadata.NativeDetails,
+            decoded.HasExplicitSampleTime ? decoded.SampleTime100Nanoseconds : null, budget), budget);
     }
 
     internal static bool IsLocalImeKey(Keys key, bool composing) =>

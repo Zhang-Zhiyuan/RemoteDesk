@@ -49,7 +49,8 @@ internal sealed class PooledRemoteFrame : IDisposable
                 Metadata.EncodedLength,
                 Metadata.CaptureMilliseconds,
                 Metadata.EncodeMilliseconds,
-                Metadata.ReceivedAtTimestamp);
+                Metadata.ReceivedAtTimestamp,
+                Metadata.NativeDetails);
         }
     }
 

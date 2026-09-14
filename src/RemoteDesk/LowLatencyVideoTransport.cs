@@ -152,7 +152,7 @@ internal readonly record struct LowLatencyVideoViewerHandshakeSnapshot(
     long DecryptFailureCount,
     long ValidAckCount);
 
-internal sealed class LowLatencyVideoHostTransport : IAsyncDisposable
+internal sealed partial class LowLatencyVideoHostTransport : IAsyncDisposable
 {
     // Task.Delay cannot accurately schedule the sub-millisecond pauses that
     // eight 1200-byte packets require on a fast LAN. The accumulated timer
@@ -799,6 +799,7 @@ internal sealed class LowLatencyVideoHostTransport : IAsyncDisposable
         ReadOnlyMemory<byte> encodedBytes,
         bool allowLatencyBudgetDrop)
     {
+        long nativePauseGeneration = Interlocked.Read(ref _nativePauseGeneration);
         if (!IsRouteActive ||
             Volatile.Read(ref _videoRouteDisabled) != 0)
         {
@@ -921,7 +922,7 @@ internal sealed class LowLatencyVideoHostTransport : IAsyncDisposable
             allowLatencyBudgetDrop,
             independentlyRecoverable,
             shortGopVideo,
-            recoveryGeneration);
+            recoveryGeneration) { NativePauseGeneration = nativePauseGeneration };
         PendingFrame? previous;
         if (shortGopVideo)
         {
@@ -1113,6 +1114,8 @@ internal sealed class LowLatencyVideoHostTransport : IAsyncDisposable
             }
 
             Volatile.Write(ref _videoRouteDisabled, 1);
+            Interlocked.Increment(ref _nativePauseGeneration);
+            _pendingNativeResume = null;
         }
 
         PendingFrame? pendingFrame;
@@ -2226,7 +2229,8 @@ internal sealed class LowLatencyVideoHostTransport : IAsyncDisposable
                     fragmentIndex < endFragment;
                     fragmentIndex++)
                 {
-                    if (!IsRouteActive ||
+                    if (!IsRouteActive || Volatile.Read(ref _videoRouteDisabled) != 0 ||
+                        frame.NativePauseGeneration != Interlocked.Read(ref _nativePauseGeneration) ||
                         ShouldAbandonCurrentFrame(
                             frameSendStartedAt,
                             frame.IsIndependentlyRecoverable,
@@ -2292,7 +2296,8 @@ internal sealed class LowLatencyVideoHostTransport : IAsyncDisposable
                     continue;
                 }
 
-                if (!IsRouteActive ||
+                if (!IsRouteActive || Volatile.Read(ref _videoRouteDisabled) != 0 ||
+                    frame.NativePauseGeneration != Interlocked.Read(ref _nativePauseGeneration) ||
                     ShouldAbandonCurrentFrame(
                         frameSendStartedAt,
                         frame.IsIndependentlyRecoverable,
@@ -2916,6 +2921,7 @@ internal sealed class LowLatencyVideoHostTransport : IAsyncDisposable
         bool IsShortGopVideo,
         long RecoveryGeneration)
     {
+        internal long NativePauseGeneration { get; init; }
         public bool IsGop1Video =>
             FrameKind == MessageType.VideoFrame &&
             IsIndependentlyRecoverable &&
@@ -3179,7 +3185,7 @@ internal sealed class LowLatencyMouseInputLatencyTracker
     }
 }
 
-internal sealed class LowLatencyVideoViewerTransport : IAsyncDisposable
+internal sealed partial class LowLatencyVideoViewerTransport : IAsyncDisposable
 {
     internal static readonly TimeSpan ProbeInterval =
         LowLatencyVideoBindPolicy.ProbeInterval;
@@ -3306,7 +3312,8 @@ internal sealed class LowLatencyVideoViewerTransport : IAsyncDisposable
             IDisposable?>? attachQwaveFlow = null,
         Action? abortConnection = null,
         Func<TimeSpan, CancellationToken, Task>?
-            fallbackBarrierDelayAsync = null)
+            fallbackBarrierDelayAsync = null,
+        object? framePublicationGate = null)
     {
         ArgumentNullException.ThrowIfNull(expectedHostAddress);
         ArgumentNullException.ThrowIfNull(sendTcpControl);
@@ -3343,6 +3350,7 @@ internal sealed class LowLatencyVideoViewerTransport : IAsyncDisposable
         _hostEndpoint = new IPEndPoint(expectedHostAddress, offer.Port);
         _sendTcpControl = sendTcpControl;
         _publishFrame = publishFrame;
+        _framePublicationGate = framePublicationGate ?? new object();
         _publishCompletedFrame =
             PublishCompletedFrame;
         _log = log;
@@ -3460,7 +3468,7 @@ internal sealed class LowLatencyVideoViewerTransport : IAsyncDisposable
     }
 
     public bool ShouldIgnoreTcpFrames =>
-        Volatile.Read(ref _state) is 2 or 3;
+        Volatile.Read(ref _state) is 2 or 3 && Volatile.Read(ref _nativeResumePendingFirstFrame) == 0;
 
     internal bool IsShutdownCompleted =>
         Volatile.Read(ref _shutdownTask)?.IsCompleted == true;
@@ -3967,6 +3975,7 @@ internal sealed class LowLatencyVideoViewerTransport : IAsyncDisposable
 
     private void HandleFramePacket(LowLatencyVideoDatagram packet)
     {
+        if (packet.FrameSequence < (ulong)Interlocked.Read(ref _nativeResumeMinimumFrame)) return;
         if (!CanAcceptUdpVideoPacket(
                 Volatile.Read(ref _state)))
         {
@@ -3981,6 +3990,16 @@ internal sealed class LowLatencyVideoViewerTransport : IAsyncDisposable
         MessageType frameKind,
         ReadOnlyMemory<byte> payload)
     {
+        // Share the client's existing publication gate: a resumed boundary
+        // and a completed old datagram must not race between validation and
+        // the callback. A separate inner gate would invert the client's lock.
+        lock (_framePublicationGate) PublishCompletedFrameLocked(frameSequence, frameKind, payload);
+    }
+
+    private void PublishCompletedFrameLocked(
+        ulong frameSequence, MessageType frameKind, ReadOnlyMemory<byte> payload)
+    {
+        if (frameSequence < (ulong)Interlocked.Read(ref _nativeResumeMinimumFrame)) return;
         try
         {
             RemoteFrame frame = frameKind == MessageType.Frame
@@ -3997,6 +4016,7 @@ internal sealed class LowLatencyVideoViewerTransport : IAsyncDisposable
                     frameSequence,
                     frame))
             {
+                Volatile.Write(ref _nativeResumePendingFirstFrame, 0);
                 // The decoded frame borrows the reassembler buffer. Event
                 // subscribers may inspect it synchronously, and must copy it
                 // before returning if they need to retain the encoded bytes.
