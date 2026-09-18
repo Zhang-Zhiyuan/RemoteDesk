@@ -44,7 +44,8 @@ internal static class RelayWindowsUpdateProbe
         Program.Save(Path.Combine(output, "inventory.json"), report);
         Console.WriteLine(JsonSerializer.Serialize(report, Program.Json));
         if (!config.TryGetProperty("action", out var action) || action.GetString() == "inventory") return 0;
-        if (action.GetString() != "apply") throw new InvalidOperationException("Unknown maintenance action.");
+        bool verificationOnly = action.GetString() == "verify";
+        if (!verificationOnly && action.GetString() != "apply") throw new InvalidOperationException("Unknown maintenance action.");
 
         string package = Path.GetFullPath(config.GetProperty("package").GetString()!);
         string expectedHash = config.GetProperty("sha256").GetString()!;
@@ -79,7 +80,7 @@ internal static class RelayWindowsUpdateProbe
                     throw new InvalidOperationException("Device has an active session; no update sent.");
                 result["sessionTakeoverExplicitlyAllowed"] = allowSessionTakeover;
                 if (credentials.Count == 0) throw new InvalidOperationException("No saved or supplied device key; no authentication attempted.");
-                await ApplyAsync(options with { DeviceId = device.DeviceId }, device, credentials, package, expectedBuild, result);
+                await ApplyAsync(options with { DeviceId = device.DeviceId }, device, credentials, package, expectedBuild, result, verificationOnly);
                 result["success"] = true;
             }
             catch (Exception error)
@@ -100,7 +101,7 @@ internal static class RelayWindowsUpdateProbe
 
     private static async Task ApplyAsync(RelayConnectionOptions target, RelayOnlineDevice device,
         List<(string Source, string Secret)> credentials, string package, string expectedBuild,
-        Dictionary<string, object?> result)
+        Dictionary<string, object?> result, bool verificationOnly)
     {
         string? authenticatedKey = null;
         RemoteViewerClient? connected = null;
@@ -138,10 +139,14 @@ internal static class RelayWindowsUpdateProbe
                 result["authenticatedDeviceId"] = before.DeviceId;
                 if (string.CompareOrdinal(before.BuildStamp, expectedBuild) > 0)
                     throw new InvalidOperationException("Remote build is newer than the candidate; downgrade refused.");
+                if (verificationOnly && before.BuildStamp != expectedBuild)
+                    throw new InvalidOperationException("Verification-only mode will not update a different remote build.");
                 if (before.BuildStamp == expectedBuild)
                 {
                     result["alreadyCurrent"] = true;
                     Console.WriteLine($"CURRENT {device.MachineName}: {before.BuildStamp}");
+                    await connected.DisconnectAsync();
+                    await VerifyUpdatedEndpointAsync(target, device, authenticatedKey, expectedBuild, result);
                     return;
                 }
                 if (!before.Capabilities.HasFlag(RemoteDeviceCapabilities.RemoteUpdate))
@@ -175,7 +180,13 @@ internal static class RelayWindowsUpdateProbe
             finally { await connected.DisconnectAsync(); }
         }
 
-        Console.WriteLine($"WAITING {device.MachineName}: restart and relay re-registration");
+        await VerifyUpdatedEndpointAsync(target, device, authenticatedKey, expectedBuild, result);
+    }
+
+    private static async Task VerifyUpdatedEndpointAsync(RelayConnectionOptions target, RelayOnlineDevice device,
+        string authenticatedKey, string expectedBuild, Dictionary<string, object?> result)
+    {
+        Console.WriteLine($"WAITING {device.MachineName}: relay connection and frame verification");
         var watch = Stopwatch.StartNew();
         string? lastBuild = null;
         while (watch.Elapsed < TimeSpan.FromMinutes(3))
@@ -189,15 +200,31 @@ internal static class RelayWindowsUpdateProbe
                 lastBuild = current?.BuildStamp;
                 if (current?.BuildStamp != expectedBuild) continue;
                 using var verifier = new RemoteViewerClient();
+                var recentLog = new System.Collections.Concurrent.ConcurrentQueue<string>();
                 long frames = 0;
                 TimeSpan? lastRtt = null;
+                string? hostVideoDiagnostics = null;
+                IReadOnlyList<CaptureTargetInfo>? captureTargets = null;
                 verifier.FrameReceived += _ => Interlocked.Increment(ref frames);
                 verifier.RoundTripUpdated += value => lastRtt = value;
+                void ObserveStatus(string message)
+                {
+                    recentLog.Enqueue(message);
+                    while (recentLog.Count > 30) recentLog.TryDequeue(out _);
+                }
+                verifier.Log += ObserveStatus;
+                verifier.ClipboardStatusReceived += ObserveStatus;
+                verifier.CaptureTargetsReceived += targets => captureTargets = targets.ToArray();
+                verifier.HostVideoDiagnosticsReceived += message => hostVideoDiagnostics = message;
                 try
                 {
                     RemoteDeviceDescriptor after = await ConnectAndIdentifyAsync(verifier, target, authenticatedKey);
                     if (after.BuildStamp != expectedBuild) throw new IOException("Authenticated endpoint has not applied the expected build.");
-                    await Task.Delay(TimeSpan.FromSeconds(8));
+                    result["afterBuild"] = after.BuildStamp;
+                    result["afterDeviceId"] = after.DeviceId;
+                    await Task.Delay(TimeSpan.FromSeconds(6));
+                    await verifier.RequestHostVideoDiagnosticsAsync();
+                    await Task.Delay(TimeSpan.FromSeconds(2));
                     if (!verifier.IsConnected) throw new IOException("Updated endpoint did not retain the verification connection.");
                     if (Interlocked.Read(ref frames) == 0)
                         throw new IOException("Updated endpoint did not deliver any verification frames.");
@@ -210,11 +237,21 @@ internal static class RelayWindowsUpdateProbe
                     Console.WriteLine($"VERIFIED {device.MachineName}: {after.BuildStamp}, relay reconnect, frames={frames}");
                     return;
                 }
-                finally { await verifier.DisconnectAsync(); }
+                finally
+                {
+                    result["verificationLog"] = recentLog.ToArray();
+                    result["hostVideoDiagnostics"] = hostVideoDiagnostics;
+                    result["captureTargets"] = captureTargets;
+                    result["captureTargetStatus"] = verifier.LatestCaptureTargetAvailability;
+                    if (Interlocked.Read(ref frames) == 0 && hostVideoDiagnostics is not null)
+                        Console.WriteLine($"CAPTURE {device.MachineName}: {hostVideoDiagnostics}");
+                    await verifier.DisconnectAsync();
+                }
             }
             catch (Exception error) when (error is IOException or TimeoutException or System.Net.Sockets.SocketException or OperationCanceledException)
             {
-                Console.WriteLine($"WAITING {device.MachineName}: {error.GetType().Name}; retrying verification only");
+                result["lastVerificationFailure"] = error.Message;
+                Console.WriteLine($"WAITING {device.MachineName}: {error.GetType().Name}: {error.Message}; retrying verification only");
             }
         }
         throw new TimeoutException($"No verified updated endpoint after restart; last directory build: {lastBuild ?? "offline"}. No second update was sent.");

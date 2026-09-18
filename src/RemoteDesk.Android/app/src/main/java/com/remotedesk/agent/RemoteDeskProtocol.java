@@ -31,6 +31,7 @@ final class RemoteDeskProtocol {
     static final int CAPABILITY_DEVICE_IDENTITY = 1 << 22;
     static final int CAPABILITY_CLIPBOARD_PASTE_SHORTCUT = 1 << 23;
     static final int CAPABILITY_FILE_TRANSFER_RECEIPT = 1 << 24;
+    static final int CAPABILITY_FILE_RECEIVE_LOCATION = 1 << 27;
 
     static final int VIDEO_CODEC_JPEG = 1;
     static final int VIDEO_CODEC_H264_ANNEX_B = 1 << 1;
@@ -93,6 +94,8 @@ final class RemoteDeskProtocol {
     static final int CONTROL_DEVICE_IDENTITY_REQUEST = 33;
     static final int CONTROL_DEVICE_IDENTITY = 34;
     static final int CONTROL_FILE_TRANSFER_RECEIPT = 35;
+    static final int CONTROL_FILE_RECEIVE_LOCATION_REQUEST = 38;
+    static final int CONTROL_FILE_RECEIVE_LOCATION = 39;
 
     static final int LOW_LATENCY_FALLBACK_GENERIC = 1;
     static final int LOW_LATENCY_FALLBACK_BIND_TIMEOUT = 3;

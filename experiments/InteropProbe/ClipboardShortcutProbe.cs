@@ -22,7 +22,7 @@ internal static class ClipboardShortcutProbe
                 using var pump = new Form { ShowInTaskbar = false };
                 pump.Shown += async (_, _) =>
                 {
-                    try { completion.TrySetResult(await RunCasesAsync(output)); }
+                    try { completion.TrySetResult(await RunCasesAsync(output, desktop)); }
                     catch (Exception error) { completion.TrySetException(error); }
                     finally { pump.Close(); }
                 };
@@ -35,7 +35,7 @@ internal static class ClipboardShortcutProbe
         return completion.Task.WaitAsync(TimeSpan.FromSeconds(90));
     }
 
-    private static async Task<int> RunCasesAsync(string output)
+    private static async Task<int> RunCasesAsync(string output, nint desktop)
     {
         var checks = new List<object>();
         int failed = 0;
@@ -177,6 +177,69 @@ internal static class ClipboardShortcutProbe
             timeout.Cancel();
             await host;
         }
+        // A Win32 focus handle belongs to an input queue, not necessarily to
+        // the foreground application. Reproduce switching to another app on
+        // another UI thread without ever entering the interactive desktop.
+        using (var client = new RemoteViewerClient())
+        using (var window = new RemoteViewerWindow(client, "Background hook fixture", true, true, false, false, false, false)
+            { ShowInTaskbar = false })
+        {
+            window.Show();
+            Invoke(window, "UninstallSystemKeyboardCapture");
+            var picture = window.Controls.OfType<PictureBox>().Single();
+            picture.Focus();
+            var ready = new TaskCompletionSource<Form>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var otherThread = new Thread(() =>
+            {
+                try
+                {
+                    if (!SetThreadDesktop(desktop)) throw new System.ComponentModel.Win32Exception();
+                    using var other = new Form { ShowInTaskbar = false, Text = "Local copy fixture" };
+                    var text = new TextBox { Text = "Owned local text", Dock = DockStyle.Fill };
+                    other.Controls.Add(text);
+                    other.Shown += (_, _) => { text.Focus(); SetForegroundWindow(other.Handle); ready.TrySetResult(other); };
+                    Application.Run(other);
+                    stopped.TrySetResult();
+                }
+                catch (Exception error) { ready.TrySetException(error); stopped.TrySetException(error); }
+            }) { IsBackground = true };
+            otherThread.SetApartmentState(ApartmentState.STA);
+            otherThread.Start();
+            Form other = await ready.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            try
+            {
+                await Task.Delay(100);
+                nint foreground = GetForegroundWindow();
+                // The own-injected-event guard used to swallow an event even
+                // with no connection, if the background picture kept focus.
+                nint data = Marshal.AllocHGlobal(32);
+                nint consumed;
+                try
+                {
+                    Marshal.StructureToPtr(new HookData { VirtualKey = (uint)Keys.C, Flags = 0x10,
+                        ExtraInfo = InputInjector.InjectedInputMarker }, data, false);
+                    consumed = (nint)Invoke(window, "LowLevelKeyboardCallback", 0, (nint)0x100, data)!;
+                }
+                finally { Marshal.FreeHGlobal(data); }
+                // An isolated noninteractive window station has no OS
+                // foreground window. This is also an ownership boundary:
+                // a stale focused child must not authorize the global hook.
+                bool pass = foreground != window.Handle && consumed == 0;
+                checks.Add(new { Name = "Non-foreground viewer must not swallow keyboard input", passed = pass,
+                    backgroundSurfaceContainsFocus = picture.ContainsFocus,
+                    viewerIsForeground = foreground == window.Handle,
+                    noninteractiveStation = foreground == 0, consumed = consumed.ToInt64() });
+                Console.WriteLine($"{(pass ? "PASS" : "FAIL")}: Background viewer keyboard isolation");
+                if (!pass) failed++;
+            }
+            finally
+            {
+                other.BeginInvoke((Action)other.Close);
+                await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                window.Close();
+            }
+        }
         Program.Save(Path.Combine(output, "clipboard-shortcuts.json"), new
         {
             complete = true, failed,
@@ -192,4 +255,11 @@ internal static class ClipboardShortcutProbe
         bool Reject = false, bool LoseFocus = false, bool Repeat = false, bool Hold = false, bool CopyFirst = false, bool NonTextCopy = false);
 
     [DllImport("user32.dll", SetLastError = true)] private static extern bool SetThreadDesktop(nint desktop);
+    [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(nint window);
+    [StructLayout(LayoutKind.Sequential)] private struct HookData
+    {
+        public uint VirtualKey, ScanCode, Flags, Time;
+        public nuint ExtraInfo;
+    }
 }

@@ -381,11 +381,12 @@ internal sealed class FileTransferConfirmationDialog : Form
             Dock = DockStyle.Fill,
             AutoScroll = true,
             ColumnCount = 1,
-            RowCount = 4,
+            RowCount = 5,
             Padding = new Padding(12)
         };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         Controls.Add(root);
@@ -436,6 +437,14 @@ internal sealed class FileTransferConfirmationDialog : Form
         });
         grid.Columns.Add(new DataGridViewTextBoxColumn
         {
+            HeaderText = "文件名",
+            DataPropertyName = nameof(FileTransferConfirmationItem.TransferName),
+            AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+            FillWeight = 25,
+            MinimumWidth = 80
+        });
+        grid.Columns.Add(new DataGridViewTextBoxColumn
+        {
             HeaderText = "原始位置",
             DataPropertyName = nameof(FileTransferConfirmationItem.SourcePath),
             AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
@@ -465,6 +474,21 @@ internal sealed class FileTransferConfirmationDialog : Form
         grid.DataSource = items.ToArray();
         root.Controls.Add(grid, 0, 1);
 
+        var selectedDetails = new TextBox
+        {
+            Dock = DockStyle.Fill, Multiline = true, ReadOnly = true,
+            WordWrap = true, ScrollBars = ScrollBars.Vertical, Height = 84,
+            Margin = new Padding(0, 8, 0, 0), AccessibleName = "所选文件的完整路径"
+        };
+        void UpdateSelectedDetails()
+        {
+            if (grid.CurrentRow?.DataBoundItem is FileTransferConfirmationItem item)
+                selectedDetails.Text = $"文件名：{item.TransferName}\r\n原始位置：{item.SourcePath}\r\n接收位置：{item.DestinationPath}";
+        }
+        grid.SelectionChanged += (_, _) => UpdateSelectedDetails();
+        Shown += (_, _) => UpdateSelectedDetails();
+        root.Controls.Add(selectedDetails, 0, 2);
+
         var noteLabel = new Label
         {
             AutoSize = true,
@@ -473,7 +497,7 @@ internal sealed class FileTransferConfirmationDialog : Form
             Padding = new Padding(0, 8, 0, 8),
             Text = string.IsNullOrWhiteSpace(note) ? "确认后才会开始实际传输。" : $"确认后才会开始实际传输。{Environment.NewLine}{note}"
         };
-        root.Controls.Add(noteLabel, 0, 2);
+        root.Controls.Add(noteLabel, 0, 3);
 
         var buttons = new FlowLayoutPanel
         {
@@ -496,7 +520,7 @@ internal sealed class FileTransferConfirmationDialog : Form
         };
         buttons.Controls.Add(confirmButton);
         buttons.Controls.Add(cancelButton);
-        root.Controls.Add(buttons, 0, 3);
+        root.Controls.Add(buttons, 0, 4);
 
         AcceptButton = confirmButton;
         CancelButton = cancelButton;

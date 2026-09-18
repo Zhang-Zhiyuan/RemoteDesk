@@ -342,6 +342,22 @@ public sealed class RemoteViewerWindowTests
     }
 
     [Theory]
+    [InlineData(true, false, true, 123, 123, true)]
+    [InlineData(true, false, true, 123, 456, false)]
+    [InlineData(true, false, true, 123, 0, false)]
+    [InlineData(true, false, true, 0, 0, false)]
+    [InlineData(false, false, true, 123, 123, false)]
+    [InlineData(true, true, true, 123, 123, false)]
+    [InlineData(true, false, false, 123, 123, false)]
+    public void GlobalKeyboardCaptureRequiresTheForegroundViewer(
+        bool connected, bool closing, bool surfaceFocus,
+        int viewer, int foreground, bool expected)
+    {
+        Assert.Equal(expected, RemoteViewerWindow.ShouldCaptureGlobalKeyboardInput(
+            connected, closing, surfaceFocus, viewer, foreground));
+    }
+
+    [Theory]
     [InlineData(
         (int)Keys.ControlKey,
         (int)Keys.LControlKey,

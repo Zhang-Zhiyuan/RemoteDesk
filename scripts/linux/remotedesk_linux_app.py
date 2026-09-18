@@ -56,6 +56,9 @@ from remotedesk_protocol_probe import (
     CAPABILITY_FILE_CHECKSUM,
     CAPABILITY_FILE_RECEIVE,
     CAPABILITY_FILE_TRANSFER_RECEIPT,
+    CAPABILITY_FILE_RECEIVE_LOCATION,
+    CONTROL_FILE_RECEIVE_LOCATION,
+    encode_file_receive_location_request,
     CAPABILITY_FILE_TRANSFER_CANCEL,
     CAPABILITY_HIGH_FRAME_RATE_H264,
     CAPABILITY_HIGH_QUALITY_JPEG,
@@ -1083,6 +1086,7 @@ def linux_viewer_capabilities(has_native_h264_presenter: bool) -> int:
 CRITICAL_UI_EVENTS = frozenset(
     {
         "viewer_file_failure",
+        "viewer_file_results",
         "host_exited",
         "host_stop_completed",
         "viewer_error",
@@ -3161,8 +3165,11 @@ def create_file_transfer_preview(
     return normalized_paths, items, "\n".join(note_parts)
 
 
-def format_remote_receive_destination(transfer_name: str) -> str:
-    return f"远端接收目录/{transfer_name}{FILE_TRANSFER_RENAME_SUFFIX}"
+def format_remote_receive_destination(transfer_name: str, directory: str = "") -> str:
+    if not directory:
+        return f"位置未确认：远端未提供完整接收目录/{transfer_name}{FILE_TRANSFER_RENAME_SUFFIX}"
+    separator = "\\" if "\\" in directory and not directory.startswith("/") else "/"
+    return directory.rstrip("/\\") + separator + transfer_name + FILE_TRANSFER_RENAME_SUFFIX
 
 
 def format_transfer_bytes(bytes_count: int) -> str:
@@ -3219,6 +3226,8 @@ class ViewerConnection:
         self.file_receipt_lock = threading.Lock()
         self.file_receipt: ViewerFileReceipt | None = None
         self.file_receipt_timeout = 120.0
+        self.file_location_lock = threading.Lock()
+        self.file_location_requests: dict[str, tuple[threading.Event, dict[str, Any]]] = {}
         self.clipboard_lock = threading.Lock()
         self.clipboard_pending: ViewerClipboardRequest | None = None
         self.clipboard_latest: ViewerClipboardRequest | None = None
@@ -3528,6 +3537,28 @@ class ViewerConnection:
             self.capture_target_condition.notify()
             return True
 
+    def get_file_receive_location(self, cancel_event: threading.Event, timeout: float = 10.0) -> tuple[str, str]:
+        if not (self.remote_capabilities & CAPABILITY_FILE_RECEIVE_LOCATION):
+            return "", "远端版本不支持报告完整接收目录。位置未确认；建议更新被控端后再传输。"
+        request_id = uuid4().hex
+        completed, response = threading.Event(), {}
+        with self.file_location_lock:
+            self.file_location_requests[request_id] = (completed, response)
+        try:
+            self._write_file_control(encode_file_receive_location_request(request_id))
+            deadline = time.monotonic() + timeout
+            while not completed.wait(0.1):
+                if cancel_event.is_set() or self.stop_event.is_set():
+                    raise TransferCancelledError("连接或文件确认已取消，尚未发送文件。")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("读取远端接收位置超时，尚未发送文件，请重试。")
+            if not response.get("success") or not str(response.get("text", "")).strip():
+                raise OSError(response.get("statusMessage") or "远端未能确认接收目录，未开始传输。")
+            return response["text"], str(response.get("statusMessage") or "")
+        finally:
+            with self.file_location_lock:
+                self.file_location_requests.pop(request_id, None)
+
     def send_files(self, file_paths: list[str]) -> bool:
         if self.session is None or self.sock is None:
             return False
@@ -3552,7 +3583,7 @@ class ViewerConnection:
     def _send_files_locked(self, file_paths: list[str]) -> None:
         sent = 0
         failed = 0
-        first_error = ""
+        results: list[str] = []
         try:
             for file_path in file_paths:
                 if self.stop_event.is_set():
@@ -3561,12 +3592,12 @@ class ViewerConnection:
                 source_path = Path(file_path)
                 try:
                     transfer_path, transfer_name, display_name, temporary_archive = self._prepare_transfer_path(source_path)
-                    self._send_file_to_remote(transfer_path, transfer_name, display_name)
+                    receipt_message = self._send_file_to_remote(transfer_path, transfer_name, display_name)
+                    results.append(f"已发送：{display_name}\n{receipt_message}\n")
                     sent += 1
                 except Exception as ex:
                     failed += 1
-                    if not first_error:
-                        first_error = f"{source_path.name}：{ex}"
+                    results.append(f"未完成：{source_path.name}\n{ex}\n")
                     if not self.stop_event.is_set():
                         self._put_event("viewer_status", f"发送项目失败：{source_path.name} - {ex}")
                 finally:
@@ -3583,8 +3614,10 @@ class ViewerConnection:
                 self._put_event("viewer_status", status)
         finally:
             self.file_transfer_lock.release()
-            if first_error and not self.stop_event.is_set():
-                self._put_event("viewer_file_failure", f"{failed} 个项目未完成传输。\n{first_error}")
+            if results:
+                remaining = len(file_paths) - sent - failed
+                summary = f"已发送 {sent} 项，未完成 {failed} 项，未开始 {remaining} 项。\n文件夹以 ZIP 保存，不自动解压。\n\n"
+                self._put_event("viewer_file_results", summary + "\n".join(results))
 
     def _prepare_transfer_path(self, source: Path) -> tuple[Path, str, str, Path | None]:
         path = source.expanduser()
@@ -3602,7 +3635,7 @@ class ViewerConnection:
             return archive, transfer_name, f"{path.name} -> {transfer_name}", archive
         raise FileNotFoundError("只支持发送文件或文件夹。")
 
-    def _send_file_to_remote(self, path: Path, transfer_name: str, display_name: str) -> None:
+    def _send_file_to_remote(self, path: Path, transfer_name: str, display_name: str) -> str:
         if not path.is_file():
             raise FileNotFoundError("只支持发送普通文件。")
         source_stat = path.stat()
@@ -3670,6 +3703,7 @@ class ViewerConnection:
                     raise OSError(receipt.message or "远端保存文件失败。")
                 self._put_event("viewer_status", receipt.message)
             transfer_active = False
+            return (receipt.message or "远端确认保存，但未提供实际路径。") if receipt is not None else "旧版远端未返回保存确认或实际路径，请到被控端检查。"
         except Exception as ex:
             if transfer_active and send_cancel:
                 try:
@@ -4418,6 +4452,12 @@ class ViewerConnection:
                     receipt.success = bool(control.get("success"))
                     receipt.message = str(control.get("statusMessage") or "")
                     receipt.completed.set()
+        elif kind == CONTROL_FILE_RECEIVE_LOCATION:
+            with self.file_location_lock:
+                pending = self.file_location_requests.get(str(control.get("transferId") or ""))
+                if pending is not None and not pending[0].is_set():
+                    pending[1].update(control)
+                    pending[0].set()
         elif kind in (CONTROL_CLIPBOARD_STATUS, CONTROL_FILE_TRANSFER_STATUS):
             message = str(
                 control.get("statusMessage")
@@ -5682,24 +5722,24 @@ class RemoteDeskLinuxApp:
             textvariable=self.host_capture,
             values=("x11", "placeholder"),
             state="readonly",
-            width=16,
-        ).grid(row=5, column=1, sticky=tk.W, pady=6)
+            width=12,
+        ).grid(row=5, column=1, columnspan=2, sticky=tk.EW, pady=6)
         ttk.Label(form, text="目标帧率", style="Panel.TLabel").grid(row=6, column=0, sticky=tk.W, pady=6)
         ttk.Combobox(
             form,
             textvariable=self.host_fps,
             values=HOST_FPS_OPTIONS,
             state="readonly",
-            width=16,
-        ).grid(row=6, column=1, sticky=tk.W, pady=6)
+            width=12,
+        ).grid(row=6, column=1, columnspan=2, sticky=tk.EW, pady=6)
         ttk.Label(form, text="画面尺寸", style="Panel.TLabel").grid(row=7, column=0, sticky=tk.W, pady=6)
         ttk.Combobox(
             form,
             textvariable=self.host_size,
             values=HOST_SIZE_OPTIONS,
             state="readonly",
-            width=16,
-        ).grid(row=7, column=1, sticky=tk.W, pady=6)
+            width=12,
+        ).grid(row=7, column=1, columnspan=2, sticky=tk.EW, pady=6)
 
         self.host_remember = tk.BooleanVar(value=True)
         self.host_login_start = tk.BooleanVar(value=True)
@@ -6760,6 +6800,11 @@ class RemoteDeskLinuxApp:
                 paths,
                 cancel_event=cancel_event,
             )
+            if items:
+                directory, location_note = ViewerConnection.get_file_receive_location(viewer, cancel_event)
+                items = [replace(item, destination_path=format_remote_receive_destination(item.transfer_name, directory)) for item in items]
+                device = getattr(viewer, "remote_device_info", {}).get("machineName", "当前远端设备")
+                note = f"接收设备：{device}\n{location_note}\n{note}"
         except TransferCancelledError:
             return
         except Exception as ex:
@@ -6849,6 +6894,28 @@ class RemoteDeskLinuxApp:
                     )
                 )
 
+    def _show_file_transfer_results(self, details: str) -> None:
+        parent = self.viewer_window or self.root
+        dialog = tk.Toplevel(parent, class_="RemoteDesk")
+        dialog.title("文件传输结果")
+        dialog.transient(parent)
+        dialog.geometry(f"{min(900, dialog.winfo_screenwidth() - 80)}x{min(480, dialog.winfo_screenheight() - 100)}")
+        content = ttk.Frame(dialog, padding=12)
+        content.pack(fill=tk.BOTH, expand=True)
+        content.rowconfigure(0, weight=1)
+        content.columnconfigure(0, weight=1)
+        text = tk.Text(content, wrap=tk.NONE, width=60, height=12)
+        text.insert("1.0", details)
+        text.configure(state=tk.DISABLED)
+        text.grid(row=0, column=0, sticky="nsew")
+        vertical = ttk.Scrollbar(content, orient=tk.VERTICAL, command=text.yview)
+        horizontal = ttk.Scrollbar(content, orient=tk.HORIZONTAL, command=text.xview)
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal.grid(row=1, column=0, sticky="ew")
+        text.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        ttk.Button(content, text="知道了", command=dialog.destroy).grid(row=2, column=0, sticky="e", pady=(10, 0))
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+
     def _show_file_transfer_confirmation_dialog(
         self,
         parent: tk.Misc,
@@ -6882,14 +6949,16 @@ class RemoteDeskLinuxApp:
 
         table_frame = ttk.Frame(content, style="App.TFrame")
         table_frame.pack(fill=tk.BOTH, expand=True)
-        columns = ("kind", "size", "source", "destination")
+        columns = ("kind", "size", "name", "source", "destination")
         tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=min(10, max(4, len(items))))
         tree.heading("kind", text="类型")
         tree.heading("size", text="大小")
+        tree.heading("name", text="文件名")
         tree.heading("source", text="原始位置")
         tree.heading("destination", text="传输后位置")
         tree.column("kind", width=70, minwidth=58, stretch=False)
         tree.column("size", width=90, minwidth=76, stretch=False, anchor=tk.E)
+        tree.column("name", width=160, minwidth=100)
         tree.column("source", width=330, minwidth=180)
         tree.column("destination", width=300, minwidth=180)
         vertical_scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=tree.yview)
@@ -6904,15 +6973,37 @@ class RemoteDeskLinuxApp:
             tree.insert(
                 "",
                 tk.END,
-                values=(item.kind, format_transfer_bytes(item.size_bytes), item.source_path, item.destination_path),
+                values=(item.kind, format_transfer_bytes(item.size_bytes), item.transfer_name, item.source_path, item.destination_path),
             )
+
+        details_frame = ttk.Frame(content)
+        details_frame.pack(fill=tk.X, pady=(8, 0))
+        selected_details = tk.Text(details_frame, height=3, wrap=tk.CHAR, state=tk.DISABLED)
+        details_scroll = ttk.Scrollbar(details_frame, orient=tk.VERTICAL, command=selected_details.yview)
+        selected_details.configure(yscrollcommand=details_scroll.set)
+        details_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        selected_details.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        def show_selected_details(_event: Any = None) -> None:
+            selection = tree.selection()
+            if not selection:
+                return
+            item = items[tree.index(selection[0])]
+            selected_details.configure(state=tk.NORMAL)
+            selected_details.delete("1.0", tk.END)
+            selected_details.insert("1.0", f"文件名：{item.transfer_name}\n原始位置：{item.source_path}\n接收位置：{item.destination_path}")
+            selected_details.configure(state=tk.DISABLED)
+        tree.bind("<<TreeviewSelect>>", show_selected_details)
+        if tree.get_children():
+            tree.selection_set(tree.get_children()[0])
+            show_selected_details()
 
         note_label: ttk.Label | None = None
         if note:
             note_label = ttk.Label(
                 content,
                 text=note,
-                style="Subtle.TLabel",
+                style="Status.TLabel",
                 wraplength=820,
                 justify=tk.LEFT,
             )
@@ -7303,6 +7394,10 @@ class RemoteDeskLinuxApp:
                 if message is not None:
                     self._set_viewer_status(str(message))
                     messagebox.showwarning("文件传输未完成", str(message), parent=self.viewer_window or self.root)
+            elif event == "viewer_file_results":
+                message = self._unpack_viewer_event(value)
+                if message is not None:
+                    self._show_file_transfer_results(str(message))
             elif event == "viewer_upscaling":
                 enabled = self._unpack_viewer_event(value)
                 if enabled is not None:

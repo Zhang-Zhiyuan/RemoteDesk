@@ -172,6 +172,7 @@ Device capabilities are an `Int32` bitmask in `DeviceInfo`; viewer-selected capa
 - `1 << 22`: negotiated stable installation identity
 - `1 << 23`: native Ctrl+V clipboard paste (Android accessibility input)
 - `1 << 24`: correlated file-save receipts (`FileTransferReceipt`, control kind `35`)
+- `1 << 27`: file receive-directory preflight (control kinds `38` / `39`)
 
 When a host advertises bit 22, an authenticated viewer may send control kind
 `33` (`DeviceIdentityRequest`, no fields). The host replies with kind `34`
@@ -556,6 +557,25 @@ for the declared file plus a 256 MiB safety reserve (Android public-download
 publication may require space for both the temporary and published copy).
 
 Sender sequence:
+
+Before an upload, viewers may query a host advertising bit 27 with control `38`
+(`FileReceiveLocationRequest`): request id (bounded .NET string). The host replies
+with control `39` (`FileReceiveLocation`): matching request id, success (Boolean),
+full receive directory (bounded .NET string), note (bounded .NET string). Directory
+and note may be empty on failure. Paths must not be truncated. This is an
+authenticated, read-only request; it neither starts nor authorizes a transfer.
+The directory may describe an Android primary destination with an explicitly
+named fallback in the note. Publication receipts remain authoritative, including
+automatic renames. Android queries its own MediaStore row for the actual name;
+if metadata is unavailable it returns the saved content URI, not a guessed name.
+
+Viewers wait up to 10 seconds, ignore unmatched/late replies, and invalidate
+confirmation on connection replacement (including queued sends). A query error
+stops before any file bytes. Legacy hosts receive no new message: the confirmation
+explicitly labels the location unconfirmed. The UI shows file names, sizes,
+source/destination paths before sending and all per-file receipts afterward.
+Current-window paste is a separate best-effort request, never proof of another
+destination or completed paste. `DeviceInfo` framing is unchanged.
 
 1. `FileTransferStart`: transfer id, file name, declared length.
 2. `FileTransferChunk`: transfer id, expected offset, chunk length, chunk bytes.

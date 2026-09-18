@@ -7,7 +7,7 @@ using RemoteDesk;
 // a private window station. The public relay sees only encrypted test traffic.
 internal static class FileClipboardRelayProbe
 {
-    internal static async Task<int> RunAsync(string output, string expectedServer)
+    internal static async Task<int> RunAsync(string output, string expectedServer, bool interactiveFileUi = false)
     {
         RelaySettings saved = new AppSettingsService().Load().Relay;
         if (string.IsNullOrWhiteSpace(expectedServer) || saved.ServerAddress != expectedServer)
@@ -50,7 +50,7 @@ internal static class FileClipboardRelayProbe
                 await Write(RemoteMessageCodec.EncodeDeviceInfo(new RemoteDeviceDescriptor("RemoteDesk transfer fixture", "Windows",
                     RemoteDeviceCapabilities.ClipboardText | RemoteDeviceCapabilities.FileReceive | RemoteDeviceCapabilities.FileSend |
                     RemoteDeviceCapabilities.FileChecksum | RemoteDeviceCapabilities.FileTransferCancel |
-                    RemoteDeviceCapabilities.FileTransferPreview | RemoteDeviceCapabilities.FileTransferReceipt)));
+                    RemoteDeviceCapabilities.FileTransferPreview | RemoteDeviceCapabilities.FileTransferReceipt | RemoteDeviceCapabilities.FileReceiveLocation)));
                 try {
                     while (!shutdown.Task.IsCompleted) {
                         var message = await Protocol.ReadMessageAsync(stream, session, timeout.Token);
@@ -58,6 +58,9 @@ internal static class FileClipboardRelayProbe
                         if (message.Type != MessageType.Control) continue;
                         var control = RemoteMessageCodec.DecodeControl(message.PayloadMemory);
                         switch (control.Kind) {
+                            case RemoteControlKind.FileReceiveLocationRequest:
+                                await Write(RemoteMessageCodec.EncodeFileReceiveLocation(control.TransferId!, true,
+                                    receiver.GetConfiguredReceiveDirectory(), "Owned fixture; duplicate names are preserved.")); break;
                             case RemoteControlKind.ClipboardSetText:
                                 remoteClipboard = control.Text!;
                                 await Write(RemoteMessageCodec.EncodeClipboardStatus(true, "Updated fixture clipboard")); break;
@@ -99,12 +102,15 @@ internal static class FileClipboardRelayProbe
             const string clipboard = "公网剪贴板 中文😀\r\n第二行\t缩进";
             Check("public relay clipboard send ACK", await viewer.SendClipboardTextToRemoteAsync(clipboard));
             Check("remote fixture exact clipboard text", remoteClipboard == clipboard);
-            await ClipboardTextService.SetTextAsync("private station sentinel");
-            // WAN progress/status messages are not completion. Wait for the
-            // correlated read request and the actual Windows clipboard write.
-            Check("public relay clipboard read reply completed",
-                await viewer.ReadRemoteClipboardAndWaitAsync(notifyRequest: false).WaitAsync(timeout.Token));
-            Check("public relay text return to real isolated Windows clipboard", await ClipboardTextService.GetTextAsync() == clipboard);
+            if (!interactiveFileUi)
+            {
+                await ClipboardTextService.SetTextAsync("private station sentinel");
+                // WAN progress/status messages are not completion. Wait for
+                // the reply and the actual private Windows clipboard write.
+                Check("public relay clipboard read reply completed",
+                    await viewer.ReadRemoteClipboardAndWaitAsync(notifyRequest: false).WaitAsync(timeout.Token));
+                Check("public relay text return to real isolated Windows clipboard", await ClipboardTextService.GetTextAsync() == clipboard);
+            }
             await viewer.SendFileToRemoteAsync(binary);
             Check("public relay 1 MiB upload saved and SHA256 verified", File.ReadAllBytes(Directory.GetFiles(received).Single()).SequenceEqual(bytes));
             await viewer.SendFileToRemoteAsync(binary);
@@ -114,11 +120,20 @@ internal static class FileClipboardRelayProbe
             bool failed = false;
             try { await viewer.SendFileToRemoteAsync(rejected); } catch (IOException error) { failed = error.Message.Contains("disk full"); }
             Check("negative save receipt fails upload without false success", failed && !File.Exists(Path.Combine(received, "reject.bin")));
+            RemoteFilePasteResult batch = await viewer.SendFilesToRemoteAsync([binary, rejected, empty], 8);
+            string batchDetails = FileTransferResultDialog.FormatDetails(batch, "Owned fixture", false);
+            Check("mixed file batch retains every saved path and rejection", batch.SentFiles == 2 && batch.FailedFiles == 1 &&
+                batch.Results?.Count == 3 && batchDetails.Contains("disk full", StringComparison.Ordinal) &&
+                batch.Results.Where(item => item.Success).All(item => item.Details.Contains(received, StringComparison.Ordinal)));
             viewer.ConfirmRemoteClipboardFileTransfer = (items, _) => items.Count == 1 && items[0].TransferName == "return.bin" && items[0].SizeBytes == bytes.Length;
             var download = await viewer.RequestRemoteClipboardFilesForDragOutAsync(timeout.Token);
             Check("confirmed reverse file transfer over public relay", download.Success && download.LocalPaths.Count == 1 && File.ReadAllBytes(download.LocalPaths[0]).SequenceEqual(bytes));
+            if (interactiveFileUi)
+                checks.AddRange(await FileClipboardUiProbe.RunAsync(viewer, binary, received));
             Program.Save(Path.Combine(output, "public-relay.json"), new { passed = true, server = options.ServerAddress, checks,
-                scope = "Real pinned public relay; synthetic authenticated peer and production file receiver; private Windows clipboard. No production desktop or files touched." });
+                scope = interactiveFileUi
+                    ? "Real public relay, production file receiver and owned file-paste confirmation dialogs. Explicit fixture paths replace clipboard reading; no user clipboard or files accessed."
+                    : "Real pinned public relay; synthetic authenticated peer and production file receiver; private Windows clipboard. No production desktop or files touched." });
             return 0;
         }
         catch (Exception error) {

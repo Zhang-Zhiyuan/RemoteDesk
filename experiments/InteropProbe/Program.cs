@@ -26,6 +26,9 @@ internal static class Program
         var c = config.RootElement;
         var output = Path.GetFullPath(c.GetProperty("output").GetString()!);
         Directory.CreateDirectory(output);
+        if (args[0] == "keyboard-focus") return KeyboardFocusProbe.Run(output);
+        if (args[0] == "file-relay-ui") return FileClipboardRelayProbe.RunAsync(output,
+            c.GetProperty("expectedServer").GetString()!, interactiveFileUi: true).GetAwaiter().GetResult();
         if (args[0] == "relay-path-quality") return RelayPathQualityProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "relay-windows-update") return RelayWindowsUpdateProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "relay-names") return RelayNamesProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();

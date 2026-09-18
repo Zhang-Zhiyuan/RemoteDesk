@@ -2425,6 +2425,13 @@ public sealed partial class MainForm : Form
         _viewerClient.ClipboardStatusReceived +=
             OnViewerClipboardStatusReceived;
         _viewerClient.FileTransferStatusReceived += OnViewerFileTransferStatusReceived;
+        _viewerClient.RemoteClipboardFileResultReady += result => OnUi(() =>
+        {
+            if (_isClosing || IsDisposed) return;
+            using var dialog = new FileTransferResultDialog("远端文件取回结果",
+                result.Message + "\r\n\r\n本机实际保存位置：\r\n" + string.Join("\r\n", result.FilesForDisplay));
+            dialog.ShowDialog(GetRemoteFileConfirmationOwner());
+        });
         _viewerClient.RemoteClipboardFileRequestPendingChanged += pending => OnUi(() =>
             SetRemoteFilePullPending(pending));
         _viewerClient.ConfirmRemoteClipboardFileTransfer = ConfirmRemoteClipboardFileTransfer;
@@ -7213,10 +7220,10 @@ public sealed partial class MainForm : Form
         try
         {
             SetViewerStatus("正在读取文件信息...", MutedTextColor);
-            FileTransferConfirmationPreview preview = await CreateOutgoingFileTransferPreviewAsync(
+            FileTransferConfirmationPreview preview = await _viewerClient.PrepareFileTransferPreviewAsync(
                 [dialog.FileName],
                 maxFiles: 1,
-                FileTransferConfirmation.FormatRemoteReceiveDestination);
+                fileGeneration);
             if (!ConfirmOutgoingFileTransfer(
                 fileGeneration,
                 preview,
@@ -7229,8 +7236,8 @@ public sealed partial class MainForm : Form
 
             _sendFileButton.Enabled = false;
             SetViewerStatus("正在准备发送文件...", MutedTextColor);
-            RemoteFilePasteResult result = await _viewerClient.SendFilePastePlanToRemoteAsync(preview.Plan, "发送文件失败");
-            if (result.FailedFiles > 0) ShowFileTransferFailure(result.FailureMessage ?? "部分文件未能发送，请检查接收目录。");
+            RemoteFilePasteResult result = await _viewerClient.SendFilePastePlanToRemoteAsync(preview.Plan, "发送文件失败", fileGeneration);
+            if (!_isClosing && !IsDisposed) FileTransferResultDialog.ShowResults(this, result, preview.Note);
         }
         catch (Exception ex)
         {
@@ -7481,10 +7488,10 @@ public sealed partial class MainForm : Form
             }
 
             SetViewerStatus("正在读取剪贴板文件信息...", MutedTextColor);
-            FileTransferConfirmationPreview preview = await CreateOutgoingFileTransferPreviewAsync(
+            FileTransferConfirmationPreview preview = await _viewerClient.PrepareFileTransferPreviewAsync(
                 clipboardFiles,
                 MaxClipboardFilePasteCount,
-                FileTransferConfirmation.FormatRemoteReceiveDestination);
+                fileGeneration);
             if (!ConfirmOutgoingFileTransfer(
                 fileGeneration,
                 preview,
@@ -7496,7 +7503,7 @@ public sealed partial class MainForm : Form
             }
 
             SetViewerStatus("正在发送剪贴板文件...", MutedTextColor);
-            RemoteFilePasteResult result = await _viewerClient.SendFilePastePlanToRemoteAsync(preview.Plan);
+            RemoteFilePasteResult result = await _viewerClient.SendFilePastePlanToRemoteAsync(preview.Plan, expectedGeneration: fileGeneration);
             string status = RemoteViewerWindow.FormatClipboardFilePasteStatus(result, MaxClipboardFilePasteCount);
             Color statusColor = result.FailedFiles > 0
                 ? DangerColor
@@ -7504,7 +7511,7 @@ public sealed partial class MainForm : Form
                     ? SuccessTextColor
                     : MutedTextColor;
             SetViewerStatus(status, statusColor);
-            if (result.FailedFiles > 0) ShowFileTransferFailure(result.FailureMessage ?? status);
+            if (!_isClosing && !IsDisposed) FileTransferResultDialog.ShowResults(this, result, preview.Note);
         }
         catch (Exception ex) when (ex is TimeoutException or
             System.Runtime.InteropServices.ExternalException or
@@ -7526,25 +7533,6 @@ public sealed partial class MainForm : Form
                 ApplyViewerCapabilityState(_viewerClient.IsConnected);
             }
         }
-    }
-
-    private static Task<FileTransferConfirmationPreview> CreateOutgoingFileTransferPreviewAsync(
-        IReadOnlyList<string> paths,
-        int maxFiles,
-        Func<string, string> destinationFormatter)
-    {
-        return Task.Run(() =>
-        {
-            RemoteFilePastePlan plan = RemoteViewerClient.CreateFilePastePlan(
-                paths,
-                maxFiles,
-                File.Exists,
-                Directory.Exists,
-                includeDirectories: true);
-            return FileTransferConfirmation.CreatePreview(
-                plan,
-                (_item, transferName) => destinationFormatter(transferName));
-        });
     }
 
     private bool ConfirmOutgoingFileTransfer(

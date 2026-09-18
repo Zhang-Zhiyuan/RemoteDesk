@@ -103,6 +103,11 @@ internal static class ClipboardSystemProbe
         shutdown.TrySetResult(true);
         await viewer.DisconnectAsync();
         await host.WaitAsync(timeout.Token);
+        string fixture = Path.GetFullPath(Path.Combine(output, "剪贴板文件😀.txt"));
+        await File.WriteAllTextAsync(fixture, "owned file clipboard fixture", timeout.Token);
+        await ClipboardTextService.SetFileDropListAsync([fixture]);
+        Check("real Windows file clipboard keeps Unicode paths",
+            (await ClipboardTextService.GetFileDropListAsync()).SequenceEqual([fixture]));
         Program.Save(Path.Combine(output, "windows-clipboard.json"), new {
             complete = true, scope = "private Windows window station and clipboard; authenticated synthetic loopback peer; no interactive user clipboard access", checks });
         return 0;

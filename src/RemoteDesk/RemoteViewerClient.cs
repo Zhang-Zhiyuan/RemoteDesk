@@ -23,8 +23,12 @@ internal sealed record ReturnedClipboardFileBatchResult(
     ReturnedClipboardFileBatchOutcome Outcome,
     IReadOnlyList<string> LocalPaths,
     string Message,
-    bool ClipboardUpdated)
+    bool ClipboardUpdated,
+    IReadOnlyList<string>? SavedPaths = null)
 {
+    // Failed clipboard commits can still have saved files. These are display-only;
+    // LocalPaths keeps its successful-delivery-only contract for clipboard/drag consumers.
+    public IReadOnlyList<string> FilesForDisplay => SavedPaths ?? LocalPaths;
     public bool Success => Outcome == ReturnedClipboardFileBatchOutcome.Succeeded;
 
     public bool Cancelled => Outcome == ReturnedClipboardFileBatchOutcome.Cancelled;
@@ -218,6 +222,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
     public event Action<bool, string>? FileTransferStatusReceived;
     public event Action<bool>? RemoteClipboardFileRequestPendingChanged;
     public event Action<ReturnedClipboardFileBatchResult>? RemoteClipboardFileBatchCompleted;
+    public event Action<ReturnedClipboardFileBatchResult>? RemoteClipboardFileResultReady;
     public event Action<string>? Log;
     public event Action<bool>? ConnectedChanged;
     public event Action<TimeSpan>? RoundTripUpdated;
@@ -933,13 +938,15 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 _heartbeatLoopTask = null;
                 _lowLatencyVideoTransport = null;
                 _allowVideoFallback = true;
+                // The notification runs on another thread: retire peer capabilities
+                // and operation reservations before subscribers observe disconnection.
+                ResetRemotePeerState();
                 if (cancellationTokenSource is not null &&
                     ReferenceEquals(_connectedEventOwner, cancellationTokenSource))
                 {
                     _connectedEventOwner = null;
                     EnqueueConnectedChanged(false);
                 }
-                ResetRemotePeerState();
             }
             CompleteActiveReturnedClipboardFileRequest(
                 CreateReturnedClipboardFileBatchResult(
@@ -1032,12 +1039,12 @@ internal sealed partial class RemoteViewerClient : IDisposable
             _heartbeatLoopTask = null;
             _lowLatencyVideoTransport = null;
             _allowVideoFallback = true;
+            ResetRemotePeerState();
             if (ReferenceEquals(_connectedEventOwner, expectedConnection))
             {
                 _connectedEventOwner = null;
                 EnqueueConnectedChanged(false);
             }
-            ResetRemotePeerState();
         }
         CompleteActiveReturnedClipboardFileRequest(
             CreateReturnedClipboardFileBatchResult(
@@ -1467,6 +1474,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 : _manualClipboardReplyTimeoutMilliseconds);
         if (request is null)
         {
+            WindowsDiagnosticLog.CreateDefault().Append("CLIPBOARD", "write:busy waiting for previous reply");
             ClipboardStatusReceived?.Invoke("上一项剪贴板操作仍在等待远端，请稍后重试；长时间无响应请重连。");
             return false;
         }
@@ -1517,22 +1525,28 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
     private async Task<bool> WaitForClipboardReplyAsync(ClipboardRequestTracker.Request request, CancellationTokenSource? owner)
     {
+        void Trace(string state) => WindowsDiagnosticLog.CreateDefault().Append("CLIPBOARD",
+            $"{(request.Read ? "read" : "write")}:{state} generation={request.Generation} revision={request.Revision} elapsedMs={request.ReplyTimeoutMilliseconds - request.RemainingTimeoutMilliseconds}");
         try
         {
             if (request.ReplyTimeoutMilliseconds > ClipboardRequestTracker.TimeoutMilliseconds &&
                 !request.Completion.Task.IsCompleted && IsCurrentConnection(owner))
                 ClipboardStatusReceived?.Invoke("正在等待远端剪贴板确认（公网慢链路最多等待 30 秒）。");
-            return await request.Completion.Task.WaitAsync(TimeSpan.FromMilliseconds(
+            bool success = await request.Completion.Task.WaitAsync(TimeSpan.FromMilliseconds(
                 request.RemainingTimeoutMilliseconds), owner?.Token ?? new CancellationToken(true));
+            Trace(success ? "acknowledged" : "not-applied");
+            return success;
         }
         catch (TimeoutException)
         {
+            Trace("timed-out");
             if (IsCurrentConnection(owner))
                 ClipboardStatusReceived?.Invoke("等待远端剪贴板超时：未覆盖本机内容，也未触发粘贴。请稍后重试或重新连接。");
             return false;
         }
         catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
         {
+            Trace("cancelled");
             return false;
         }
     }
@@ -1917,14 +1931,17 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
     public async Task<RemoteFilePasteResult> SendFilePastePlanToRemoteAsync(
         RemoteFilePastePlan plan,
-        string failurePrefix = "粘贴文件失败")
+        string failurePrefix = "粘贴文件失败",
+        long? expectedGeneration = null)
     {
         ArgumentNullException.ThrowIfNull(plan);
-
+        long generation = expectedGeneration ?? InputConnectionGeneration;
         await _fileTransferLock.WaitAsync();
         try
         {
             CancellationTokenSource ownerConnection = RequireActiveFileTransferConnection();
+            if (InputConnectionGeneration != generation)
+                throw new IOException("连接已改变，原文件确认已失效，请重新确认文件和接收位置。");
             return await SendFilesToRemoteCoreAsync(plan, failurePrefix, ownerConnection);
         }
         finally
@@ -1945,10 +1962,10 @@ internal sealed partial class RemoteViewerClient : IDisposable
         return await SendFilePastePlanToRemoteDropPasteAsync(plan);
     }
 
-    public async Task<RemoteFileDropPasteResult> SendFilePastePlanToRemoteDropPasteAsync(RemoteFilePastePlan plan)
+    public async Task<RemoteFileDropPasteResult> SendFilePastePlanToRemoteDropPasteAsync(RemoteFilePastePlan plan, long? expectedGeneration = null)
     {
         ArgumentNullException.ThrowIfNull(plan);
-
+        long generation = expectedGeneration ?? InputConnectionGeneration;
         await _fileTransferLock.WaitAsync();
         bool batchStarted = false;
         bool batchClosed = false;
@@ -1956,6 +1973,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
         try
         {
             ownerConnection = RequireActiveFileTransferConnection();
+            if (InputConnectionGeneration != generation)
+                throw new IOException("连接已改变，原文件确认已失效，请重新确认文件和接收位置。");
             if (plan.Files.Count > 0)
             {
                 if (!await SendControlAsync(
@@ -2013,32 +2032,32 @@ internal sealed partial class RemoteViewerClient : IDisposable
         int failedFiles = 0;
         int archivedDirectories = 0;
         string? failureMessage = null;
+        var results = new List<RemoteFileItemResult>();
         foreach (RemoteFilePasteItem item in plan.TransferItems)
         {
-            ownerConnection.Token.ThrowIfCancellationRequested();
             try
             {
-                bool archivedDirectory = await SendTransferItemToRemoteCoreAsync(
+                if (!IsCurrentConnection(ownerConnection)) throw new IOException("连接已断开或切换，未开始此项传输。");
+                var (archivedDirectory, savedMessage) = await SendTransferItemToRemoteCoreAsync(
                     item,
                     ownerConnection);
+                results.Add(new(RemoteFileTransfer.GetTransferDisplayName(item.Path), true, savedMessage));
                 sentFiles++;
                 if (archivedDirectory)
                 {
                     archivedDirectories++;
                 }
             }
-            catch (Exception ex) when (RemoteFileTransfer.IsRecoverableTransferException(ex))
+            catch (Exception ex) when (RemoteFileTransfer.IsRecoverableTransferException(ex) || ex is OperationCanceledException)
             {
                 failedFiles++;
                 string fileName = RemoteFileTransfer.GetTransferDisplayName(item.Path);
-                failureMessage ??= $"{fileName}：{ex.Message}";
+                string details = ex is OperationCanceledException ? "连接已结束，保存状态未确认，请检查远端接收目录后再重试。" : ex.Message;
+                results.Add(new(fileName, false, details));
+                failureMessage ??= $"{fileName}：{details}";
                 FileTransferStatusReceived?.Invoke(
                     false,
                     $"{failurePrefix}：{(string.IsNullOrWhiteSpace(fileName) ? item.Path : fileName)} - {ex.Message}");
-                if (!IsConnected)
-                {
-                    break;
-                }
             }
         }
 
@@ -2049,10 +2068,11 @@ internal sealed partial class RemoteViewerClient : IDisposable
             plan.SkippedMissing,
             plan.Truncated,
             archivedDirectories,
-            failureMessage);
+            failureMessage,
+            results);
     }
 
-    private async Task<bool> SendTransferItemToRemoteCoreAsync(
+    private async Task<(bool Archived, string Message)> SendTransferItemToRemoteCoreAsync(
         RemoteFilePasteItem item,
         CancellationTokenSource ownerConnection)
     {
@@ -2093,11 +2113,11 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 sourcePath = temporaryArchivePath;
             }
 
-            await SendFileToRemoteCoreAsync(
+            string savedMessage = await SendFileToRemoteCoreAsync(
                 sourcePath,
                 transferFileName,
                 ownerConnection: ownerConnection);
-            return archivedDirectory;
+            return (archivedDirectory, savedMessage);
         }
         finally
         {
@@ -2108,7 +2128,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
         }
     }
 
-    private async Task SendFileToRemoteCoreAsync(
+    private async Task<string> SendFileToRemoteCoreAsync(
         string path,
         string? transferFileName = null,
         bool remoteUpdate = false,
@@ -2265,7 +2285,9 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 if (!result.Success) throw new IOException(result.StatusMessage ?? "远端保存文件失败。");
                 if (!IsCurrentConnection(ownerConnection)) throw new IOException("连接已切换，文件传输已结束。");
                 FileTransferStatusReceived?.Invoke(true, result.StatusMessage ?? $"远端已保存：{fileName}");
+                return result.StatusMessage ?? $"远端已确认保存 {fileName}，但未返回实际路径。";
             }
+            return $"已发送 {fileName}；旧版远端未返回保存确认或实际路径，请到被控端检查。";
         }
         catch (Exception ex) when (transferStarted && RemoteFileTransfer.IsRecoverableTransferException(ex))
         {
@@ -2621,12 +2643,12 @@ internal sealed partial class RemoteViewerClient : IDisposable
                         _heartbeatLoopTask = null;
                         _lowLatencyVideoTransport = null;
                         _allowVideoFallback = true;
+                        ResetRemotePeerState();
                         if (ReferenceEquals(_connectedEventOwner, ownerCancellationTokenSource))
                         {
                             _connectedEventOwner = null;
                             EnqueueConnectedChanged(false);
                         }
-                        ResetRemotePeerState();
                         ClearInputQueueAndFailFlushWaiters(
                             "连接已中断，输入命令未能全部发送。",
                             inputConnectionGeneration);
@@ -2823,6 +2845,11 @@ internal sealed partial class RemoteViewerClient : IDisposable
         TouchReturnedClipboardFileRequestForControl(control.Kind);
         switch (control.Kind)
         {
+            case RemoteControlKind.FileReceiveLocation:
+                if (IsCurrentConnection(ownerConnection) &&
+                    _fileLocationRequests.TryGetValue(control.TransferId ?? string.Empty, out var locationRequest))
+                    locationRequest.TrySetResult(control);
+                break;
             case RemoteControlKind.HostVideoDiagnostics:
                 HostVideoDiagnosticsReceived?.Invoke(control.Text ?? string.Empty);
                 break;
@@ -3788,11 +3815,12 @@ internal sealed partial class RemoteViewerClient : IDisposable
         string statusMessage,
         bool allowClipboardFailure)
     {
+        IReadOnlyList<string> savedPaths = Array.Empty<string>();
         try
         {
             ReturnedClipboardFileCommitResult commitResult =
                 await _incomingFileReceiver.CommitReturnedClipboardFileBatchWithResultAsync(
-                    allowClipboardFailure);
+                    allowClipboardFailure, paths => savedPaths = paths);
             bool success = commitResult.LocalPaths.Count > 0;
             return new ReturnedClipboardFinalizeResult(
                 success,
@@ -3805,17 +3833,19 @@ internal sealed partial class RemoteViewerClient : IDisposable
             return new ReturnedClipboardFinalizeResult(
                 false,
                 $"{statusMessage}；写入本机文件剪贴板失败：{ex.Message}。已保留已接收文件，再次点击拉取文件可重试。",
-                Array.Empty<string>(),
+                savedPaths,
                 ClipboardUpdated: false);
         }
     }
 
     private async Task<ReturnedClipboardFinalizeResult> TryCommitPendingReturnedClipboardFilesAsync(bool notifyRequest)
     {
+        IReadOnlyList<string> savedPaths = Array.Empty<string>();
         try
         {
             ReturnedClipboardFileCommitResult commitResult =
-                await _incomingFileReceiver.CommitReturnedClipboardFileBatchWithResultAsync();
+                await _incomingFileReceiver.CommitReturnedClipboardFileBatchWithResultAsync(
+                    onClipboardFailure: paths => savedPaths = paths);
             bool success = commitResult.LocalPaths.Count > 0;
             if (notifyRequest)
             {
@@ -3840,7 +3870,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
             return new ReturnedClipboardFinalizeResult(
                 false,
                 message,
-                Array.Empty<string>(),
+                savedPaths,
                 ClipboardUpdated: false);
         }
     }
@@ -4203,6 +4233,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
         }
 
         NotifyRemoteClipboardFileBatchCompleted(result);
+        if (request.Mode == ReturnedClipboardFileRequestMode.Standard && result.FilesForDisplay.Count > 0)
+            RemoteClipboardFileResultReady?.Invoke(result);
     }
 
     private void NotifyRemoteClipboardFileRequestPendingChanged(bool pending)
@@ -4232,13 +4264,16 @@ internal sealed partial class RemoteViewerClient : IDisposable
     private static ReturnedClipboardFileBatchResult CreateReturnedClipboardFileBatchResult(
         ReturnedClipboardFinalizeResult result)
     {
-        return CreateReturnedClipboardFileBatchResult(
+        ReturnedClipboardFileBatchResult batch = CreateReturnedClipboardFileBatchResult(
             result.Success
                 ? ReturnedClipboardFileBatchOutcome.Succeeded
                 : ReturnedClipboardFileBatchOutcome.Failed,
             result.Message,
             result.LocalPaths,
             result.ClipboardUpdated);
+        return !result.Success && result.LocalPaths.Count > 0
+            ? batch with { SavedPaths = Array.AsReadOnly(result.LocalPaths.ToArray()) }
+            : batch;
     }
 
     private static ReturnedClipboardFileBatchResult CreateReturnedClipboardFileBatchResult(

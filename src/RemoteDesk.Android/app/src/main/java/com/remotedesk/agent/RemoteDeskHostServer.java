@@ -998,6 +998,20 @@ final class RemoteDeskHostServer {
         RemoteDeskTransport.ControlMessage control = RemoteDeskTransport.decodeControl(payload);
         boolean receipts = (state.viewerCapabilities.get() & RemoteDeskProtocol.CAPABILITY_FILE_TRANSFER_RECEIPT) != 0;
         switch (control.kind) {
+            case RemoteDeskProtocol.CONTROL_FILE_RECEIVE_LOCATION_REQUEST:
+                String directory = "", note;
+                boolean locationAvailable;
+                try {
+                    directory = fileTransferReceiver.getAdvertisedReceiveDirectory();
+                    note = fileTransferReceiver.getReceiveLocationNote();
+                    locationAvailable = true;
+                } catch (RuntimeException ex) {
+                    note = "无法读取手机接收目录，请检查存储状态。";
+                    locationAvailable = false;
+                }
+                RemoteDeskTransport.writeMessage(output, RemoteDeskProtocol.MESSAGE_CONTROL,
+                    RemoteDeskTransport.encodeFileReceiveLocation(control.transferId, locationAvailable, directory, note), session, writeLock);
+                break;
             case RemoteDeskProtocol.CONTROL_DEVICE_IDENTITY_REQUEST:
                 RemoteDeskTransport.writeMessage(output, RemoteDeskProtocol.MESSAGE_CONTROL,
                     RemoteDeskTransport.encodeDeviceIdentity(AndroidRelaySettings.localDeviceId(appContext)), session, writeLock);
@@ -1377,6 +1391,7 @@ final class RemoteDeskHostServer {
             RemoteDeskProtocol.CAPABILITY_CLIPBOARD_TEXT |
             RemoteDeskProtocol.CAPABILITY_FILE_RECEIVE |
             RemoteDeskProtocol.CAPABILITY_FILE_TRANSFER_RECEIPT |
+            RemoteDeskProtocol.CAPABILITY_FILE_RECEIVE_LOCATION |
             RemoteDeskProtocol.CAPABILITY_FILE_CHECKSUM |
             RemoteDeskProtocol.CAPABILITY_FILE_TRANSFER_CANCEL |
             RemoteDeskProtocol.CAPABILITY_LOW_LATENCY_UDP_VIDEO |

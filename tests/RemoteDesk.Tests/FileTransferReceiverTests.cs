@@ -641,8 +641,11 @@ public sealed class FileTransferReceiverTests
         receiver.BeginReturnedClipboardFileBatch();
         await ReceiveSmallFileAsync(receiver, "return-retry", "retry.txt", [6, 7, 8]);
 
+        IReadOnlyList<string>? savedDespiteClipboardFailure = null;
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            receiver.CommitReturnedClipboardFileBatchAsync());
+            receiver.CommitReturnedClipboardFileBatchWithResultAsync(
+                onClipboardFailure: paths => savedDespiteClipboardFailure = paths));
+        Assert.Equal(Path.Combine(temp.Path, "retry.txt"), Assert.Single(savedDespiteClipboardFailure!));
         string retryMessage = await receiver.CommitReturnedClipboardFileBatchAsync();
 
         Assert.Equal(2, clipboardWrites);

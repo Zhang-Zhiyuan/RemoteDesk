@@ -39,7 +39,8 @@ internal enum RemoteDeviceCapabilities
     HostVideoDiagnostics = 1 << 25,
     // Reserved negotiated tier. Do not advertise until the endpoint's full
     // native capture/request/render path is enabled and qualified.
-    NativeDetailV1 = 1 << 26
+    NativeDetailV1 = 1 << 26,
+    FileReceiveLocation = 1 << 27
 }
 
 internal static class RemoteDevicePlatforms
@@ -112,6 +113,7 @@ internal static class RemoteDeviceCapabilityInfo
             RemoteDeviceCapabilities.FileSend |
             RemoteDeviceCapabilities.FileChecksum |
             RemoteDeviceCapabilities.FileTransferReceipt |
+            RemoteDeviceCapabilities.FileReceiveLocation |
             RemoteDeviceCapabilities.FileTransferCancel |
             RemoteDeviceCapabilities.FileTransferPreview |
             RemoteDeviceCapabilities.ClipboardSequenceTracking |
@@ -270,6 +272,7 @@ internal static class RemoteDeviceCapabilityInfo
         }
 
         if (capabilities.HasFlag(RemoteDeviceCapabilities.NativeDetailV1)) names.Add("原生文字补清");
+        if (capabilities.HasFlag(RemoteDeviceCapabilities.FileReceiveLocation)) names.Add("接收目录确认");
 
         return names.Count == 0 ? "能力未知" : string.Join("/", names);
     }

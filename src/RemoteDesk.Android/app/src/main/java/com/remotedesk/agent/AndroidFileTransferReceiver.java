@@ -418,6 +418,19 @@ final class AndroidFileTransferReceiver {
         return receiveDirectoryProvider.get();
     }
 
+    String getAdvertisedReceiveDirectory() {
+        if (context != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+            return new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), RECEIVE_FOLDER_NAME).getAbsolutePath();
+        return getReceiveDirectory().getAbsolutePath();
+    }
+
+    String getReceiveLocationNote() {
+        String note = "重名文件自动改名，不覆盖已有文件；完成回执显示实际保存位置。";
+        if (context != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+            note += " 若公共下载目录不可用，将保存到应用接收目录：" + getReceiveDirectory().getAbsolutePath() + "（卸载应用会删除该目录）。";
+        return note;
+    }
+
     private String saveCompletedTransfer(
         IncomingTransfer transfer,
         CancellationSignal cancellationSignal) throws IOException {
@@ -477,8 +490,9 @@ final class AndroidFileTransferReceiver {
             // it back instead of leaving an unacknowledged cross-generation
             // file behind.
             throwIfCancelled(cancellationSignal);
+            String savedLocation = readPublishedLocation(resolver, uri);
             deleteQuietly(transfer.temporaryFile);
-            return "Downloads/" + RECEIVE_FOLDER_NAME + "/" + transfer.fileName;
+            return savedLocation;
         } catch (TransferCancelledException ex) {
             try {
                 resolver.delete(uri, null, null);
@@ -493,6 +507,27 @@ final class AndroidFileTransferReceiver {
 
             return null;
         }
+    }
+
+    @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
+    private static String readPublishedLocation(ContentResolver resolver, Uri uri) {
+        // Query only our own row. MediaStore may rename the file; never report the requested name as the actual name.
+        try (android.database.Cursor cursor = resolver.query(uri,
+            new String[] { MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.RELATIVE_PATH }, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst())
+                return formatPublishedLocation(Environment.getExternalStorageDirectory().getAbsolutePath(),
+                    cursor.getString(1), cursor.getString(0), uri.toString());
+        } catch (RuntimeException ignored) {
+            // Metadata failure must not delete an already published file or retry an absent temporary file.
+        }
+        return "公共下载目录（系统未返回实际文件名），文件标识：" + uri;
+    }
+
+    static String formatPublishedLocation(String root, String relativePath, String name, String uri) {
+        if (relativePath == null || relativePath.startsWith("/") || relativePath.contains("..") ||
+            name == null || name.isEmpty() || name.contains("/") || name.contains("\\"))
+            return "公共下载目录（系统未返回可靠路径），文件标识：" + uri;
+        return new File(new File(root, relativePath), name).getAbsolutePath();
     }
 
     private static void copy(

@@ -49,6 +49,9 @@ from remotedesk_protocol_probe import (
     CAPABILITY_FILE_CHECKSUM,
     CAPABILITY_FILE_RECEIVE,
     CAPABILITY_FILE_TRANSFER_RECEIPT,
+    CAPABILITY_FILE_RECEIVE_LOCATION,
+    CONTROL_FILE_RECEIVE_LOCATION_REQUEST,
+    encode_file_receive_location,
     CAPABILITY_FILE_SEND,
     CAPABILITY_FILE_TRANSFER_CANCEL,
     CAPABILITY_FILE_TRANSFER_PREVIEW,
@@ -150,6 +153,7 @@ BASE_HOST_CAPABILITIES = (
     | CAPABILITY_CLIPBOARD_TEXT
     | CAPABILITY_FILE_RECEIVE
     | CAPABILITY_FILE_TRANSFER_RECEIPT
+    | CAPABILITY_FILE_RECEIVE_LOCATION
     | CAPABILITY_CAPTURE_TARGET_SELECTION
     | CAPABILITY_FILE_SEND
     | CAPABILITY_FILE_CHECKSUM
@@ -276,6 +280,8 @@ CAPABILITY_NAMES = (
     (CAPABILITY_INPUT_CONTROL, "InputControl"),
     (CAPABILITY_CLIPBOARD_TEXT, "ClipboardText"),
     (CAPABILITY_FILE_RECEIVE, "FileReceive"),
+    (CAPABILITY_FILE_RECEIVE_LOCATION, "FileReceiveLocation"),
+    (CAPABILITY_FILE_TRANSFER_RECEIPT, "FileTransferReceipt"),
     (CAPABILITY_CAPTURE_TARGET_SELECTION, "CaptureTargetSelection"),
     (CAPABILITY_FILE_SEND, "FileSend"),
     (CAPABILITY_FILE_CHECKSUM, "FileChecksum"),
@@ -3447,6 +3453,14 @@ class LinuxHostSession:
         kind = int(control["kind"])
         if kind == CONTROL_DEVICE_IDENTITY_REQUEST and getattr(self.args, "device_id", ""):
             self._write_control(encode_device_identity(self.args.device_id))
+        elif kind == CONTROL_FILE_RECEIVE_LOCATION_REQUEST:
+            try:
+                directory = str(self.receive_dir.resolve())
+                note = "重名文件自动改名，不覆盖已有文件；完成回执显示实际保存位置。"
+                success = True
+            except (OSError, RuntimeError):
+                directory, note, success = "", "无法读取接收目录，请检查被控端存储设置。", False
+            self._write_control(encode_file_receive_location(control["transferId"], success, directory, note))
         elif kind == CONTROL_VIEWER_CAPABILITIES:
             self.viewer_capabilities = int(control.get("capabilities") or 0)
             negotiated_fps = negotiated_h264_fps(

@@ -126,6 +126,13 @@ internal sealed class FileTransferReceiver : IDisposable
         _savedLocationName = string.IsNullOrWhiteSpace(savedLocationName) ? "本机" : savedLocationName.Trim();
     }
 
+    internal string GetConfiguredReceiveDirectory()
+    {
+        string directory = _receiveDirectoryProvider();
+        if (string.IsNullOrWhiteSpace(directory)) throw new InvalidOperationException("文件接收目录不可用。");
+        return Path.GetFullPath(directory);
+    }
+
     public string Start(RemoteControlMessage control)
     {
         string transferId = RequireText(control.TransferId, "文件传输编号缺失。");
@@ -135,7 +142,7 @@ internal sealed class FileTransferReceiver : IDisposable
             throw new InvalidDataException("文件大小超出允许范围。");
         }
 
-        string receiveDirectory = _receiveDirectoryProvider();
+        string receiveDirectory = GetConfiguredReceiveDirectory();
         if (string.IsNullOrWhiteSpace(receiveDirectory))
         {
             throw new InvalidOperationException("文件接收目录不可用。");
@@ -412,7 +419,8 @@ internal sealed class FileTransferReceiver : IDisposable
     }
 
     internal async Task<ReturnedClipboardFileCommitResult> CommitReturnedClipboardFileBatchWithResultAsync(
-        bool allowClipboardFailure = false)
+        bool allowClipboardFailure = false,
+        Action<IReadOnlyList<string>>? onClipboardFailure = null)
     {
         await _returnedClipboardCommitLock.WaitAsync().ConfigureAwait(false);
         try
@@ -453,6 +461,7 @@ internal sealed class FileTransferReceiver : IDisposable
                 if (!allowClipboardFailure)
                 {
                     PreserveReturnedClipboardCommitRetryIfCurrentBatch(batchVersion, files);
+                    onClipboardFailure?.Invoke(Array.AsReadOnly(files));
                     throw;
                 }
 

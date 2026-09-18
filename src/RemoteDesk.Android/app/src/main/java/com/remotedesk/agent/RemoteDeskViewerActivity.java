@@ -468,7 +468,10 @@ public final class RemoteDeskViewerActivity extends Activity {
                     if (name.isEmpty() || name.length() > 240) throw new IOException("文件名为空或过长，请重命名后再发送");
                     final String fileName = name;
                     final long fileSize = size;
-                    runOnUiThread(() -> confirmFileUpload(owner, uri, fileName, fileSize));
+                    AndroidFileReceiveLocation.Location location = owner.fileLocation.request(owner.remoteCapabilities.get(), payload -> {
+                        if (!sendControlMessageIfCurrent(owner, payload)) throw new IOException("连接已结束");
+                    }, () -> isCurrentConnectionOwner(owner));
+                    runOnUiThread(() -> confirmFileUpload(owner, uri, fileName, fileSize, location));
                 } catch (Exception ex) {
                     owner.fileBusy.set(false);
                     showFileResult(owner, false, MainActivity.formatExceptionMessage(ex));
@@ -477,12 +480,12 @@ public final class RemoteDeskViewerActivity extends Activity {
         } catch (RuntimeException closed) { owner.fileBusy.set(false); }
     }
 
-    private void confirmFileUpload(ViewerConnectionOwner owner, android.net.Uri uri, String name, long size) {
+    private void confirmFileUpload(ViewerConnectionOwner owner, android.net.Uri uri, String name, long size, AndroidFileReceiveLocation.Location location) {
         if (!isCurrentConnectionOwner(owner) || isFinishing() || isDestroyed()) { owner.fileBusy.set(false); return; }
         new android.app.AlertDialog.Builder(this).setTitle("确认发送文件")
             .setMessage("文件：" + name + "\n大小：" + android.text.format.Formatter.formatFileSize(this, size) +
                 "\n设备：" + owner.remoteMachineName + "\n连接：" + (relayOptions == null ? "IP 直连" : "公网中继") +
-                "\n保存到：远端接收目录（重名自动改名，不覆盖原文件）\n\n完成后显示实际保存位置。")
+                "\n保存到：" + location.file(name) + "\n重名自动改名，不覆盖原文件。\n" + location.note + "\n\n完成后显示实际保存结果。")
             .setNegativeButton("取消", (dialog, which) -> owner.fileBusy.set(false))
             .setOnCancelListener(dialog -> owner.fileBusy.set(false))
             .setPositiveButton("发送", (dialog, which) -> startFileUpload(owner, uri, name, size)).show();
@@ -1363,6 +1366,8 @@ public final class RemoteDeskViewerActivity extends Activity {
             } else if (control.kind == RemoteDeskProtocol.CONTROL_FILE_TRANSFER_RECEIPT) {
                 AndroidFileSender sender = owner.fileSender;
                 if (sender != null) sender.receive(control);
+            } else if (control.kind == RemoteDeskProtocol.CONTROL_FILE_RECEIVE_LOCATION) {
+                owner.fileLocation.receive(control);
             } else if (control.statusMessage != null) {
                 boolean clipboardReply = false;
                 if (control.kind == RemoteDeskProtocol.CONTROL_CLIPBOARD_STATUS &&
@@ -2737,6 +2742,7 @@ public final class RemoteDeskViewerActivity extends Activity {
         final ExecutorService fileExecutor = Executors.newSingleThreadExecutor();
         final AtomicBoolean fileBusy = new AtomicBoolean();
         volatile AndroidFileSender fileSender;
+        final AndroidFileReceiveLocation fileLocation = new AndroidFileReceiveLocation();
         final long generation;
         final Socket socket;
         final RemoteDeskTransport.SecureSession session;

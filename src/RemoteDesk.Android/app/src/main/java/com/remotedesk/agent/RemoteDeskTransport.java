@@ -421,6 +421,23 @@ final class RemoteDeskTransport {
         return output.toByteArray();
     }
 
+    static byte[] encodeFileReceiveLocationRequest(String requestId) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        output.write(RemoteDeskProtocol.CONTROL_FILE_RECEIVE_LOCATION_REQUEST);
+        writeString(output, requestId, MAX_CONTROL_STRING_CHARS);
+        return output.toByteArray();
+    }
+
+    static byte[] encodeFileReceiveLocation(String requestId, boolean success, String directory, String note) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        output.write(RemoteDeskProtocol.CONTROL_FILE_RECEIVE_LOCATION);
+        writeString(output, requestId, MAX_CONTROL_STRING_CHARS);
+        output.write(success ? 1 : 0);
+        writeString(output, directory, MAX_CONTROL_STRING_CHARS);
+        writeString(output, note, MAX_CONTROL_STRING_CHARS);
+        return output.toByteArray();
+    }
+
     static byte[] encodeFileTransferStart(String id, String name, long length) throws IOException {
         validateFileLength(length);
         ByteArrayOutputStream output = new ByteArrayOutputStream();
@@ -491,6 +508,9 @@ final class RemoteDeskTransport {
         long fileOffset = 0;
         byte[] fileBytes = null;
         switch (kind) {
+            case RemoteDeskProtocol.CONTROL_FILE_RECEIVE_LOCATION_REQUEST:
+                transferId = cursor.readString(MAX_CONTROL_STRING_CHARS);
+                break;
             case RemoteDeskProtocol.CONTROL_DEVICE_IDENTITY_REQUEST:
                 break;
             case RemoteDeskProtocol.CONTROL_DEVICE_IDENTITY:
@@ -690,15 +710,17 @@ final class RemoteDeskTransport {
             case RemoteDeskProtocol.CONTROL_CLIPBOARD_STATUS:
             case RemoteDeskProtocol.CONTROL_FILE_TRANSFER_STATUS:
             case RemoteDeskProtocol.CONTROL_FILE_TRANSFER_RECEIPT:
-                if (kind == RemoteDeskProtocol.CONTROL_FILE_TRANSFER_RECEIPT) {
+            case RemoteDeskProtocol.CONTROL_FILE_RECEIVE_LOCATION:
+                if (kind == RemoteDeskProtocol.CONTROL_FILE_TRANSFER_RECEIPT || kind == RemoteDeskProtocol.CONTROL_FILE_RECEIVE_LOCATION) {
                     transferId = cursor.readString(MAX_CONTROL_STRING_CHARS);
                 }
                 boolean success = cursor.readUnsignedByte() != 0;
+                if (kind == RemoteDeskProtocol.CONTROL_FILE_RECEIVE_LOCATION) text = cursor.readString(MAX_CONTROL_STRING_CHARS);
                 String statusMessage = cursor.readString(MAX_CONTROL_STRING_CHARS);
                 cursor.ensureFullyRead();
                 return new ControlMessage(
                     kind,
-                    null,
+                    text,
                     transferId,
                     null,
                     0,

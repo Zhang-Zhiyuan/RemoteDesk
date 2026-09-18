@@ -719,7 +719,7 @@ public sealed class RemoteViewerClientLoopbackTests
         {
             if (!connected)
             {
-                disconnected.TrySetResult(true);
+                disconnected.TrySetResult(client.SupportsRemoteClipboardSequenceTracking);
             }
         };
 
@@ -738,7 +738,7 @@ public sealed class RemoteViewerClientLoopbackTests
             Assert.True(client.TryReserveSelfUpdatePackageRequest());
 
             releaseFirstConnection.TrySetResult(true);
-            await disconnected.Task.WaitAsync(timeout.Token);
+            Assert.False(await disconnected.Task.WaitAsync(timeout.Token));
             await firstServerTask.WaitAsync(timeout.Token);
             Assert.False(client.SupportsRemoteClipboardSequenceTracking);
             Assert.True(client.TryReserveSelfUpdatePackageRequest());
@@ -2548,6 +2548,11 @@ public sealed class RemoteViewerClientLoopbackTests
             });
         var clipboardFailureStatus = CreateCompletionSource<string>();
         var clipboardRetryStatus = CreateCompletionSource<string>();
+        var clipboardFailureResult = CreateCompletionSource<ReturnedClipboardFileBatchResult>();
+        client.RemoteClipboardFileResultReady += result =>
+        {
+            if (!result.ClipboardUpdated) clipboardFailureResult.TrySetResult(result);
+        };
         client.FileTransferStatusReceived += (success, message) =>
         {
             if (!success && message.Contains("写入本机文件剪贴板失败", StringComparison.Ordinal))
@@ -2576,6 +2581,12 @@ public sealed class RemoteViewerClientLoopbackTests
             Assert.Contains("再次点击拉取文件可重试", failureStatus, StringComparison.Ordinal);
             Assert.Equal(1, clipboardWrites);
             Assert.True(File.Exists(savedPath));
+            var savedResult = await clipboardFailureResult.Task.WaitAsync(timeout.Token);
+            Assert.False(savedResult.Success);
+            Assert.False(savedResult.ClipboardUpdated);
+            Assert.Empty(savedResult.LocalPaths); // Failure still forbids clipboard/drag delivery.
+            Assert.Equal(savedPath, Assert.Single(savedResult.FilesForDisplay));
+            Assert.Equal(expectedBytes, await File.ReadAllBytesAsync(savedResult.FilesForDisplay[0], timeout.Token));
 
             Assert.True(await client.RequestRemoteClipboardFilesAsync());
             string retryStatus = await clipboardRetryStatus.Task.WaitAsync(timeout.Token);

@@ -927,9 +927,13 @@ internal sealed partial class RemoteViewerWindow : Form
         nint message,
         nint dataPointer)
     {
-        if (code >= 0 &&
-            !_isClosing &&
-            _pictureBox.ContainsFocus)
+        // ContainsFocus describes this thread's input queue. It can remain
+        // true after another application becomes foreground, so it is not
+        // enough to decide whether a global hook owns the user's keys.
+        if (code >= 0 && IsHandleCreated &&
+            ShouldCaptureGlobalKeyboardInput(
+                _client.IsConnected, _isClosing, _pictureBox.ContainsFocus,
+                Handle, GetForegroundWindow()))
         {
             try
             {
@@ -998,6 +1002,12 @@ internal sealed partial class RemoteViewerWindow : Form
         !allowOwnInjectedEventsForTests &&
         (flags & LowLevelKeyboardInjected) != 0 &&
         extraInfo == InputInjector.InjectedInputMarker;
+
+    internal static bool ShouldCaptureGlobalKeyboardInput(
+        bool connected, bool closing, bool surfaceContainsFocus,
+        nint viewerWindow, nint foregroundWindow) =>
+        connected && !closing && surfaceContainsFocus &&
+        viewerWindow != 0 && viewerWindow == foregroundWindow;
 
     private void TryInstallSystemKeyboardCapture()
     {
@@ -7133,8 +7143,10 @@ internal sealed partial class RemoteViewerWindow : Form
         try
         {
             OnUi(() => SetStatus("正在读取拖放文件信息...", MutedTextColor));
-            FileTransferConfirmationPreview preview = await CreateOutgoingFileTransferPreviewAsync(
+            FileTransferConfirmationPreview preview = await _client.PrepareFileTransferPreviewAsync(
                 files,
+                MaxClipboardFilePasteCount,
+                fileGeneration,
                 pasteAtRemoteDropTarget);
             if (!ConfirmOutgoingFileTransfer(
                 fileGeneration,
@@ -7162,13 +7174,13 @@ internal sealed partial class RemoteViewerWindow : Form
             RemoteFilePasteResult result;
             if (pasteAtRemoteDropTarget)
             {
-                RemoteFileDropPasteResult dropPasteResult = await _client.SendFilePastePlanToRemoteDropPasteAsync(preview.Plan);
+                RemoteFileDropPasteResult dropPasteResult = await _client.SendFilePastePlanToRemoteDropPasteAsync(preview.Plan, fileGeneration);
                 result = dropPasteResult.TransferResult;
                 remoteTargetPasteRequested = dropPasteResult.RemotePasteRequested;
             }
             else
             {
-                result = await _client.SendFilePastePlanToRemoteAsync(preview.Plan);
+                result = await _client.SendFilePastePlanToRemoteAsync(preview.Plan, expectedGeneration: fileGeneration);
             }
 
             string status = FormatDroppedFileTransferStatus(
@@ -7181,7 +7193,7 @@ internal sealed partial class RemoteViewerWindow : Form
                     ? SuccessTextColor
                     : MutedTextColor;
             OnUi(() => SetStatus(status, color));
-            if (result.FailedFiles > 0) ShowFileTransferFailure(result.FailureMessage ?? status);
+            OnUi(() => { if (!_isClosing && !IsDisposed) FileTransferResultDialog.ShowResults(this, result, preview.Note, remoteTargetPasteRequested); });
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or ObjectDisposedException)
         {
@@ -7229,6 +7241,7 @@ internal sealed partial class RemoteViewerWindow : Form
         _clipboardPasteKeys.Add(args.KeyCode);
         if (_clipboardPasteInProgress)
         {
+            DiagnosticLog.Append("CLIPBOARD", "paste:busy");
             SetStatus("正在等待上一项剪贴板粘贴完成，请稍后重试", MutedTextColor);
             return true;
         }
@@ -7240,6 +7253,7 @@ internal sealed partial class RemoteViewerWindow : Form
     private async Task PasteClipboardToRemoteAsync(KeyEventArgs shortcutArgs, long revision)
     {
         long clipboardGeneration = _client.InputConnectionGeneration;
+        DiagnosticLog.Append("CLIPBOARD", $"paste:start generation={clipboardGeneration} revision={revision}");
         bool IsCurrentPaste() => !_isClosing && !IsDisposed && _client.IsConnected &&
             _client.InputConnectionGeneration == clipboardGeneration && _clipboardPasteRevision == revision;
         try
@@ -7275,12 +7289,15 @@ internal sealed partial class RemoteViewerWindow : Form
             if (!IsCurrentPaste()) return;
             if (clipboardFiles.Count > 0)
             {
+                DiagnosticLog.Append("CLIPBOARD", $"paste:files count={clipboardFiles.Count}");
                 await PasteClipboardFilesToRemoteAsync(clipboardFiles);
                 return;
             }
 
             string text = await ClipboardTextService.GetTextAsync();
             if (!IsCurrentPaste()) return;
+            // Only lengths and state are recorded, never clipboard content.
+            DiagnosticLog.Append("CLIPBOARD", $"paste:text utf16={text.Length}");
             if (string.IsNullOrEmpty(text))
             {
                 OnUi(() => SetStatus("本机剪贴板没有可输入的文本", MutedTextColor));
@@ -7334,7 +7351,7 @@ internal sealed partial class RemoteViewerWindow : Form
             {
                 await _client.SendInputsAsync(
                     pasteCommands, clipboardGeneration);
-
+                DiagnosticLog.Append("CLIPBOARD", "paste:shortcut-queued after remote acknowledgement");
                 OnUi(() => SetStatus("已同步文本剪贴板并触发远程粘贴", SuccessTextColor));
                 return;
             }
@@ -7369,9 +7386,14 @@ internal sealed partial class RemoteViewerWindow : Form
         }
         catch (Exception ex) when (ex is TimeoutException or ExternalException or InvalidOperationException)
         {
+            DiagnosticLog.Append("CLIPBOARD", $"paste:failed type={ex.GetType().Name}");
             OnUi(() => SetStatus($"读取本机剪贴板失败：{ex.Message}", DangerTextColor));
         }
-        finally { _clipboardPasteInProgress = false; }
+        finally
+        {
+            if (!IsCurrentPaste()) DiagnosticLog.Append("CLIPBOARD", "paste:input-ownership-ended (focus or connection changed)");
+            _clipboardPasteInProgress = false;
+        }
     }
 
     private async Task PasteClipboardFilesToRemoteAsync(IReadOnlyList<string> clipboardFiles)
@@ -7387,8 +7409,10 @@ internal sealed partial class RemoteViewerWindow : Form
         {
             bool pasteAtRemoteTarget = _fileDropPasteEnabled && !_isAndroidRemote && _inputEnabled;
             OnUi(() => SetStatus("正在读取剪贴板文件信息...", MutedTextColor));
-            FileTransferConfirmationPreview preview = await CreateOutgoingFileTransferPreviewAsync(
+            FileTransferConfirmationPreview preview = await _client.PrepareFileTransferPreviewAsync(
                 clipboardFiles,
+                MaxClipboardFilePasteCount,
+                fileGeneration,
                 pasteAtRemoteTarget);
             if (!ConfirmOutgoingFileTransfer(
                 fileGeneration,
@@ -7411,13 +7435,13 @@ internal sealed partial class RemoteViewerWindow : Form
             RemoteFilePasteResult result;
             if (pasteAtRemoteTarget)
             {
-                RemoteFileDropPasteResult dropPasteResult = await _client.SendFilePastePlanToRemoteDropPasteAsync(preview.Plan);
+                RemoteFileDropPasteResult dropPasteResult = await _client.SendFilePastePlanToRemoteDropPasteAsync(preview.Plan, fileGeneration);
                 result = dropPasteResult.TransferResult;
                 remoteTargetPasteRequested = dropPasteResult.RemotePasteRequested;
             }
             else
             {
-                result = await _client.SendFilePastePlanToRemoteAsync(preview.Plan);
+                result = await _client.SendFilePastePlanToRemoteAsync(preview.Plan, expectedGeneration: fileGeneration);
             }
 
             string status = FormatClipboardFilePasteStatus(
@@ -7430,32 +7454,12 @@ internal sealed partial class RemoteViewerWindow : Form
                     ? SuccessTextColor
                     : MutedTextColor;
             OnUi(() => SetStatus(status, color));
-            if (result.FailedFiles > 0) ShowFileTransferFailure(result.FailureMessage ?? status);
+            OnUi(() => { if (!_isClosing && !IsDisposed) FileTransferResultDialog.ShowResults(this, result, preview.Note, remoteTargetPasteRequested); });
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or ObjectDisposedException)
         {
             ShowFileTransferFailure(ex.Message);
         }
-    }
-
-    private static Task<FileTransferConfirmationPreview> CreateOutgoingFileTransferPreviewAsync(
-        IReadOnlyList<string> paths,
-        bool pasteAtRemoteDropTarget)
-    {
-        return Task.Run(() =>
-        {
-            RemoteFilePastePlan plan = RemoteViewerClient.CreateFilePastePlan(
-                paths,
-                MaxClipboardFilePasteCount,
-                File.Exists,
-                Directory.Exists,
-                includeDirectories: true);
-            return FileTransferConfirmation.CreatePreview(
-                plan,
-                (_item, transferName) => pasteAtRemoteDropTarget
-                    ? FileTransferConfirmation.FormatRemoteDropPasteDestination(transferName)
-                    : FileTransferConfirmation.FormatRemoteReceiveDestination(transferName));
-        });
     }
 
     private bool ConfirmOutgoingFileTransfer(
@@ -8495,6 +8499,9 @@ internal sealed partial class RemoteViewerWindow : Form
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool UnhookWindowsHookEx(
         nint hook);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
 
     [DllImport("user32.dll")]
     private static extern nint CallNextHookEx(

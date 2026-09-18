@@ -136,7 +136,9 @@ internal enum RemoteControlKind : byte
     DeviceIdentity = 34,
     FileTransferReceipt = 35,
     HostVideoDiagnosticsRequest = 36,
-    HostVideoDiagnostics = 37
+    HostVideoDiagnostics = 37,
+    FileReceiveLocationRequest = 38,
+    FileReceiveLocation = 39
 }
 
 internal sealed record LowLatencyVideoOffer(
@@ -891,6 +893,32 @@ internal static class RemoteMessageCodec
         return output.ToArray();
     }
 
+    public static byte[] EncodeFileReceiveLocationRequest(string requestId)
+    {
+        ValidateControlString(requestId);
+        using var output = new MemoryStream();
+        using var writer = new BinaryWriter(output, Encoding.UTF8);
+        writer.Write((byte)RemoteControlKind.FileReceiveLocationRequest);
+        writer.Write(requestId);
+        return output.ToArray();
+    }
+
+    public static byte[] EncodeFileReceiveLocation(string requestId, bool success, string directory, string note)
+    {
+        ValidateControlString(requestId);
+        if (success) ValidateControlString(directory);
+        if (directory is null || note is null || directory.Length > MaxControlStringChars || note.Length > MaxControlStringChars)
+            throw new InvalidDataException("接收目录信息过长或无效。");
+        using var output = new MemoryStream();
+        using var writer = new BinaryWriter(output, Encoding.UTF8);
+        writer.Write((byte)RemoteControlKind.FileReceiveLocation);
+        writer.Write(requestId);
+        writer.Write(success);
+        writer.Write(directory);
+        writer.Write(note);
+        return output.ToArray();
+    }
+
     public static byte[] EncodeSessionRejected(string message)
     {
         using var output = new MemoryStream();
@@ -965,6 +993,9 @@ internal static class RemoteMessageCodec
                 Success: reader.ReadBoolean(),
                 StatusMessage: ReadBoundedString(reader)),
             RemoteControlKind.FileTransferChecksum => DecodeFileTransferChecksum(reader, kind),
+            RemoteControlKind.FileReceiveLocationRequest => new RemoteControlMessage(kind, [], null, null,
+                TransferId: ReadBoundedString(reader)),
+            RemoteControlKind.FileReceiveLocation => DecodeFileReceiveLocation(reader, kind),
             RemoteControlKind.DeviceInfo => DecodeDeviceInfo(reader, kind),
             RemoteControlKind.DeviceIdentityRequest => new RemoteControlMessage(kind, [], null, null),
             RemoteControlKind.HostVideoDiagnosticsRequest => new RemoteControlMessage(kind, [], null, null),
@@ -1149,6 +1180,16 @@ internal static class RemoteMessageCodec
             Platform: platform,
             Capabilities: capabilities,
             BuildStamp: buildStamp);
+    }
+
+    private static RemoteControlMessage DecodeFileReceiveLocation(BinaryReader reader, RemoteControlKind kind)
+    {
+        string id = ReadBoundedString(reader);
+        bool success = reader.ReadBoolean();
+        string directory = ReadBoundedString(reader);
+        string note = ReadBoundedString(reader);
+        return new RemoteControlMessage(kind, [], null, null, Text: directory, Success: success,
+            StatusMessage: note, TransferId: id);
     }
 
     private static RemoteControlMessage DecodeFileTransferStart(BinaryReader reader, RemoteControlKind kind)

@@ -107,6 +107,40 @@ all Windows displays. Their passing matrix is not a claim of zero bugs.
 
 ## Native public relay mode
 
+`relay-windows-update` uses the owner's saved, pinned relay login. Its stdin
+configuration requires `expectedServer` and a new `output` directory. Omit
+`action`, or use `inventory`, to list nodes without connecting to their desktops.
+`apply` requires explicit Windows device IDs in `devices`, the verified EXE
+`package`, `sha256`, and `buildStamp`; busy sessions additionally require
+`allowSessionTakeover: true`. Saved per-device keys are preferred; any explicit
+`credentials` map stays on stdin and is not written to reports.
+
+`verify` accepts the same package/identity checks but never sends an update, and
+rejects endpoints with a different build. Already-current endpoints also undergo
+relay reconnection and frame verification. Reports retain capture diagnostics and
+target availability on failure: an authenticated `afterBuild` alone does not mean
+the desktop is viewable. These modes never inject input, copy clipboard contents,
+change settings, or install the separate Windows lock-screen service.
+
+Clipboard/file regressions also have bounded standalone modes:
+
+- `clipboard-isolated` and `clipboard-shortcuts-isolated` take `output` on stdin;
+  they use a private window station and never access the interactive clipboard.
+- `file-relay-isolated` takes `output` and `expectedServer`. It reuses the locally
+  saved, pinned relay configuration, registers a temporary node and verifies
+  text/file round trips with generated fixtures and the product file receiver.
+- `file-relay-ui` uses the same configuration but does **not** read/write the
+  interactive clipboard. It gives explicit fixture paths to the product's
+  file-paste flow and operates only its owned confirmation/result dialogs. It
+  verifies the queried directory before consent, no early upload on cancel,
+  every saved path in a mixed-success batch, and the actual renamed receipt.
+  Screenshots contain only these generated fixtures.
+- `keyboard-focus` takes `output`, opens two owned windows on separate UI
+  threads and checks the actual foreground boundary, including an asynchronous
+  background refocus. Synthetic records enter the product hook callback; no OS
+  keystrokes are injected and no clipboard data is read. Keep the test windows
+  foreground during its brief run; an unexpected focus change fails the check.
+
 The runner also accepts `--relay-server`, `--relay-ssh-pin` and `--relay-tls-pin`.
 It reads the **existing** authorized server configuration using a hidden SSH
 password prompt, after matching the supplied previously verified SSH host key.

@@ -5487,6 +5487,26 @@ internal sealed partial class RemoteHostServer : IDisposable
             viewerState.PendingRemoteUpdateTransferId != control.TransferId;
         switch (control.Kind)
         {
+            case RemoteControlKind.FileReceiveLocationRequest:
+                string receiveLocation;
+                string receiveNote;
+                bool locationAvailable;
+                try
+                {
+                    receiveLocation = fileTransferReceiver.GetConfiguredReceiveDirectory();
+                    receiveNote = "重名文件自动改名，不覆盖已有文件；完成回执显示实际保存位置。";
+                    locationAvailable = true;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException)
+                {
+                    receiveLocation = string.Empty;
+                    receiveNote = "无法读取接收目录，请检查被控端存储设置。";
+                    locationAvailable = false;
+                }
+                await Protocol.WriteMessageAsync(stream, MessageType.Control,
+                    RemoteMessageCodec.EncodeFileReceiveLocation(control.TransferId!, locationAvailable, receiveLocation, receiveNote),
+                    session, writeLock, cancellationToken);
+                break;
             case RemoteControlKind.SelectCaptureTarget:
                 if (string.IsNullOrWhiteSpace(control.TargetId))
                 {

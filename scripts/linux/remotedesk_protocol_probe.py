@@ -63,6 +63,9 @@ CONTROL_DEVICE_INFO = 12
 CONTROL_DEVICE_IDENTITY_REQUEST = 33
 CONTROL_DEVICE_IDENTITY = 34
 CONTROL_FILE_TRANSFER_RECEIPT = 35
+CONTROL_FILE_RECEIVE_LOCATION_REQUEST = 38
+CONTROL_FILE_RECEIVE_LOCATION = 39
+CAPABILITY_FILE_RECEIVE_LOCATION = 1 << 27
 CAPABILITY_DEVICE_IDENTITY = 1 << 22
 CAPABILITY_CLIPBOARD_PASTE_SHORTCUT = 1 << 23
 CAPABILITY_FILE_TRANSFER_RECEIPT = 1 << 24
@@ -178,6 +181,8 @@ CAPABILITIES = [
     (1 << 20, "AuthenticatedUdpHeartbeat"),
     (1 << 21, "HighQualityJpeg"),
     (1 << 23, "ClipboardPasteShortcut"),
+    (CAPABILITY_FILE_TRANSFER_RECEIPT, "FileTransferReceipt"),
+    (CAPABILITY_FILE_RECEIVE_LOCATION, "FileReceiveLocation"),
 ]
 
 RESERVED_FILE_NAMES = {
@@ -788,6 +793,18 @@ def encode_file_transfer_request_clipboard_files() -> bytes:
     return bytes([CONTROL_FILE_TRANSFER_REQUEST_CLIPBOARD_FILES])
 
 
+def encode_file_receive_location_request(request_id: str) -> bytes:
+    validate_control_string(request_id)
+    return bytes([CONTROL_FILE_RECEIVE_LOCATION_REQUEST]) + encode_dotnet_string(request_id)
+
+
+def encode_file_receive_location(request_id: str, success: bool, directory: str, note: str) -> bytes:
+    validate_control_string(request_id)
+    return (bytes([CONTROL_FILE_RECEIVE_LOCATION]) + encode_dotnet_string(request_id)
+            + (b"\x01" if success else b"\x00") + encode_dotnet_string(directory)
+            + encode_dotnet_string(note))
+
+
 def encode_file_transfer_confirm_clipboard_files() -> bytes:
     return bytes([CONTROL_FILE_TRANSFER_CONFIRM_CLIPBOARD_FILES])
 
@@ -963,6 +980,13 @@ def decode_control(payload: bytes, *, include_clipboard_text: bool = False) -> d
         pass
     elif kind == CONTROL_FILE_TRANSFER_REJECT_CLIPBOARD_FILES:
         pass
+    elif kind == CONTROL_FILE_RECEIVE_LOCATION_REQUEST:
+        message["transferId"] = cursor.read_dotnet_string()
+    elif kind == CONTROL_FILE_RECEIVE_LOCATION:
+        message["transferId"] = cursor.read_dotnet_string()
+        message["success"] = cursor.read_bool()
+        message["text"] = cursor.read_dotnet_string()
+        message["statusMessage"] = cursor.read_dotnet_string()
     elif kind == CONTROL_FILE_TRANSFER_RECEIPT:
         message["transferId"] = cursor.read_dotnet_string()
         message["success"] = cursor.read_bool()
@@ -1014,6 +1038,8 @@ def control_name(kind: int) -> str:
         CONTROL_REMOTE_UPDATE_PACKAGE_REQUEST: "RemoteUpdatePackageRequest",
         CONTROL_DEVICE_BUILD_INFO: "DeviceBuildInfo",
         CONTROL_SESSION_REJECTED: "SessionRejected",
+        CONTROL_FILE_RECEIVE_LOCATION_REQUEST: "FileReceiveLocationRequest",
+        CONTROL_FILE_RECEIVE_LOCATION: "FileReceiveLocation",
     }
     return names.get(kind, f"Control({kind})")
 
