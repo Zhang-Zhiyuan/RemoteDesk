@@ -83,7 +83,7 @@ public sealed class WindowsLocalHostInputSmokeTests
             new TaskCompletionSource<RemoteFrameMetadata>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
         var h264Arrivals = new ConcurrentQueue<long>();
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         client.Log += message =>
         {
             logs.Enqueue(message);

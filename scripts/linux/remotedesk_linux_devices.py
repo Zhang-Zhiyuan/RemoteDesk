@@ -1,6 +1,7 @@
 """Bounded LAN discovery and a current-user encrypted device book. No network authentication during discovery."""
 from __future__ import annotations
 import base64
+import ctypes
 from dataclasses import asdict, dataclass, replace
 import ipaddress
 import json
@@ -22,6 +23,117 @@ IDENTITY_CAPABILITY = 1 << 22
 IDENTITY_REQUEST = 33
 IDENTITY_RESPONSE = 34
 LIMIT = 20
+SELF_CONNECTION_MESSAGE = "这是本机，不能连接自己。请使用另一台设备的 IP 或在中继列表选择其他设备。"
+
+
+class SelfConnectionError(ValueError):
+    """A terminal viewer rejection, not a password or transient network error."""
+
+
+# ctypes caches POINTER types globally. Define these once, not on every periodic
+# discovery/reconnect, or each lookup would permanently retain new ABI classes.
+class _Sockaddr(ctypes.Structure):
+    _fields_ = [("family", ctypes.c_ushort), ("data", ctypes.c_ubyte * 14)]
+
+
+class _Ifaddrs(ctypes.Structure):
+    pass
+
+
+_Ifaddrs._fields_ = [("next", ctypes.POINTER(_Ifaddrs)), ("name", ctypes.c_char_p),
+                    ("flags", ctypes.c_uint), ("address", ctypes.POINTER(_Sockaddr)),
+                    ("netmask", ctypes.c_void_p), ("broadcast", ctypes.c_void_p),
+                    ("data", ctypes.c_void_p)]
+
+
+def normalized_ip(value):
+    try:
+        address = ipaddress.ip_address(str(value))
+        if isinstance(address, ipaddress.IPv6Address):
+            if address.ipv4_mapped:
+                return address.ipv4_mapped
+            if address.scope_id:
+                bare = str(address).split("%", 1)[0]
+                if not address.is_link_local:
+                    return ipaddress.ip_address(bare)
+                scope = address.scope_id
+                if not scope.isdigit():
+                    try: scope = str(socket.if_nametoindex(scope))
+                    except OSError: pass
+                return ipaddress.ip_address(f"{bare}%{scope}")
+        return address
+    except ValueError:
+        return None
+
+
+def same_ip(first, second):
+    if first == second: return True
+    if isinstance(first, ipaddress.IPv6Address) and isinstance(second, ipaddress.IPv6Address):
+        return int(first) == int(second) and (not first.scope_id or not second.scope_id or first.scope_id == second.scope_id)
+    return False
+
+
+def socket_endpoint_ip(endpoint):
+    value = endpoint[0]
+    if len(endpoint) >= 4 and endpoint[3] and ":" in value and "%" not in value:
+        value += f"%{endpoint[3]}"
+    return normalized_ip(value)
+
+
+def local_ip_addresses():
+    """Read all Linux interface addresses, without DNS, commands, or network I/O."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.getifaddrs.argtypes = [ctypes.POINTER(ctypes.POINTER(_Ifaddrs))]
+    libc.getifaddrs.restype = ctypes.c_int
+    libc.freeifaddrs.argtypes = [ctypes.POINTER(_Ifaddrs)]
+    libc.freeifaddrs.restype = None
+    head = ctypes.POINTER(_Ifaddrs)()
+    if libc.getifaddrs(ctypes.byref(head)) != 0:
+        raise OSError(ctypes.get_errno(), "无法读取本机接口地址，请稍后重试。")
+    addresses = {normalized_ip("127.0.0.1"), normalized_ip("::1")}
+    try:
+        current = head
+        while current:
+            address = current.contents.address
+            if address:
+                family = address.contents.family
+                if family in (socket.AF_INET, socket.AF_INET6):
+                    # Linux sockaddr_in: address at byte 4; sockaddr_in6: byte 8.
+                    offset, length = (4, 4) if family == socket.AF_INET else (8, 16)
+                    raw = ctypes.string_at(ctypes.addressof(address.contents) + offset, length)
+                    value = socket.inet_ntop(family, raw)
+                    if family == socket.AF_INET6:
+                        scope = ctypes.c_uint32.from_address(ctypes.addressof(address.contents) + 24).value
+                        if scope: value += f"%{scope}"
+                    addresses.add(normalized_ip(value))
+            current = current.contents.next
+    finally:
+        libc.freeifaddrs(head)
+    return addresses
+
+
+def is_local_ip(value, own):
+    address = normalized_ip(value)
+    return address is not None and (address.is_loopback or address.is_unspecified or any(same_ip(address, local) for local in own))
+
+
+def reject_local_identity(remote_id, local_id):
+    own, remote = identity(local_id), identity(remote_id)
+    if own and remote == own:
+        raise SelfConnectionError(SELF_CONNECTION_MESSAGE)
+
+
+def reject_local_socket(sock):
+    # Inspect the actual connected peer, not the hostname's earlier DNS answers.
+    # Never use this on the relay's intentionally local host bridge.
+    peer = socket_endpoint_ip(sock.getpeername())
+    source = socket_endpoint_ip(sock.getsockname())
+    if peer is None or source is None:
+        raise OSError("无法确认连接的实际 IP，请重试。")
+    if is_local_ip(peer, {source}):
+        raise SelfConnectionError(SELF_CONNECTION_MESSAGE)
+    if is_local_ip(peer, local_ip_addresses()):
+        raise SelfConnectionError(SELF_CONNECTION_MESSAGE)
 
 
 def identity(value):
@@ -228,7 +340,10 @@ def interfaces():
 
 
 class Scanner:
-    def __init__(self): self.cancelled = threading.Event(); self.sockets = []; self.lock = threading.Lock()
+    def __init__(self, *, local_device_id="", allow_self_connection_for_testing=False):
+        self.cancelled = threading.Event(); self.sockets = []; self.lock = threading.Lock()
+        self.local_device_id = identity(local_device_id)
+        self.allow_self_connection_for_testing = allow_self_connection_for_testing
     def close(self):
         self.cancelled.set()
         with self.lock:
@@ -244,9 +359,14 @@ class Scanner:
     def scan(self, target=None, nodes=(), *, discovery_ports=DISCOVERY_PORTS, host_ports=HOST_PORTS, seconds=1.5):
         if self.cancelled.is_set(): return []
         destinations, own = interfaces(); explicit = set()
+        own = {normalized_ip(address) for address in own}
+        if not self.allow_self_connection_for_testing:
+            own.update(local_ip_addresses())
         if target:
             explicit = {row[4][0] for row in socket.getaddrinfo(target, 0, socket.AF_INET, socket.SOCK_DGRAM)}
+            explicit = {address for address in explicit if self.allow_self_connection_for_testing or not is_local_ip(address, own)}
             explicit = set(sorted(explicit)[:4]); destinations = explicit
+            if not explicit: return []
         else:
             for node in nodes:
                 try:
@@ -254,7 +374,7 @@ class Scanner:
                     if isinstance(address, ipaddress.IPv4Address) and not address.is_unspecified and not address.is_multicast:
                         destinations.add(node.host)
                 except ValueError: pass
-        result = {}; started = time.monotonic()
+        result = {}; rejected_self_endpoints = set(); started = time.monotonic()
         try:
             udp = self._socket(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)); udp.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1); udp.settimeout(.12)
             udp.bind(("0.0.0.0", 0)); rounds = 0
@@ -268,23 +388,28 @@ class Scanner:
                 try: data, source = udp.recvfrom(8193)
                 except (socket.timeout, ConnectionResetError, ConnectionRefusedError): continue
                 if explicit and source[0] not in explicit: continue
-                if not explicit and (source[0] in own or ipaddress.ip_address(source[0]).is_loopback): continue
+                if not self.allow_self_connection_for_testing and is_local_ip(source[0], own): continue
                 item = parse_response(data, source[0])
+                if item and self.local_device_id and item.device_id == self.local_device_id:
+                    rejected_self_endpoints.add((item.host, item.port))
+                    continue
                 if item and (item.address in result or len(result) < 64): result[item.address] = item
             if explicit and not any(d.listening for d in result.values()):
                 ports = list(dict.fromkeys([n.port for n in nodes if n.host == target][:4]+list(host_ports)))
                 for host in explicit:
                     for port in ports:
                         if self.cancelled.is_set() or time.monotonic()-started > 4.5: break
+                        if (host, port) in rejected_self_endpoints: continue
                         try:
                             with self._socket(socket.socket()) as tcp:
                                 tcp.settimeout(.25); tcp.connect((host, port)); banner = b""
+                                if not self.allow_self_connection_for_testing: reject_local_socket(tcp)
                                 while len(banner) < 4:
                                     part = tcp.recv(4-len(banner))
                                     if not part: break
                                     banner += part
                                 if banner == b"RDK1": result[f"{host}:{port}"] = Device(host, port, advertised=False)
-                        except OSError: pass
+                        except (OSError, SelfConnectionError): pass
             return sorted(result.values(), key=lambda d:(not d.listening, d.name.casefold(), d.host, d.port))
         except OSError:
             if self.cancelled.is_set(): return []

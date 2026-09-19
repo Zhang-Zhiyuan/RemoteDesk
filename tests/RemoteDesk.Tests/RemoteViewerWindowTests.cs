@@ -1218,7 +1218,7 @@ public sealed class RemoteViewerWindowTests
     [Fact]
     public void FullScreenToggleRestoresBorderBoundsAndWindowState()
     {
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var window =
             new RemoteViewerWindow(
                 client,
@@ -1253,7 +1253,7 @@ public sealed class RemoteViewerWindowTests
     [Fact]
     public void DisplayScaleDefaultsToNoUpscalingAndCanOptIntoWindowFit()
     {
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var window =
             new RemoteViewerWindow(
                 client,
@@ -1329,7 +1329,7 @@ public sealed class RemoteViewerWindowTests
     [Fact]
     public void CaptureTargetSwitchButtonIsPartOfViewerFooter()
     {
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var window =
             new RemoteViewerWindow(
                 client,
@@ -1382,7 +1382,7 @@ public sealed class RemoteViewerWindowTests
                 try
                 {
                     using var client =
-                        new RemoteViewerClient();
+                        new RemoteViewerClient(allowLocalConnectionsForTesting: true);
                     using var window =
                         new RemoteViewerWindow(
                             client,
@@ -1572,7 +1572,7 @@ public sealed class RemoteViewerWindowTests
                 try
                 {
                     (bool Form, bool Picture) result;
-                    using (var client = new RemoteViewerClient())
+                    using (var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true))
                     using (var window =
                         new RemoteViewerWindow(
                             client,
@@ -1638,7 +1638,7 @@ public sealed class RemoteViewerWindowTests
                 try
                 {
                     using var client =
-                        new RemoteViewerClient();
+                        new RemoteViewerClient(allowLocalConnectionsForTesting: true);
                     using var window =
                         new RemoteViewerWindow(
                             client,
@@ -1710,7 +1710,7 @@ public sealed class RemoteViewerWindowTests
                 try
                 {
                     using var client =
-                        new RemoteViewerClient();
+                        new RemoteViewerClient(allowLocalConnectionsForTesting: true);
                     using var window =
                         new RemoteViewerWindow(
                             client,
@@ -2333,7 +2333,7 @@ public sealed class RemoteViewerWindowTests
     public void PendingFrameReplacementAndShutdownReturnViewerPoolLeases()
     {
         var pool = new TrackingByteArrayPool();
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var window =
             new RemoteViewerWindow(
                 client,
@@ -2382,7 +2382,7 @@ public sealed class RemoteViewerWindowTests
             RemoteViewerClient
                 .LocalH264SamplesAreAllIndependent);
         var pool = new TrackingByteArrayPool();
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var window =
             new RemoteViewerWindow(
                 client,
@@ -2436,7 +2436,7 @@ public sealed class RemoteViewerWindowTests
     public void RecoveryWaitDropReturnsViewerPoolLease()
     {
         var pool = new TrackingByteArrayPool();
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var window =
             new RemoteViewerWindow(
                 client,
@@ -2472,7 +2472,7 @@ public sealed class RemoteViewerWindowTests
     public void ClosingViewerDoesNotAcceptDeferredFrameOwnership()
     {
         var pool = new TrackingByteArrayPool();
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var window =
             new RemoteViewerWindow(
                 client,

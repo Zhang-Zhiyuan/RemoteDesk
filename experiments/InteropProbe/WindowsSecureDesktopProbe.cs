@@ -123,7 +123,7 @@ internal static class WindowsSecureDesktopProbe
             if (string.IsNullOrEmpty(password)) throw new InvalidOperationException("Installed host has no readable RemoteDesk connection password.");
         }
         using var host = installedHost ? null : new RemoteHostServer();
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds((signInButton ? 55 : 25) + holdSeconds));
         var lines = new System.Collections.Concurrent.ConcurrentQueue<string>();
         if (host is not null) host.Log += lines.Enqueue;

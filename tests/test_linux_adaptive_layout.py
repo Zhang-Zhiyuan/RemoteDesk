@@ -216,18 +216,100 @@ class RealTkAdaptiveLayoutTests(unittest.TestCase):
                 self.ui.frame_label.configure(image=image, text="")
                 self.root.update()
                 footer = self.ui.viewer_window_status.master
-                self.assertGreater(self.ui.frame_label.winfo_height(), 0)
+                self.assertGreaterEqual(self.ui.frame_label.winfo_height(), height * .35)
+                more = next(control for parent in footer.winfo_children() for control in parent.winfo_children()
+                            if isinstance(control, app.ttk.Menubutton))
+                menu = more.nametowidget(more.cget("menu"))
+                self.root.tk.call(menu.cget("postcommand"))
+                menu_labels = {menu.entrycget(index, "label") for index in range(menu.index(app.tk.END) + 1)
+                               if menu.type(index) == "command"}
+                self.assertLessEqual(self.ui.viewer_window_status.winfo_rooty() + self.ui.viewer_window_status.winfo_height(),
+                                     viewer.winfo_rooty() + viewer.winfo_height())
                 for parent in (footer, *footer.winfo_children()):
                     if parent is self.ui.viewer_target_bar:
                         continue  # Deliberately hidden until multiple targets are advertised.
                     for control in parent.winfo_children():
                         if isinstance(control, (app.ttk.Button, app.ttk.Entry)):
-                            self.assertTrue(control.winfo_ismapped())
+                            if not control.winfo_ismapped():
+                                self.assertTrue(more.winfo_ismapped())
+                                self.assertIsInstance(control, app.ttk.Button)
+                                self.assertIn(control.cget("text"), menu_labels)
+                                continue
                             self.assertGreaterEqual(control.winfo_rootx(), viewer.winfo_rootx())
                             self.assertLessEqual(control.winfo_rootx() + control.winfo_width(), viewer.winfo_rootx() + viewer.winfo_width())
                             self.assertLessEqual(control.winfo_rooty() + control.winfo_height(), viewer.winfo_rooty() + viewer.winfo_height())
                             self.assertIs(control, viewer.winfo_containing(control.winfo_rootx() + control.winfo_width() // 2,
                                                                          control.winfo_rooty() + control.winfo_height() // 2))
+
+    def test_viewer_overflow_menu_preserves_actions_and_disabled_state(self):
+        self.root.tk.call("tk", "scaling", 192 / 72)
+        self.ui._configure_style()
+        self.ui.viewer_window = None
+        self.ui.window_icon = None
+        self.ui.viewer = None
+        self.ui.native_presenter_active = False
+        self.ui.last_photo = None
+        self.ui.text_input = app.tk.StringVar(self.root)
+        self.ui._viewer_frame_focus_out = mock.Mock()
+        with mock.patch.object(app, "apply_adaptive_window_geometry"):
+            self.ui._open_viewer_window("owned-layout.invalid", 56565)
+        window = self.ui.viewer_window
+        window.geometry("640x480")
+        self.root.update()
+        footer = self.ui.viewer_window_status.master
+        more = next(control for parent in footer.winfo_children() for control in parent.winfo_children()
+                    if isinstance(control, app.ttk.Menubutton))
+        self.assertTrue(more.winfo_ismapped())
+        menu = more.nametowidget(more.cget("menu"))
+        sent = []
+        self.ui.viewer_window_send_file_button.configure(command=lambda: sent.append("file"))
+        for enabled in (False, True, False):
+            self.ui.viewer_window_send_file_button.configure(state=app.tk.NORMAL if enabled else app.tk.DISABLED)
+            menu.post(more.winfo_rootx(), more.winfo_rooty() + more.winfo_height())
+            self.root.update()
+            index = next(index for index in range(menu.index(app.tk.END) + 1)
+                         if menu.type(index) == "command" and menu.entrycget(index, "label") == "发送文件")
+            self.assertEqual("normal" if enabled else "disabled", menu.entrycget(index, "state"))
+            menu.invoke(index)
+            menu.unpost()
+        self.assertEqual(["file"], sent)
+        self.assertGreaterEqual(self.ui.frame_label.winfo_height(), 240)
+        self.ui.viewer_status = mock.Mock()
+        full_status = "Decoder fallback\n" + "Owned diagnostic line\n" * 6
+        self.ui._set_viewer_status(full_status)
+        self.root.update()
+        self.assertNotIn("\n", self.ui.viewer_window_status.cget("text"))
+        self.assertGreaterEqual(self.ui.frame_label.winfo_height(), 240)
+        self.ui._show_viewer_status_details()
+        details = next(child for child in window.winfo_children()
+                       if isinstance(child, app.tk.Toplevel) and child.title() == "完整连接状态")
+        details_text = next(child for child in details.winfo_children() if isinstance(child, app.tk.Text))
+        self.assertEqual(full_status, details_text.get("1.0", "end-1c"))
+        self.assertEqual("disabled", details_text.cget("state"))
+        details.destroy()
+        self.ui.viewer_target_selector.configure(values=("Screen 1", "Screen 2"), state="readonly")
+        self.ui.viewer_target_bar.pack(fill=app.tk.X, before=self.ui.viewer_target_controls_anchor)
+        self.root.update()
+        self.assertTrue(self.ui.viewer_target_selector.winfo_ismapped())
+        self.assertGreaterEqual(self.ui.frame_label.winfo_height(), 180)
+        status = self.ui.viewer_window_status
+        self.assertLessEqual(status.winfo_rooty() + status.winfo_height(), window.winfo_rooty() + window.winfo_height())
+        self.ui.viewer_target_bar.pack_forget()
+        for _ in range(3):
+            window.geometry("1900x1000")
+            self.root.update()
+            self.assertFalse(more.winfo_ismapped())
+            self.assertTrue(self.ui.viewer_window_send_file_button.winfo_ismapped())
+            window.geometry("640x480")
+            self.root.update()
+            self.assertTrue(more.winfo_ismapped())
+        background_errors = []
+        self.root.createcommand("owned_bgerror", background_errors.append)
+        self.root.tk.eval("proc bgerror {msg} {owned_bgerror $msg}")
+        self.ui.viewer_target_controls_anchor.event_generate("<Configure>", width=620, height=100)
+        window.destroy()
+        self.root.update()
+        self.assertEqual([], background_errors)
 
 
 if __name__ == "__main__":

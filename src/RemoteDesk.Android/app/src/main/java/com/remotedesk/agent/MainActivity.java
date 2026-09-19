@@ -42,6 +42,7 @@ import android.widget.Toast;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.IOException;
 import java.net.Inet4Address;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -81,6 +82,8 @@ public final class MainActivity extends Activity {
     private Button returnToDesktopButton;
     private final AndroidHostLaunchPolicy hostLaunchPolicy = new AndroidHostLaunchPolicy();
     private final Runnable hostStartupCheck = this::checkHostStartup;
+    private final AndroidHostStatusTracker hostStatusTracker = new AndroidHostStatusTracker();
+    private final Runnable hostStatusCheck = this::checkHostStatus;
     private boolean activityResumed;
     private ScrollView scrollView;
     private LinearLayout mainContentLayout;
@@ -289,7 +292,7 @@ public final class MainActivity extends Activity {
             hostColumn,
             AndroidUiTheme.createSectionSubtitle(
                 this,
-                "录屏授权时请选择“整个屏幕”。启动成功后自动返回桌面；无障碍权限用于远程触控与文本输入。"));
+                "H.264 模式授权时请选择“整个屏幕”。启动成功后自动返回桌面；无障碍权限用于远程触控与文本输入。"));
         addLabeledField(hostColumn, "本机设备密钥", passwordEdit);
         CheckBox compatibleHost = new CheckBox(this);
         compatibleHost.setText("免重复录屏授权（无障碍兼容模式）");
@@ -304,6 +307,15 @@ public final class MainActivity extends Activity {
             getSharedPreferences(RemoteDeskForegroundService.PREFS_NAME, MODE_PRIVATE)
                 .edit().putBoolean(AndroidHostResume.PREF_COMPATIBLE, checked).apply();
             if (!checked) AndroidHostResume.setArmed(this, false);
+            updateStatusPanel(currentHeadline());
+            if (RemoteDeskForegroundService.isServiceRunning()) {
+                try {
+                    startService(new Intent(this, RemoteDeskForegroundService.class)
+                        .putExtra(RemoteDeskForegroundService.EXTRA_REFRESH_STATUS, true));
+                } catch (RuntimeException ex) {
+                    AndroidSessionLog.error("Could not refresh the host mode notification.", ex);
+                }
+            }
         });
         addColumnView(hostColumn, compatibleHost);
         addColumnView(hostColumn, AndroidUiTheme.createSectionSubtitle(this,
@@ -330,7 +342,7 @@ public final class MainActivity extends Activity {
         addColumnView(hostColumn, startHostButton);
         addColumnView(hostColumn, returnToDesktopButton);
         addColumnView(hostColumn, AndroidUiTheme.createSectionSubtitle(this,
-            "含设备密钥的配置页可能被系统录屏保护遮黑。返回桌面即可查看其它内容；可通过应用通知回来管理连接。"));
+            "含设备密钥的配置页可能被系统录屏保护遮黑。返回桌面即可查看其它内容；可从 RemoteDesk 应用图标返回管理连接。"));
         addColumnView(hostColumn, presenceButton);
         addColumnView(hostColumn, stopButton);
 
@@ -660,6 +672,12 @@ public final class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         activityResumed = true;
+        // SystemUI can resume this Activity before the projection-stop callback
+        // reaches the service. Watch cheap state flags while visible, not just
+        // onResume, so a revoked grant cannot leave the restart button disabled.
+        rememberHostStatus();
+        statusView.removeCallbacks(hostStatusCheck);
+        statusView.postDelayed(hostStatusCheck, 750);
         if (historyPanel != null) historyPanel.refresh(nodes -> {
             if (historyRestored) return;
             historyRestored = true;
@@ -686,6 +704,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (statusView != null) statusView.removeCallbacks(hostStatusCheck);
         receivedFilesLoad.close();
         receivedFilesExecutor.shutdownNow();
         cancelHostStartupNavigation();
@@ -700,6 +719,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onPause() {
         activityResumed = false;
+        statusView.removeCallbacks(hostStatusCheck);
         receivedFilesLoad.cancel();
         if (receivedFilesLoadingDialog != null) {
             receivedFilesLoadingDialog.dismiss();
@@ -710,6 +730,21 @@ public final class MainActivity extends Activity {
         cancelHostStartupNavigation();
         if (relayPanel != null) relayPanel.active(false);
         super.onPause();
+    }
+
+    private boolean rememberHostStatus() {
+        return hostStatusTracker.update(
+            RemoteDeskForegroundService.isServiceRunning(),
+            RemoteDeskForegroundService.isHostRunning(),
+            RemoteDeskForegroundService.isCapturePaused(),
+            RemoteDeskAccessibilityService.isEnabled(),
+            RemoteDeskForegroundService.getLastStartFailure());
+    }
+
+    private void checkHostStatus() {
+        if (!activityResumed || isFinishing() || isDestroyed()) return;
+        if (rememberHostStatus()) updateStatusPanel(currentHeadline());
+        statusView.postDelayed(hostStatusCheck, 750);
     }
 
     private void openRelayViewer(AndroidRelay.Options target, String name, boolean editKey) {
@@ -756,6 +791,7 @@ public final class MainActivity extends Activity {
     }
 
     private void openHistoryViewer(AndroidConnectionHistory.Node node) {
+        if (rejectSelfDevice(node.relay() ? node.relayDeviceId : node.deviceId)) return;
         if (node.relay()) {
             try { AndroidRelayUiPolicy.historyTarget(node, AndroidRelaySettings.load(this)); }
             catch (Exception unavailable) {
@@ -779,6 +815,8 @@ public final class MainActivity extends Activity {
     }
 
     private void launchHistoryViewer(AndroidConnectionHistory.Node node, AndroidLanDevice replacement) {
+        if (rejectSelfDevice(replacement != null ? replacement.deviceId :
+                node.relay() ? node.relayDeviceId : node.deviceId)) return;
         // Pass only an opaque local ID, not a credential or relay access token.
         Intent intent = new Intent(this, RemoteDeskViewerActivity.class)
             .putExtra(RemoteDeskViewerActivity.EXTRA_HISTORY_ID, node.id);
@@ -799,6 +837,7 @@ public final class MainActivity extends Activity {
 
     private void openDiscoveredViewer(AndroidLanDevice device) {
         viewerLaunchEpoch++;
+        if (rejectSelfDevice(device.deviceId)) return;
         if (!device.listening) {
             new AlertDialog.Builder(this).setTitle(device.name)
                 .setMessage("已发现 " + device.address() + "，但被控端尚未启动。请先在对方设备上启动被控端。")
@@ -1001,6 +1040,17 @@ public final class MainActivity extends Activity {
         startActivity(intent);
     }
 
+    private boolean rejectSelfDevice(String deviceId) {
+        if (AndroidConnectionHistory.deviceIdentity(deviceId).isEmpty()) return false;
+        try {
+            if (!AndroidSelfConnectionGuard.sameDevice(deviceId, AndroidRelaySettings.localDeviceId(this))) return false;
+            updateStatusPanel(AndroidSelfConnectionGuard.SELF_MESSAGE);
+        } catch (IOException failure) {
+            updateStatusPanel("无法读取本机设备标识，请重试。");
+        }
+        return true;
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
@@ -1055,7 +1105,7 @@ public final class MainActivity extends Activity {
 
     private void returnToDesktop() {
         if (!RemoteDeskForegroundService.isHostRunning()) {
-            updateStatusPanel("请先启动被控端并完成整个屏幕的录制授权。");
+            updateStatusPanel(currentHeadline());
             return;
         }
         cancelHostStartupNavigation();
@@ -1063,7 +1113,7 @@ public final class MainActivity extends Activity {
             // Leave the sensitive settings Activity; never disable Android's screen-share protections.
             startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-            Toast.makeText(this, "被控保持运行，可从 RemoteDesk 通知返回设置。", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, AndroidHostStatusText.returnToSettingsHint(), Toast.LENGTH_LONG).show();
             AndroidSessionLog.info("Host is ready; settings task moved behind the desktop to avoid sensitive-page screen masking.");
         } catch (RuntimeException ex) {
             AndroidSessionLog.error("Could not return to desktop after host startup.", ex);
@@ -1511,8 +1561,11 @@ public final class MainActivity extends Activity {
         boolean hostRunning = RemoteDeskForegroundService.isHostRunning();
         if (startHostButton != null) {
             startHostButton.setEnabled(!hostRunning && !hostLaunchPolicy.isPending());
-            startHostButton.setText(RemoteDeskForegroundService.isCapturePaused()
-                ? "重新授权，恢复被控" : "启动被控端");
+            boolean compatible = hostRunning
+                ? AndroidScreenCaptureSession.getInstance().isAccessibilityCapture()
+                : AndroidHostResume.compatibleSelected(this);
+            startHostButton.setText(AndroidHostStatusText.startAction(compatible,
+                RemoteDeskAccessibilityService.canCaptureScreen(), RemoteDeskForegroundService.isCapturePaused()));
         }
         if (returnToDesktopButton != null) returnToDesktopButton.setEnabled(hostRunning);
     }
@@ -1529,22 +1582,10 @@ public final class MainActivity extends Activity {
         }
 
         String startFailure = RemoteDeskForegroundService.getLastStartFailure();
-        if (!startFailure.isEmpty()) return startFailure;
-
-        if (AndroidHostResume.compatibleSelected(this) && !RemoteDeskAccessibilityService.canCaptureScreen()) {
-            return "无障碍截图服务未连接\n如系统开关已开启，请关闭后重新开启，再启动被控。";
-        }
-
-        if (RemoteDeskForegroundService.isServiceRunning()) {
-            if (RemoteDeskForegroundService.isCapturePaused()) {
-                return "屏幕录制已停止\n锁屏或系统停止共享后，需要在手机上重新授权；设备发现仍在运行。";
-            }
-            return "发现常驻中";
-        }
-
-        return AndroidHostResume.compatibleSelected(this)
-            ? "已打开，可被局域网扫描\n点击启动兼容被控，无需录屏授权"
-            : "已打开，可被局域网扫描\n等待屏幕录制授权";
+        String nextStep = AndroidHostStatusText.idleHeadline(RemoteDeskForegroundService.isServiceRunning(),
+            AndroidHostResume.compatibleSelected(this), RemoteDeskAccessibilityService.canCaptureScreen(),
+            RemoteDeskForegroundService.isCapturePaused());
+        return AndroidHostStatusText.withStartFailure(startFailure, nextStep);
     }
 
     private String localStatusText() {
@@ -1555,19 +1596,16 @@ public final class MainActivity extends Activity {
         boolean hostRunning = RemoteDeskForegroundService.isHostRunning();
         boolean projectionGranted = AndroidScreenCaptureSession.getInstance().hasProjectionGrant();
         boolean compatible = AndroidHostResume.compatibleSelected(this);
+        boolean activeCompatible = AndroidScreenCaptureSession.getInstance().isAccessibilityCapture();
         String discoveryStatus = hostRunning
             ? "正在广播完整被控能力"
             : serviceRunning
             ? "正在常驻广播 App 已打开，需在手机上启动被控端"
             : "仅广播 App 已打开，启动被控端后才能连接屏幕";
-        String projectionStatus = hostRunning && AndroidScreenCaptureSession.getInstance().isAccessibilityCapture()
-            ? "无障碍兼容模式，无需重复录屏授权"
-            : hostRunning && projectionGranted
-            ? "已授权并运行"
-            : RemoteDeskForegroundService.isCapturePaused()
-            ? "已停止，请重新授权" : compatible ? "使用无障碍截图，无需录屏授权" : "启动被控端时会请求";
+        String projectionStatus = AndroidHostStatusText.projectionStatus(hostRunning, activeCompatible,
+            projectionGranted, compatible, RemoteDeskForegroundService.isCapturePaused());
         String capabilitiesStatus = hostRunning
-            ? "屏幕观看、" + (compatible ? "JPEG 兼容截图" : "H.264/JPEG") + "、剪贴板文本、文件接收" + (inputEnabled ? "、输入控制、聚焦文本输入" : "")
+            ? "屏幕观看、" + (activeCompatible ? "JPEG 兼容截图" : "H.264/JPEG") + "、剪贴板文本、文件接收" + (inputEnabled ? "、输入控制、聚焦文本输入" : "")
             : "待启动被控端后提供屏幕观看、剪贴板和文件接收";
         String notificationStatus = notificationPermissionStatus();
         String batteryOptimizationStatus = AndroidBatteryOptimization.formatStatus(
@@ -1594,11 +1632,9 @@ public final class MainActivity extends Activity {
         boolean inputEnabled = AndroidInputInjector.isEnabled();
         boolean hostRunning = RemoteDeskForegroundService.isHostRunning();
         boolean projectionGranted = AndroidScreenCaptureSession.getInstance().hasProjectionGrant();
-        String projectionStatus = AndroidHostResume.compatibleSelected(this)
-            ? "无障碍兼容模式，无需录屏授权"
-            : hostRunning && projectionGranted
-            ? "已授权并运行"
-            : "启动被控端时会请求";
+        String projectionStatus = AndroidHostStatusText.projectionStatus(hostRunning,
+            AndroidScreenCaptureSession.getInstance().isAccessibilityCapture(), projectionGranted,
+            AndroidHostResume.compatibleSelected(this), RemoteDeskForegroundService.isCapturePaused());
         String h264Status = AndroidVideoCodecDiagnostics.formatH264Status(
             AndroidVideoCodecDiagnostics.cachedH264Report());
         String text = AndroidConnectionInfoFormatter.format(

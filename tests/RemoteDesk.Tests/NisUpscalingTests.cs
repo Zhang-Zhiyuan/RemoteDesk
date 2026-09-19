@@ -64,7 +64,7 @@ public sealed class NisUpscalingTests
     [Fact]
     public void AlgorithmSelectionDoesNotEnableExperimentOrChangeInputGeometry()
     {
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var viewer = new RemoteViewerWindow(client, "algorithm test", false, false, false, false, false, false);
         bool geometry = viewer.AllowDisplayUpscalingForEntityTests;
         viewer.SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.CatmullRom);

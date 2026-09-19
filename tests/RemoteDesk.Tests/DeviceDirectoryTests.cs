@@ -203,7 +203,7 @@ public sealed class DeviceDirectoryTests
                 }
             }
         }
-        Task host = Host(); using var client = new RemoteViewerClient();
+        Task host = Host(); using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         client.DeviceInfoReceived += info => { if (!supported || info.DeviceId is not null) gotInfo.TrySetResult(info); };
         try
         {

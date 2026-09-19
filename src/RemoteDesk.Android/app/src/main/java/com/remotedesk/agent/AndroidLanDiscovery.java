@@ -40,14 +40,14 @@ final class AndroidLanDiscovery implements AutoCloseable {
     List<AndroidLanDevice> scan(Context context, String target, List<AndroidConnectionHistory.Node> history) throws Exception {
         if (cancelled) return Collections.emptyList();
         LinkedHashSet<InetAddress> destinations = new LinkedHashSet<>();
-        Set<String> localAddresses = new LinkedHashSet<>();
+        List<InetAddress> localAddresses = AndroidSelfConnectionGuard.localAddresses();
+        String localDeviceId = AndroidRelaySettings.localDeviceId(context);
         Set<InetAddress> explicitAddresses = new LinkedHashSet<>();
         Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
         while (interfaces != null && interfaces.hasMoreElements()) {
             NetworkInterface network = interfaces.nextElement();
             if (!network.isUp()) continue;
             for (InterfaceAddress address : network.getInterfaceAddresses()) {
-                localAddresses.add(address.getAddress().getHostAddress());
                 if (!network.isLoopback() && address.getAddress() instanceof Inet4Address && address.getBroadcast() != null)
                     destinations.add(address.getBroadcast());
             }
@@ -55,17 +55,21 @@ final class AndroidLanDiscovery implements AutoCloseable {
         if (target != null && !target.isEmpty()) {
             // Only an explicitly entered hostname may trigger DNS. Automatic
             // refresh does not resolve twenty old/offline names in the background.
+            boolean foundSelf = false;
             for (InetAddress address : InetAddress.getAllByName(target)) {
+                if (AndroidSelfConnectionGuard.isSelf(address, localAddresses)) { foundSelf = true; continue; }
                 if (!address.isAnyLocalAddress() && !address.isMulticastAddress()) explicitAddresses.add(address);
                 if (explicitAddresses.size() >= 4) break;
             }
+            if (explicitAddresses.isEmpty() && foundSelf) throw new AndroidSelfConnectionGuard.Rejected();
             destinations.clear(); destinations.addAll(explicitAddresses);
         } else {
             destinations.add(InetAddress.getByAddress(new byte[]{-1,-1,-1,-1}));
             for (AndroidConnectionHistory.Node node : history) {
                 if (node.relay()) continue;
                 InetAddress address = literalIpv4(node.host);
-                if (address != null) destinations.add(address);
+                if (address != null && !AndroidSelfConnectionGuard.isSelf(address, localAddresses) &&
+                        !AndroidSelfConnectionGuard.knownSelf(node, false, localDeviceId)) destinations.add(address);
             }
         }
         if (cancelled) return Collections.emptyList();
@@ -90,10 +94,10 @@ final class AndroidLanDiscovery implements AutoCloseable {
                 catch (java.net.PortUnreachableException ignored) { continue; }
                 if (cancelled) break;
                 if (!explicitAddresses.isEmpty() && !explicitAddresses.contains(packet.getAddress())) continue;
-                if (explicitAddresses.isEmpty() && (packet.getAddress().isLoopbackAddress() ||
-                        localAddresses.contains(packet.getAddress().getHostAddress()))) continue;
+                if (AndroidSelfConnectionGuard.isSelf(packet.getAddress(), localAddresses)) continue;
                 AndroidLanDevice device = parse(packet);
-                if (device != null && (devices.containsKey(device.address()) || devices.size() < MAX_DEVICES))
+                if (device != null && !AndroidSelfConnectionGuard.sameDevice(device.deviceId, localDeviceId) &&
+                        (devices.containsKey(device.address()) || devices.size() < MAX_DEVICES))
                     devices.put(device.address(), device);
             }
             // No all-port/subnet TCP scan. A user-selected target can fall back
@@ -132,9 +136,10 @@ final class AndroidLanDiscovery implements AutoCloseable {
             synchronized (this) { tcp = socket; if (cancelled) socket.close(); }
             if (cancelled) return false;
             socket.connect(new InetSocketAddress(address, port), 250);
+            AndroidSelfConnectionGuard.requireRemote(socket, false);
             socket.setSoTimeout(250);
             return readBanner(socket.getInputStream());
-        } catch (IOException ignored) { return false; }
+        } catch (IOException | AndroidSelfConnectionGuard.Rejected | AndroidSelfConnectionGuard.VerificationFailed ignored) { return false; }
         finally { synchronized (this) { tcp = null; } }
     }
 

@@ -17,6 +17,23 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 
 public final class RemoteDeskForegroundServiceTest {
+    @Test public void notificationRefreshFailureDoesNotBecomeAHostStartFailure() {
+        SecurityException denied = new SecurityException("synthetic notification rejection");
+        java.util.concurrent.atomic.AtomicReference<RuntimeException> notificationFailure = new java.util.concurrent.atomic.AtomicReference<>();
+        assertEquals(android.app.Service.START_STICKY, RemoteDeskForegroundService.runStartSafely(() -> {
+            RemoteDeskForegroundService.refreshStatusSafely(() -> { throw denied; }, notificationFailure::set);
+            return android.app.Service.START_STICKY;
+        }, ex -> { throw new AssertionError("Must not stop the host for a notification refresh", ex); }));
+        assertSame(denied, notificationFailure.get());
+    }
+
+    @Test public void successfulNotificationRefreshRunsOnceAndDoesNotReportFailure() {
+        java.util.concurrent.atomic.AtomicInteger refreshes = new java.util.concurrent.atomic.AtomicInteger();
+        RemoteDeskForegroundService.refreshStatusSafely(refreshes::incrementAndGet,
+            ex -> { throw new AssertionError(ex); });
+        assertEquals(1, refreshes.get());
+    }
+
     @Test
     public void rejectedForegroundStartDoesNotCrashOrLoopRestart() {
         SecurityException rejected = new SecurityException("platform denied start");

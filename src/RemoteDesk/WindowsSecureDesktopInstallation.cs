@@ -6,7 +6,7 @@ using Microsoft.Win32;
 
 namespace RemoteDesk;
 
-internal static class WindowsSecureDesktopInstallation
+internal static partial class WindowsSecureDesktopInstallation
 {
     internal const string InstallArgument = "--install-secure-desktop";
     internal const string DisableArgument = "--disable-secure-desktop";
@@ -48,8 +48,11 @@ internal static class WindowsSecureDesktopInstallation
     internal static bool RecoverSharedExecutableAfterUpdate()
     {
         string sid = WindowsPersistentStartup.UserSid;
+        bool elevated = WindowsProcessElevation.IsCurrentProcessElevated();
+        string currentExecutable = Path.GetFullPath(Application.ExecutablePath);
+        if (elevated && UpgradeExistingHelperAfterUpdate(sid, currentExecutable)) return true;
         return RecoverSharedExecutableAfterUpdate(
-            WindowsProcessElevation.IsCurrentProcessElevated(), Path.GetFullPath(Application.ExecutablePath),
+            elevated, currentExecutable,
             () => InstalledExecutable(sid), WindowsPersistentStartup.ValidateProtectedFile,
             QueryAuthenticatedStatus, guard => RestartExistingService(sid, guard), WaitForAuthenticatedStatus);
     }

@@ -96,6 +96,8 @@ public sealed partial class MainForm
     {
         _confirmedHistorySource = null;
         var endpoint = ParseDeviceEndpoint(_viewerHostBox.Text, _viewerAutoPortBox.Checked ? "" : _viewerPortBox.Value.ToString());
+        using (var selfCheckTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+            await SelfConnectionGuard.ValidateDirectHostAsync(endpoint.Host, selfCheckTimeout.Token);
         if (endpoint.ExplicitPort) _viewerAutoPortBox.Checked = false;
         _viewerHostBox.Text = endpoint.Host;
         if (endpoint.ExplicitPort) _viewerPortBox.Value = endpoint.Port;
@@ -103,7 +105,11 @@ public sealed partial class MainForm
         SavedRemoteDevice? saved = _selectedHistoryDevice;
         if (saved is not null && !string.Equals(saved.Address, endpoint.Host, StringComparison.OrdinalIgnoreCase) &&
             !_lastDiscoveredHosts.Any(h => h.Address == endpoint.Host && RemoteDeviceIdentity.Same(h.DeviceId, saved.DeviceId))) saved = null;
+        SelfConnectionGuard.RejectLocalDevice(saved?.DeviceId);
         saved ??= FindSavedForDiscovery(endpoint.Host, requestedPort, null);
+        // An old self record's IP may now belong to a different DHCP client.
+        // Do not turn that stale address match into a permanent address ban.
+        if (RemoteDeviceIdentity.Same(saved?.DeviceId, RemoteDeviceIdentity.LocalId)) saved = null;
         if (!_viewerAutoPortBox.Checked) return ConfirmMovedSavedDevice(saved, endpoint.Host, requestedPort);
         SetViewerStatus("正在自动查找设备和监听端口…", MutedTextColor);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
@@ -118,6 +124,7 @@ public sealed partial class MainForm
         catch (Exception ex) when (ex is OperationCanceledException or System.Net.Sockets.SocketException or IOException)
         { found = []; }
         if (_isClosing || IsDisposed) return false;
+        found = RemoveLocalDiscoveredHosts(found, out _);
         // Resolve DNS aliases to the actual source IP before selecting the response.
         IReadOnlyList<IPAddress> ips = [];
         try { ips = await NetworkDiscoveryService.ResolveDirectProbeAddressesAsync([endpoint.Host], timeout.Token); }
@@ -136,6 +143,7 @@ public sealed partial class MainForm
 
     private bool ConfirmMovedSavedDevice(SavedRemoteDevice? saved, string host, int port)
     {
+        SelfConnectionGuard.RejectLocalDevice(saved?.DeviceId);
         bool confirmed = saved is null || (string.Equals(saved.Address, host, StringComparison.OrdinalIgnoreCase) && saved.Port == port) ||
             MessageBox.Show(this, $"{saved.Remark ?? saved.MachineName}\n原地址：{saved.Address}:{saved.Port}\n新地址：{host}:{port}\n\n请确认这是你的设备。连接成功后自动合并同一设备的记录。",
                 "设备地址已变化", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) == DialogResult.OK;

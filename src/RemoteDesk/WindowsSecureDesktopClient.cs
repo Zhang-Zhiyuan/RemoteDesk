@@ -48,10 +48,13 @@ internal sealed class WindowsSecureDesktopClient : IDisposable
     internal static bool IsRequired => !SystemProcess.Value && !WindowsInteractiveDesktopProbe.InspectCurrent().IsAvailable;
 
     internal void Apply(RemoteInputCommand command, Rectangle bounds, Size size)
+        => Apply(command, bounds, size, null);
+
+    internal void Apply(RemoteInputCommand command, Rectangle bounds, Size size, bool? expectedSecureDesktop)
     {
         InputInjector.ValidateCommand(command, size);
         if (_shortcuts.TryHandle(command, ReleaseKeyCore, LockCurrentSession)) return;
-        if (!Route(new("input", command, bounds.X, bounds.Y, bounds.Width, bounds.Height, size.Width, size.Height)))
+        if (!Route(new("input", command, bounds.X, bounds.Y, bounds.Width, bounds.Height, size.Width, size.Height), expectedSecureDesktop))
             InputInjector.Apply(command, bounds, size);
         _shortcuts.Observe(command);
     }
@@ -84,14 +87,31 @@ internal sealed class WindowsSecureDesktopClient : IDisposable
         if (!Route(new("paste"))) InputInjector.SendPasteShortcut();
     }
 
-    private bool Route(SecureDesktopRequest request)
+    private bool Route(SecureDesktopRequest request, bool? expectedSecureDesktop = null)
     {
-        if (!IsRequired) { Disconnect(); return false; }
+        bool required = IsRequired;
+        if (expectedSecureDesktop is { } expected && required != expected)
+            throw new SecureDesktopTargetException(true);
+        if (!required) { Disconnect(); return false; }
         SecureDesktopReply reply = Exchange(request, out _);
-        // Inactive proves that no input was injected, so falling back after
-        // an unlock race is safe. Never replay an operation after an I/O error.
-        if (reply.Status == "inactive") { Disconnect(); return false; }
+        // Inactive proves that no input was injected. Only target-independent
+        // operations may fall back; old pointer coordinates are not replayed.
+        if (reply.Status == "inactive")
+        {
+            Disconnect();
+            ValidateInactiveFallback(request);
+            return false;
+        }
         return true;
+    }
+
+    internal static void ValidateInactiveFallback(SecureDesktopRequest request)
+    {
+        // No input was injected, but coordinates belong to the previous
+        // desktop. Do not replay a pointer against Default after unlocking.
+        if (request.Operation == "input" && request.Command.Kind is RemoteInputKind.MouseMove or
+            RemoteInputKind.MouseDown or RemoteInputKind.MouseUp or RemoteInputKind.MouseWheel)
+            throw new SecureDesktopTargetException(true);
     }
 
     internal bool TryCapture(Rectangle bounds, int quality, int scale, out ScreenCaptureResult capture, string? targetId = null)
@@ -103,7 +123,8 @@ internal sealed class WindowsSecureDesktopClient : IDisposable
         if (reply.Status == "inactive") { Disconnect(); return false; }
         if (jpeg is null) throw new InvalidOperationException("登录画面尚未准备好。");
         capture = new(new Rectangle(reply.Left, reply.Top, reply.Width, reply.Height),
-            new Size(reply.FrameWidth, reply.FrameHeight), jpeg, reply.CaptureMilliseconds, reply.EncodeMilliseconds);
+            new Size(reply.FrameWidth, reply.FrameHeight), jpeg, reply.CaptureMilliseconds, reply.EncodeMilliseconds,
+            IsSecureDesktop: true, IsSecureDesktopFallback: reply.CaptureTargetFallback);
         return true;
     }
 
@@ -130,7 +151,7 @@ internal sealed class WindowsSecureDesktopClient : IDisposable
                     failureStage = SecureDesktopFailureStage.HelperRejected;
                     // The stage is actionable without forwarding helper exception text,
                     // which can contain desktop input or other private native details.
-                    throw new InvalidOperationException("Desktop helper rejected the request.");
+                    throw WindowsSecureDesktopProtocol.HelperFailure(reply);
                 }
                 if (request.Operation == "capture" && reply.Status == "active")
                 {
@@ -146,6 +167,14 @@ internal sealed class WindowsSecureDesktopClient : IDisposable
                 }
                 else if (reply.JpegLength != 0) throw new InvalidDataException("辅助服务返回了意外的数据。");
                 return reply;
+            }
+            catch (SecureDesktopTargetException)
+            {
+                // Keep the fixed, non-sensitive topology classification. It
+                // means this request did not inject input; the caller still
+                // must not replay it against a newly selected monitor.
+                DisconnectCore();
+                throw;
             }
             catch (Exception ex) when (ex is IOException or OperationCanceledException or System.ComponentModel.Win32Exception or
                 System.Text.Json.JsonException or UnauthorizedAccessException or InvalidOperationException or

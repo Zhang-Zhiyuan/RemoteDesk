@@ -35,7 +35,7 @@ public sealed class RemoteViewerClientLoopbackTests
             await releaseHost.Task.WaitAsync(timeout.Token);
         }
         Task host = Host();
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         object connectionLock = typeof(RemoteViewerClient).GetField("_connectionStateLock",
             BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(client)!;
         var writeGate = (SemaphoreSlim)typeof(RemoteViewerClient).GetField("_writeLock",
@@ -94,7 +94,7 @@ public sealed class RemoteViewerClientLoopbackTests
             timeout.Token,
             machineName: "stale-disconnect-new-host");
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var firstDevice = CreateCompletionSource<bool>();
         var secondDevice = CreateCompletionSource<bool>();
         client.DeviceInfoReceived += device =>
@@ -162,7 +162,7 @@ public sealed class RemoteViewerClientLoopbackTests
             release.Task,
             timeout.Token,
             machineName: "invalid-generation-host");
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
 
         try
         {
@@ -191,7 +191,7 @@ public sealed class RemoteViewerClientLoopbackTests
         using var listener =
             new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
-        using var client = new RemoteViewerClient(
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true,
             incomingFileReceiveDirectoryProvider: null,
             setFileDropListAsync: null,
             connectTimeout: TimeSpan.FromMilliseconds(250));
@@ -222,7 +222,7 @@ public sealed class RemoteViewerClientLoopbackTests
         using var listener =
             new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
-        using var client = new RemoteViewerClient(
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true,
             incomingFileReceiveDirectoryProvider: null,
             setFileDropListAsync: null,
             connectTimeout: TimeSpan.FromSeconds(30));
@@ -253,7 +253,7 @@ public sealed class RemoteViewerClientLoopbackTests
         using var listener =
             new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
-        using var client = new RemoteViewerClient(
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true,
             incomingFileReceiveDirectoryProvider: null,
             setFileDropListAsync: null,
             connectTimeout: TimeSpan.FromSeconds(30));
@@ -331,7 +331,7 @@ public sealed class RemoteViewerClientLoopbackTests
                 timeout.Token);
         }, timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var rejectionLog = CreateCompletionSource<string>();
         client.Log += message =>
         {
@@ -414,7 +414,7 @@ public sealed class RemoteViewerClientLoopbackTests
             releaseSecond.Task,
             timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var queuedLists = new List<CaptureTargetsUpdate>();
         var queuedSelections =
             new List<CaptureTargetChangedUpdate>();
@@ -563,7 +563,7 @@ public sealed class RemoteViewerClientLoopbackTests
                 ],
                 timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var updates =
             new List<CaptureTargetAvailabilityUpdate>();
         var clipboardStatuses = new List<string>();
@@ -642,7 +642,7 @@ public sealed class RemoteViewerClientLoopbackTests
             requestReceived,
             timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var deviceReceived = CreateCompletionSource<RemoteDeviceDescriptor>();
         client.DeviceInfoReceived += device => deviceReceived.TrySetResult(device);
         await client.ConnectAsync(
@@ -709,7 +709,7 @@ public sealed class RemoteViewerClientLoopbackTests
             Path.GetTempPath(),
             $"RemoteDesk-reconnect-capabilities-{Guid.NewGuid():N}");
         Directory.CreateDirectory(receiveDirectory);
-        using var client = new RemoteViewerClient(
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true,
             () => receiveDirectory,
             _ => Task.CompletedTask);
         var disconnected = CreateCompletionSource<bool>();
@@ -812,7 +812,12 @@ public sealed class RemoteViewerClientLoopbackTests
                 releaseFirstHost.Task,
                 timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
+        var firstOwnerDisconnected = CreateCompletionSource<bool>();
+        client.ConnectedChanged += connected =>
+        {
+            if (!connected) firstOwnerDisconnected.TrySetResult(true);
+        };
         await client.ConnectAsync(
             IPAddress.Loopback.ToString(),
             ((IPEndPoint)firstListener.LocalEndpoint).Port,
@@ -824,6 +829,10 @@ public sealed class RemoteViewerClientLoopbackTests
                 timeout.Token));
         releaseFirstHost.TrySetResult(true);
         await firstServerTask.WaitAsync(timeout.Token);
+        // The server's disposal does not mean the viewer has observed TCP EOF.
+        // Connecting while it still owns the first live socket intentionally
+        // returns ExistingConnection; wait for that owner's close event first.
+        await firstOwnerDisconnected.Task.WaitAsync(timeout.Token);
 
         using var secondListener =
             new TcpListener(IPAddress.Loopback, 0);
@@ -866,7 +875,7 @@ public sealed class RemoteViewerClientLoopbackTests
                 listener,
                 LoopbackPassword,
                 timeout.Token);
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var events = new List<string>();
         var eventsLock = new object();
         var disconnected = CreateCompletionSource<bool>();
@@ -934,7 +943,7 @@ public sealed class RemoteViewerClientLoopbackTests
             timeout.Token,
             machineName: "stale-owner-host");
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var firstDeviceReceived = CreateCompletionSource<bool>();
         var secondDeviceReceived = CreateCompletionSource<bool>();
         client.DeviceInfoReceived += device =>
@@ -1040,7 +1049,7 @@ public sealed class RemoteViewerClientLoopbackTests
             receivedInputs,
             timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var firstDeviceReceived = CreateCompletionSource<bool>();
         var reconnected = CreateCompletionSource<bool>();
         client.DeviceInfoReceived += device =>
@@ -1133,7 +1142,7 @@ public sealed class RemoteViewerClientLoopbackTests
             timeout.Token,
             machineName: "notification-order-host");
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var connectedCallbackEntered = CreateCompletionSource<bool>();
         var disconnectedCallbackObserved = CreateCompletionSource<bool>();
         using var releaseConnectedCallback = new ManualResetEventSlim(false);
@@ -1209,7 +1218,7 @@ public sealed class RemoteViewerClientLoopbackTests
             allowRejectAcknowledgement.Task,
             timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var deviceReceived = CreateCompletionSource<bool>();
         var firstCompleted = CreateCompletionSource<ReturnedClipboardFileBatchResult>();
         var secondCompleted = CreateCompletionSource<ReturnedClipboardFileBatchResult>();
@@ -1275,7 +1284,7 @@ public sealed class RemoteViewerClientLoopbackTests
         var viewerInfoReceived = CreateCompletionSource<RemoteVideoCodecs>();
         Task serverTask = RunSyntheticHostAsync(listener, LoopbackPassword, viewerInfoReceived, timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var connectedChanged = CreateCompletionSource<bool>();
         var deviceReceived = CreateCompletionSource<RemoteDeviceDescriptor>();
         var targetsReceived = CreateCompletionSource<IReadOnlyList<CaptureTargetInfo>>();
@@ -1336,7 +1345,7 @@ public sealed class RemoteViewerClientLoopbackTests
         var receivedFile = CreateCompletionSource<ReceivedLoopbackFile>();
         Task serverTask = RunFileReceivingSyntheticHostAsync(listener, LoopbackPassword, receivedFile, timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var remoteStatus = CreateCompletionSource<string>();
         client.FileTransferStatusReceived += (success, message) =>
         {
@@ -1401,7 +1410,7 @@ public sealed class RemoteViewerClientLoopbackTests
                 RemoteDeviceCapabilities.RemoteUpdate,
             expectedStartKind: RemoteControlKind.RemoteUpdateStart);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         try
         {
             var deviceInfoReceived = CreateCompletionSource<RemoteDeviceDescriptor>();
@@ -1448,7 +1457,7 @@ public sealed class RemoteViewerClientLoopbackTests
             advertiseChecksum: true,
             expectChecksum: true);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var deviceInfoReceived = CreateCompletionSource<RemoteDeviceDescriptor>();
         client.DeviceInfoReceived += device => deviceInfoReceived.TrySetResult(device);
 
@@ -1494,7 +1503,7 @@ public sealed class RemoteViewerClientLoopbackTests
         var receivedFile = CreateCompletionSource<ReceivedLoopbackFile>();
         Task serverTask = RunFileReceivingSyntheticHostAsync(listener, LoopbackPassword, receivedFile, timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         try
         {
             await client.ConnectAsync(IPAddress.Loopback.ToString(), port, LoopbackPassword, ViewerVideoMode.StableJpeg);
@@ -1561,7 +1570,7 @@ public sealed class RemoteViewerClientLoopbackTests
             hostReceivedStatus,
             timeout.Token);
 
-        using var client = new RemoteViewerClient(() => receiveDirectory);
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true, () => receiveDirectory);
         var localSaveStatus = CreateCompletionSource<string>();
         var receiveProgressStatus = CreateCompletionSource<string>();
         client.FileTransferStatusReceived += (success, message) =>
@@ -1634,7 +1643,7 @@ public sealed class RemoteViewerClientLoopbackTests
             sendReturnCompleteStatus: true,
             advertisedCapabilities: RemoteDeviceCapabilities.FileSend);
 
-        using var client = new RemoteViewerClient(
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true,
             () => receiveDirectory,
             _ => Task.CompletedTask);
         var deviceInfoReceived = CreateCompletionSource<RemoteDeviceDescriptor>();
@@ -1701,7 +1710,7 @@ public sealed class RemoteViewerClientLoopbackTests
             terminalSuccess: false,
             terminalMessage: "远端文件回传失败：1 个成功，1 个失败");
         int clipboardWrites = 0;
-        using var client = new RemoteViewerClient(
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true,
             () => receiveDirectory,
             _ =>
             {
@@ -1762,7 +1771,7 @@ public sealed class RemoteViewerClientLoopbackTests
             timeout.Token);
 
         int clipboardWrites = 0;
-        using var client = new RemoteViewerClient(
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true,
             () => receiveDirectory,
             _ =>
             {
@@ -1839,7 +1848,7 @@ public sealed class RemoteViewerClientLoopbackTests
                 RemoteDeviceCapabilities.FileTransferPreview,
             terminalStatusWithoutWaitingForSave: true);
 
-        using var client = new RemoteViewerClient(
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true,
             () => receiveDirectory,
             _ => Task.CompletedTask);
         var deviceInfoReceived = CreateCompletionSource<bool>();
@@ -1897,7 +1906,7 @@ public sealed class RemoteViewerClientLoopbackTests
             secondRequestCount,
             timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var duplicateStatus = CreateCompletionSource<string>();
         var firstTerminalStatus = CreateCompletionSource<string>();
         var secondTerminalStatus = CreateCompletionSource<string>();
@@ -1986,7 +1995,7 @@ public sealed class RemoteViewerClientLoopbackTests
             timeout.Token,
             previewTransferName: @"..\remote-preview.txt");
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var deviceReceived = CreateCompletionSource<RemoteDeviceDescriptor>();
         var previewReceived = CreateCompletionSource<IReadOnlyList<FileTransferConfirmationItem>>();
         var waitingStatus = CreateCompletionSource<string>();
@@ -2059,7 +2068,7 @@ public sealed class RemoteViewerClientLoopbackTests
             returnedFileBytes: expectedBytes);
 
         int confirmationCallbacks = 0;
-        using var client = new RemoteViewerClient(
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true,
             () => receiveDirectory,
             _ => throw new InvalidOperationException("clipboard busy"));
         client.ConfirmRemoteClipboardFileTransfer = (_items, _note) =>
@@ -2160,7 +2169,7 @@ public sealed class RemoteViewerClientLoopbackTests
             previewKind: previewKind,
             returnedFileLength: returnedFileLength);
 
-        using var client = new RemoteViewerClient(
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true,
             () => receiveDirectory,
             _ => Task.CompletedTask);
         var deviceInfoReceived = CreateCompletionSource<RemoteDeviceDescriptor>();
@@ -2228,7 +2237,7 @@ public sealed class RemoteViewerClientLoopbackTests
             previewSizeBytes: 0,
             previewKind: "文件夹");
 
-        using var client = new RemoteViewerClient(
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true,
             () => receiveDirectory,
             _ => Task.CompletedTask);
         try
@@ -2285,7 +2294,7 @@ public sealed class RemoteViewerClientLoopbackTests
             previewGate: allowPreview.Task,
             requestReceived: requestReceived);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var batchCompleted = CreateCompletionSource<ReturnedClipboardFileBatchResult>();
         client.RemoteClipboardFileBatchCompleted += result => batchCompleted.TrySetResult(result);
         await client.ConnectAsync(
@@ -2353,7 +2362,7 @@ public sealed class RemoteViewerClientLoopbackTests
             allowCancellationAcknowledgement.Task,
             timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var deviceReceived = CreateCompletionSource<bool>();
         var firstCompleted = CreateCompletionSource<ReturnedClipboardFileBatchResult>();
         var secondCompleted = CreateCompletionSource<ReturnedClipboardFileBatchResult>();
@@ -2435,7 +2444,7 @@ public sealed class RemoteViewerClientLoopbackTests
             sendTerminalStatus: false,
             timeout.Token);
 
-        using var client = new RemoteViewerClient(
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true,
             incomingFileReceiveDirectoryProvider: null,
             setFileDropListAsync: null,
             returnedClipboardFileRequestIdleTimeout: TimeSpan.FromMilliseconds(300));
@@ -2479,7 +2488,7 @@ public sealed class RemoteViewerClientLoopbackTests
             sendTerminalStatus: true,
             timeout.Token);
 
-        using var client = new RemoteViewerClient(
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true,
             incomingFileReceiveDirectoryProvider: null,
             setFileDropListAsync: null,
             returnedClipboardFileRequestIdleTimeout: TimeSpan.FromMilliseconds(500));
@@ -2532,7 +2541,7 @@ public sealed class RemoteViewerClientLoopbackTests
 
         int clipboardWrites = 0;
         string[]? retriedFiles = null;
-        using var client = new RemoteViewerClient(
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true,
             () => receiveDirectory,
             paths =>
             {
@@ -2640,7 +2649,7 @@ public sealed class RemoteViewerClientLoopbackTests
             hostReceivedStatus,
             timeout.Token);
 
-        using var client = new RemoteViewerClient(() => receiveDirectory);
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true, () => receiveDirectory);
         var verifiedSaveStatus = CreateCompletionSource<string>();
         var deviceInfoReceived = CreateCompletionSource<bool>();
         client.DeviceInfoReceived += _ => deviceInfoReceived.TrySetResult(true);
@@ -2717,7 +2726,7 @@ public sealed class RemoteViewerClientLoopbackTests
             sendChecksum: false,
             expectSuccessfulSave: false);
 
-        using var client = new RemoteViewerClient(() => receiveDirectory);
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true, () => receiveDirectory);
         var localFailureStatus = CreateCompletionSource<string>();
         var deviceInfoReceived = CreateCompletionSource<bool>();
         client.DeviceInfoReceived += _ => deviceInfoReceived.TrySetResult(true);
@@ -2787,7 +2796,7 @@ public sealed class RemoteViewerClientLoopbackTests
             hostReceivedStatus,
             timeout.Token);
 
-        using var client = new RemoteViewerClient(() => receiveDirectory);
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true, () => receiveDirectory);
         var cancelStatus = CreateCompletionSource<string>();
         client.FileTransferStatusReceived += (success, message) =>
         {
@@ -2846,7 +2855,7 @@ public sealed class RemoteViewerClientLoopbackTests
             releaseHost.Task,
             timeout.Token);
 
-        using var client = new RemoteViewerClient(() => receiveDirectory);
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true, () => receiveDirectory);
         var mismatchReported = CreateCompletionSource<string>();
         var completed = CreateCompletionSource<string>();
         client.FileTransferStatusReceived += (success, message) =>
@@ -2921,7 +2930,7 @@ public sealed class RemoteViewerClientLoopbackTests
             releaseHost.Task,
             timeout.Token);
 
-        using var client = new RemoteViewerClient(() => receiveDirectory);
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true, () => receiveDirectory);
         var invalidControlLogged = CreateCompletionSource<string>();
         var transferCompleted = CreateCompletionSource<string>();
         client.Log += message =>
@@ -3003,7 +3012,7 @@ public sealed class RemoteViewerClientLoopbackTests
             receivedBatch,
             timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         try
         {
             await client.ConnectAsync(IPAddress.Loopback.ToString(), port, LoopbackPassword, ViewerVideoMode.StableJpeg);
@@ -3053,7 +3062,7 @@ public sealed class RemoteViewerClientLoopbackTests
             receivedCommands,
             timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         await client.ConnectAsync(IPAddress.Loopback.ToString(), port, LoopbackPassword, ViewerVideoMode.StableJpeg);
 
         await client.SendInputsAsync(
@@ -3102,7 +3111,7 @@ public sealed class RemoteViewerClientLoopbackTests
             receivedText,
             timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         await client.ConnectAsync(IPAddress.Loopback.ToString(), port, LoopbackPassword, ViewerVideoMode.StableJpeg);
 
         RemoteTextInputResult result = client.SendTextInput(text);
@@ -3133,7 +3142,7 @@ public sealed class RemoteViewerClientLoopbackTests
             receivedText,
             timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         await client.ConnectAsync(
             IPAddress.Loopback.ToString(),
             port,
@@ -3186,7 +3195,7 @@ public sealed class RemoteViewerClientLoopbackTests
                 receivedText,
                 timeout.Token);
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         await client.ConnectAsync(
             IPAddress.Loopback.ToString(),
             port,

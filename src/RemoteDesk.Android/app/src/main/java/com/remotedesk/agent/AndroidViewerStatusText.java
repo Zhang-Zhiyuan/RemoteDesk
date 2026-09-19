@@ -20,6 +20,10 @@ final class AndroidViewerStatusText {
     private AndroidViewerStatusText() {
     }
 
+    static String terminalConnectionDetail(boolean connectedBefore) {
+        return connectedBefore ? "连接已结束 · 请返回重新连接" : "连接未建立 · 请返回选择其他设备";
+    }
+
     static String forDisplay(String message) {
         if (message == null || message.isEmpty()) {
             return message;
@@ -38,6 +42,8 @@ final class AndroidViewerStatusText {
 
     static String connectionFailure(Throwable failure) {
         for (Throwable current = failure; current != null; current = current.getCause()) {
+            if (current instanceof AndroidSelfConnectionGuard.Rejected ||
+                    current instanceof AndroidSelfConnectionGuard.VerificationFailed) return current.getMessage();
             if (current instanceof AndroidRelay.IdentityFailure) {
                 // This type contains only fixed local messages, never server-supplied text or credentials.
                 return current.getMessage();

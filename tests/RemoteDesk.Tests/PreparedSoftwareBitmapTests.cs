@@ -53,7 +53,7 @@ public sealed class PreparedSoftwareBitmapTests
     [Fact]
     public void ChangingPerformanceDigitsDoesNotRelayoutTheViewerFooter()
     {
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var window = new RemoteViewerWindow(client, "footer-layout-test", inputEnabled: false,
             clipboardTextEnabled: false, filePasteEnabled: false, fileDropPasteEnabled: false, remoteFilePullEnabled: false, isAndroidRemote: false);
         window.SetPerformanceStatus("JPEG 3840x2160 | 10.0 FPS | RTT 20ms");
@@ -144,7 +144,7 @@ public sealed class PreparedSoftwareBitmapTests
     [Fact]
     public void StalePreviewCannotReplaceANewerHardwarePresentation()
     {
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var window = new RemoteViewerWindow(client, "software-epoch-test", inputEnabled: false,
             clipboardTextEnabled: false, filePasteEnabled: false, fileDropPasteEnabled: false, remoteFilePullEnabled: false, isAndroidRemote: false);
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
@@ -169,7 +169,7 @@ public sealed class PreparedSoftwareBitmapTests
     [Fact]
     public void DecodedBitmapPassesThroughBoundedBackgroundPreparationBeforeUiDispatch()
     {
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var window = new RemoteViewerWindow(client, "software-pipeline-test", inputEnabled: false,
             clipboardTextEnabled: false, filePasteEnabled: false, fileDropPasteEnabled: false, remoteFilePullEnabled: false, isAndroidRemote: false);
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;

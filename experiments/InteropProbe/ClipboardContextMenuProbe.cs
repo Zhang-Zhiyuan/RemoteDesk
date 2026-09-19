@@ -103,7 +103,7 @@ internal static class ClipboardContextMenuProbe
                 catch (Exception error) when (error is IOException or OperationCanceledException or ObjectDisposedException) { }
             });
             await ClipboardTextService.SetTextAsync("本机连接前旧内容");
-            using var client = new RemoteViewerClient();
+            using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
             await client.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port, "context-fixture", ViewerVideoMode.StableJpeg);
             using var viewer = new RemoteViewerWindow(client, "Context menu " + platform, true, true, false, false, false, false)
                 { ShowInTaskbar = false, ClipboardForegroundForEntityTests = true };

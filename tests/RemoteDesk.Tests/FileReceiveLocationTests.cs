@@ -120,7 +120,7 @@ public sealed class FileReceiveLocationTests
             } catch (Exception ex) when (ex is OperationCanceledException or IOException or SocketException) { }
         }
         Task host = Host();
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         try {
             await client.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port, "fixture", ViewerVideoMode.StableJpeg, timeout.Token);
             Assert.True(await client.WaitForCurrentDeviceInfoAsync(TimeSpan.FromSeconds(5), timeout.Token));

@@ -110,6 +110,33 @@ public sealed class InputInjectionDispatcherTests
         Assert.Same(expected, actual);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void ExpectedFrameDesktopIsRecheckedOnWorkerWithoutReplayingInput(bool capturedSecure, bool actualSecure)
+    {
+        var native = new FakeInputDesktopNativeApi
+        {
+            InputDesktop = FakeInputDesktopNativeApi.UserObject(actualSecure ? "Winlogon" : "Default", isInput: true)
+        };
+        int calls = 0;
+        using var dispatcher = new InputInjectionDispatcher(native, (_, _, _) => calls++, () => { }, _ => { }, _ => { });
+        void Apply() => dispatcher.Apply(RemoteInputCommand.MouseMove(1, 1), new Rectangle(0, 0, 10, 10), new Size(10, 10), capturedSecure);
+        if (capturedSecure == actualSecure)
+        {
+            Apply();
+            Assert.Equal(1, calls);
+        }
+        else
+        {
+            Assert.Throws<SecureDesktopTargetException>(Apply);
+            Assert.Equal(0, calls);
+            Assert.Equal(0, native.SetThreadDesktopCount);
+        }
+    }
+
     [Fact]
     public void CursorFailureRecoversToActiveDefaultInputDesktop()
     {

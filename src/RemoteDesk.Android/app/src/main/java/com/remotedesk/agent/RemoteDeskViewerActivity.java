@@ -57,6 +57,7 @@ public final class RemoteDeskViewerActivity extends Activity {
     static final String EXTRA_HISTORY_ID = "com.remotedesk.agent.extra.HISTORY_ID";
     static final String EXTRA_HISTORY_REDIRECT = "com.remotedesk.agent.extra.HISTORY_REDIRECT";
     private AndroidRelay.Options relayOptions;
+    private String localDeviceId;
     private java.util.function.BiConsumer<String, String> recordHistory;
     private boolean historyRecorded;
 
@@ -138,6 +139,12 @@ public final class RemoteDeskViewerActivity extends Activity {
         super.onCreate(savedInstanceState);
         AndroidDisplay.configureEdgeToEdge(this, false);
         AndroidSessionLog.configure(this);
+        try { localDeviceId = AndroidRelaySettings.localDeviceId(this); }
+        catch (IOException failure) {
+            buildViewerUi("", RemoteDeskProtocol.HOST_PORT);
+            updateTerminalStatus("无法读取本机设备标识，请返回首页重试。", false);
+            return;
+        }
 
         String requestedHost = trimExtra(EXTRA_HOST);
         int requestedPort = getIntent().getIntExtra(EXTRA_PORT, RemoteDeskProtocol.HOST_PORT);
@@ -147,6 +154,9 @@ public final class RemoteDeskViewerActivity extends Activity {
             try {
                 AndroidConnectionHistory.Node node = AndroidConnectionHistoryStore.load(this).find(historyId);
                 if (node == null) throw new IOException("History removed");
+                if (AndroidSelfConnectionGuard.knownSelf(node,
+                        getIntent().getBooleanExtra(EXTRA_HISTORY_REDIRECT, false), localDeviceId))
+                    throw new AndroidSelfConnectionGuard.Rejected();
                 requestedHost = node.host; requestedPort = node.port; requestedPassword = node.password;
                 if (!node.relay() && getIntent().getBooleanExtra(EXTRA_HISTORY_REDIRECT, false)) {
                     requestedHost = AndroidConnectionHistory.normalizeHost(trimExtra(EXTRA_HOST));
@@ -160,13 +170,17 @@ public final class RemoteDeskViewerActivity extends Activity {
                     if (relayOptions.deviceId.equals(AndroidRelaySettings.localDeviceId(this)))
                         throw new IOException("Cannot connect to local device");
                 }
+            } catch (AndroidSelfConnectionGuard.Rejected ex) {
+                buildViewerUi("", RemoteDeskProtocol.HOST_PORT);
+                updateTerminalStatus(ex.getMessage(), false);
+                return;
             } catch (AndroidRelayUiPolicy.LoginRequired ex) {
                 buildViewerUi("", RemoteDeskProtocol.HOST_PORT);
-                updateStatus(ex.getMessage());
+                updateTerminalStatus(ex.getMessage(), false);
                 return;
             } catch (Exception ex) {
                 buildViewerUi("", RemoteDeskProtocol.HOST_PORT);
-                updateStatus("这条历史连接已删除或无法读取，请返回首页重新连接。");
+                updateTerminalStatus("这条历史连接已删除或无法读取，请返回首页重新连接。", false);
                 return;
             }
         }
@@ -182,17 +196,17 @@ public final class RemoteDeskViewerActivity extends Activity {
                 if (saved == null) throw new IllegalStateException();
                 relayOptions = saved.target(relayTarget);
                 if (saved.deviceId.equals(relayOptions.deviceId)) {
-                    updateStatus("不能通过中转连接本机。");
+                    updateTerminalStatus("不能通过中转连接本机。", false);
                     return;
                 }
             } catch (Exception ex) {
-                updateStatus("中转配置无效，请返回首页重新保存。");
+                updateTerminalStatus("中转配置无效，请返回首页重新保存。", false);
                 return;
             }
         }
 
         if (host.isEmpty() || password.isEmpty() || port <= 0 || port > 65535) {
-            updateStatus("远端地址或口令无效");
+            updateTerminalStatus("远端地址或口令无效", false);
             return;
         }
 
@@ -1058,17 +1072,18 @@ public final class RemoteDeskViewerActivity extends Activity {
             if (failure != null) {
                 AndroidSessionLog.error("Android viewer connection ended.", failure);
                 if (failure instanceof AndroidSessionRejectedException) {
-                    updateStatus(
+                    updateTerminalStatus(
                         "连接已结束：" +
-                            AndroidViewerStatusText.connectionFailure(failure));
+                            AndroidViewerStatusText.connectionFailure(failure), intentQualifiedOnce || owner != null);
                     return;
                 }
                 if (!AndroidViewerReconnectPolicy.isRetryable(failure) || !shouldReconnect) {
-                    updateStatus("连接失败：" + AndroidViewerStatusText.connectionFailure(failure));
+                    updateTerminalStatus("连接失败：" + AndroidViewerStatusText.connectionFailure(failure),
+                        intentQualifiedOnce || owner != null);
                     return;
                 }
             } else if (!shouldReconnect) {
-                updateStatus("连接在远端信息确认前结束");
+                updateTerminalStatus("连接在远端信息确认前结束", owner != null);
                 return;
             }
         }
@@ -1091,7 +1106,13 @@ public final class RemoteDeskViewerActivity extends Activity {
             if (!running.get()) throw new IOException("连接已取消。");
             configureViewerSocket(connectedSocket);
             connectedSocket.setSoTimeout(AUTHENTICATION_TIMEOUT_MILLIS);
-            if (relayOptions == null) connectedSocket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MILLIS);
+            if (relayOptions == null) {
+                InetSocketAddress endpoint = new InetSocketAddress(host, port);
+                AndroidSelfConnectionGuard.requireResolvedRemote(endpoint.getAddress(), BuildConfig.ALLOW_LOOPBACK_FIXTURES);
+                connectedSocket.connect(endpoint, CONNECT_TIMEOUT_MILLIS);
+                // Check the actual DNS-selected peer before writing authentication bytes.
+                AndroidSelfConnectionGuard.requireRemote(connectedSocket, BuildConfig.ALLOW_LOOPBACK_FIXTURES);
+            }
             else AndroidRelay.exchange(connectedSocket,
                 AndroidRelay.request(relayOptions, "viewer").put("deviceId", relayOptions.deviceId));
             if (!running.get()) throw new IOException("连接已取消。");
@@ -1325,6 +1346,8 @@ public final class RemoteDeskViewerActivity extends Activity {
             } else if (control.kind == RemoteDeskProtocol.CONTROL_CLIPBOARD_TEXT) {
                 owner.clipboard.receive(true, true, control.text, SystemClock.elapsedRealtime());
             } else if (control.kind == RemoteDeskProtocol.CONTROL_DEVICE_IDENTITY && owner.identityRequested) {
+                // Also catches an external/NAT address that leads back to this device.
+                AndroidSelfConnectionGuard.requireOtherDevice(control.text, localDeviceId);
                 if (!historyRecorded && recordHistory != null) {
                     historyRecorded = true;
                     recordHistory.accept(owner.remoteMachineName, control.text);
@@ -2323,6 +2346,18 @@ public final class RemoteDeskViewerActivity extends Activity {
     private void updateStatus(String text) {
         runOnUiThread(() -> {
             statusView.setText(text);
+            AndroidUiTheme.styleViewerStatusIndicator(this, connectionIndicator, text);
+            toolbar.post(this::updateViewerToolbarLayout);
+        });
+    }
+
+    private void updateTerminalStatus(String text, boolean connectedBefore) {
+        // Only terminal return paths use this. Normal reconnection and active
+        // owner telemetry retain their existing status/health update paths.
+        runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed() || connectionOwner != null) return;
+            statusView.setText(text);
+            healthView.setText(AndroidViewerStatusText.terminalConnectionDetail(connectedBefore));
             AndroidUiTheme.styleViewerStatusIndicator(this, connectionIndicator, text);
             toolbar.post(this::updateViewerToolbarLayout);
         });

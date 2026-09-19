@@ -3,6 +3,8 @@ plugins { id "com.android.application" version "8.10.1" }
 android {
     namespace "com.remotedesk.agent"
     compileSdk 36
+    buildFeatures { buildConfig true }
+    defaultConfig { buildConfigField "boolean", "ALLOW_LOOPBACK_FIXTURES", "false" }
     defaultConfig {
         applicationId "com.remotedesk.codecprobe"
         minSdk 26

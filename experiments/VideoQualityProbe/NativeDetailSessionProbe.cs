@@ -126,7 +126,7 @@ internal static class NativeDetailSessionProbe
             }
         }
         Task host = Task.Run(Host);
-        using var client = new RemoteViewerClient { EnableNativeDetailReception = true };
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true) { EnableNativeDetailReception = true };
         var logs = new System.Collections.Concurrent.ConcurrentQueue<string>();
         client.Log += logs.Enqueue;
         client.FrameReceived += frame => { if (frame.NativeDetails is not null) Interlocked.Increment(ref nativeReceived); };

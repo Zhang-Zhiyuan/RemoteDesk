@@ -11,12 +11,39 @@ internal sealed record SecureDesktopRequest(string Operation, RemoteInputCommand
     int Quality = 90, int Scale = 100, string? CaptureTargetId = null);
 internal sealed record SecureDesktopReply(string Status, int Left = 0, int Top = 0, int Width = 0, int Height = 0,
     int FrameWidth = 0, int FrameHeight = 0, double CaptureMilliseconds = 0, double EncodeMilliseconds = 0,
-    int JpegLength = 0, string? Error = null, int CursorX = 0, int CursorY = 0, bool ShiftDown = false);
+    int JpegLength = 0, string? Error = null, int CursorX = 0, int CursorY = 0, bool ShiftDown = false,
+    string? ErrorCode = null, bool CaptureTargetFallback = false);
+
+internal sealed class SecureDesktopTargetException(bool topologyChanged) : InvalidOperationException(topologyChanged
+    ? "登录桌面的屏幕布局已变化，已拒绝旧坐标输入；请等待新画面后再操作。"
+    : "登录桌面没有所选屏幕，且无法唯一确定替代屏幕；请切换屏幕，或等待原屏幕恢复。")
+{
+    internal bool TopologyChanged { get; } = topologyChanged;
+}
 
 internal static class WindowsSecureDesktopProtocol
 {
     internal const int MaxMessageBytes = 4096;
     internal const int MaxJpegBytes = 24 * 1024 * 1024;
+
+    // Optional fixed codes extend v1 JSON compatibly. Old clients still see
+    // status=error; old helpers without a code retain the generic failure.
+    internal static SecureDesktopReply FailureReply(Exception error) => new("error",
+        Error: "登录界面暂不可用，请稍后重试。",
+        ErrorCode: error switch
+        {
+            ScreenCaptureTargetUnavailableException => "target-unavailable",
+            SecureDesktopTargetException { TopologyChanged: false } => "target-unavailable",
+            SecureDesktopTargetException { TopologyChanged: true } => "topology-changed",
+            _ => "request-failed"
+        });
+
+    internal static Exception HelperFailure(SecureDesktopReply reply) => reply.ErrorCode switch
+    {
+        "target-unavailable" => new SecureDesktopTargetException(false),
+        "topology-changed" => new SecureDesktopTargetException(true),
+        _ => new InvalidOperationException("Desktop helper rejected the request.")
+    };
     internal static string PipeName(string sid, uint session) =>
         "RemoteDesk-SecureDesktop-v1-" + WindowsSecureDesktopInstallation.ValidateSid(sid) + "-" + session;
 

@@ -9,6 +9,14 @@ That file is consumed and deleted on launch; the secret remains only in this
 probe's keystore-backed viewer preferences until uninstall. Do not connect this
 automated probe to an ordinary user's active desktop.
 
+Only this separately compiled viewer probe enables the compile-time
+`ALLOW_LOOPBACK_FIXTURES` flag for owned ADB-reverse fixtures. Production APKs,
+including normal debug builds, set it to `false`: they reject loopback and every
+local interface address before authentication. There is no intent, preference,
+or runtime user switch. The probe exception only permits actual loopback sockets;
+local-interface and authenticated device-identity checks remain active. Explicit
+LAN discovery/port probes still reject self targets in this test APK.
+
 The probe never reads production preferences or declares accessibility/capture
 services. Its exported gesture/IME test receiver is **not** part of the
 production manifest/APK. Physical mode does send real OS input to the explicitly
@@ -108,6 +116,14 @@ nodes, remark/delete UI, process restart, failed connection and per-node passwor
 selection. It is restricted to an owned emulator with a fresh history, two reverse
 ports (7411/7412) to the synthetic peer, and an unused port 7419. It never clears
 the app's data or accesses a user's remote machine.
+
+The history verifier scrolls only the production devices page when an item is
+below its fixed navigation bar. Its two-port case uses a peer without a device
+GUID; it does not assert that one stable GUID must produce duplicate records.
+When automatic port discovery offers both synthetic ports, the verifier chooses
+the original saved endpoint explicitly. `--resume-reconnect` continues an
+inspected run that already contains both synthetic nodes and `History-Node-A`,
+without clearing data; retain the earlier report and label the resumed subset.
 
 After inspection, uninstall only this probe, remove only its owned reverse entry
 and `/data/local/tmp/remotedesk-test-ui.xml`, and stop only the peer process started

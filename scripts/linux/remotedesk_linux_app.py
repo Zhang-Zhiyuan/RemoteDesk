@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import ctypes
 import functools
 import hashlib
 import io
@@ -35,6 +36,23 @@ from uuid import uuid4
 import remotedesk_linux_relay as relay
 import remotedesk_linux_relay_login as relay_login
 
+# Initialize Xlib threading before this module imports Tk. Each metadata query
+# below owns/closes its own Display; neither a clipboard-content read nor a
+# worker-owned connection is ever shared with the UI thread.
+try:
+    _clipboard_x11 = ctypes.CDLL("libX11.so.6") if sys.platform.startswith("linux") else None
+    if _clipboard_x11 is not None:
+        _clipboard_x11.XInitThreads()
+        _clipboard_x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        _clipboard_x11.XOpenDisplay.restype = ctypes.c_void_p
+        _clipboard_x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+        _clipboard_x11.XInternAtom.restype = ctypes.c_ulong
+        _clipboard_x11.XGetSelectionOwner.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        _clipboard_x11.XGetSelectionOwner.restype = ctypes.c_ulong
+        _clipboard_x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+except (OSError, AttributeError):
+    _clipboard_x11 = None
+
 if __name__ == "__main__" and sys.platform.startswith("linux"):
     # Run before importing Tk/Pillow/cryptography so missing imports are repairable.
     from remotedesk_linux_dependencies import prepare_runtime
@@ -50,9 +68,12 @@ except Exception as ex:  # pragma: no cover - exercised on target desktops.
     print(f"RemoteDesk Linux GUI requires tkinter: {ex}", file=sys.stderr)
     raise SystemExit(2)
 
+import remotedesk_linux_devices as device_model
+
 from remotedesk_protocol_probe import (
     CAPABILITY_CLIPBOARD_TEXT,
     CAPABILITY_CLIPBOARD_PASTE_SHORTCUT,
+    CAPABILITY_CLIPBOARD_SNAPSHOT_V1,
     CAPABILITY_FILE_CHECKSUM,
     CAPABILITY_FILE_RECEIVE,
     CAPABILITY_FILE_TRANSFER_RECEIPT,
@@ -69,6 +90,7 @@ from remotedesk_protocol_probe import (
     CONTROL_CLIPBOARD_STATUS,
     CONTROL_CLIPBOARD_GET_TEXT,
     CONTROL_CLIPBOARD_TEXT,
+    CONTROL_CLIPBOARD_SNAPSHOT,
     CONTROL_DEVICE_INFO,
     CONTROL_DEVICE_IDENTITY_REQUEST,
     CONTROL_DEVICE_IDENTITY,
@@ -93,6 +115,7 @@ from remotedesk_protocol_probe import (
     create_safe_directory_archive,
     decode_control,
     encode_clipboard_set_text,
+    encode_clipboard_snapshot_request,
     encode_file_transfer_cancel,
     encode_file_transfer_checksum,
     encode_file_transfer_chunk,
@@ -1078,6 +1101,8 @@ def linux_viewer_capabilities(has_native_h264_presenter: bool) -> int:
         | CAPABILITY_FILE_TRANSFER_CANCEL
         | CAPABILITY_SHORT_GOP_H264
         | CAPABILITY_HIGH_QUALITY_JPEG
+        | CAPABILITY_CLIPBOARD_TEXT
+        | CAPABILITY_CLIPBOARD_SNAPSHOT_V1
     )
     if has_native_h264_presenter:
         capabilities |= CAPABILITY_HIGH_FRAME_RATE_H264
@@ -1092,6 +1117,7 @@ CRITICAL_UI_EVENTS = frozenset(
         "host_stop_completed",
         "viewer_error",
         "viewer_auth_failed",
+        "viewer_self_rejected",
         "viewer_session_replaced",
         "viewer_reconnect_qualified",
         "viewer_closed",
@@ -1112,6 +1138,7 @@ COALESCED_VIEWER_EVENTS = frozenset(
         "viewer_status",
         "viewer_error",
         "viewer_auth_failed",
+        "viewer_self_rejected",
         "viewer_session_replaced",
         "viewer_reconnect_qualified",
         "viewer_capture_metadata",
@@ -3199,6 +3226,175 @@ class ViewerClipboardRequest:
     completed: threading.Event = field(default_factory=threading.Event)
     success: bool = False
     text: str = ""
+    automatic: bool = False
+
+
+@dataclass(frozen=True)
+class LocalClipboardSnapshot:
+    text: str
+    revision: str
+    ownership: str = ""
+    owner: int | None = None
+    can_replace: bool = True
+
+    @classmethod
+    def from_text(cls, text: str, ownership: str = "", owner: int | None = None,
+                  can_replace: bool = True) -> "LocalClipboardSnapshot":
+        return cls(text, hashlib.sha256(text.encode("utf-8")).hexdigest(), ownership, owner, can_replace)
+
+    def same_as(self, other: "LocalClipboardSnapshot") -> bool:
+        return self.revision == other.revision and self.can_replace == other.can_replace and (
+            not self.ownership or not other.ownership or self.ownership == other.ownership) and (
+            self.owner is None or other.owner is None or self.owner == other.owner)
+
+
+def clipboard_x11_owner() -> int | None:
+    """Only X-server metadata; never asks a clipboard owner for its contents."""
+    if _clipboard_x11 is None or os.environ.get("WAYLAND_DISPLAY") or not os.environ.get("DISPLAY"):
+        return None
+    display = _clipboard_x11.XOpenDisplay(os.environ["DISPLAY"].encode())
+    if not display:
+        return None
+    try:
+        atom = _clipboard_x11.XInternAtom(display, b"CLIPBOARD", 0)
+        return int(_clipboard_x11.XGetSelectionOwner(display, atom))
+    finally:
+        _clipboard_x11.XCloseDisplay(display)
+
+
+class X11ClipboardChanges:
+    """Session-owned XFixes metadata connection, not Tk's Display.
+
+    The short lock covers only X-server metadata. Clipboard-content helpers
+    never hold it. XFixes catches same-owner re-copies even when the owner lies
+    about TIMESTAMP (Tk commonly reports CurrentTime/zero).
+    """
+
+    class SelectionEvent(ctypes.Structure):
+        _fields_ = [("type", ctypes.c_int), ("serial", ctypes.c_ulong),
+                    ("send_event", ctypes.c_int), ("display", ctypes.c_void_p),
+                    ("window", ctypes.c_ulong), ("subtype", ctypes.c_int),
+                    ("owner", ctypes.c_ulong), ("selection", ctypes.c_ulong),
+                    ("timestamp", ctypes.c_ulong), ("selection_timestamp", ctypes.c_ulong)]
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.display = None
+        self.window = 0
+        self.counter = self.timestamp = 0
+        if _clipboard_x11 is None or os.environ.get("WAYLAND_DISPLAY") or not os.environ.get("DISPLAY"):
+            return
+        try:
+            x11 = _clipboard_x11
+            self.fixes = ctypes.CDLL("libXfixes.so.3")
+            for name, arguments, result in (
+                ("XDefaultRootWindow", [ctypes.c_void_p], ctypes.c_ulong),
+                ("XCreateSimpleWindow", [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
+                    ctypes.c_uint, ctypes.c_uint, ctypes.c_uint, ctypes.c_ulong, ctypes.c_ulong], ctypes.c_ulong),
+                ("XDestroyWindow", [ctypes.c_void_p, ctypes.c_ulong], ctypes.c_int),
+                ("XSync", [ctypes.c_void_p, ctypes.c_int], ctypes.c_int),
+                ("XPending", [ctypes.c_void_p], ctypes.c_int),
+                ("XNextEvent", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int),
+            ):
+                function = getattr(x11, name)
+                function.argtypes, function.restype = arguments, result
+            self.fixes.XFixesQueryExtension.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+            self.fixes.XFixesQueryExtension.restype = ctypes.c_int
+            self.fixes.XFixesQueryVersion.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+            self.fixes.XFixesQueryVersion.restype = ctypes.c_int
+            self.fixes.XFixesSelectSelectionInput.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+            self.fixes.XFixesSelectSelectionInput.restype = None
+            self.display = x11.XOpenDisplay(os.environ["DISPLAY"].encode())
+            if not self.display:
+                return
+            event_base, error_base = ctypes.c_int(), ctypes.c_int()
+            major, minor = ctypes.c_int(1), ctypes.c_int(0)
+            if (not self.fixes.XFixesQueryExtension(self.display, ctypes.byref(event_base), ctypes.byref(error_base))
+                    or not self.fixes.XFixesQueryVersion(self.display, ctypes.byref(major), ctypes.byref(minor))
+                    or major.value < 1):
+                self.close()
+                return
+            self.event_type = event_base.value  # XFixesSelectionNotify is offset 0.
+            self.selection = x11.XInternAtom(self.display, b"CLIPBOARD", 0)
+            self.window = x11.XCreateSimpleWindow(self.display, x11.XDefaultRootWindow(self.display), 0, 0, 1, 1, 0, 0, 0)
+            self.fixes.XFixesSelectSelectionInput(self.display, self.window, self.selection, 1 | 2 | 4)
+            x11.XSync(self.display, 0)
+        except (OSError, AttributeError):
+            self.close()
+
+    def snapshot(self) -> tuple[int, str] | None:
+        with self.lock:
+            if not self.display:
+                return None
+            x11 = _clipboard_x11
+            x11.XSync(self.display, 0)
+            owner = int(x11.XGetSelectionOwner(self.display, self.selection))
+            event = (ctypes.c_long * 24)()  # XEvent's ABI union size, LP64/ILP32.
+            for _ in range(256):
+                if x11.XPending(self.display) == 0:
+                    return owner, f"xfixes:{self.counter}:{self.timestamp}"
+                x11.XNextEvent(self.display, ctypes.byref(event))
+                change = self.SelectionEvent.from_buffer(event)
+                if change.type == self.event_type and change.selection == self.selection:
+                    self.counter += 1
+                    self.timestamp = int(change.selection_timestamp)
+                    owner = int(change.owner)
+            return None  # Clipboard event storm: skip rather than use stale metadata.
+
+    def close(self) -> None:
+        with self.lock:
+            if self.display:
+                if self.window:
+                    _clipboard_x11.XDestroyWindow(self.display, self.window)
+                _clipboard_x11.XCloseDisplay(self.display)
+                self.display, self.window = None, 0
+
+
+class ClipboardSyncState:
+    """Single-worker state: observe before choosing a direction; never erase.
+
+    Failed writes do not advance baselines, so a later poll can retry only if
+    the other side has not changed in the meantime. No clipboard text is logged.
+    """
+
+    def __init__(self) -> None:
+        self.local: LocalClipboardSnapshot | None = None
+        self.remote_revision: str | None = None
+
+    def observe(self, local: LocalClipboardSnapshot, remote: dict[str, Any]) -> str:
+        revision = str(remote["revision"])
+        if self.local is None or self.remote_revision is None:
+            self.local, self.remote_revision = local, revision
+            return "baseline"
+        local_changed = not local.same_as(self.local)
+        remote_changed = revision != self.remote_revision
+        if local.revision == revision:
+            self.local, self.remote_revision = local, revision
+            return "equal"
+        if local_changed and remote_changed:
+            self.local, self.remote_revision = local, revision
+            return "conflict"
+        if local_changed and local.text:
+            return "push"
+        if remote_changed and local.can_replace and remote.get("hasText") and remote.get("text"):
+            return "pull"
+        self.local, self.remote_revision = local, revision
+        return "unchanged"
+
+    def committed(self, local: LocalClipboardSnapshot, remote_revision: str) -> None:
+        self.local, self.remote_revision = local, remote_revision
+
+
+@dataclass
+class ViewerAutoClipboardApply:
+    text: str
+    baseline: LocalClipboardSnapshot
+    epoch: int
+    deadline: float
+    completed: threading.Event = field(default_factory=threading.Event)
+    ready: threading.Event = field(default_factory=threading.Event)
+    verified: bool = False
+    applied: bool = False
 
 
 @dataclass
@@ -3218,6 +3414,10 @@ class ViewerConnection:
         events: "queue.Queue[tuple[str, Any]]",
         generation: int,
         relay_options: relay.RelayOptions | None = None,
+        *,
+        local_device_id: str = "",
+        expected_device_id: str = "",
+        allow_self_connection_for_testing: bool = False,
     ) -> None:
         self.host = host
         self.port = port
@@ -3225,6 +3425,10 @@ class ViewerConnection:
         self.events = events
         self.generation = generation
         self.relay_options = relay_options
+        self.local_device_id = device_model.identity(local_device_id)
+        self.expected_device_id = device_model.identity(expected_device_id)
+        # Only synthetic fixtures may opt out. Product construction never does.
+        self.allow_self_connection_for_testing = allow_self_connection_for_testing
         self.stop_event = threading.Event()
         self.write_lock = threading.Lock()
         self.file_transfer_lock = threading.Lock()
@@ -3236,6 +3440,15 @@ class ViewerConnection:
         self.clipboard_lock = threading.Lock()
         self.clipboard_pending: ViewerClipboardRequest | None = None
         self.clipboard_latest: ViewerClipboardRequest | None = None
+        self.clipboard_manual_epoch = 0
+        self.clipboard_manual_waiting = False
+        self.clipboard_snapshot_pending: tuple[str, threading.Event, dict[str, Any]] | None = None
+        self.clipboard_auto_apply: ViewerAutoClipboardApply | None = None
+        self.clipboard_auto_stop = threading.Event()
+        self.clipboard_changes: X11ClipboardChanges | None = None
+        self.clipboard_changes_lock = threading.Lock()
+        self.clipboard_auto_thread = threading.Thread(
+            target=self._auto_clipboard_loop, name="RemoteDeskClipboardSync", daemon=True)
         self.sock: socket.socket | None = None
         self.session: Any | None = None
         self.thread = threading.Thread(target=self._run, name="RemoteDeskViewer", daemon=True)
@@ -3321,6 +3534,7 @@ class ViewerConnection:
         self.capture_target_thread.start()
         self.heartbeat_thread.start()
         self.liveness_thread.start()
+        self.clipboard_auto_thread.start()
         self.thread.start()
 
     def set_display_size(self, width: int, height: int) -> None:
@@ -3380,11 +3594,227 @@ class ViewerConnection:
             self.heartbeat_thread.join(timeout=1.0)
         if self.liveness_thread.is_alive() and current_thread is not self.liveness_thread:
             self.liveness_thread.join(timeout=1.0)
+        if self.clipboard_auto_thread.is_alive() and current_thread is not self.clipboard_auto_thread:
+            self.clipboard_auto_thread.join(timeout=1.0)
 
     def request_close(self) -> None:
         """Promptly interrupt socket I/O; heavier teardown may run elsewhere."""
 
         self._interrupt_transport()
+
+    def stop_auto_clipboard(self) -> None:
+        # Called synchronously when the UI drops its generation, before the
+        # asynchronous socket/input teardown can finish.
+        self.clipboard_auto_stop.set()
+        with self.clipboard_changes_lock:
+            if self.clipboard_changes is not None:
+                self.clipboard_changes.close()
+
+    def _auto_clipboard_active(self) -> bool:
+        return not self.stop_event.is_set() and not self.clipboard_auto_stop.is_set()
+
+    def _read_auto_local_clipboard(self) -> LocalClipboardSnapshot | None:
+        # This helper is called only by a background worker, never by Tk.
+        # Host's snapshot reader enforces time, UTF-16 and UTF-8 output limits.
+        from remotedesk_linux_host import _read_clipboard_command_bounded
+        if os.environ.get("WAYLAND_DISPLAY"):
+            if not shutil.which("wl-paste"):
+                return None
+            deadline = time.monotonic() + 2
+            formats = _read_clipboard_command_bounded(
+                ["wl-paste", "--list-types"], deadline, self._auto_clipboard_active, 16384)
+            if formats is None:
+                return None
+            formats = formats.decode("utf-8", errors="strict").casefold().splitlines()
+            if any(value in formats for value in ("text/uri-list", "x-special/gnome-copied-files")):
+                return LocalClipboardSnapshot.from_text("", can_replace=False)
+            target = next((value for value in ("text/plain;charset=utf-8", "text/plain") if value in formats), None)
+            if target is None:
+                return LocalClipboardSnapshot.from_text("", can_replace=False)
+            raw = _read_clipboard_command_bounded(
+                ["wl-paste", "--no-newline", "--type", target], deadline,
+                self._auto_clipboard_active, 1024 * 1024)
+            if raw is None:
+                return None
+            text = raw.decode("utf-8", errors="strict")
+            if len(text.encode("utf-16-le")) // 2 > 256000:
+                raise ProtocolError("Clipboard snapshot text exceeds the character limit.")
+            # Wayland exposes no portable owner/timestamp fence. Sending a
+            # detected local change is safe; receiving remains explicit.
+            return LocalClipboardSnapshot.from_text(text, can_replace=False)
+        if not shutil.which("xclip"):
+            # xsel cannot reliably distinguish a file/image selection from an
+            # empty string. Keep manual support rather than overwrite it.
+            return None
+        changes = self.clipboard_changes
+        metadata = changes.snapshot() if changes is not None else None
+        if changes is not None and changes.display and metadata is None:
+            return None
+        owner = metadata[0] if metadata is not None else clipboard_x11_owner()
+        if owner == 0:
+            return LocalClipboardSnapshot.from_text("", owner=owner)
+        deadline = time.monotonic() + 2.0
+        def read(target: str, limit: int) -> bytes | None:
+            return _read_clipboard_command_bounded(
+                ["xclip", "-selection", "clipboard", "-out", "-target", target],
+                deadline, self._auto_clipboard_active, limit)
+        targets = read("TARGETS", 16384)
+        if targets is None:
+            return None
+        formats = targets.decode("utf-8", errors="strict").casefold().splitlines()
+        timestamp = read("TIMESTAMP", 256) if metadata is None and "timestamp" in formats else None
+        if metadata is None and "timestamp" in formats and timestamp is None:
+            return None
+        ownership = metadata[1] if metadata is not None else ((timestamp or b"").hex() if (timestamp or b"").strip() != b"0" else "")
+        if any(value in formats for value in ("text/uri-list", "x-special/gnome-copied-files")):
+            return LocalClipboardSnapshot.from_text("", ownership, owner, can_replace=False)
+        target = next((value for value in ("UTF8_STRING", "text/plain;charset=utf-8", "text/plain")
+                       if value.casefold() in formats), None)
+        if target is None:
+            return LocalClipboardSnapshot.from_text("", ownership, owner, can_replace=False)
+        raw = read(target, 1024 * 1024)
+        current_metadata = changes.snapshot() if changes is not None else None
+        if (raw is None or (metadata is not None and current_metadata != metadata)
+                or (metadata is None and clipboard_x11_owner() != owner)):
+            return None
+        text = raw.decode("utf-8", errors="strict")
+        if len(text.encode("utf-16-le")) // 2 > 256000:
+            raise ProtocolError("Clipboard snapshot text exceeds the character limit.")
+        return LocalClipboardSnapshot.from_text(text, ownership, owner, can_replace=metadata is not None)
+
+    def _request_clipboard_snapshot(self, known_revision: str) -> dict[str, Any] | None:
+        if not self._auto_clipboard_active() or not self.remote_capabilities & CAPABILITY_CLIPBOARD_SNAPSHOT_V1:
+            return None
+        request_id, completed, result = uuid4().hex, threading.Event(), {}
+        pending = (request_id, completed, result)
+        with self.clipboard_lock:
+            if self.clipboard_snapshot_pending is not None:
+                return None
+            self.clipboard_snapshot_pending = pending
+        try:
+            self._send_control(encode_clipboard_snapshot_request(request_id, known_revision))
+            deadline = time.monotonic() + 4.0
+            while self._auto_clipboard_active() and time.monotonic() < deadline:
+                if completed.wait(.05):
+                    return result if result.get("success") else None
+            return None
+        finally:
+            with self.clipboard_lock:
+                if self.clipboard_snapshot_pending is pending:
+                    self.clipboard_snapshot_pending = None
+
+    def _push_auto_clipboard(self, local: LocalClipboardSnapshot, epoch: int) -> bool:
+        payload = encode_clipboard_set_text(local.text)
+        with self.clipboard_lock:
+            if (not self._auto_clipboard_active() or self.clipboard_manual_epoch != epoch
+                    or self.clipboard_pending is not None or self.clipboard_manual_waiting):
+                return False
+            request = ViewerClipboardRequest(False, local.text, deadline=time.monotonic() + 4,
+                                             automatic=True)
+            self.clipboard_pending = self.clipboard_latest = request
+        self._exchange_clipboard(request, payload, False, False, False)
+        if self._auto_clipboard_active() and not request.completed.is_set():
+            with self.clipboard_lock:
+                ambiguous = self.clipboard_pending is request
+            if ambiguous:
+                self._put_event("viewer_status", "自动文字同步等待远端确认超时，已暂停自动写入以防回执错配；请重新连接后重试。")
+        return (self._auto_clipboard_active() and request.completed.is_set() and request.success
+                and time.monotonic() < request.deadline)
+
+    def _auto_clipboard_loop(self) -> None:
+        with self.clipboard_changes_lock:
+            if not self._auto_clipboard_active():
+                return
+            changes = X11ClipboardChanges()
+            self.clipboard_changes = changes
+        try:
+            self._run_auto_clipboard_loop()
+        finally:
+            changes.close()
+
+    def _run_auto_clipboard_loop(self) -> None:
+        state = ClipboardSyncState()
+        epoch = -1
+        failures = 0
+        warned_legacy = False
+        while not self.clipboard_auto_stop.wait(min(5.0, .75 * (2 ** min(failures, 3)))):
+            if not self._auto_clipboard_active():
+                return
+            if self.sock is None or self.session is None or not self.remote_capabilities & CAPABILITY_CLIPBOARD_TEXT:
+                continue
+            if not self.remote_capabilities & CAPABILITY_CLIPBOARD_SNAPSHOT_V1:
+                if not warned_legacy:
+                    self._put_event("viewer_status", "远端不支持自动文字同步；请使用剪贴板按钮或快捷键，更新远端后可自动同步。")
+                    warned_legacy = True
+                continue
+            if self.file_transfer_lock.locked():
+                continue
+            with self.clipboard_lock:
+                if self.clipboard_pending is not None or self.clipboard_manual_waiting:
+                    continue
+                current_epoch = self.clipboard_manual_epoch
+            if epoch != current_epoch:
+                state, epoch = ClipboardSyncState(), current_epoch
+            try:
+                local = self._read_auto_local_clipboard()
+                if local is None:
+                    failures += 1
+                    continue
+                remote = self._request_clipboard_snapshot(state.remote_revision or "")
+                if remote is None:
+                    failures += 1
+                    continue
+                fresh = self._read_auto_local_clipboard()
+                if fresh is None or not self._auto_clipboard_active() or self.clipboard_manual_epoch != epoch:
+                    continue
+                # A new copy while waiting for the remote snapshot wins. The
+                # next cycle compares it against the previous settled baseline.
+                if not fresh.same_as(local):
+                    continue
+                action = state.observe(fresh, remote)
+                if action == "baseline" and fresh.text and not fresh.can_replace:
+                    self._put_event("viewer_status", "本机无法可靠监测剪贴板归属：仅自动发送文字；取回远端文字请用剪贴板按钮，避免覆盖刚复制的内容。")
+                elif action == "conflict":
+                    self._put_event("viewer_status", "两端都复制了新内容，已分别保留；请再次复制或用剪贴板按钮选择同步方向。")
+                elif action == "push":
+                    if not self._push_auto_clipboard(fresh, epoch):
+                        failures += 1
+                        continue
+                    state.committed(fresh, fresh.revision)
+                elif action == "pull":
+                    apply = ViewerAutoClipboardApply(remote["text"], fresh, epoch, time.monotonic() + 3)
+                    self.clipboard_auto_apply = apply
+                    self._put_event("viewer_auto_clipboard", apply)
+                    # First let Tk reach the queued operation, then re-read in
+                    # the worker. A user copy made while the UI was busy must
+                    # invalidate this operation, not get overwritten later.
+                    while self._auto_clipboard_active() and time.monotonic() < apply.deadline:
+                        if apply.ready.wait(.05):
+                            break
+                    checked = self._read_auto_local_clipboard() if apply.ready.is_set() else None
+                    if (checked is None or not checked.same_as(fresh)
+                            or self.clipboard_manual_epoch != epoch or not self._auto_clipboard_active()):
+                        self.clipboard_auto_apply = None
+                        continue
+                    apply.baseline = checked
+                    apply.verified = True
+                    apply.deadline = time.monotonic() + .35
+                    self._put_event("viewer_auto_clipboard", apply)
+                    while self._auto_clipboard_active() and time.monotonic() < apply.deadline:
+                        if apply.completed.wait(.05):
+                            break
+                    self.clipboard_auto_apply = None
+                    if not apply.applied:
+                        failures += 1
+                        continue
+                    updated = self._read_auto_local_clipboard()
+                    if updated is not None and updated.revision == remote["revision"]:
+                        state.committed(updated, remote["revision"])
+                failures = 0
+            except Exception:
+                # Missing/busy clipboard tools must not close an otherwise
+                # healthy remote-control session or spam the status bar.
+                failures += 1
 
     def send_input(self, kind: int, button: int = MOUSE_NONE, x: int = 0, y: int = 0, data: int = 0) -> bool:
         if self.session is None or self.sock is None:
@@ -3420,7 +3850,8 @@ class ViewerConnection:
         return sent
 
     def request_clipboard(self, *, read: bool, text: str = "", baseline: str | None = None,
-                          paste: bool = False, after_copy: bool = False, paste_shift: bool = False) -> bool:
+                          paste: bool = False, after_copy: bool = False, paste_shift: bool = False,
+                          _queued_deadline: float | None = None) -> bool:
         if self.stop_event.is_set() or self.sock is None or self.session is None:
             return False
         if not self.remote_capabilities & CAPABILITY_CLIPBOARD_TEXT:
@@ -3434,70 +3865,103 @@ class ViewerConnection:
         except (ProtocolError, ValueError, UnicodeError):
             self._put_event("viewer_status", "剪贴板文字过长或编码无效，未截断或发送。请分段复制。")
             return False
+        timeout = 30.0 if getattr(self, "relay_options", None) is not None and not paste else 8.0
+        deadline = _queued_deadline or time.monotonic() + timeout
+        if time.monotonic() >= deadline:
+            return False
         with self.clipboard_lock:
+            self.clipboard_manual_epoch += 1
+            if self.clipboard_manual_waiting and _queued_deadline is None:
+                self._put_event("viewer_status", "已有手动剪贴板操作在等待，请稍后重试。")
+                return False
             if self.clipboard_pending is not None:
+                if self.clipboard_pending.automatic and not self.clipboard_manual_waiting:
+                    self.clipboard_manual_waiting = True
+                    threading.Thread(target=self._wait_manual_clipboard,
+                        args=(dict(read=read, text=text, baseline=baseline, paste=paste,
+                                   after_copy=after_copy, paste_shift=paste_shift, _queued_deadline=deadline),),
+                        name="RemoteDeskManualClipboard", daemon=True).start()
+                    return True
                 self._put_event("viewer_status", "上一项剪贴板操作仍在等待远端，请稍后重试；长时间无响应请重连。")
                 return False
             # Manual relay transfers may wait across a slow in-flight frame.
             # Keep automatic paste short-lived so it cannot unexpectedly target
             # another input field much later. Read replies retain local fences.
-            timeout = 30.0 if getattr(self, "relay_options", None) is not None and not paste else 8.0
-            request = ViewerClipboardRequest(read, baseline, deadline=time.monotonic() + timeout)
+            request = ViewerClipboardRequest(read, baseline, deadline=deadline)
             self.clipboard_pending = self.clipboard_latest = request
         threading.Thread(target=self._exchange_clipboard,
                          args=(request, payload, paste, after_copy, paste_shift),
                          name="RemoteDeskViewerClipboard", daemon=True).start()
         return True
 
+    def _wait_manual_clipboard(self, arguments: dict[str, Any]) -> None:
+        try:
+            while not self.stop_event.wait(.025) and time.monotonic() < arguments["_queued_deadline"]:
+                with self.clipboard_lock:
+                    idle = self.clipboard_pending is None
+                if idle:
+                    self.request_clipboard(**arguments)
+                    return
+            if not self.stop_event.is_set():
+                self._put_event("viewer_status", "自动剪贴板确认仍未返回，本次手动操作未执行；请重新连接或稍后重试。")
+        finally:
+            with self.clipboard_lock:
+                self.clipboard_manual_waiting = False
+
     def _exchange_clipboard(self, request: ViewerClipboardRequest, payload: bytes,
                             paste: bool, after_copy: bool, paste_shift: bool) -> None:
         sent = False
+        def status(message: str) -> None:
+            if not request.automatic:
+                self._put_event("viewer_status", message)
+        def cancelled() -> bool:
+            return self.stop_event.is_set() or (request.automatic and self.clipboard_auto_stop.is_set())
         try:
             if not self.flush_pending_inputs(1.5):
-                self._put_event("viewer_status", "输入队列仍忙，未执行剪贴板操作，请重试。")
+                status("输入队列仍忙，未执行剪贴板操作，请重试。")
                 return
             if after_copy and self.stop_event.wait(0.55):
                 return
-            if self.stop_event.is_set():
+            if cancelled():
                 return
             # Mark before writing: an incomplete write may still reach the peer.
             sent = True
             self._send_control(payload)
             if not request.completed.is_set():
-                self._put_event("viewer_status", "正在等待远端剪贴板确认…")
+                status("正在等待远端剪贴板确认…")
             while not request.completed.wait(0.1):
-                if self.stop_event.is_set():
+                if cancelled():
                     return
                 if time.monotonic() >= request.deadline:
-                    self._put_event("viewer_status", "等待远端剪贴板超时，未覆盖本机或触发粘贴；可重新连接后重试。")
+                    status("等待远端剪贴板超时，未覆盖本机或触发粘贴；可重新连接后重试。")
                     return
-            if self.stop_event.is_set() or time.monotonic() >= request.deadline or not request.success:
+            if cancelled() or time.monotonic() >= request.deadline or not request.success:
                 return
             if request.read:
                 if request.text:
                     self._put_event("viewer_clipboard_text", (request, request.text))
                 else:
-                    self._put_event("viewer_status", "远端没有可读取的文字，本机剪贴板保持不变。")
+                    status("远端没有可读取的文字，本机剪贴板保持不变。")
             elif paste and self.remote_capabilities & CAPABILITY_INPUT_CONTROL:
                 if (getattr(self, "remote_device_info", {}).get("platform", "").lower() == "android" and
                         not self.remote_capabilities & CAPABILITY_CLIPBOARD_PASTE_SHORTCUT):
-                    self._put_event("viewer_status", "文字已写入远端剪贴板；此旧版 Android 请长按输入框粘贴，或更新远端后使用快捷粘贴。")
+                    status("文字已写入远端剪贴板；此旧版 Android 请长按输入框粘贴，或更新远端后使用快捷粘贴。")
                     return
                 keys = [0x11, 0x10, 0x56] if paste_shift else [0x11, 0x56]
                 commands = [(INPUT_KEY_DOWN, encode_input(INPUT_KEY_DOWN, data=key)) for key in keys]
                 commands += [(INPUT_KEY_UP, encode_input(INPUT_KEY_UP, data=key)) for key in reversed(keys)]
                 with self.input_condition:
                     if self.stop_event.is_set() or len(self.pending_inputs) + len(commands) > INPUT_QUEUE_LIMIT:
-                        self._put_event("viewer_status", "剪贴板已写入，但输入队列忙，未粘贴；请重试。")
+                        status("剪贴板已写入，但输入队列忙，未粘贴；请重试。")
                         return
                     self.pending_inputs.extend(commands)
                     self.input_condition.notify()
-                self._put_event("viewer_status", "已写入远端剪贴板，并请求在当前输入框粘贴。")
+                status("已写入远端剪贴板，并请求在当前输入框粘贴。")
             else:
-                self._put_event("viewer_status", "已写入远端文本剪贴板。")
+                status("已写入远端文本剪贴板。")
         except Exception:
             if not self.stop_event.is_set():
-                self._put_event("viewer_status", "剪贴板传输失败，未触发粘贴；请检查连接后重试。")
+                status("剪贴板传输失败，未触发粘贴；请检查连接后重试。")
         finally:
             with self.clipboard_lock:
                 # Retain a timed-out request until its late reply is drained.
@@ -3819,6 +4283,7 @@ class ViewerConnection:
         """Wake all transport workers without waiting for the write lock."""
 
         self.stop_event.set()
+        self.stop_auto_clipboard()
         with self.frame_condition:
             self.pending_frame = None
             self.pending_h264_frames.clear()
@@ -4329,6 +4794,9 @@ class ViewerConnection:
         self.failed_native_h264_presenter_backends.clear()
         authenticated = False
         try:
+            if not self.allow_self_connection_for_testing:
+                target_id = self.relay_options.device_id if self.relay_options is not None else self.expected_device_id
+                device_model.reject_local_identity(target_id, self.local_device_id)
             connection = (relay.connect_viewer(self.relay_options, self.stop_event)
                           if self.relay_options is not None
                           else socket.create_connection((self.host, self.port), timeout=6.0))
@@ -4337,6 +4805,8 @@ class ViewerConnection:
                 self.sock = sock
                 if self.stop_event.is_set():
                     return
+                if self.relay_options is None and not self.allow_self_connection_for_testing:
+                    device_model.reject_local_socket(sock)
                 self.session = authenticate(sock, self.password)
                 authenticated = True
                 self._activate_heartbeat()
@@ -4425,6 +4895,9 @@ class ViewerConnection:
                             self._handle_frame(payload, legacy=False)
                         except ProtocolError as ex:
                             self._put_event("viewer_status", str(ex))
+        except device_model.SelfConnectionError as ex:
+            if not self.stop_event.is_set():
+                self._put_event("viewer_self_rejected", str(ex))
         except SessionRejectedError as ex:
             if not self.stop_event.is_set():
                 self._put_event("viewer_session_replaced", str(ex))
@@ -4448,6 +4921,7 @@ class ViewerConnection:
                 self.capture_target_thread,
                 self.heartbeat_thread,
                 self.liveness_thread,
+                self.clipboard_auto_thread,
             ):
                 if worker.is_alive() and threading.current_thread() is not worker:
                     worker.join(timeout=1.0)
@@ -4475,6 +4949,8 @@ class ViewerConnection:
             self._put_event("viewer_status", f"{name} ({platform}) - {capabilities}")
             self._put_event("viewer_reconnect_qualified", True)
         elif kind == CONTROL_DEVICE_IDENTITY and getattr(self, "identity_requested", False):
+            if not getattr(self, "allow_self_connection_for_testing", False):
+                device_model.reject_local_identity(control["deviceId"], getattr(self, "local_device_id", ""))
             self.remote_device_info = dict(getattr(self, "remote_device_info", {}), deviceId=control["deviceId"])
             self._put_event("viewer_device_identity", self.remote_device_info)
         elif kind == CONTROL_CAPTURE_TARGET_LIST:
@@ -4502,6 +4978,13 @@ class ViewerConnection:
             self._publish_capture_target_snapshot()
         elif kind == CONTROL_CLIPBOARD_TEXT:
             self._receive_clipboard_reply(text_reply=True, success=True, text=control.get("text", ""))
+        elif kind == CONTROL_CLIPBOARD_SNAPSHOT:
+            with self.clipboard_lock:
+                pending = self.clipboard_snapshot_pending
+                if (pending is not None and pending[0] == control.get("requestId")
+                        and not pending[1].is_set()):
+                    pending[2].update(control)
+                    pending[1].set()
         elif kind == CONTROL_FILE_TRANSFER_RECEIPT:
             with self.file_receipt_lock:
                 receipt = self.file_receipt
@@ -4523,7 +5006,9 @@ class ViewerConnection:
             )
             if kind == CONTROL_CLIPBOARD_STATUS:
                 if CAPTURE_TARGET_STATUS_TRAILER_PREFIX not in message:
-                    if self._receive_clipboard_reply(text_reply=False, success=bool(control.get("success"))) and control.get("success"):
+                    with self.clipboard_lock:
+                        automatic = self.clipboard_pending is not None and self.clipboard_pending.automatic
+                    if self._receive_clipboard_reply(text_reply=False, success=bool(control.get("success"))) and (control.get("success") or automatic):
                         return  # The clipboard worker publishes the final result.
                 message = strip_capture_target_status_trailer(message)
             self._put_event("viewer_status", message)
@@ -5762,7 +6247,7 @@ class RemoteDeskLinuxApp:
 
         self._wrapping_label(
             form,
-            text="设置本机设备密钥后启动被控；其他设备可通过 IP 直连，或登录同一公网中继连接本机。",
+            text="设置设备密钥后启动被控。需要已登录的 Xorg 桌面；登录界面及锁屏控制不保证可用，Wayland 可能只有部分画面与输入。",
             style="PanelSubtitle.TLabel",
             wraplength=760,
             justify=tk.LEFT,
@@ -6183,8 +6668,9 @@ class RemoteDeskLinuxApp:
         port = normalize_port(self.viewer_port.get())
         self._begin_direct_viewer(host, port, password)
 
-    def _begin_direct_viewer(self, host, port, password):
+    def _begin_direct_viewer(self, host, port, password, device_id=""):
         self.viewer_relay_options = None
+        self.viewer_reconnect_device_id = device_model.identity(device_id)
         self.viewer_pressed_keys.clear()
         self.viewer_reconnect_policy.begin()
         self._viewer_capture_state().begin_logical_session()
@@ -6200,6 +6686,13 @@ class RemoteDeskLinuxApp:
         reconnecting: bool,
     ) -> None:
         if self.closing or self.viewer_reconnect_policy.cancelled:
+            return
+        options = getattr(self, "viewer_relay_options", None)
+        expected_id = options.device_id if options is not None else getattr(self, "viewer_reconnect_device_id", "")
+        try:
+            device_model.reject_local_identity(expected_id, getattr(self, "relay_device_id", ""))
+        except device_model.SelfConnectionError as error:
+            self._reject_self_viewer(str(error))
             return
         self.last_photo = None
         self.native_presenter_active = False
@@ -6222,6 +6715,8 @@ class RemoteDeskLinuxApp:
             self.events,
             self.viewer_generation,
             relay_options=getattr(self, "viewer_relay_options", None),
+            local_device_id=getattr(self, "relay_device_id", ""),
+            expected_device_id=expected_id,
         )
         self.viewer = viewer
         if self.frame_label is not None:
@@ -6258,6 +6753,7 @@ class RemoteDeskLinuxApp:
         self._viewer_capture_state().end_logical_session()
         self.viewer = None
         if viewer is not None:
+            viewer.stop_auto_clipboard()
             threading.Thread(
                 target=self._close_viewer_after_input_release,
                 args=(viewer, released_inputs),
@@ -6291,6 +6787,13 @@ class RemoteDeskLinuxApp:
             self.root.after_cancel(after_id)
         except (tk.TclError, ValueError):
             pass
+
+    def _reject_self_viewer(self, message: str) -> None:
+        self._cancel_viewer_stability_timer()
+        self.viewer_reconnect_policy.cancel()
+        self.viewer_reconnect_target = None
+        self._cancel_viewer_reconnect_timer()
+        self._set_viewer_status(message)
 
     def _cancel_viewer_stability_timer(self) -> None:
         after_id = self.viewer_reconnect_stable_after_id
@@ -6512,22 +7015,59 @@ class RemoteDeskLinuxApp:
                 style="ViewerDanger.TButton",
             ),
         )
-        toolbar_layout_state = {"mode": ""}
+        actions_menu = tk.Menu(controls, tearoff=False)
+        more_button = ttk.Menubutton(controls, text="更多操作", menu=actions_menu, style="Viewer.TButton")
+
+        def refresh_actions_menu() -> None:
+            if self.viewer is not None:
+                self._release_pressed_viewer_inputs(flush=True, background_flush=True)
+            actions_menu.delete(0, tk.END)
+            for index, button in enumerate((*clipboard_buttons, *viewer_buttons[1:4])):
+                if index == len(clipboard_buttons):
+                    actions_menu.add_separator()
+                actions_menu.add_command(
+                    label=button.cget("text"), command=button.invoke,
+                    state=tk.DISABLED if button.instate(("disabled",)) else tk.NORMAL,
+                )
+            actions_menu.add_separator()
+            actions_menu.add_command(label="完整连接状态", command=self._show_viewer_status_details)
+
+        actions_menu.configure(postcommand=refresh_actions_menu)
+        toolbar_layout_state = {"mode": "", "pending": None}
 
         def update_toolbar_layout(event: tk.Event[Any] | None = None) -> None:
-            available_width = int(getattr(event, "width", controls.winfo_width())) - 20
+            toolbar_layout_state["pending"] = None
+            available_width = controls.winfo_width() - 20
             actions_width = sum(button.winfo_reqwidth() + 8 for button in viewer_buttons)
             mode = "wide" if available_width >= actions_width + entry.winfo_reqwidth() + 8 else "medium" if available_width >= actions_width else "compact"
+            # Derive the expanded size from widgets, not the current footer size:
+            # measuring the collapsed footer would oscillate between both modes.
+            button_height = max(button.winfo_reqheight() for button in viewer_buttons)
+            clip_columns = max(1, min(3, available_width // max(1, max(button.winfo_reqwidth() for button in clipboard_buttons) + 6)))
+            clip_height = ((len(clipboard_buttons) + clip_columns - 1) // clip_columns) * (max(button.winfo_reqheight() for button in clipboard_buttons) + 4) + 8
+            control_height = (max(entry.winfo_reqheight(), button_height) if mode == "wide" else
+                              entry.winfo_reqheight() + 8 + (button_height if mode == "medium" else 3 * (button_height + 6))) + 16
+            target_height = target_bar.winfo_reqheight() if target_bar.winfo_manager() else 0
+            if clip_height + control_height + status.winfo_reqheight() + target_height > max(140, window.winfo_height() * .45):
+                mode = "overflow"
             if mode == toolbar_layout_state["mode"]:
                 return
             toolbar_layout_state["mode"] = mode
             entry.grid_forget()
+            more_button.grid_forget()
             for button in viewer_buttons:
                 button.grid_forget()
             for column in range(len(viewer_buttons) + 1):
                 controls.columnconfigure(column, weight=0)
 
-            if mode == "wide":
+            if mode == "overflow":
+                clipboard_bar.pack_forget()
+                entry.grid(row=0, column=0, sticky=tk.EW, padx=(0, 8))
+                viewer_buttons[0].grid(row=0, column=1, sticky=tk.EW)
+                more_button.grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
+                viewer_buttons[-1].grid(row=1, column=1, sticky=tk.EW, pady=(6, 0))
+                controls.columnconfigure(0, weight=1)
+            elif mode == "wide":
                 entry.grid(row=0, column=0, sticky=tk.EW, padx=(0, 8))
                 controls.columnconfigure(0, weight=1)
                 for column, button in enumerate(viewer_buttons, start=1):
@@ -6549,12 +7089,34 @@ class RemoteDeskLinuxApp:
                     )
                 controls.columnconfigure(0, weight=1)
                 controls.columnconfigure(1, weight=1)
+            if mode != "overflow" and not clipboard_bar.winfo_manager():
+                clipboard_bar.pack(fill=tk.X, before=target_bar if target_bar.winfo_manager() else controls)
 
-        controls.bind("<Configure>", update_toolbar_layout, add="+")
-        controls.after_idle(update_toolbar_layout)
+        def schedule_toolbar_layout(_event: Any = None) -> None:
+            if toolbar_layout_state["pending"] is None:
+                toolbar_layout_state["pending"] = controls.after_idle(update_toolbar_layout)
 
-        status = ttk.Label(footer, text="正在连接...", style="ViewerStatus.TLabel")
-        status.pack(fill=tk.X)
+        def cancel_toolbar_layout(event: Any) -> None:
+            if event.widget not in (window, controls):
+                return
+            pending = toolbar_layout_state["pending"]
+            toolbar_layout_state["pending"] = None
+            if pending is not None:
+                try:
+                    controls.after_cancel(pending)
+                except tk.TclError:
+                    pass
+
+        controls.bind("<Configure>", schedule_toolbar_layout, add="+")
+        controls.bind("<Destroy>", cancel_toolbar_layout, add="+")
+        footer.bind("<Configure>", schedule_toolbar_layout, add="+")
+        window.bind("<Configure>", schedule_toolbar_layout, add="+")
+        window.bind("<Destroy>", cancel_toolbar_layout, add="+")
+        schedule_toolbar_layout()
+
+        status = ttk.Label(footer, text="正在连接...", style="ViewerStatus.TLabel", cursor="hand2")
+        status.pack(side=tk.BOTTOM, fill=tk.X, before=clipboard_bar)
+        status.bind("<Double-Button-1>", lambda _event: self._show_viewer_status_details())
         window.bind("<Unmap>", self._viewer_window_unmapped, add="+")
         window.protocol("WM_DELETE_WINDOW", self._viewer_window_closed)
 
@@ -6625,15 +7187,40 @@ class RemoteDeskLinuxApp:
                 pass
 
     def _set_viewer_status(self, text: str) -> None:
+        self.viewer_status_detail = text
         try:
             self.viewer_status.config(text=text)
         except tk.TclError:
             pass
         if self.viewer_window_status is not None:
             try:
-                self.viewer_window_status.config(text=text)
+                lines = text.splitlines()
+                summary = next((line for line in lines if line.strip()), "")
+                if len(lines) > 1:
+                    summary += "（双击查看详情）"
+                self.viewer_window_status.config(text=summary)
             except tk.TclError:
                 self.viewer_window_status = None
+
+    def _show_viewer_status_details(self) -> None:
+        parent = self.viewer_window or self.root
+        dialog = tk.Toplevel(parent, class_="RemoteDesk")
+        dialog.title("完整连接状态")
+        dialog.transient(parent)
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(0, weight=1)
+        text = tk.Text(dialog, wrap=tk.NONE, width=1, height=1)
+        text.insert("1.0", getattr(self, "viewer_status_detail", "正在连接…"))
+        text.configure(state=tk.DISABLED)
+        vertical = ttk.Scrollbar(dialog, orient=tk.VERTICAL, command=text.yview)
+        horizontal = ttk.Scrollbar(dialog, orient=tk.HORIZONTAL, command=text.xview)
+        text.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        text.grid(row=0, column=0, sticky=tk.NSEW, padx=(10, 0), pady=(10, 0))
+        vertical.grid(row=0, column=1, sticky=tk.NS, pady=(10, 0))
+        horizontal.grid(row=1, column=0, sticky=tk.EW, padx=(10, 0))
+        ttk.Button(dialog, text="关闭", command=dialog.destroy).grid(row=2, column=0, columnspan=2, sticky=tk.E, padx=10, pady=10)
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        apply_adaptive_window_geometry(dialog, preferred_size=(760, 420), minimum_size=(320, 240), parent=parent)
 
     def _viewer_capture_target_selected(self, _event: tk.Event[Any]) -> None:
         if getattr(self, "viewer_target_programmatic_update", False):
@@ -7131,11 +7718,43 @@ class RemoteDeskLinuxApp:
             self._set_viewer_status("剪贴板请求已过期，或本机已复制新内容；未覆盖本机剪贴板。")
             return
         try:
+            with self.viewer.clipboard_lock:
+                self.viewer.clipboard_manual_epoch += 1
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
             self._set_viewer_status("已将远端文字复制到本机剪贴板。")
         except tk.TclError:
             self._set_viewer_status("写入本机剪贴板失败，请重试。")
+
+    def _apply_viewer_auto_clipboard(self, apply: ViewerAutoClipboardApply) -> None:
+        viewer = self.viewer
+        if (viewer is None or not viewer._auto_clipboard_active() or viewer.clipboard_auto_apply is not apply
+                or viewer.clipboard_manual_epoch != apply.epoch or time.monotonic() >= apply.deadline):
+            apply.completed.set()
+            return
+        if not apply.verified:
+            apply.ready.set()
+            return
+        try:
+            # No clipboard_get here: it can wait on a stalled external owner.
+            # This cheap X-server owner lookup also fences a new owner that
+            # appeared after the worker's final content/TIMESTAMP check.
+            if apply.baseline.ownership.startswith("xfixes:"):
+                changes = viewer.clipboard_changes
+                if changes is None or changes.snapshot() != (apply.baseline.owner, apply.baseline.ownership):
+                    return
+            elif apply.baseline.owner is not None and clipboard_x11_owner() != apply.baseline.owner:
+                return
+            if not viewer._auto_clipboard_active() or viewer.clipboard_manual_epoch != apply.epoch:
+                return
+            if apply.text:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(apply.text)
+                apply.applied = True
+        except tk.TclError:
+            pass
+        finally:
+            apply.completed.set()
 
     def send_viewer_text(self) -> None:
         viewer = self.viewer
@@ -7447,6 +8066,10 @@ class RemoteDeskLinuxApp:
                 clipboard = self._unpack_viewer_event(value)
                 if clipboard is not None:
                     self._apply_viewer_clipboard(clipboard)
+            elif event == "viewer_auto_clipboard":
+                clipboard = self._unpack_viewer_event(value)
+                if clipboard is not None:
+                    self._apply_viewer_auto_clipboard(clipboard)
             elif event == "viewer_file_failure":
                 message = self._unpack_viewer_event(value)
                 if message is not None:
@@ -7479,6 +8102,10 @@ class RemoteDeskLinuxApp:
                     self._set_viewer_status(
                         f"身份验证失败，已停止自动重连：{message}"
                     )
+            elif event == "viewer_self_rejected":
+                message = self._unpack_viewer_event(value)
+                if message is not None:
+                    self._reject_self_viewer(str(message))
             elif event == "viewer_session_replaced":
                 message = self._unpack_viewer_event(value)
                 if message is not None:
@@ -7513,6 +8140,8 @@ class RemoteDeskLinuxApp:
                     )
             elif event == "viewer_device_identity":
                 info = self._unpack_viewer_event(value)
+                if isinstance(info, dict):
+                    self.viewer_reconnect_device_id = device_model.identity(info.get("deviceId"))
                 if getattr(self, "device_panel", None) is not None: self.device_panel.record(info)
             elif event == "viewer_capture_metadata":
                 snapshot = self._unpack_viewer_event(value)

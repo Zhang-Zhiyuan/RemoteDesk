@@ -10,7 +10,9 @@ internal readonly record struct ScreenCaptureResult(
     Size FrameSize,
     ReadOnlyMemory<byte> JpegBytes,
     double CaptureMilliseconds,
-    double EncodeMilliseconds);
+    double EncodeMilliseconds,
+    bool IsSecureDesktop = false,
+    bool IsSecureDesktopFallback = false);
 
 internal readonly record struct ScreenCaptureTargetAvailability(
     bool IsAvailable,
@@ -62,10 +64,18 @@ internal sealed class ScreenCaptureService : IDisposable
     private long _captureBoundsRefreshedAt;
     private readonly WindowsSecureDesktopClient _secureDesktop = new();
     private Rectangle? _secureCaptureBounds;
+    private readonly Func<bool> _isSecureDesktopRequired;
+    private bool _wasSecureDesktop;
 
     public ScreenCaptureService(ScreenCaptureTarget target)
+        : this(target, static () => WindowsSecureDesktopClient.IsRequired)
+    {
+    }
+
+    internal ScreenCaptureService(ScreenCaptureTarget target, Func<bool> isSecureDesktopRequired)
     {
         _target = target;
+        _isSecureDesktopRequired = isSecureDesktopRequired;
         _cachedCaptureBounds = NormalizeBounds(target.Bounds, new Rectangle(0, 0, 1, 1));
         _cachedTargetAvailable = target.IsAllScreens;
         // Resolve the real display on the first read. In particular, do not
@@ -417,8 +427,17 @@ internal sealed class ScreenCaptureService : IDisposable
     private bool TryGetSecureBounds(out Rectangle bounds)
     {
         bounds = default;
-        if (_secureCaptureBounds is not { } secure) return false;
-        if (WindowsSecureDesktopClient.IsRequired) { bounds = secure; return true; }
+        if (_isSecureDesktopRequired())
+        {
+            _wasSecureDesktop = true;
+            // The ordinary desktop's monitor list cannot veto a Winlogon
+            // capture. These are request bounds only until the helper returns
+            // actual pixels; host pointer mapping waits for that fresh frame.
+            bounds = _secureCaptureBounds ?? _target.Bounds;
+            return true;
+        }
+        if (!_wasSecureDesktop) return false;
+        _wasSecureDesktop = false;
         // Re-enumerate Default immediately on unlock; do not retain the
         // login desktop's possibly rotated dimensions in the normal cache.
         _secureCaptureBounds = null;

@@ -2326,7 +2326,7 @@ Available hardware decoders:
 
     def test_viewer_natural_disconnect_releases_owned_decoder(self) -> None:
         events: "queue.Queue[tuple[str, object]]" = queue.Queue()
-        viewer = app.ViewerConnection("127.0.0.1", 56565, "1", events, 3)
+        viewer = app.ViewerConnection("127.0.0.1", 56565, "1", events, 3, allow_self_connection_for_testing=True)
         decoder = mock.Mock()
         with viewer.h264_decoder_lock:
             viewer.h264_decoder = decoder
@@ -2494,6 +2494,7 @@ Available hardware decoders:
             "wrong",
             events,
             18,
+            allow_self_connection_for_testing=True,
         )
         sock = mock.MagicMock()
         sock.__enter__.return_value = sock
@@ -2950,7 +2951,7 @@ Available hardware decoders:
                                 ([protocol.ProtocolError("invalid authentication tag")], 0),
                                 ([(protocol.MESSAGE_FRAME, b"authenticated fixture"), EOFError()], 1)):
             with self.subTest(expected=expected, error=type(reads[-1]).__name__):
-                viewer = app.ViewerConnection("127.0.0.1", 56565, "1", queue.Queue(), 1)
+                viewer = app.ViewerConnection("127.0.0.1", 56565, "1", queue.Queue(), 1, allow_self_connection_for_testing=True)
                 sock = mock.MagicMock()
                 sock.__enter__.return_value = sock
                 with (mock.patch.object(app, "find_ffmpeg", return_value=None),

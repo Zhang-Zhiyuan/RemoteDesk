@@ -136,7 +136,10 @@ final class ReceivedFilesUiProbe {
             for (int i = 0; i < checks.length(); i++) passed &= checks.getJSONObject(i).getBoolean("passed");
             JSONObject result = new JSONObject().put("checks", checks).put("passed", passed)
                 .put("baselineDirectoryQueryIncludedPending", baselinePendingVisible)
-                .put("scope", "MuMu Android 15 isolated APK; product file-list UI and MediaStore, not a physical phone");
+                .put("scope", "Isolated test APK; product file-list UI and MediaStore; platform metadata recorded separately")
+                .put("androidApi", android.os.Build.VERSION.SDK_INT)
+                .put("androidRelease", android.os.Build.VERSION.RELEASE)
+                .put("hardware", android.os.Build.HARDWARE);
             if (probeFailure != null) result.put("failure", probeFailure.toString());
             Files.write(new File(activity.getFilesDir(), "received-files-probe.json").toPath(), result.toString(2).getBytes(StandardCharsets.UTF_8));
         } catch (Exception ignored) {}

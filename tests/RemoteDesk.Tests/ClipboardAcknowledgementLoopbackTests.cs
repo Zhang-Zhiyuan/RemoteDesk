@@ -36,7 +36,7 @@ public sealed class ClipboardAcknowledgementLoopbackTests
                 return;
             }
         }, timeout.Token);
-        using var viewer = new RemoteViewerClient();
+        using var viewer = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         await viewer.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port, "read-fixture", ViewerVideoMode.StableJpeg);
         Task<bool> read = viewer.ReadRemoteClipboardAndWaitAsync();
         await received.Task.WaitAsync(timeout.Token);
@@ -75,7 +75,7 @@ public sealed class ClipboardAcknowledgementLoopbackTests
                 return;
             }
         }, timeout.Token);
-        using var viewer = new RemoteViewerClient();
+        using var viewer = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         await viewer.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port, "generation-fixture", ViewerVideoMode.StableJpeg);
         long generation = viewer.InputConnectionGeneration;
         await viewer.SendInputsAsync([RemoteInputCommand.KeyDown(0x56), RemoteInputCommand.KeyUp(0x56)], generation - 1);
@@ -124,7 +124,7 @@ public sealed class ClipboardAcknowledgementLoopbackTests
                 return;
             }
         }, timeout.Token);
-        using var viewer = new RemoteViewerClient();
+        using var viewer = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         await viewer.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port,
             fixturePassword, ViewerVideoMode.StableJpeg);
         Task<bool> sent = viewer.SendClipboardTextToRemoteAsync(text);

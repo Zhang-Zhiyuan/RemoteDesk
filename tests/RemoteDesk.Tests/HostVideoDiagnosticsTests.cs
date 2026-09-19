@@ -47,7 +47,7 @@ public sealed class HostVideoDiagnosticsTests
     [Fact]
     public async Task OldPeersAreNeverSentAnUnrecognizedDiagnosticRequest()
     {
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         Assert.False(await client.RequestHostVideoDiagnosticsAsync());
     }
 

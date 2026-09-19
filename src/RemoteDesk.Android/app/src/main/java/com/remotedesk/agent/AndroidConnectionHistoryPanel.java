@@ -24,6 +24,7 @@ final class AndroidConnectionHistoryPanel extends LinearLayout implements AutoCl
     private final ExecutorService storage = Executors.newSingleThreadExecutor();
     private boolean closed, expanded;
     private List<AndroidConnectionHistory.Node> currentNodes = java.util.Collections.emptyList();
+    private String localDeviceId = "";
 
     AndroidConnectionHistoryPanel(Activity activity, Consumer<AndroidConnectionHistory.Node> connect,
             Consumer<AndroidConnectionHistory.Node> fill, Consumer<String> status) {
@@ -37,8 +38,10 @@ final class AndroidConnectionHistoryPanel extends LinearLayout implements AutoCl
         storage.execute(() -> {
             try {
                 List<AndroidConnectionHistory.Node> nodes = AndroidConnectionHistoryStore.load(activity).entries();
+                String identity = AndroidRelaySettings.localDeviceId(activity);
                 activity.runOnUiThread(() -> {
                     if (closed || activity.isFinishing()) return;
+                    localDeviceId = identity;
                     render(nodes);
                     if (loaded != null) loaded.accept(nodes);
                 });
@@ -66,10 +69,13 @@ final class AndroidConnectionHistoryPanel extends LinearLayout implements AutoCl
         }
         for (int i = 0; i < (expanded ? nodes.size() : Math.min(3, nodes.size())); i++) {
             AndroidConnectionHistory.Node node = nodes.get(i);
+            boolean self = AndroidSelfConnectionGuard.knownSelf(node, false, localDeviceId);
             LinearLayout row = new LinearLayout(activity);
             row.setGravity(Gravity.CENTER_VERTICAL);
             Button entry = button(node.title() + "\n" +
-                (node.relay() ? "中转 · " + node.address() + " · " + node.relayDeviceId.substring(0, 8) : "直连 · " + node.address()));
+                (self ? "本机（不可自连） · " + node.address() :
+                node.relay() ? "中转 · " + node.address() + " · " + node.relayDeviceId.substring(0, 8) : "直连 · " + node.address()));
+            entry.setEnabled(!self);
             entry.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
             entry.setMaxLines(3); entry.setEllipsize(TextUtils.TruncateAt.END);
             entry.setPadding(dp(12), dp(8), dp(12), dp(8));
@@ -80,7 +86,7 @@ final class AndroidConnectionHistoryPanel extends LinearLayout implements AutoCl
             more.setContentDescription("管理连接 " + node.title());
             more.setOnClickListener(view -> {
                 PopupMenu menu = new PopupMenu(activity, more);
-                menu.getMenu().add("连接").setOnMenuItemClickListener(item -> { connect.accept(node); return true; });
+                menu.getMenu().add("连接").setEnabled(!self).setOnMenuItemClickListener(item -> { connect.accept(node); return true; });
                 if (!node.relay()) menu.getMenu().add("填入地址和设备密钥").setOnMenuItemClickListener(item -> { fill.accept(node); return true; });
                 menu.getMenu().add("修改备注").setOnMenuItemClickListener(item -> { rename(node); return true; });
                 menu.getMenu().add("删除记录").setOnMenuItemClickListener(item -> { remove(node); return true; });

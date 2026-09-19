@@ -808,7 +808,7 @@ public sealed class WindowsRemoteKeyboardRealMachineTests
                 RemoteDeviceDescriptor>(
                 TaskCreationOptions
                     .RunContinuationsAsynchronously);
-        var client = new RemoteViewerClient();
+        var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         client.DeviceInfoReceived +=
             device =>
                 deviceReceived.TrySetResult(

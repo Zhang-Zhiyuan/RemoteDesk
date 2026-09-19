@@ -128,7 +128,7 @@ class DeviceModelTests(unittest.TestCase):
                     responder.sendto(json.dumps(dict(Type="RemoteDesk.Discover.Response.v1", Port=45678, DeviceId=ID)).encode(), peer)
                 except Exception as error: errors.append(error)
             thread = threading.Thread(target=serve); thread.start()
-            scanner = devices.Scanner()
+            scanner = devices.Scanner(allow_self_connection_for_testing=True)
             with mock.patch.object(devices, "interfaces", return_value=(set(), set())):
                 found = scanner.scan("127.0.0.1", discovery_ports=(responder.getsockname()[1],), seconds=.3)
             thread.join(3)
@@ -147,7 +147,7 @@ class DeviceModelTests(unittest.TestCase):
                 except Exception as error: errors.append(error)
             thread = threading.Thread(target=serve); thread.start()
             with mock.patch.object(devices, "interfaces", return_value=(set(), set())):
-                found = devices.Scanner().scan("127.0.0.1", discovery_ports=(), host_ports=(listener.getsockname()[1],), seconds=.05)
+                found = devices.Scanner(allow_self_connection_for_testing=True).scan("127.0.0.1", discovery_ports=(), host_ports=(listener.getsockname()[1],), seconds=.05)
             thread.join(3)
             self.assertFalse(errors); self.assertEqual([b""], received); self.assertEqual(1, len(found))
             self.assertFalse(found[0].advertised)

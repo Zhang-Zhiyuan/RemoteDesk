@@ -208,6 +208,20 @@ internal sealed class InputInjectionDispatcher : IDisposable
         Size frameSize) =>
         Dispatch(() => _applyInput(command, captureBounds, frameSize));
 
+    public void Apply(RemoteInputCommand command, Rectangle captureBounds, Size frameSize, bool? expectedSecureDesktop) =>
+        Dispatch(() =>
+        {
+            // This check must run on the native-input worker, not before a
+            // queued operation waits while the user locks/unlocks Windows.
+            if (expectedSecureDesktop is { } expected)
+            {
+                bool actualSecureDesktop = !WindowsInteractiveDesktopProbe.Inspect(_nativeApi).IsAvailable;
+                if (expected != actualSecureDesktop) throw new SecureDesktopTargetException(true);
+            }
+            if (_secureDesktop is not null) _secureDesktop.Apply(command, captureBounds, frameSize, expectedSecureDesktop);
+            else _applyInput(command, captureBounds, frameSize);
+        });
+
     public void SendPasteShortcut() =>
         Dispatch(_sendPasteShortcut);
 

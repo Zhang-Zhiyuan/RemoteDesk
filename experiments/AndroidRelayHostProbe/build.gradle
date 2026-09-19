@@ -2,6 +2,8 @@ plugins { id "com.android.application" version "8.10.1" }
 android {
     namespace "com.remotedesk.agent"
     compileSdk 36
+    buildFeatures { buildConfig true }
+    defaultConfig { buildConfigField "boolean", "ALLOW_LOOPBACK_FIXTURES", "false" }
     defaultConfig { applicationId "com.remotedesk.relayhostprobe"; minSdk 26; targetSdk 36; versionCode 1; versionName "1.0-test-only" }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
     sourceSets.main {

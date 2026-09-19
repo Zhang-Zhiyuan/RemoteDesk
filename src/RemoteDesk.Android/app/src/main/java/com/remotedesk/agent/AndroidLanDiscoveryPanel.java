@@ -132,18 +132,26 @@ final class AndroidLanDiscoveryPanel extends LinearLayout implements AutoCloseab
         ui.postDelayed(timeout, 6500);
         worker.execute(() -> {
             List<AndroidLanDevice> found = Collections.emptyList();
+            boolean selfTarget = false;
             try {
                 List<AndroidConnectionHistory.Node> known;
                 try { known = AndroidConnectionHistoryStore.load(activity).entries(); }
                 catch (Exception ignored) { known = Collections.emptyList(); }
                 found = scanner.scan(activity.getApplicationContext(), target, known);
-            } catch (Exception ignored) { /* Missing interfaces/DNS/UDP do not break manual connections. */ }
+            } catch (AndroidSelfConnectionGuard.Rejected ignored) { selfTarget = true; }
+            catch (Exception ignored) { /* Missing interfaces/DNS/UDP do not break manual connections. */ }
             finally { scanner.close(); }
             List<AndroidLanDevice> result = found;
+            boolean rejectedSelf = selfTarget;
             ui.post(() -> {
                 ui.removeCallbacks(timeout);
                 if (!active || closed || generation != epoch) return;
                 pending = null; busy = false; refresh.setEnabled(true); detectPort.setEnabled(true);
+                if (rejectedSelf) {
+                    status.setText(AndroidSelfConnectionGuard.SELF_MESSAGE);
+                    // Do not invoke the empty-result fallback, which launches a direct viewer.
+                    return;
+                }
                 if (target == null) {
                     nearby = result; refreshedAt = SystemClock.elapsedRealtime();
                 } else {

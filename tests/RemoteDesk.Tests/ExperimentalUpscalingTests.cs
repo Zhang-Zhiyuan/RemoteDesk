@@ -41,7 +41,7 @@ public sealed class ExperimentalUpscalingTests
     [Fact]
     public void ToggleIsAdjacentReversibleAndDoesNotChangeGeometry()
     {
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var viewer = new RemoteViewerWindow(client, "upscale test", false, false, false, false, false, false);
         var button = viewer.ExperimentalUpscaleButtonForEntityTests;
         var scale = viewer.DisplayScaleButtonForEntityTests;

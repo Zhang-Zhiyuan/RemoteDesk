@@ -36,13 +36,15 @@ def hasReleaseSigning = !releaseStoreFilePath.isEmpty() &&
 android {
     namespace "com.remotedesk.agent"
     compileSdk 36
+    buildFeatures { buildConfig true }
 
     defaultConfig {
         applicationId "com.remotedesk.agent"
         minSdk 26
         targetSdk 36
-        versionCode 30
-        versionName "1.0.27"
+        buildConfigField "boolean", "ALLOW_LOOPBACK_FIXTURES", "false"
+        versionCode 31
+        versionName "1.0.28"
     }
 
     compileOptions {

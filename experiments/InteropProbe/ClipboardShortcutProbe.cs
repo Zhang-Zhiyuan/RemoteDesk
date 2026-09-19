@@ -122,7 +122,7 @@ internal static class ClipboardShortcutProbe
                 catch (Exception error) when (error is IOException or OperationCanceledException or ObjectDisposedException) { }
                 finally { if (acknowledgement is not null) try { await acknowledgement; } catch (OperationCanceledException) { } }
             });
-            using var client = new RemoteViewerClient();
+            using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
             await client.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port, "shortcut-fixture", ViewerVideoMode.StableJpeg);
             using var window = new RemoteViewerWindow(client, scenario.Name, true, true, false, false, false,
                 scenario.Platform == "Android") { ShowInTaskbar = false };
@@ -182,7 +182,7 @@ internal static class ClipboardShortcutProbe
         // A Win32 focus handle belongs to an input queue, not necessarily to
         // the foreground application. Reproduce switching to another app on
         // another UI thread without ever entering the interactive desktop.
-        using (var client = new RemoteViewerClient())
+        using (var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true))
         using (var window = new RemoteViewerWindow(client, "Background hook fixture", true, true, false, false, false, false)
             { ShowInTaskbar = false })
         {

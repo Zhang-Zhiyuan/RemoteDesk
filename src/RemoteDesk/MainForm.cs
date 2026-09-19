@@ -5589,7 +5589,8 @@ public sealed partial class MainForm : Form
 
     private static bool IsLocalDiscoveredHost(DiscoveredHost host, HashSet<string> localAddresses)
     {
-        return NetworkUtils.IsLikelyLocalEndpoint(host.Address, host.MachineName, localAddresses);
+        return RemoteDeviceIdentity.Same(host.DeviceId, RemoteDeviceIdentity.LocalId) ||
+            NetworkUtils.IsLikelyLocalEndpoint(host.Address, host.MachineName, localAddresses);
     }
 
     private static string GetDiscoveryStatus(int remoteHostCount, int ignoredLocalHostCount)
@@ -6201,6 +6202,8 @@ public sealed partial class MainForm : Form
 
         foreach (DiscoveredHost host in CollapseDiscoveryAliases(hosts))
         {
+            if (RemoteDeviceIdentity.Same(host.DeviceId, RemoteDeviceIdentity.LocalId) ||
+                NetworkUtils.IsLikelyLocalEndpoint(host.Address, host.MachineName, localAddresses)) continue;
             SavedRemoteDevice? savedDevice = FindSavedForDiscovery(savedDevices, host.Address, host.Port, host.DeviceId);
             devices.Add(RemoteDeviceListItem.FromDiscovered(host, savedDevice));
             seenKeys.Add(MakeDeviceListKey(host.Address, host.Port, host.DeviceId ?? savedDevice?.DeviceId));
@@ -6472,7 +6475,8 @@ public sealed partial class MainForm : Form
 
     private static bool IsLocalSavedRemoteDevice(SavedRemoteDevice device, IReadOnlySet<string> localAddresses)
     {
-        return NetworkUtils.IsLikelyLocalEndpoint(device.Address, device.MachineName, localAddresses);
+        return RemoteDeviceIdentity.Same(device.DeviceId, RemoteDeviceIdentity.LocalId) ||
+            NetworkUtils.IsLikelyLocalEndpoint(device.Address, device.MachineName, localAddresses);
     }
 
     private static string MakeDeviceKey(string address, int port)

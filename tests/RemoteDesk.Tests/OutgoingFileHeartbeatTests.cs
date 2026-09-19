@@ -28,7 +28,7 @@ public sealed class OutgoingFileHeartbeatTests
     [Fact]
     public void OldUploadCompletionCannotClearNewConnectionGrace()
     {
-        using var viewer = new RemoteViewerClient();
+        using var viewer = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var oldConnection = new CancellationTokenSource();
         using var newConnection = new CancellationTokenSource();
         viewer.BeginOutgoingFileTransfer(oldConnection);
@@ -45,7 +45,7 @@ public sealed class OutgoingFileHeartbeatTests
     [Fact]
     public void CancelledConnectionGetsNoUploadGrace()
     {
-        using var viewer = new RemoteViewerClient();
+        using var viewer = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var connection = new CancellationTokenSource();
         viewer.BeginOutgoingFileTransfer(connection);
         connection.Cancel();
@@ -65,7 +65,7 @@ public sealed class OutgoingFileHeartbeatTests
     [Fact]
     public void SuccessfulUnconfirmedUploadKeepsOnlyItsOwnersDeliveryGrace()
     {
-        using var viewer = new RemoteViewerClient();
+        using var viewer = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var connection = new CancellationTokenSource();
         using var other = new CancellationTokenSource();
         viewer.BeginOutgoingFileTransfer(connection);
@@ -83,7 +83,7 @@ public sealed class OutgoingFileHeartbeatTests
     [Fact]
     public void OldUnconfirmedCompletionCannotReplaceNewConnectionsActiveUpload()
     {
-        using var viewer = new RemoteViewerClient();
+        using var viewer = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var oldConnection = new CancellationTokenSource();
         using var newConnection = new CancellationTokenSource();
         viewer.BeginOutgoingFileTransfer(oldConnection);
@@ -98,7 +98,7 @@ public sealed class OutgoingFileHeartbeatTests
     [Fact]
     public void NewUploadReplacesPriorDeliveryDrainAndAcknowledgedCompletionClearsIt()
     {
-        using var viewer = new RemoteViewerClient();
+        using var viewer = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var connection = new CancellationTokenSource();
         viewer.BeginOutgoingFileTransfer(connection);
         viewer.EndOutgoingFileTransfer(connection, pendingDelivery: true);

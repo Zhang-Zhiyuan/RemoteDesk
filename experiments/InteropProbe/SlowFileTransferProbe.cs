@@ -30,7 +30,7 @@ internal static class SlowFileTransferProbe
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Server.ReceiveBufferSize = receiveBufferBytes;
         listener.Start();
-        using var viewer = new RemoteViewerClient(() => unusedViewerReceive, _ => Task.CompletedTask);
+        using var viewer = new RemoteViewerClient(allowLocalConnectionsForTesting: true, () => unusedViewerReceive, _ => Task.CompletedTask);
         string password = Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
         byte[] sourceBytes = RandomNumberGenerator.GetBytes(fileLength);
         string sourcePath = Path.Combine(fixture, "generated-1MiB.bin");

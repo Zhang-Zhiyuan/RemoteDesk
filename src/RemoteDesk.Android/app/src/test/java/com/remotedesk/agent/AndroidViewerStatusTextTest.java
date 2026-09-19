@@ -9,6 +9,13 @@ import java.net.SocketTimeoutException;
 import org.junit.Test;
 
 public final class AndroidViewerStatusTextTest {
+    @Test public void terminalFailureNoLongerClaimsEncryptionOrWaitingForFrames() {
+        assertEquals("连接未建立 · 请返回选择其他设备", AndroidViewerStatusText.terminalConnectionDetail(false));
+    }
+
+    @Test public void terminalCloseOfEstablishedConnectionExplainsHowToResume() {
+        assertEquals("连接已结束 · 请返回重新连接", AndroidViewerStatusText.terminalConnectionDetail(true));
+    }
     private static final String TRAILER =
         "RemoteDesk.CaptureTargetStatus/v1|unavailable|QQ==|Qg==|3";
 

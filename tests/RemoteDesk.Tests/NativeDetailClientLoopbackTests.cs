@@ -57,7 +57,7 @@ public sealed class NativeDetailClientLoopbackTests
             await release.Task.WaitAsync(timeout.Token);
         }
         Task host = Host();
-        using var client = new RemoteViewerClient { EnableNativeDetailReception = true };
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true) { EnableNativeDetailReception = true };
         client.FrameReceived += frame => frames.Writer.TryWrite(frame);
         Exception? testFailure = null;
         try
@@ -133,7 +133,7 @@ public sealed class NativeDetailClientLoopbackTests
                     (await Protocol.ReadMessageAsync(stream, session, timeout.Token)).Type);
         }
         Task host = Host();
-        using var client = new RemoteViewerClient { EnableNativeDetailReception = optIn };
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true) { EnableNativeDetailReception = optIn };
         client.FrameReceived += frame => received.TrySetResult(frame);
         try
         {
@@ -156,7 +156,7 @@ public sealed class NativeDetailClientLoopbackTests
     [Fact]
     public async Task LocalOffIsImmediateEvenWhenNoNetworkRequestCanBeSent()
     {
-        using var client = new RemoteViewerClient { EnableNativeDetailReception = true };
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true) { EnableNativeDetailReception = true };
         client.NativeDetails.BeginRequest(NativeDetailSessionTests.Request());
         Assert.False(await client.RequestNativeDetailsAsync(new(256, 128), new(0, 0, 256, 128), enabled: false));
         Assert.False(client.NativeDetails.IsEnabled);
@@ -196,7 +196,7 @@ public sealed class NativeDetailClientLoopbackTests
             await release.Task.WaitAsync(timeout.Token);
         }
         Task host = Host();
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         try
         {
             await client.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port, Password,
@@ -233,7 +233,7 @@ public sealed class NativeDetailClientLoopbackTests
     [Fact]
     public void LateTcpCallbackFromRetiredConnectionCannotPublishLegacyOrNativeFrames()
     {
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var retired = new CancellationTokenSource();
         int published = 0;
         client.FrameReceived += _ => published++;

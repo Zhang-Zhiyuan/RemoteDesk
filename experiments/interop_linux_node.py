@@ -51,6 +51,11 @@ def source(output):
     button.place(x=100, y=350, width=700, height=100)
     editor = tk.Entry(root, textvariable=text, font=("monospace", 28))
     editor.place(x=100, y=580, width=750, height=80)
+    # This synthetic borderless target deliberately bypasses window-manager
+    # focus handling. Openbox can take the X11 focus after our initial startup
+    # focus_force(), leaving a Tk caret but sending all keyboard input elsewhere.
+    # Acquire focus only when the test actually clicks this owned text field.
+    editor.bind("<ButtonPress-1>", lambda _event: editor.focus_force(), add="+")
     text.trace_add("write", snapshot)
     def animate():
         nonlocal tick

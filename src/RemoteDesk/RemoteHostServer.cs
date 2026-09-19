@@ -1024,7 +1024,8 @@ internal sealed partial class RemoteHostServer : IDisposable
                             if (!captureState.TryGetInputMappingSnapshot(
                                     input,
                                     out Rectangle captureBounds,
-                                    out Size frameSize))
+                                    out Size frameSize,
+                                    out bool? expectedSecureDesktop))
                             {
                                 return;
                             }
@@ -1032,7 +1033,8 @@ internal sealed partial class RemoteHostServer : IDisposable
                             inputInjectionDispatcher.Apply(
                                 input,
                                 captureBounds,
-                                frameSize);
+                                frameSize,
+                                expectedSecureDesktop);
                             interactionActivity.Record();
                         });
                     IPAddress peerAddress = ((IPEndPoint)client.Client.RemoteEndPoint!).Address;
@@ -4363,6 +4365,9 @@ internal sealed partial class RemoteHostServer : IDisposable
 
     internal static bool ShouldGateUnchangedReliableJpeg(bool udpRouteActive) => !udpRouteActive;
 
+    internal static bool CanUseCapturedPointerGeometry(bool captureReady, bool capturedSecureDesktop,
+        bool currentSecureDesktop) => captureReady && capturedSecureDesktop == currentSecureDesktop;
+
     internal static bool ShouldFinishJpegStartupPreview(
         bool startupPreviewOnly,
         bool udpRouteActive) =>
@@ -4406,6 +4411,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                 : null);
         int consecutiveCaptureFailures = 0;
         bool captureUnavailablePublished = false;
+        bool usedSecureTargetFallback = false;
         var unchangedFrames = new UnchangedJpegFrameGate();
         int suppressedFramesInWindow = 0;
         int framesInWindow = 0;
@@ -4466,6 +4472,7 @@ internal sealed partial class RemoteHostServer : IDisposable
             }
             catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or OutOfMemoryException or System.ComponentModel.Win32Exception or System.Runtime.InteropServices.ExternalException)
             {
+                captureState.InvalidateInputCapture();
                 consecutiveCaptureFailures++;
                 // Recovery clears/requalifies the viewer's surface. Its first
                 // image must be resent even if the locked desktop is unchanged.
@@ -4481,7 +4488,9 @@ internal sealed partial class RemoteHostServer : IDisposable
                     WindowsInteractiveDesktopAvailability desktop =
                         WindowsInteractiveDesktopProbe
                             .InspectCurrent();
-                    string displayMessage = desktop.IsAvailable
+                    string displayMessage = ex is SecureDesktopTargetException
+                        ? ex.Message
+                        : desktop.IsAvailable
                         ? "远端屏幕采集暂时不可用；连接仍保持，" +
                           "恢复后画面和操作会自动继续。"
                         : "远端 Windows 当前处于锁屏、UAC 或安全桌面；" +
@@ -4508,6 +4517,14 @@ internal sealed partial class RemoteHostServer : IDisposable
 
                 await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
                 continue;
+            }
+
+            if (capture.IsSecureDesktopFallback != usedSecureTargetFallback)
+            {
+                usedSecureTargetFallback = capture.IsSecureDesktopFallback;
+                captureLog(usedSecureTargetFallback
+                    ? "登录桌面的屏幕标识已变化，临时使用唯一可用屏幕；解锁后恢复原屏幕选择。"
+                    : "原屏幕映射已恢复，已结束登录桌面临时单屏映射。");
             }
 
             if (consecutiveCaptureFailures > 0)
@@ -4888,7 +4905,8 @@ internal sealed partial class RemoteHostServer : IDisposable
                             if (!captureState.TryGetInputMappingSnapshot(
                                     input,
                                     out Rectangle captureBounds,
-                                    out Size frameSize))
+                                    out Size frameSize,
+                                    out bool? expectedSecureDesktop))
                             {
                                 if (IsTargetIndependentPointerRelease(input))
                                 {
@@ -4917,7 +4935,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                                 viewerState,
                                 captureBounds,
                                 frameSize,
-                                inputInjectionDispatcher.Apply,
+                                (command, bounds, size) => inputInjectionDispatcher.Apply(command, bounds, size, expectedSecureDesktop),
                                 ClipboardTextService.ReadClipboardSequenceNumber,
                                 static () => Environment.TickCount64);
                             interactionActivity.Record();
@@ -7503,6 +7521,8 @@ internal sealed partial class RemoteHostServer : IDisposable
         private Rectangle _lastCaptureBounds;
         private Size _lastFrameSize;
         private bool _isTargetAvailable;
+        private bool _inputCaptureReady;
+        private bool _lastCaptureWasSecureDesktop;
         private int _lastScalePercent;
         private int _targetVersion;
         private readonly Action<int>?
@@ -7596,12 +7616,16 @@ internal sealed partial class RemoteHostServer : IDisposable
         public bool TryGetInputMappingSnapshot(
             RemoteInputCommand command,
             out Rectangle bounds,
-            out Size frameSize)
+            out Size frameSize,
+            out bool? expectedSecureDesktop)
         {
+            bool requiresPointerGeometry = RequiresAvailableCaptureTarget(command);
+            bool currentSecureDesktop = requiresPointerGeometry && WindowsSecureDesktopClient.IsRequired;
             lock (_syncRoot)
             {
-                if (!_isTargetAvailable &&
-                    RequiresAvailableCaptureTarget(command))
+                expectedSecureDesktop = requiresPointerGeometry ? _lastCaptureWasSecureDesktop : null;
+                if (requiresPointerGeometry && (!_isTargetAvailable ||
+                    !CanUseCapturedPointerGeometry(_inputCaptureReady, _lastCaptureWasSecureDesktop, currentSecureDesktop)))
                 {
                     bounds = default;
                     frameSize = default;
@@ -7698,7 +7722,7 @@ internal sealed partial class RemoteHostServer : IDisposable
 
                 lock (_syncRoot)
                 {
-                    if (_lastCaptureBounds != capture.Bounds)
+                    if (_lastCaptureBounds != capture.Bounds || _lastCaptureWasSecureDesktop != capture.IsSecureDesktop)
                     {
                         PublishTargetChangeLocked();
                         _target = RefreshTargetMetadata(
@@ -7708,6 +7732,8 @@ internal sealed partial class RemoteHostServer : IDisposable
 
                     _lastCaptureBounds = capture.Bounds;
                     _lastFrameSize = capture.FrameSize;
+                    _lastCaptureWasSecureDesktop = capture.IsSecureDesktop;
+                    _inputCaptureReady = true;
                     _lastScalePercent = clampedScalePercent;
                     targetGeneration =
                         _targetVersion;
@@ -7720,6 +7746,11 @@ internal sealed partial class RemoteHostServer : IDisposable
         public bool RefreshCaptureBounds() =>
             RefreshCaptureBounds(
                 forceRefresh: false);
+
+        public void InvalidateInputCapture()
+        {
+            lock (_syncRoot) _inputCaptureReady = false;
+        }
 
         public bool RefreshCaptureBounds(
             bool forceRefresh)
@@ -7787,6 +7818,8 @@ internal sealed partial class RemoteHostServer : IDisposable
                 _lastCaptureBounds = captureBounds;
                 _lastFrameSize = frameSize;
                 _lastScalePercent = Math.Clamp(scalePercent, 25, 100);
+                _lastCaptureWasSecureDesktop = false;
+                _inputCaptureReady = true;
                 return true;
             }
         }
@@ -7843,6 +7876,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                     _captureService = captureService;
                     _isTargetAvailable =
                         availability.IsAvailable;
+                    _inputCaptureReady = false;
                     _lastCaptureBounds =
                         availability.Bounds;
                     _lastFrameSize = ScreenCaptureService.CalculateFrameSize(
@@ -7872,6 +7906,7 @@ internal sealed partial class RemoteHostServer : IDisposable
 
                 _isTargetAvailable =
                     availability.IsAvailable;
+                _inputCaptureReady = false;
                 if (availability.IsAvailable)
                 {
                     _lastCaptureBounds =

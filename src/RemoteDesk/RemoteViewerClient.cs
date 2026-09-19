@@ -410,7 +410,9 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 update.ConnectionGeneration;
     }
 
-    public RemoteViewerClient() : this(null, null)
+    private readonly bool _allowLocalConnectionsForTesting;
+
+    public RemoteViewerClient() : this(false)
     {
     }
 
@@ -424,7 +426,21 @@ internal sealed partial class RemoteViewerClient : IDisposable
         Func<IEnumerable<string>, Task>? setFileDropListAsync,
         TimeSpan? returnedClipboardFileRequestIdleTimeout = null,
         TimeSpan? connectTimeout = null)
+        : this(false, incomingFileReceiveDirectoryProvider, setFileDropListAsync,
+            returnedClipboardFileRequestIdleTimeout, connectTimeout)
     {
+    }
+
+    // Only friend test/probe assemblies can opt into their owned loopback
+    // fixtures. Production callers use the safe parameterless constructor.
+    internal RemoteViewerClient(
+        bool allowLocalConnectionsForTesting,
+        Func<string>? incomingFileReceiveDirectoryProvider = null,
+        Func<IEnumerable<string>, Task>? setFileDropListAsync = null,
+        TimeSpan? returnedClipboardFileRequestIdleTimeout = null,
+        TimeSpan? connectTimeout = null)
+    {
+        _allowLocalConnectionsForTesting = allowLocalConnectionsForTesting;
         _returnedClipboardFileRequestIdleTimeout =
             returnedClipboardFileRequestIdleTimeout is { } configuredTimeout && configuredTimeout > TimeSpan.Zero
                 ? configuredTimeout
@@ -500,6 +516,9 @@ internal sealed partial class RemoteViewerClient : IDisposable
         {
             throw new InvalidOperationException("请输入目标设备的设备密钥。");
         }
+
+        if (!_allowLocalConnectionsForTesting && relayRoute is not null)
+            SelfConnectionGuard.RejectLocalDevice(relayRoute.DeviceId);
 
         // A remote close can make TcpClient.Connected false a little before the receive loop has
         // finished its owner-bound cleanup. Never publish a new connection over that old owner:
@@ -613,6 +632,11 @@ internal sealed partial class RemoteViewerClient : IDisposable
                         host,
                         port,
                         connectionAttemptToken);
+                    // Check the connected endpoint, not just the typed name:
+                    // DNS aliases, reconnects and adapter changes are covered
+                    // before any password proof can take over the host session.
+                    if (!_allowLocalConnectionsForTesting)
+                        SelfConnectionGuard.RejectLocalPeer(tcpClient.Client);
                 }
                 else
                 {
@@ -2935,6 +2959,10 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 if (_deviceIdentityRequested && _remoteDeviceInfo is not null && _remoteDeviceInfo.DeviceId is null && IsCurrentConnection(ownerConnection) &&
                     IsCurrentInputConnectionGeneration(inputConnectionGeneration))
                 {
+                    // Public NAT hairpin/forwarders may hide a local endpoint.
+                    // Identity is a final stop, not a pre-auth takeover guard.
+                    if (!_allowLocalConnectionsForTesting)
+                        SelfConnectionGuard.RejectLocalDevice(control.Text);
                     _remoteDeviceInfo = _remoteDeviceInfo with { DeviceId = control.Text };
                     DeviceInfoUpdated?.Invoke(new RemoteDeviceInfoUpdate(inputConnectionGeneration, _remoteDeviceInfo));
                     DeviceInfoReceived?.Invoke(_remoteDeviceInfo);

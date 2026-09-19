@@ -244,7 +244,7 @@ public sealed class WindowsRemoteViewerRealMachineTests
                 $"{PasswordVariable} must not be empty when real-machine tests are enabled.");
         }
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var deviceReceived = new TaskCompletionSource<RemoteDeviceDescriptor>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         var firstFrameReceived = new TaskCompletionSource<Size>(
@@ -361,8 +361,8 @@ public sealed class WindowsRemoteViewerRealMachineTests
                 $"{PasswordVariable} must not be empty when real-machine tests are enabled.");
         }
 
-        using var first = new RemoteViewerClient();
-        using var second = new RemoteViewerClient();
+        using var first = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
+        using var second = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var firstFrame = new TaskCompletionSource<object?>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         var secondFrame = new TaskCompletionSource<object?>(
@@ -449,7 +449,7 @@ public sealed class WindowsRemoteViewerRealMachineTests
                 $"{PasswordVariable} must not be empty when real-machine tests are enabled.");
         }
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var firstFrameReceived = new TaskCompletionSource<Size>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         var statuses = new ConcurrentQueue<string>();
@@ -559,7 +559,7 @@ public sealed class WindowsRemoteViewerRealMachineTests
                 $"{PasswordVariable} must not be empty when real-machine tests are enabled.");
         }
 
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         string requestedTarget =
             Environment.GetEnvironmentVariable(TargetVariable) ??
             EntityTargetId;

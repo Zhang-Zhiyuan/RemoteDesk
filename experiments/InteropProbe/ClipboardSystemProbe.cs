@@ -95,7 +95,7 @@ internal static class ClipboardSystemProbe
             }
             catch (Exception error) when (shutdown.Task.IsCompleted && error is IOException or SocketException) { }
         });
-        using var viewer = new RemoteViewerClient();
+        using var viewer = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         await viewer.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port, "synthetic-clipboard", ViewerVideoMode.StableJpeg);
         async Task Read(string reply, string? copiedWhileWaiting, string expected, string name)
         {

@@ -151,7 +151,7 @@ public sealed class RemoteViewerClientFilePasteTests
     [Fact]
     public async Task RequestRemoteClipboardFilesCanSuppressRequestFailureStatus()
     {
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var statuses = new List<string>();
         client.FileTransferStatusReceived += (_success, message) => statuses.Add(message);
 
@@ -163,7 +163,7 @@ public sealed class RemoteViewerClientFilePasteTests
     [Fact]
     public async Task RequestRemoteClipboardFilesReportsManualRequestFailureStatus()
     {
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         var statuses = new List<string>();
         var pendingTransitions = new List<bool>();
         client.FileTransferStatusReceived += (_success, message) => statuses.Add(message);
@@ -212,7 +212,7 @@ public sealed class RemoteViewerClientFilePasteTests
     [Fact]
     public void InvalidRemoteUpdateStartConsumesOutstandingPackageRequest()
     {
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         Assert.True(client.TryReserveSelfUpdatePackageRequest());
         RemoteControlMessage invalidStart = RemoteMessageCodec.DecodeControl(
             RemoteMessageCodec.EncodeRemoteUpdateStart(

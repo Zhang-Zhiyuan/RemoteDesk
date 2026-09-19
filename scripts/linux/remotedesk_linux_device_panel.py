@@ -94,7 +94,8 @@ class DevicePanel(ttk.LabelFrame):
             self.refreshed = time.monotonic()
             if callback: callback([])
             return
-        self.cancel_scan(); self.busy = True; generation = self.epoch; scanner = self.scanner = model.Scanner()
+        self.cancel_scan(); self.busy = True; generation = self.epoch
+        scanner = self.scanner = model.Scanner(local_device_id=getattr(self.app, "relay_device_id", ""))
         self.scan_deadline = time.monotonic()+6; self.scan_callback = callback
         self.status.config(text="正在查找设备和实际端口，不发送设备密钥…")
         nodes = tuple(self.book.nodes)
@@ -141,6 +142,10 @@ class DevicePanel(ttk.LabelFrame):
     def connect_selected(self):
         node, device = self.selection()
         if not node and not device: return
+        try:
+            model.reject_local_identity((device or node).device_id, getattr(self.app, "relay_device_id", ""))
+        except model.SelfConnectionError as error:
+            self.status.config(text=str(error)); return
         self.fill_selection()
         if not node:
             value = simpledialog.askstring("连接设备", f"{device.name or device.address}\n请输入对方设备的设备密钥：", show="*", parent=self.app.root)
@@ -170,7 +175,8 @@ class DevicePanel(ttk.LabelFrame):
                 if not messagebox.askokcancel("设备地址已变化", f"{node.title}\n原地址：{node.address}\n新地址：{new_host}:{new_port}\n\n请确认这是你的设备。成功连接后保留备注并合并记录。", parent=self.app.root): return
             self.app.viewer_host.set(new_host)
             self.app.viewer_port.set("" if self.connection_auto else str(new_port))
-            self.app._begin_direct_viewer(new_host, new_port, password)
+            known_id = device.device_id if device else node.device_id if node else ""
+            self.app._begin_direct_viewer(new_host, new_port, password, device_id=known_id)
         if explicit: begin(); return
         def resolved(found, fallback=True):
             options = model.candidates(node, found) if node else [d for d in found if d.listening]

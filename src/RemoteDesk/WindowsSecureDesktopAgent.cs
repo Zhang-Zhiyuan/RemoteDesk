@@ -130,23 +130,27 @@ internal static class WindowsSecureDesktopAgent
                     else
                     {
                         Rectangle bounds = new(request.Left, request.Top, request.Width, request.Height);
+                        bool captureTargetFallback = false;
                         if (request.Operation == "capture")
                         {
                             // Default and Winlogon can have different orientation
                             // and topology. Resolve the same monitor on this desktop,
                             // and publish its actual bounds with the encoded pixels.
-                            bounds = WindowsSecureDesktopDisplays.ResolveCaptureBounds(request, WindowsSecureDesktopDisplays.GetTargets());
+                            var selection = WindowsSecureDesktopDisplays.ResolveCaptureSelection(request, WindowsSecureDesktopDisplays.GetTargets());
+                            bounds = selection.Bounds;
+                            captureTargetFallback = selection.IsFallback;
                         }
                         else if (request.Operation == "input" &&
                             request.Command.Kind is RemoteInputKind.MouseMove or RemoteInputKind.MouseDown or RemoteInputKind.MouseUp or RemoteInputKind.MouseWheel)
                         {
-                            if (!WindowsSecureDesktopDisplays.Contains(WindowsSecureDesktopDisplays.GetTargets(), bounds))
-                                throw new InvalidOperationException("登录界面屏幕范围已变化，请刷新屏幕。");
+                            if (!WindowsSecureDesktopDisplays.MatchesCurrentBounds(WindowsSecureDesktopDisplays.GetTargets(), bounds))
+                                throw new SecureDesktopTargetException(true);
                         }
                         switch (request.Operation)
                         {
                             case "capture":
                                 (reply, jpeg) = Capture(bounds, request.Quality, request.Scale);
+                                reply = reply with { CaptureTargetFallback = captureTargetFallback };
                                 break;
                             case "input":
                                 var command = request.Command;
@@ -184,7 +188,7 @@ internal static class WindowsSecureDesktopAgent
                         failureLoggedAt = Environment.TickCount64;
                         WindowsSecureDesktopNative.ReportFailure(request.Operation, ex);
                     }
-                    reply = new("error", Error: "登录界面暂不可用，请稍后重试。错误码 " + ex.HResult);
+                    reply = WindowsSecureDesktopProtocol.FailureReply(ex);
                 }
                 WindowsSecureDesktopProtocol.Write(pipe, reply, deadline.Token);
                 if (jpeg is not null) pipe.WriteAsync(jpeg, deadline.Token).AsTask().GetAwaiter().GetResult();

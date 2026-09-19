@@ -31,6 +31,7 @@ public final class RemoteDeskForegroundService extends Service {
     static final String EXTRA_REFRESH_RELAY = "refreshRelay";
     static final String EXTRA_REPORT_ADDRESS = "reportRelayAddress";
     static final String EXTRA_REFRESH_POWER = "refreshPower";
+    static final String EXTRA_REFRESH_STATUS = "refreshHostStatus";
     static final String EXTRA_STOP = "stop";
     static final String EXTRA_COMPATIBLE = "compatibleCapture";
     static final String EXTRA_AUTO_RESUME = "automaticResume";
@@ -95,6 +96,12 @@ public final class RemoteDeskForegroundService extends Service {
         }
     }
 
+    static void refreshStatusSafely(Runnable refresh,
+            java.util.function.Consumer<RuntimeException> onFailure) {
+        try { refresh.run(); }
+        catch (RuntimeException ex) { onFailure.accept(ex); }
+    }
+
     private int handleStartCommand(Intent intent, int startId) {
         if (intent != null && intent.getBooleanExtra(EXTRA_STOP, false)) {
             AndroidHostResume.setArmed(this, false);
@@ -112,6 +119,12 @@ public final class RemoteDeskForegroundService extends Service {
         if (intent != null && intent.getBooleanExtra(EXTRA_REFRESH_POWER, false)) {
             updateStreamingPower();
             if (!running) stopSelf(startId);
+            return activeRestartMode();
+        }
+        if (intent != null && intent.getBooleanExtra(EXTRA_REFRESH_STATUS, false)) {
+            if (running) refreshStatusSafely(this::updateNotification,
+                ex -> AndroidSessionLog.error("Could not refresh the host status notification.", ex));
+            else stopSelf(startId);
             return activeRestartMode();
         }
         if (intent != null && intent.getBooleanExtra(EXTRA_REPORT_ADDRESS, false)) {
@@ -457,7 +470,7 @@ public final class RemoteDeskForegroundService extends Service {
         response.put("DeviceId", AndroidRelaySettings.localDeviceId(this));
         response.put("Port", RemoteDeskProtocol.HOST_PORT);
         response.put("CaptureTarget", activeHost ? RemoteDeskProtocol.CAPTURE_TARGET_NAME
-            : isCapturePaused() ? "录屏已停止，请在手机上重新授权" : "Android App 常驻，等待录屏授权");
+            : idleHostStatus());
         response.put("IsHostRunning", activeHost);
         response.put("CanRemoteStart", false);
         response.put("Platform", RemoteDeskProtocol.PLATFORM_ANDROID);
@@ -472,9 +485,9 @@ public final class RemoteDeskForegroundService extends Service {
 
         String status = hostServer != null && hostServer.isRunning()
             ? AndroidScreenCaptureSession.getInstance().isAccessibilityCapture()
-                ? "兼容被控运行中 · 锁屏后仍可连接 · 56565"
+                ? "兼容被控运行中 · 解锁依赖系统权限 · 56565"
                 : "正在监听 56565，可被局域网连接"
-            : isCapturePaused() ? "录屏已停止，解锁后点此重新授权" : "发现常驻中，等待屏幕录制授权";
+            : idleHostStatus();
         return builder
             .setContentTitle("RemoteDesk Agent")
             .setContentText(status)
@@ -497,6 +510,11 @@ public final class RemoteDeskForegroundService extends Service {
         int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
 
         return PendingIntent.getActivity(this, 0, intent, flags);
+    }
+
+    private String idleHostStatus() {
+        return AndroidHostStatusText.presenceStatus(AndroidHostResume.compatibleSelected(this),
+            RemoteDeskAccessibilityService.canCaptureScreen(), isCapturePaused());
     }
 
     @SuppressWarnings("deprecation")

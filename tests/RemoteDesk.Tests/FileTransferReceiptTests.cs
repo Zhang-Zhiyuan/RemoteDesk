@@ -47,7 +47,7 @@ public sealed class FileTransferReceiptTests
                 return;
             }
         }, timeout.Token);
-        using var viewer = new RemoteViewerClient();
+        using var viewer = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         viewer.FileSaveConfirmationTimeout = TimeSpan.FromMilliseconds(180);
         try {
             await viewer.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port, "receipt-fixture", ViewerVideoMode.StableJpeg);
