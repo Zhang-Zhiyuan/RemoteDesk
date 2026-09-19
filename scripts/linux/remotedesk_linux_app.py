@@ -3070,8 +3070,12 @@ def safe_path_size(
     return safe_transfer_path_size(path, cancel_event=cancel_event)
 
 
-def create_directory_archive(directory: Path, source_size: int | None = None) -> Path:
-    return create_safe_directory_archive(directory, source_size)
+def create_directory_archive(
+    directory: Path,
+    source_size: int | None = None,
+    cancel_event: threading.Event | None = None,
+) -> Path:
+    return create_safe_directory_archive(directory, source_size, cancel_event=cancel_event)
 
 
 def create_directory_archive_name(directory: Path) -> str:
@@ -3629,12 +3633,12 @@ class ViewerConnection:
             display_name = path.name if transfer_name == path.name else f"{path.name} -> {transfer_name}"
             return path, transfer_name, display_name, None
         if path.is_dir():
-            source_size = safe_path_size(path)
+            source_size = safe_path_size(path, cancel_event=self.stop_event)
             if source_size > MAX_FILE_TRANSFER_BYTES:
                 raise ProtocolError(f"文件夹超过 RemoteDesk 传输上限：{source_size} bytes")
             transfer_name = create_directory_archive_name(path)
             self._put_event("viewer_status", f"正在打包文件夹：{path.name} ({source_size} bytes)")
-            archive = create_directory_archive(path, source_size)
+            archive = create_directory_archive(path, source_size, cancel_event=self.stop_event)
             return archive, transfer_name, f"{path.name} -> {transfer_name}", archive
         raise FileNotFoundError("只支持发送文件或文件夹。")
 
@@ -7057,7 +7061,7 @@ class RemoteDeskLinuxApp:
             item = items[tree.index(selection[0])]
             selected_details.configure(state=tk.NORMAL)
             selected_details.delete("1.0", tk.END)
-            selected_details.insert("1.0", f"文件名：{item.transfer_name}\n接收位置：{item.destination_path}\n原始位置：{item.source_path}"
+            selected_details.insert("1.0", f"接收位置：{item.destination_path}\n文件名：{item.transfer_name}\n原始位置：{item.source_path}"
                                     + (f"\n说明：{note}" if note else ""))
             selected_details.configure(state=tk.DISABLED)
         tree.bind("<<TreeviewSelect>>", show_selected_details)

@@ -7,6 +7,24 @@ using Microsoft.Win32.SafeHandles;
 
 namespace RemoteDesk;
 
+internal enum SecureDesktopIdentityQuery
+{
+    OpenProcess,
+    OpenProcessToken,
+    QueryFullProcessImageName,
+    ProcessIdToSessionId,
+    GetTokenElevation,
+    GetNamedPipeServerProcessId
+}
+
+internal sealed class SecureDesktopIdentityQueryException : Win32Exception
+{
+    internal SecureDesktopIdentityQuery Query { get; }
+
+    internal SecureDesktopIdentityQueryException(SecureDesktopIdentityQuery query, int error)
+        : base(error, "Desktop helper identity query failed.") => Query = query;
+}
+
 // The service duplicates only its OWN SYSTEM token into the authorized console
 // session. It never opens winlogon/lsass tokens or changes desktop/UAC ACLs.
 internal static class WindowsSecureDesktopNative
@@ -68,19 +86,19 @@ internal static class WindowsSecureDesktopNative
     internal static (string? Sid, bool Elevated, string Image, int Session) ProcessIdentity(uint processId)
     {
         nint process = OpenProcess(0x1000, false, processId);
-        Check(process != 0);
+        CheckIdentityQuery(process != 0, SecureDesktopIdentityQuery.OpenProcess);
         nint token = 0;
         try
         {
-            Check(OpenProcessToken(process, 8, out token));
+            CheckIdentityQuery(OpenProcessToken(process, 8, out token), SecureDesktopIdentityQuery.OpenProcessToken);
             using var identity = new WindowsIdentity(token);
             var path = new StringBuilder(32768);
             int length = path.Capacity;
-            Check(QueryFullProcessImageName(process, 0, path, ref length));
-            Check(ProcessIdToSessionId(processId, out uint session));
+            CheckIdentityQuery(QueryFullProcessImageName(process, 0, path, ref length), SecureDesktopIdentityQuery.QueryFullProcessImageName);
+            CheckIdentityQuery(ProcessIdToSessionId(processId, out uint session), SecureDesktopIdentityQuery.ProcessIdToSessionId);
             // Querying elevation does not require TOKEN_DUPLICATE. IsInRole
             // on a foreign primary token attempts impersonation and can throw.
-            Check(GetTokenInformation(token, 20, out int elevated, sizeof(int), out _));
+            CheckIdentityQuery(GetTokenInformation(token, 20, out int elevated, sizeof(int), out _), SecureDesktopIdentityQuery.GetTokenElevation);
             return (identity.User?.Value, elevated != 0,
                 path.ToString(), checked((int)session));
         }
@@ -90,7 +108,12 @@ internal static class WindowsSecureDesktopNative
     internal static uint PipeClientProcessId(SafePipeHandle pipe)
     { Check(GetNamedPipeClientProcessId(pipe, out uint pid)); return pid; }
     internal static uint PipeServerProcessId(SafePipeHandle pipe)
-    { Check(GetNamedPipeServerProcessId(pipe, out uint pid)); return pid; }
+    { CheckIdentityQuery(GetNamedPipeServerProcessId(pipe, out uint pid), SecureDesktopIdentityQuery.GetNamedPipeServerProcessId); return pid; }
+
+    private static void CheckIdentityQuery(bool okay, SecureDesktopIdentityQuery query)
+    {
+        if (!okay) throw new SecureDesktopIdentityQueryException(query, Marshal.GetLastWin32Error());
+    }
 
     internal static void Check(bool okay)
     { if (!okay) throw new Win32Exception(Marshal.GetLastWin32Error()); }

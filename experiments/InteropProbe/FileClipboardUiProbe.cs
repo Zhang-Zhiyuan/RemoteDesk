@@ -49,7 +49,8 @@ internal static class FileClipboardUiProbe
                 if (dialog is null) {
                     var completed = Application.OpenForms.OfType<FileTransferResultDialog>().SingleOrDefault(form => form.Owner == window);
                     if (completed is null) return;
-                    string detail = completed.Controls.OfType<TableLayoutPanel>().Single().Controls.OfType<TextBox>().Single().Text;
+                    string detail = Descendants(completed).OfType<TextBox>()
+                        .Single(control => control.AccessibleName == "实际保存位置和传输结果").Text;
                     var actualFiles = Directory.GetFiles(received).Except(before).ToArray();
                     exactResult = actualFiles.Length == 1 && detail.Contains(actualFiles[0], StringComparison.Ordinal);
                     SaveDialog(completed, Path.Combine(Path.GetDirectoryName(received)!, "result-dialog.png"));
@@ -59,7 +60,7 @@ internal static class FileClipboardUiProbe
                 }
                 sawConfirmation = true;
                 transferredBeforeConfirmation |= Directory.GetFiles(received).Length != before.Length;
-                var grid = dialog.Controls.OfType<TableLayoutPanel>().Single().Controls.OfType<DataGridView>().Single();
+                var grid = Descendants(dialog).OfType<DataGridView>().Single();
                 exactPreview = grid.Rows.Cast<DataGridViewRow>().Any(row => row.DataBoundItem is FileTransferConfirmationItem item &&
                     item.DestinationPath.Contains(Path.Combine(received, Path.GetFileName(source)), StringComparison.Ordinal));
                 SaveDialog(dialog, Path.Combine(Path.GetDirectoryName(received)!, accept ? "confirm-send.png" : "confirm-cancel.png"));
@@ -88,6 +89,16 @@ internal static class FileClipboardUiProbe
 
     private static object? Invoke(object instance, string name, params object[] args) =>
         instance.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(instance, args);
+    // Dialogs may wrap their content in a scrolling viewport. Find the owned
+    // semantic control rather than assuming its layout container is a Form child.
+    private static IEnumerable<Control> Descendants(Control parent)
+    {
+        foreach (Control child in parent.Controls)
+        {
+            yield return child;
+            foreach (Control nested in Descendants(child)) yield return nested;
+        }
+    }
     private static void SaveDialog(Form dialog, string path)
     {
         using var bitmap = new Bitmap(dialog.Width, dialog.Height);

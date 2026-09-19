@@ -5,6 +5,35 @@ using System.Security.Principal;
 
 namespace RemoteDesk;
 
+internal enum SecureDesktopFailureStage
+{
+    RequestValidation,
+    Elevation,
+    Registration,
+    MissingInstallation,
+    DisabledInstallation,
+    InstallationValidation,
+    PipeConnection,
+    ServerIdentity,
+    Exchange,
+    HelperRejected
+}
+
+internal enum SecureDesktopServerIdentityMismatch
+{
+    SystemAccount,
+    Session,
+    Executable
+}
+
+internal sealed class SecureDesktopServerIdentityException : UnauthorizedAccessException
+{
+    internal SecureDesktopServerIdentityMismatch Mismatch { get; }
+
+    internal SecureDesktopServerIdentityException(SecureDesktopServerIdentityMismatch mismatch)
+        : base("Desktop helper identity does not match the protected installation.") => Mismatch = mismatch;
+}
+
 internal sealed class WindowsSecureDesktopClient : IDisposable
 {
     private static readonly Lazy<bool> SystemProcess = new(() => WindowsSecureDesktopNative.IsSystem);
@@ -86,15 +115,23 @@ internal sealed class WindowsSecureDesktopClient : IDisposable
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             jpeg = null;
+            SecureDesktopFailureStage failureStage = SecureDesktopFailureStage.RequestValidation;
             try
             {
                 WindowsSecureDesktopProtocol.Validate(request);
-                EnsureConnected();
+                EnsureConnected(ref failureStage);
+                failureStage = SecureDesktopFailureStage.Exchange;
                 using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
                 WindowsSecureDesktopProtocol.Write(_pipe!, request, deadline.Token);
                 SecureDesktopReply reply = WindowsSecureDesktopProtocol.Read<SecureDesktopReply>(_pipe!, deadline.Token);
                 if (reply.Status is not ("active" or "inactive" or "error")) throw new InvalidDataException("辅助服务响应无效。");
-                if (reply.Status == "error") throw new InvalidOperationException(reply.Error ?? "登录界面暂不可用。");
+                if (reply.Status == "error")
+                {
+                    failureStage = SecureDesktopFailureStage.HelperRejected;
+                    // The stage is actionable without forwarding helper exception text,
+                    // which can contain desktop input or other private native details.
+                    throw new InvalidOperationException("Desktop helper rejected the request.");
+                }
                 if (request.Operation == "capture" && reply.Status == "active")
                 {
                     WindowsSecureDesktopProtocol.ValidateFrameSize(reply.FrameWidth, reply.FrameHeight);
@@ -111,31 +148,88 @@ internal sealed class WindowsSecureDesktopClient : IDisposable
                 return reply;
             }
             catch (Exception ex) when (ex is IOException or OperationCanceledException or System.ComponentModel.Win32Exception or
-                System.Text.Json.JsonException or UnauthorizedAccessException or InvalidOperationException)
+                System.Text.Json.JsonException or UnauthorizedAccessException or InvalidOperationException or
+                ArgumentException or System.Security.SecurityException)
             {
                 DisconnectCore();
-                throw new InvalidOperationException("锁屏控制暂不可用：请在被控端启用“锁屏控制”，并以管理员身份运行 RemoteDesk。", ex);
+                throw new InvalidOperationException(DescribeFailure(failureStage, ex), ex);
             }
         }
     }
 
-    private void EnsureConnected()
+    internal static string DescribeFailure(SecureDesktopFailureStage stage, Exception error)
+    {
+        // Only fixed labels and numeric OS error codes leave this boundary.
+        // Never append error.Message, process paths/SIDs or request contents.
+        string reason = stage switch
+        {
+            SecureDesktopFailureStage.Elevation => "当前被控端没有管理员权限；请在被控电脑上以管理员身份重新运行 RemoteDesk。",
+            SecureDesktopFailureStage.Registration => "无法读取当前用户的锁屏服务信息；请在被控电脑上检查“锁屏控制”安装和系统服务权限。",
+            SecureDesktopFailureStage.MissingInstallation => "未找到当前用户的有效锁屏控制安装；请在被控电脑上选择“设置锁屏控制 → 安装 / 更新锁屏控制”。",
+            SecureDesktopFailureStage.DisabledInstallation => "当前用户的锁屏控制服务未启用；如需恢复，请在被控电脑上选择“设置锁屏控制 → 安装 / 更新锁屏控制”。",
+            SecureDesktopFailureStage.InstallationValidation => "锁屏辅助程序的文件或权限校验未通过，已拒绝使用；请在被控电脑上重新安装 / 更新锁屏控制。",
+            SecureDesktopFailureStage.PipeConnection => "锁屏控制已启用，但辅助进程尚未连接成功；请稍后重试，持续失败时检查被控电脑的锁屏服务是否正在运行。",
+            SecureDesktopFailureStage.ServerIdentity when error is SecureDesktopIdentityQueryException native =>
+                $"锁屏辅助进程身份信息读取失败（API {native.Query}，Win32 {native.NativeErrorCode}），已拒绝连接；请在被控电脑上检查锁屏辅助服务。",
+            SecureDesktopFailureStage.ServerIdentity when error is SecureDesktopServerIdentityException mismatch =>
+                DescribeIdentityMismatch(mismatch.Mismatch),
+            SecureDesktopFailureStage.ServerIdentity => "锁屏辅助进程身份校验未通过，已拒绝连接；请在被控电脑上检查或重新安装锁屏控制。",
+            SecureDesktopFailureStage.HelperRejected => "锁屏辅助进程已连接，但暂时无法处理当前登录桌面；请稍后重试，持续失败时检查 Windows 应用日志中的 RemoteDesk 事件。",
+            SecureDesktopFailureStage.RequestValidation => "锁屏请求参数无效；请刷新远程屏幕后重试。",
+            _ when error is OperationCanceledException => "锁屏辅助进程响应超时；连接已释放，请稍后重试。",
+            _ when error is InvalidDataException or System.Text.Json.JsonException => "锁屏辅助进程返回了无效响应；连接已释放，请在被控电脑上检查或更新锁屏控制。",
+            _ => "与锁屏辅助进程的通信中断；连接已释放，请稍后重试，持续失败时检查被控电脑上的辅助服务。"
+        };
+        return "锁屏控制暂不可用：" + reason;
+    }
+
+    private static string DescribeIdentityMismatch(SecureDesktopServerIdentityMismatch mismatch) => mismatch switch
+    {
+        SecureDesktopServerIdentityMismatch.SystemAccount => "锁屏辅助进程并非预期的 SYSTEM 身份，已拒绝连接；请在被控电脑上检查锁屏服务安装。",
+        SecureDesktopServerIdentityMismatch.Session => "锁屏辅助进程不在当前用户会话，已拒绝连接；请在被控电脑上检查锁屏服务。",
+        _ => "锁屏辅助进程的运行程序与已注册安装不一致，已拒绝连接；请在被控电脑上检查或更新锁屏控制。"
+    };
+
+    internal static SecureDesktopServerIdentityMismatch? FindServerIdentityMismatch(
+        string? actualSid, int actualSession, string actualExecutable, uint expectedSession, string expectedExecutable)
+    {
+        if (actualSid != "S-1-5-18") return SecureDesktopServerIdentityMismatch.SystemAccount;
+        if (actualSession != expectedSession) return SecureDesktopServerIdentityMismatch.Session;
+        if (!string.Equals(actualExecutable, expectedExecutable, StringComparison.OrdinalIgnoreCase))
+            return SecureDesktopServerIdentityMismatch.Executable;
+        return null;
+    }
+
+    private void EnsureConnected(ref SecureDesktopFailureStage failureStage)
     {
         if (_pipe is not null) return;
+        failureStage = SecureDesktopFailureStage.Elevation;
         if (!WindowsProcessElevation.IsCurrentProcessElevated()) throw new UnauthorizedAccessException();
-        string executable = WindowsSecureDesktopInstallation.InstalledExecutable(_ownerSid)
-            ?? throw new InvalidOperationException("未安装或未启用锁屏控制服务。");
+        failureStage = SecureDesktopFailureStage.Registration;
+        string? executable = WindowsSecureDesktopInstallation.InstalledExecutable(_ownerSid, requireEnabled: false);
+        if (executable is null)
+        {
+            failureStage = SecureDesktopFailureStage.MissingInstallation;
+            throw new InvalidOperationException("No owned secure desktop installation.");
+        }
+        if (WindowsSecureDesktopInstallation.InstalledExecutable(_ownerSid) is null)
+        {
+            failureStage = SecureDesktopFailureStage.DisabledInstallation;
+            throw new InvalidOperationException("Owned secure desktop installation is disabled.");
+        }
+        failureStage = SecureDesktopFailureStage.InstallationValidation;
         WindowsPersistentStartup.ValidateProtectedFile(executable);
+        failureStage = SecureDesktopFailureStage.PipeConnection;
         var pipe = new NamedPipeClientStream(".", WindowsSecureDesktopProtocol.PipeName(_ownerSid, _session),
             PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Identification);
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
             pipe.ConnectAsync(timeout.Token).GetAwaiter().GetResult();
+            failureStage = SecureDesktopFailureStage.ServerIdentity;
             var identity = WindowsSecureDesktopNative.ProcessIdentity(WindowsSecureDesktopNative.PipeServerProcessId(pipe.SafePipeHandle));
-            if (identity.Sid != "S-1-5-18" || identity.Session != _session ||
-                !string.Equals(identity.Image, executable, StringComparison.OrdinalIgnoreCase))
-                throw new UnauthorizedAccessException("桌面辅助服务身份无效。");
+            if (FindServerIdentityMismatch(identity.Sid, identity.Session, identity.Image, _session, executable) is { } mismatch)
+                throw new SecureDesktopServerIdentityException(mismatch);
             _pipe = pipe;
             _heartbeat ??= new System.Threading.Timer(_ => Heartbeat(), null, 3000, 3000);
         }

@@ -3,6 +3,7 @@ package com.remotedesk.agent;
 import android.app.AlertDialog;
 import android.content.ContentValues;
 import android.net.Uri;
+import android.os.CancellationSignal;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -76,7 +77,7 @@ final class ReceivedFilesUiProbe {
             // Providers differ: MuMu's MediaStore already excludes pending rows by default.
             // Record this baseline honestly; the explicit IS_PENDING filter is defensive.
             baselinePendingVisible = oldQueryExposesPending;
-            Object listing = call("listReceivedFiles", new Class<?>[0]);
+            Object listing = call("listReceivedFiles", new Class<?>[] { CancellationSignal.class }, new CancellationSignal());
             List<?> files = (List<?>) ViewerProbeApplication.field(listing, "files");
             boolean found = false, premature = false;
             for (Object file : files) {

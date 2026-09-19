@@ -328,6 +328,7 @@ public sealed partial class MainForm : Form
 
             await StartHostAutomaticallyAsync(
                 _resumeHostAfterUpdate);
+            await RecoverLockScreenAfterUpdateAsync();
             await MigrateLegacyStartupAsync();
             await DiscoverHostsAsync(silent: true);
             await RefreshRelayDevicesAsync(silent: true);
@@ -3833,6 +3834,28 @@ public sealed partial class MainForm : Form
             {
                 _hostToggleButton.Enabled = true;
             }
+        }
+    }
+
+    private async Task RecoverLockScreenAfterUpdateAsync()
+    {
+        // The host and relay are already listening. A short-lived child owns
+        // the SCM stop/start transaction so closing this UI cannot abandon it.
+        if (!_resumeHostAfterUpdate || _isClosing || IsDisposed) return;
+        try
+        {
+            bool recovered = await WindowsSecureDesktopInstallation
+                .RecoverSharedExecutableAfterUpdateAsync();
+            if (recovered && !_isClosing && !IsDisposed)
+                AppendHostLog("更新后的锁屏辅助进程已重新加载，身份校验通过；原有权限和启动设置保持不变。");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or
+            InvalidOperationException or ArgumentException or TimeoutException or
+            System.ComponentModel.Win32Exception or System.Security.SecurityException)
+        {
+            if (!_isClosing && !IsDisposed)
+                AppendHostLog("更新后的锁屏辅助服务未恢复（" + error.GetType().Name +
+                    "）；被控端仍保持运行，请检查“设置锁屏控制”。");
         }
     }
 

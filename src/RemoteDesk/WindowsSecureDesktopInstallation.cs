@@ -11,6 +11,7 @@ internal static class WindowsSecureDesktopInstallation
     internal const string InstallArgument = "--install-secure-desktop";
     internal const string DisableArgument = "--disable-secure-desktop";
     internal const string ServiceArgument = "--secure-desktop-service";
+    internal const string RecoverAfterUpdateArgument = "--recover-secure-desktop-after-update";
     private const uint ServiceAllAccess = 0xF01FF;
 
     internal static string ValidateSid(string value)
@@ -44,6 +45,161 @@ internal static class WindowsSecureDesktopInstallation
         return key.GetValue("ImagePath") is string command ? ReadOwnedExecutable(command, sid) : null;
     }
 
+    internal static bool RecoverSharedExecutableAfterUpdate()
+    {
+        string sid = WindowsPersistentStartup.UserSid;
+        return RecoverSharedExecutableAfterUpdate(
+            WindowsProcessElevation.IsCurrentProcessElevated(), Path.GetFullPath(Application.ExecutablePath),
+            () => InstalledExecutable(sid), WindowsPersistentStartup.ValidateProtectedFile,
+            QueryAuthenticatedStatus, guard => RestartExistingService(sid, guard), WaitForAuthenticatedStatus);
+    }
+
+    internal static async Task<bool> RecoverSharedExecutableAfterUpdateAsync()
+    {
+        if (!WindowsProcessElevation.IsCurrentProcessElevated()) return false;
+        // Recovery must outlive a normal parent/UI exit once STOP has been sent.
+        // This fixed-purpose child is not a shell and cannot run arbitrary commands.
+        // Disposing its Process handle does not terminate the child, and no UI
+        // lifetime cancellation token is attached to its bounded SCM/IPC work.
+        using Process child = Process.Start(CreateRecoveryStartInfo(
+            Path.GetFullPath(Application.ExecutablePath), WindowsPersistentStartup.UserSid))
+            ?? throw new InvalidOperationException("无法启动更新后的锁屏辅助恢复程序。");
+        await child.WaitForExitAsync().ConfigureAwait(false);
+        return InterpretRecoveryExitCode(child.ExitCode);
+    }
+
+    internal static ProcessStartInfo CreateRecoveryStartInfo(string executable, string sid)
+    {
+        if (!Path.IsPathFullyQualified(executable))
+            throw new ArgumentException("锁屏辅助恢复需要完整的当前程序路径。", nameof(executable));
+        ValidateSid(sid);
+        var start = new ProcessStartInfo(Path.GetFullPath(executable))
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden
+        };
+        start.ArgumentList.Add(RecoverAfterUpdateArgument);
+        start.ArgumentList.Add(sid);
+        return start;
+    }
+
+    internal static bool InterpretRecoveryExitCode(int exitCode) => exitCode switch
+    {
+        0 => false,
+        2 => true,
+        _ => throw new InvalidOperationException("更新后的锁屏辅助恢复未完成；被控端仍保持运行，请检查锁屏控制服务。")
+    };
+
+    internal static int ExecuteRecoveryCommand(string[] args, string currentSid, bool elevated, Func<bool> recover)
+    {
+        try
+        {
+            if (!elevated || args.Length != 2 || args[0] != RecoverAfterUpdateArgument ||
+                args[1] != currentSid || ValidateSid(args[1]) != currentSid)
+                return 1;
+            return recover() ? 2 : 0;
+        }
+        catch
+        {
+            // The parent sees only this fixed result, never native exception
+            // messages, process paths or identity details from this CLI boundary.
+            return 1;
+        }
+    }
+
+    // The startup caller restricts this to --resume-host-after-update. The
+    // separate policy boundary also fails closed if installation ownership,
+    // enablement or the protected executable changes during recovery.
+    internal static bool RecoverSharedExecutableAfterUpdate(bool isElevated, string currentExecutable,
+        Func<string?> readEnabledExecutable, Action<string> validateProtectedFile, Action queryStatus,
+        Action<Action> restartService, Action<Action> waitForAuthenticatedStatus)
+    {
+        if (!isElevated) return false;
+        string? installed = readEnabledExecutable();
+        if (installed is null || !string.Equals(installed, currentExecutable, StringComparison.OrdinalIgnoreCase))
+            return false;
+        validateProtectedFile(installed);
+        try
+        {
+            queryStatus();
+            return false; // Already authenticated; never restart a healthy helper.
+        }
+        catch (InvalidOperationException ex) when (ex.InnerException is SecureDesktopServerIdentityException
+            { Mismatch: SecureDesktopServerIdentityMismatch.Executable })
+        {
+            // Updating the shared EXE can rename the still-running helper's
+            // process image to the old backup. Keep the exact identity check:
+            // reload only this existing service, never accept the backup path.
+        }
+
+        void EnsureUnchangedOwnership()
+        {
+            if (!string.Equals(readEnabledExecutable(), installed, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("锁屏控制安装在恢复期间已更改，已停止恢复；请检查当前安装状态。");
+            validateProtectedFile(installed);
+            if (!string.Equals(readEnabledExecutable(), installed, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("锁屏控制安装在恢复期间已更改，已停止恢复；请检查当前安装状态。");
+        }
+
+        EnsureUnchangedOwnership();
+        restartService(EnsureUnchangedOwnership);
+        EnsureUnchangedOwnership();
+        waitForAuthenticatedStatus(EnsureUnchangedOwnership);
+        EnsureUnchangedOwnership();
+        return true;
+    }
+
+    private static void QueryAuthenticatedStatus()
+    {
+        using var client = new WindowsSecureDesktopClient();
+        client.QueryStatus();
+    }
+
+    private static void WaitForAuthenticatedStatus(Action ensureUnchangedOwnership)
+    {
+        var ready = Stopwatch.StartNew();
+        Exception? lastFailure = null;
+        while (ready.Elapsed < TimeSpan.FromSeconds(10))
+        {
+            ensureUnchangedOwnership();
+            try
+            {
+                QueryAuthenticatedStatus();
+            }
+            catch (InvalidOperationException ex)
+            {
+                lastFailure = ex;
+                Thread.Sleep(250);
+                continue;
+            }
+            ensureUnchangedOwnership();
+            return;
+        }
+        throw new InvalidOperationException("更新后的锁屏辅助进程尚未通过身份验证；请检查锁屏控制服务。", lastFailure);
+    }
+
+    private static void RestartExistingService(string sid, Action ensureUnchangedOwnership)
+    {
+        ensureUnchangedOwnership();
+        nint manager = OpenSCManager(null, null, 1); // SC_MANAGER_CONNECT only.
+        WindowsSecureDesktopNative.Check(manager != 0);
+        nint service = 0;
+        try
+        {
+            // QUERY_STATUS | START | STOP. No configuration/write/install rights.
+            service = OpenService(manager, ServiceName(sid), 0x04 | 0x10 | 0x20);
+            WindowsSecureDesktopNative.Check(service != 0);
+            ensureUnchangedOwnership();
+            StopAndWait(service);
+            ensureUnchangedOwnership();
+            WindowsSecureDesktopNative.Check(StartService(service, 0, 0));
+            WaitForState(service, 4, TimeSpan.FromSeconds(15));
+            ensureUnchangedOwnership();
+        }
+        finally { if (service != 0) CloseServiceHandle(service); CloseServiceHandle(manager); }
+    }
+
     internal static async Task ChangeAsync(bool enable)
     {
         var info = new ProcessStartInfo(Application.ExecutablePath) { UseShellExecute = true, Verb = "runas" };
@@ -56,6 +212,17 @@ internal static class WindowsSecureDesktopInstallation
 
     internal static bool TryHandleCommand(string[] args)
     {
+        if (args.Length > 0 && args[0] == RecoverAfterUpdateArgument)
+        {
+            try
+            {
+                Environment.ExitCode = ExecuteRecoveryCommand(args, WindowsPersistentStartup.UserSid,
+                    WindowsProcessElevation.IsCurrentProcessElevated(), RecoverSharedExecutableAfterUpdate);
+            }
+            catch { Environment.ExitCode = 1; }
+            if (Environment.ExitCode == 1) Console.Error.WriteLine("RemoteDesk secure desktop recovery failed.");
+            return true;
+        }
         if (args.Length == 0 || args[0] is not (InstallArgument or DisableArgument)) return false;
         bool quiet = args.Length == 3 && args[2] == "--quiet";
         try

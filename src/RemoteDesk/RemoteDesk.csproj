@@ -9,7 +9,7 @@
     <ApplicationIcon>Assets\RemoteDesk.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.0.26</Version>
+    <Version>1.0.27</Version>
     <RemoteDeskBuildStamp Condition="'$(RemoteDeskBuildStamp)' == ''">$([System.DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))</RemoteDeskBuildStamp>
     <InformationalVersion>$(Version)+remotedesk.$(RemoteDeskBuildStamp)</InformationalVersion>
   </PropertyGroup>

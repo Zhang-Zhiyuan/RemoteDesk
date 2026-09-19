@@ -18,7 +18,9 @@ import android.media.projection.MediaProjectionConfig;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.CancellationSignal;
 import android.os.Environment;
+import android.os.OperationCanceledException;
 import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.provider.Settings;
@@ -1268,27 +1270,33 @@ public final class MainActivity extends Activity {
     }
 
     private void showReceivedFiles() {
-        long request = receivedFilesLoad.begin();
+        CancellationSignal cancellation = new CancellationSignal();
+        long request = receivedFilesLoad.begin(cancellation::cancel);
         if (request == 0) {
             Toast.makeText(this, "仍在读取接收文件，请稍候。", Toast.LENGTH_SHORT).show();
             return;
         }
         AlertDialog progress = new AlertDialog.Builder(this).setTitle("接收文件")
             .setMessage("正在读取已保存的文件…")
-            .setNegativeButton("取消", (dialog, which) -> receivedFilesLoad.cancel())
-            .setOnCancelListener(dialog -> receivedFilesLoad.cancel()).create();
+            .setNegativeButton("取消", (dialog, which) -> receivedFilesLoad.cancel(request))
+            .setOnCancelListener(dialog -> receivedFilesLoad.cancel(request)).create();
         receivedFilesLoadingDialog = progress;
         progress.show();
         try {
             receivedFilesExecutor.execute(() -> {
-                ReceivedFileListing listing = listReceivedFiles();
-                boolean deliver = receivedFilesLoad.finish(request);
-                runOnUiThread(() -> {
-                    progress.dismiss();
-                    if (receivedFilesLoadingDialog == progress) receivedFilesLoadingDialog = null;
-                    if (!deliver || !receivedFilesLoad.isCurrent(request) || !activityResumed || isFinishing() || isDestroyed()) return;
-                    showReceivedFileListing(listing);
-                });
+                ReceivedFileListing listing = null;
+                try { listing = listReceivedFiles(cancellation); }
+                catch (OperationCanceledException ignored) { }
+                finally {
+                    boolean deliver = receivedFilesLoad.finish(request);
+                    ReceivedFileListing result = listing;
+                    runOnUiThread(() -> {
+                        progress.dismiss();
+                        if (receivedFilesLoadingDialog == progress) receivedFilesLoadingDialog = null;
+                        if (!deliver || result == null || !receivedFilesLoad.isCurrent(request) || !activityResumed || isFinishing() || isDestroyed()) return;
+                        showReceivedFileListing(result);
+                    });
+                }
             });
         } catch (RuntimeException failure) {
             receivedFilesLoad.finish(request);
@@ -1319,22 +1327,28 @@ public final class MainActivity extends Activity {
         listingDialog.show();
     }
 
-    private ReceivedFileListing listReceivedFiles() {
+    private ReceivedFileListing listReceivedFiles(CancellationSignal cancellation) {
+        cancellation.throwIfCanceled();
         List<ReceivedFileItem> files = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            try { addPublicReceivedFiles(files); }
+            try { addPublicReceivedFiles(files, cancellation); }
+            catch (OperationCanceledException cancelled) { throw cancelled; }
             catch (Exception failure) { warnings.add("公共下载目录读取失败：" + formatExceptionMessage(failure)); }
         }
 
-        try { addAppSpecificReceivedFiles(files); }
+        cancellation.throwIfCanceled();
+        try { addAppSpecificReceivedFiles(files, cancellation); }
+        catch (OperationCanceledException cancelled) { throw cancelled; }
         catch (Exception failure) { warnings.add("应用接收目录读取失败：" + formatExceptionMessage(failure)); }
+        cancellation.throwIfCanceled();
         files.sort(Comparator.comparingLong((ReceivedFileItem item) -> item.modifiedAt).reversed());
+        cancellation.throwIfCanceled();
         return new ReceivedFileListing(files, String.join("\n", warnings));
     }
 
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
-    private void addPublicReceivedFiles(List<ReceivedFileItem> files) {
+    private void addPublicReceivedFiles(List<ReceivedFileItem> files, CancellationSignal cancellation) {
         String relativePath = Environment.DIRECTORY_DOWNLOADS + File.separator +
             AndroidFileTransferReceiver.RECEIVE_FOLDER_NAME + File.separator;
         String[] projection = {
@@ -1349,7 +1363,9 @@ public final class MainActivity extends Activity {
             projection,
             MediaStore.MediaColumns.RELATIVE_PATH + "=? AND " + MediaStore.MediaColumns.IS_PENDING + "=0",
             new String[] { relativePath },
-            MediaStore.MediaColumns.DATE_MODIFIED + " DESC")) {
+            MediaStore.MediaColumns.DATE_MODIFIED + " DESC",
+            cancellation)) {
+            cancellation.throwIfCanceled();
             if (cursor == null) {
                 throw new IllegalStateException("系统未返回文件列表，请稍后重试。");
             }
@@ -1358,7 +1374,9 @@ public final class MainActivity extends Activity {
             int nameColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME);
             int sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE);
             int modifiedColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED);
-            while (cursor.moveToNext()) {
+            while (true) {
+                cancellation.throwIfCanceled();
+                if (!cursor.moveToNext()) break;
                 long id = cursor.getLong(idColumn);
                 String name = cursor.getString(nameColumn);
                 long size = cursor.getLong(sizeColumn);
@@ -1371,16 +1389,21 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void addAppSpecificReceivedFiles(List<ReceivedFileItem> files) {
+    private void addAppSpecificReceivedFiles(List<ReceivedFileItem> files, CancellationSignal cancellation) {
+        cancellation.throwIfCanceled();
         File directory = AndroidFileTransferReceiver.getAppSpecificReceiveDirectory(this);
-        File[] localFiles = directory.listFiles(file ->
-            file.isFile() && !AndroidFileTransferReceiver.isOwnedTemporaryFileName(file.getName()));
+        File[] localFiles = directory.listFiles(file -> {
+            cancellation.throwIfCanceled();
+            return file.isFile() && !AndroidFileTransferReceiver.isOwnedTemporaryFileName(file.getName());
+        });
+        cancellation.throwIfCanceled();
         if (localFiles == null) {
             if (directory.exists()) throw new IllegalStateException("接收目录无法读取，请检查存储是否可用。");
             return;
         }
 
         for (File file : localFiles) {
+            cancellation.throwIfCanceled();
             files.add(new ReceivedFileItem(
                 file.getName(),
                 file.length(),

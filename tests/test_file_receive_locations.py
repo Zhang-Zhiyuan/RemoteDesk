@@ -169,17 +169,43 @@ class FileTransferDialogTkTests(unittest.TestCase):
                     self.root.update()
                     text = next(c for c in self.descendants(dialog) if isinstance(c, app.tk.Text))
                     self.assertIn(destination, text.get("1.0", app.tk.END))
+                    self.assertIn(item.source_path, text.get("1.0", app.tk.END))
                     self.assertIn(note, text.get("1.0", app.tk.END))
+                    self.assertTrue(text.get("1.0", app.tk.END).startswith("接收位置：" + destination))
                     # Even a viewport smaller than the dialog's normal minimum
                     # must retain a readable line and its working scrollbar.
                     self.assertGreaterEqual(text.winfo_height(), 40)
+                    # Read-only details must still permit selecting the complete
+                    # receiving path and scrolling to every wrapped source line.
+                    text.tag_add("sel", "1.5", "1.end")
+                    self.assertEqual(destination, text.get(*text.tag_ranges("sel")))
+                    text.tag_remove("sel", "1.0", app.tk.END)
+                    # A resize defers offscreen wrapped-line measurements in Tk.
+                    # Finish those measurements without moving the viewport, then
+                    # exercise only the scrollbar's normal moveto operation.
+                    text.tk.call(text._w, "count", "-update", "-ypixels", "1.0", "end")
+                    text.yview_moveto(1.0)
+                    self.root.update_idletasks()
+                    self.assertGreater(text.yview()[0], 0, f"details at {width}x{height}: {text.yview()}, size={text.winfo_width()}x{text.winfo_height()}")
+                    self.assertAlmostEqual(1.0, text.yview()[1])
+                    self.assertIsNotNone(text.bbox("end-2c"), "The final detail character must be scrollable into view")
+                    text.yview_moveto(0.0)
                     tree = next(c for c in self.descendants(dialog) if isinstance(c, app.ttk.Treeview))
                     self.assertGreaterEqual(tree.winfo_height(), 60)
+                    tree.xview_moveto(1.0)
+                    self.root.update_idletasks()
+                    column_width = sum(int(tree.column(column, "width")) for column in tree.cget("columns"))
+                    if column_width > tree.winfo_width():
+                        self.assertGreater(tree.xview()[0], 0, f"table at {width}x{height}: {tree.xview()}, columns={column_width}, width={tree.winfo_width()}")
+                    self.assertAlmostEqual(1.0, tree.xview()[1], msg="The table's final column must be reachable")
+                    self.capture(dialog, f"linux-confirm-{width}x{height}-large-font-scrolled.png")
+                    tree.xview_moveto(0.0)
                     for button in (c for c in self.descendants(dialog) if isinstance(c, app.ttk.Button)):
                         self.assertTrue(button.winfo_ismapped())
                         self.assertGreaterEqual(button.winfo_rootx(), dialog.winfo_rootx())
                         self.assertLessEqual(button.winfo_rootx() + button.winfo_width(), dialog.winfo_rootx() + dialog.winfo_width())
                         self.assertLessEqual(button.winfo_rooty() + button.winfo_height(), dialog.winfo_rooty() + dialog.winfo_height())
+                    self.capture(dialog, f"linux-confirm-{width}x{height}-large-font.png")
                     next(c for c in self.descendants(dialog) if isinstance(c, app.ttk.Button) and c.cget("text") == "取消").invoke()
                 except Exception as error:
                     errors.append(error); dialog.destroy()
