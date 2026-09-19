@@ -278,9 +278,38 @@ internal static class ResponsiveWindowLayout
                 // WinForms ignores horizontal overflow of a Top-docked child
                 // when computing scrollbars. Include its minimum-width bounds
                 // explicitly, otherwise ScrollControlIntoView cannot reach it.
-                void UpdateScrollExtent() => scroll.AutoScrollMinSize = new Size(content.MinimumSize.Width, content.Height);
-                content.SizeChanged += (_, _) => UpdateScrollExtent();
-                UpdateScrollExtent();
+                bool extentRefreshPending = false;
+                void QueueScrollExtentRefresh()
+                {
+                    if (scroll.IsDisposed || content.IsDisposed) return;
+                    if (!scroll.IsHandleCreated)
+                    {
+                        scroll.AutoScrollMinSize = new Size(content.MinimumSize.Width, content.Height);
+                        return;
+                    }
+                    if (extentRefreshPending) return;
+                    extentRefreshPending = true;
+                    scroll.BeginInvoke((Action)(() =>
+                    {
+                        extentRefreshPending = false;
+                        if (scroll.IsDisposed || content.IsDisposed || form.IsDisposed) return;
+                        var requiredExtent = new Size(content.MinimumSize.Width, content.Height);
+                        if (scroll.AutoScrollMinSize != requiredExtent) scroll.AutoScrollMinSize = requiredExtent;
+                        // A child can grow while the parent is already calculating
+                        // scrollbars. The property then holds the new minimum but
+                        // DisplayRectangle/Maximum retain the old, shorter range.
+                        // Refresh that range after layout; repeating a focus scroll
+                        // cannot overcome the stale maximum.
+                        if (!IsScrollExtentCurrent(scroll.ClientSize, requiredExtent, scroll.DisplayRectangle.Size))
+                            scroll.PerformLayout();
+                        if (form.ActiveControl is { IsDisposed: false } active && scroll.Contains(active))
+                            scroll.ScrollControlIntoView(active);
+                    }));
+                }
+                content.SizeChanged += (_, _) => QueueScrollExtentRefresh();
+                scroll.HandleCreated += (_, _) => QueueScrollExtentRefresh();
+                scroll.ClientSizeChanged += (_, _) => QueueScrollExtentRefresh();
+                QueueScrollExtentRefresh();
                 void TrackFocus(Control parent)
                 {
                     foreach (Control child in parent.Controls)
@@ -290,17 +319,6 @@ internal static class ResponsiveWindowLayout
                     }
                 }
                 TrackFocus(content);
-                bool focusRefreshPending = false;
-                scroll.ClientSizeChanged += (_, _) =>
-                {
-                    if (focusRefreshPending || !scroll.IsHandleCreated) return;
-                    focusRefreshPending = true;
-                    scroll.BeginInvoke((Action)(() =>
-                    {
-                        focusRefreshPending = false;
-                        if (!scroll.IsDisposed) scroll.ScrollControlIntoView(form.ActiveControl);
-                    }));
-                };
             }
         }
         finally { form.ResumeLayout(performLayout: true); }
@@ -317,6 +335,10 @@ internal static class ResponsiveWindowLayout
             }));
         };
     }
+
+    internal static bool IsScrollExtentCurrent(Size viewport, Size requiredExtent, Size display) =>
+        display.Width == Math.Max(viewport.Width, requiredExtent.Width) &&
+        display.Height == Math.Max(viewport.Height, requiredExtent.Height);
 
     private static Rectangle GetAvailableWorkingArea(Rectangle workingArea, int dpi)
     {

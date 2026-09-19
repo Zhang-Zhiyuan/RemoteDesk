@@ -565,27 +565,65 @@ async def bridge_streams(
     second_reader: asyncio.StreamReader,
     second_writer: asyncio.StreamWriter,
 ) -> None:
-    async def pump(reader, writer):
-        while True:
-            data = await reader.read(COPY_BUFFER_BYTES)
-            if not data:
-                return
-            writer.write(data)
-            # Bound unsent TLS data independently of TCP's in-flight window.
-            # A stalled peer must not keep both bridge tasks alive forever.
-            await asyncio.wait_for(writer.drain(), BRIDGE_WRITE_TIMEOUT_SECONDS)
+    termination = None
+
+    def record_termination(reason, direction, stage, error=None):
+        nonlocal termination
+        if termination is not None:
+            return
+        # Record only fixed categories and a bounded code type. Exception
+        # messages can contain secrets, paths or peer data and are not logged.
+        error_type = "" if error is None else "".join(
+            char for char in type(error).__name__ if char.isascii() and (char.isalnum() or char == "_")
+        )[:64]
+        termination = f"reason={reason} direction={direction} stage={stage}"
+        if error_type:
+            termination += f" error={error_type}"
+
+    async def pump(reader, writer, direction):
+        stage = "read"
+        try:
+            while True:
+                stage = "read"
+                data = await reader.read(COPY_BUFFER_BYTES)
+                if not data:
+                    record_termination("eof", direction, stage)
+                    return
+                stage = "write"
+                writer.write(data)
+                # Bound unsent TLS data independently of TCP's in-flight window.
+                # A stalled peer must not keep both bridge tasks alive forever.
+                stage = "drain"
+                await asyncio.wait_for(writer.drain(), BRIDGE_WRITE_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            record_termination("cancelled", direction, stage)
+            raise
+        except asyncio.TimeoutError as error:
+            record_termination("drain-timeout" if stage == "drain" else "timeout", direction, stage, error)
+            raise
+        except ConnectionError as error:
+            record_termination("connection-error", direction, stage, error)
+            raise
+        except Exception as error:
+            record_termination("error", direction, stage, error)
+            raise
 
     tasks = {
-        asyncio.create_task(pump(first_reader, second_writer)),
-        asyncio.create_task(pump(second_reader, first_writer)),
+        asyncio.create_task(pump(first_reader, second_writer, "first-to-second")),
+        asyncio.create_task(pump(second_reader, first_writer, "second-to-first")),
     }
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
+        record_termination("cancelled", "bridge", "wait")
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.gather(close_writer(first_writer, abort=True), close_writer(second_writer, abort=True))
+        # Preserve the original teardown even when stderr is unavailable.
+        # Exactly one terminal reason per bridge, never one per chunk/task.
+        with contextlib.suppress(Exception):
+            print(f"relay bridge ended: {termination}"[:256], file=sys.stderr, flush=True)
 
 
 def validate_congestion_control(value: str) -> str:

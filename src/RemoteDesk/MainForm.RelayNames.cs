@@ -52,15 +52,16 @@ public sealed partial class MainForm
             FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false,
             ClientSize = new Size(480, 220), AutoScaleMode = AutoScaleMode.Dpi, Font = font };
         var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(16), ColumnCount = 1, RowCount = 3 };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         panel.Controls.Add(new Label { Text = "保存在中继服务器，使用同一服务器的所有设备可见。\n不更改系统名称或设备密钥；清空可恢复系统原名。\n系统原名：" + device.OriginalMachineName,
-            AutoSize = true, Dock = DockStyle.Top, MaximumSize = new Size(440, 0) });
+            AutoSize = true, Dock = DockStyle.Top, UseMnemonic = false });
         var input = new TextBox { Text = device.SharedName, Dock = DockStyle.Top, MaxLength = 80, PlaceholderText = "输入共享名称（可留空）" };
         name = input;
         panel.Controls.Add(input);
-        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true };
         var save = new Button { Text = "保存并同步", AutoSize = true };
         save.Click += (_, _) =>
         {
@@ -69,6 +70,7 @@ public sealed partial class MainForm
         };
         var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = true };
         buttons.Controls.Add(save); buttons.Controls.Add(cancel); panel.Controls.Add(buttons);
+        ConfigureWrappingDialogActions(buttons);
         dialog.Controls.Add(panel); dialog.AcceptButton = save; dialog.CancelButton = cancel;
         dialog.Shown += (_, _) => { input.Focus(); input.SelectAll(); };
         ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(520, 300), new Size(360, 220));

@@ -66,6 +66,9 @@ public final class MainActivity extends Activity {
     private static final int CONTROL_SPACING_DP = 8;
 
     private final ExecutorService discoveryExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService receivedFilesExecutor = Executors.newSingleThreadExecutor();
+    private final AndroidReceivedFilesLoadState receivedFilesLoad = new AndroidReceivedFilesLoadState();
+    private AlertDialog receivedFilesLoadingDialog;
     private MediaProjectionManager projectionManager;
     private TextView statusView;
     private TextView readinessView;
@@ -681,6 +684,8 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        receivedFilesLoad.close();
+        receivedFilesExecutor.shutdownNow();
         cancelHostStartupNavigation();
         if (relayPanel != null) relayPanel.close();
         if (historyPanel != null) historyPanel.close();
@@ -693,6 +698,11 @@ public final class MainActivity extends Activity {
     @Override
     protected void onPause() {
         activityResumed = false;
+        receivedFilesLoad.cancel();
+        if (receivedFilesLoadingDialog != null) {
+            receivedFilesLoadingDialog.dismiss();
+            receivedFilesLoadingDialog = null;
+        }
         viewerLaunchEpoch++;
         if (lanPanel != null) lanPanel.active(false);
         cancelHostStartupNavigation();
@@ -1258,33 +1268,69 @@ public final class MainActivity extends Activity {
     }
 
     private void showReceivedFiles() {
-        List<ReceivedFileItem> files = listReceivedFiles();
-        if (files.isEmpty()) {
-            updateStatusPanel("暂无接收文件");
+        long request = receivedFilesLoad.begin();
+        if (request == 0) {
+            Toast.makeText(this, "仍在读取接收文件，请稍候。", Toast.LENGTH_SHORT).show();
             return;
         }
+        AlertDialog progress = new AlertDialog.Builder(this).setTitle("接收文件")
+            .setMessage("正在读取已保存的文件…")
+            .setNegativeButton("取消", (dialog, which) -> receivedFilesLoad.cancel())
+            .setOnCancelListener(dialog -> receivedFilesLoad.cancel()).create();
+        receivedFilesLoadingDialog = progress;
+        progress.show();
+        try {
+            receivedFilesExecutor.execute(() -> {
+                ReceivedFileListing listing = listReceivedFiles();
+                boolean deliver = receivedFilesLoad.finish(request);
+                runOnUiThread(() -> {
+                    progress.dismiss();
+                    if (receivedFilesLoadingDialog == progress) receivedFilesLoadingDialog = null;
+                    if (!deliver || !receivedFilesLoad.isCurrent(request) || !activityResumed || isFinishing() || isDestroyed()) return;
+                    showReceivedFileListing(listing);
+                });
+            });
+        } catch (RuntimeException failure) {
+            receivedFilesLoad.finish(request);
+            progress.dismiss();
+            receivedFilesLoadingDialog = null;
+            showReceivedFileDetails("无法读取接收文件", formatExceptionMessage(failure));
+        }
+    }
 
+    private void showReceivedFileListing(ReceivedFileListing listing) {
+        List<ReceivedFileItem> files = listing.files;
+        if (files.isEmpty()) {
+            showReceivedFileDetails("接收文件", listing.warning.isEmpty()
+                ? "暂无已保存的接收文件。传输中的文件会在校验并保存完成后出现。" : listing.warning);
+            return;
+        }
         String[] labels = new String[files.size()];
         for (int index = 0; index < files.size(); index++) {
             labels[index] = files.get(index).label();
         }
 
-        new AlertDialog.Builder(this)
-            .setTitle("接收文件")
+        AlertDialog listingDialog = new AlertDialog.Builder(this)
+            .setTitle(listing.warning.isEmpty() ? "接收文件" : "接收文件（部分目录未读取）")
             .setItems(labels, (dialog, which) -> showReceivedFileActions(files.get(which)))
             .setPositiveButton("关闭", null)
-            .show();
+            .setNeutralButton(listing.warning.isEmpty() ? null : "查看原因", (ignored, which) ->
+                showReceivedFileDetails("读取提示", listing.warning)).create();
+        listingDialog.show();
     }
 
-    private List<ReceivedFileItem> listReceivedFiles() {
+    private ReceivedFileListing listReceivedFiles() {
         List<ReceivedFileItem> files = new ArrayList<>();
+        List<String> warnings = new ArrayList<>();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            addPublicReceivedFiles(files);
+            try { addPublicReceivedFiles(files); }
+            catch (Exception failure) { warnings.add("公共下载目录读取失败：" + formatExceptionMessage(failure)); }
         }
 
-        addAppSpecificReceivedFiles(files);
+        try { addAppSpecificReceivedFiles(files); }
+        catch (Exception failure) { warnings.add("应用接收目录读取失败：" + formatExceptionMessage(failure)); }
         files.sort(Comparator.comparingLong((ReceivedFileItem item) -> item.modifiedAt).reversed());
-        return files;
+        return new ReceivedFileListing(files, String.join("\n", warnings));
     }
 
     @androidx.annotation.RequiresApi(Build.VERSION_CODES.Q)
@@ -1301,11 +1347,11 @@ public final class MainActivity extends Activity {
         try (Cursor cursor = getContentResolver().query(
             MediaStore.Downloads.EXTERNAL_CONTENT_URI,
             projection,
-            MediaStore.MediaColumns.RELATIVE_PATH + "=?",
+            MediaStore.MediaColumns.RELATIVE_PATH + "=? AND " + MediaStore.MediaColumns.IS_PENDING + "=0",
             new String[] { relativePath },
             MediaStore.MediaColumns.DATE_MODIFIED + " DESC")) {
             if (cursor == null) {
-                return;
+                throw new IllegalStateException("系统未返回文件列表，请稍后重试。");
             }
 
             int idColumn = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID);
@@ -1318,9 +1364,10 @@ public final class MainActivity extends Activity {
                 long size = cursor.getLong(sizeColumn);
                 long modifiedAt = cursor.getLong(modifiedColumn) * 1000L;
                 Uri uri = ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, id);
-                files.add(new ReceivedFileItem(name, size, modifiedAt, uri, "Downloads/" + AndroidFileTransferReceiver.RECEIVE_FOLDER_NAME));
+                String location = AndroidFileTransferReceiver.formatPublishedLocation(
+                    Environment.getExternalStorageDirectory().getAbsolutePath(), relativePath, name, uri.toString());
+                files.add(new ReceivedFileItem(name, size, modifiedAt, uri, location));
             }
-        } catch (Exception ignored) {
         }
     }
 
@@ -1329,6 +1376,7 @@ public final class MainActivity extends Activity {
         File[] localFiles = directory.listFiles(file ->
             file.isFile() && !AndroidFileTransferReceiver.isOwnedTemporaryFileName(file.getName()));
         if (localFiles == null) {
+            if (directory.exists()) throw new IllegalStateException("接收目录无法读取，请检查存储是否可用。");
             return;
         }
 
@@ -1352,11 +1400,25 @@ public final class MainActivity extends Activity {
                 } else if (which == 1) {
                     shareReceivedFile(file);
                 } else {
-                    updateStatusPanel("文件位置：" + file.location);
+                    showReceivedFileDetails("文件位置", "文件：" + file.name + "\n大小：" + formatBytes(file.size) +
+                        "\n保存位置：\n" + file.location);
                 }
             })
             .setPositiveButton("关闭", null)
             .show();
+    }
+
+    private void showReceivedFileDetails(String title, String message) {
+        TextView details = new TextView(this);
+        details.setText(message);
+        details.setTextSize(16);
+        details.setTextColor(AndroidUiTheme.TEXT);
+        details.setTextIsSelectable(true);
+        int padding = AndroidDisplay.dp(this, 24);
+        details.setPadding(padding, padding / 2, padding, padding / 2);
+        ScrollView container = new ScrollView(this);
+        container.addView(details);
+        new AlertDialog.Builder(this).setTitle(title).setView(container).setPositiveButton("关闭", null).show();
     }
 
     private void openReceivedFile(ReceivedFileItem file) {
@@ -1681,6 +1743,12 @@ public final class MainActivity extends Activity {
         }
 
         return unit == 0 ? bytes + " " + units[unit] : String.format(java.util.Locale.ROOT, "%.1f %s", value, units[unit]);
+    }
+
+    private static final class ReceivedFileListing {
+        final List<ReceivedFileItem> files;
+        final String warning;
+        ReceivedFileListing(List<ReceivedFileItem> files, String warning) { this.files = files; this.warning = warning; }
     }
 
     private static final class ReceivedFileItem {

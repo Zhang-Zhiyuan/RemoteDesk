@@ -33,22 +33,51 @@ public sealed partial class MainForm
             FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false,
             ClientSize = new Size(440, 180), AutoScaleMode = AutoScaleMode.Dpi, Font = font };
         var panel = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(16), ColumnCount = 1, RowCount = 3 };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        panel.Controls.Add(new Label { Text = "请输入这台设备自己的密钥，不是服务器 root 密码。\n连接成功后自动记住；可在设备列表上方更改。", AutoSize = true, Dock = DockStyle.Top, MaximumSize = new Size(402, 0) });
+        panel.Controls.Add(new Label { Text = "请输入这台设备自己的密钥，不是服务器 root 密码。\n连接成功后自动记住；可在设备列表上方更改。", AutoSize = true, Dock = DockStyle.Top, UseMnemonic = false });
         var key = new TextBox { Dock = DockStyle.Top, UseSystemPasswordChar = true, MaxLength = 4096 };
         password = key;
         panel.Controls.Add(key);
-        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true };
         var connect = new Button { Text = "连接", AutoSize = true };
         connect.Click += (_, _) => { if (key.Text.Length > 0) dialog.DialogResult = DialogResult.OK; else key.Focus(); };
         var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = true };
         buttons.Controls.Add(connect); buttons.Controls.Add(cancel); panel.Controls.Add(buttons);
+        ConfigureWrappingDialogActions(buttons);
         dialog.Controls.Add(panel); dialog.AcceptButton = connect; dialog.CancelButton = cancel;
         dialog.Shown += (_, _) => key.Focus();
         ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(480, 260), new Size(360, 200));
         return dialog;
+    }
+
+    internal static void ConfigureWrappingDialogActions(FlowLayoutPanel actions)
+    {
+        actions.AutoSize = true;
+        actions.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        actions.WrapContents = true;
+        bool applying = false;
+        void Constrain()
+        {
+            if (applying || actions.IsDisposed || actions.ClientSize.Width <= 0) return;
+            applying = true;
+            try
+            {
+                foreach (Button button in actions.Controls.OfType<Button>())
+                {
+                    var limit = new Size(Math.Max(1, actions.ClientSize.Width - actions.Padding.Horizontal - button.Margin.Horizontal), 0);
+                    button.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+                    if (button.MaximumSize != limit) button.MaximumSize = limit;
+                }
+            }
+            finally { applying = false; }
+        }
+        actions.ClientSizeChanged += (_, _) => Constrain();
+        actions.Layout += (_, _) => Constrain();
+        actions.FontChanged += (_, _) => Constrain();
+        Constrain();
     }
 
     private async Task LogoutRelayServerAsync()

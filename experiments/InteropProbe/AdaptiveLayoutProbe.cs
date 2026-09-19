@@ -7,7 +7,7 @@ using RemoteDesk;
 // the user's desktop, and no networking/services/settings are started.
 internal static class AdaptiveLayoutProbe
 {
-    internal static int Run(bool softwarePaint = false)
+    internal static int Run(bool softwarePaint = false, bool viewerClipping = false)
     {
         using var config = JsonDocument.Parse(Console.ReadLine()!);
         string output = Path.GetFullPath(config.RootElement.GetProperty("output").GetString()!);
@@ -24,14 +24,15 @@ internal static class AdaptiveLayoutProbe
                 if (!SetThreadDesktop(desktop)) throw new Win32Exception();
                 Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
                 Application.EnableVisualStyles();
-                if (softwarePaint) SoftwarePaintProbe.Verify(output);
+                if (viewerClipping) ViewerClippingProbe.Verify(output);
+                else if (softwarePaint) SoftwarePaintProbe.Verify(output);
                 else Verify(output);
             }
             catch (Exception error) { failure = error; }
         });
         worker.SetApartmentState(ApartmentState.STA);
         worker.Start(); worker.Join();
-        if (failure is not null) throw failure;
+        if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
         return 0;
     }
 
@@ -129,7 +130,71 @@ internal static class AdaptiveLayoutProbe
             }
             form.Close(); Application.DoEvents();
         }
+        VerifyFileDialogs(output, evidence);
         Program.Save(Path.Combine(output, "layout.json"), new { passed = true, scope = "private Windows desktop; real main pages and dialogs; every input/action reachable", cases = evidence });
+    }
+
+    private static void VerifyFileDialogs(string output, List<object> evidence)
+    {
+        FileTransferConfirmationItem[] items = [
+            new("文件", @"C:\测试文档\一份具有比较长的名称的项目说明和测试资料.txt",
+                "一份具有比较长的名称的项目说明和测试资料.txt", 1024,
+                @"D:\RemoteDeskReceived\一份具有比较长的名称的项目说明和测试资料 (2).txt"),
+            new("文件夹", @"C:\测试文档\项目资源", "项目资源.zip", 0,
+                @"D:\RemoteDeskReceived\项目资源.zip")
+        ];
+        foreach (float fontSize in new[] { 9f, 14f })
+        {
+            Func<Form>[] factories = [
+                () => new FileTransferConfirmationDialog("确认文件传输", "发送所选文件到远端", items,
+                    "文件夹会先打包为 ZIP；接收端不会自动解压。接收位置由远端返回，重名会自动改名。"),
+                () => new FileTransferResultDialog("已发送 1 项，未完成 1 项；实际保存结果如下。",
+                    "已发送：一份具有比较长的名称的项目说明和测试资料.txt\r\n" + items[0].DestinationPath +
+                    "\r\n\r\n未完成：项目资源.zip\r\n远端磁盘空间不足；前面已保存的文件不会被删除。")
+            ];
+            for (int index = 0; index < factories.Length; index++)
+            {
+                using Form form = factories[index]();
+                using var font = new Font("Microsoft YaHei UI", fontSize);
+                form.Font = font;
+                form.Show(); Application.DoEvents();
+                var root = (ScrollableControl)form.Controls[0];
+                foreach (Size viewport in new[] { new Size(1000, 700), new Size(700, 430), new Size(520, 320), new Size(360, 240), new Size(1000, 700) })
+                {
+                    form.MinimumSize = Size.Empty;
+                    form.ClientSize = viewport;
+                    root.AutoScrollPosition = Point.Empty;
+                    Application.DoEvents();
+                    using var bitmap = new Bitmap(form.Width, form.Height);
+                    form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, form.Size));
+                    bitmap.Save(Path.Combine(output, $"file-dialog-{index}-{fontSize}-{viewport.Width}.png"));
+                    foreach (Control control in Descendants(root).Where(c => c is Button or TextBox or DataGridView))
+                    {
+                        control.Select();
+                        control.Focus();
+                        Application.DoEvents();
+                        Rectangle bounds = control.RectangleToScreen(control.ClientRectangle);
+                        Rectangle visible = root.RectangleToScreen(root.ClientRectangle);
+                        if (!control.Visible || bounds.Width < 24 || bounds.Height < 12 || !visible.Contains(bounds))
+                            throw new InvalidOperationException($"{form.Text} at {viewport}, font {fontSize}: {control.GetType().Name} '{control.Text}' {bounds} outside {visible}; scroll={root.AutoScrollPosition}/{root.AutoScrollMinSize}");
+                    }
+                    if (root.HorizontalScroll.Visible)
+                        throw new InvalidOperationException($"{form.Text} at {viewport}, font {fontSize}: unexpected whole-dialog horizontal overflow");
+                    using var scrolled = new Bitmap(form.Width, form.Height);
+                    form.DrawToBitmap(scrolled, new Rectangle(Point.Empty, form.Size));
+                    scrolled.Save(Path.Combine(output, $"file-dialog-{index}-{fontSize}-{viewport.Width}-scrolled.png"));
+                    int idleLayouts = 0;
+                    LayoutEventHandler counted = (_, _) => idleLayouts++;
+                    root.Controls[0].Layout += counted;
+                    for (int tick = 0; tick < 10; tick++) { Thread.Sleep(10); Application.DoEvents(); }
+                    root.Controls[0].Layout -= counted;
+                    if (idleLayouts > 2)
+                        throw new InvalidOperationException($"{form.Text}: did not settle after resize ({idleLayouts} idle layouts)");
+                    evidence.Add(new { fileDialog = index, viewport, fontSize, dpi = form.DeviceDpi, passed = true });
+                }
+                form.Close(); Application.DoEvents();
+            }
+        }
     }
 
     private static IEnumerable<Control> Descendants(Control root)

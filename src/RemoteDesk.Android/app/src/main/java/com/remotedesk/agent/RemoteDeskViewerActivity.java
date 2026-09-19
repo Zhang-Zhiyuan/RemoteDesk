@@ -504,16 +504,28 @@ public final class RemoteDeskViewerActivity extends Activity {
             owner.fileExecutor.execute(() -> {
                 boolean success = false;
                 String result;
-                try (java.io.InputStream input = getContentResolver().openInputStream(uri)) {
-                    if (input == null) throw new IOException("无法读取已选文件");
-                    result = sender.send(input, name, size, owner.remoteCapabilities.get(), payload -> {
-                        if (!sendControlMessageIfCurrent(owner, payload)) throw new IOException("连接已结束");
-                    }, () -> isCurrentConnectionOwner(owner), message -> runOnUiThread(() -> {
-                        if (isCurrentConnectionOwner(owner) && progress.isShowing()) progress.setMessage(message);
-                    }));
+                AndroidFileTransferLiveness.Lease uploadLease = null;
+                int transferCapabilities = owner.remoteCapabilities.get();
+                try {
+                    // The upload can put Ping behind file bytes on slow TCP paths.
+                    // Lease only the actual sender/receipt wait, not the picker or confirmation.
+                    try (java.io.InputStream input = getContentResolver().openInputStream(uri)) {
+                        if (input == null) throw new IOException("无法读取已选文件");
+                        uploadLease = owner.fileLiveness.begin();
+                        result = sender.send(input, name, size, transferCapabilities, payload -> {
+                            if (!sendControlMessageIfCurrent(owner, payload)) throw new IOException("连接已结束");
+                        }, () -> isCurrentConnectionOwner(owner), message -> runOnUiThread(() -> {
+                            if (isCurrentConnectionOwner(owner) && progress.isShowing()) progress.setMessage(message);
+                        }));
+                    }
+                    if ((transferCapabilities & RemoteDeskProtocol.CAPABILITY_FILE_TRANSFER_RECEIPT) == 0)
+                        uploadLease.completedWithoutReceipt(System.nanoTime());
                     success = true;
                 } catch (Exception ex) { result = MainActivity.formatExceptionMessage(ex); }
-                finally { owner.fileBusy.set(false); owner.fileSender = null; }
+                finally {
+                    if (uploadLease != null) uploadLease.close();
+                    owner.fileBusy.set(false); owner.fileSender = null;
+                }
                 boolean done = success;
                 String message = result;
                 runOnUiThread(() -> {
@@ -2260,9 +2272,9 @@ public final class RemoteDeskViewerActivity extends Activity {
             return;
         }
 
-        if (AndroidViewerHeartbeat.hasInboundTimedOut(now, owner.lastInboundNanos.get())) {
+        if (owner.fileLiveness.hasInboundTimedOut(now, owner.lastInboundNanos.get())) {
             AndroidSessionLog.info(
-                "Android viewer received no authenticated TCP message for 18 seconds; reconnecting.");
+                "Android viewer authenticated TCP inbound deadline expired; reconnecting.");
             closeConnectionOwner(owner);
             return;
         }
@@ -2742,6 +2754,7 @@ public final class RemoteDeskViewerActivity extends Activity {
         final ExecutorService fileExecutor = Executors.newSingleThreadExecutor();
         final AtomicBoolean fileBusy = new AtomicBoolean();
         volatile AndroidFileSender fileSender;
+        final AndroidFileTransferLiveness fileLiveness = new AndroidFileTransferLiveness();
         final AndroidFileReceiveLocation fileLocation = new AndroidFileReceiveLocation();
         final long generation;
         final Socket socket;

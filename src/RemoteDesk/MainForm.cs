@@ -713,6 +713,7 @@ public sealed partial class MainForm : Form
         copy.Controls.Add(new Label
         {
             Text = "RemoteDesk",
+            Dock = DockStyle.Top,
             AutoSize = true,
             ForeColor = TextColor,
             Font = new Font(Font.FontFamily, 15F, FontStyle.Bold),
@@ -721,6 +722,7 @@ public sealed partial class MainForm : Form
         copy.Controls.Add(new Label
         {
             Text = "安全连接、远程控制与文件传输",
+            Dock = DockStyle.Top,
             AutoSize = true,
             ForeColor = MutedTextColor,
             Margin = new Padding(0)
@@ -742,6 +744,22 @@ public sealed partial class MainForm : Form
         layout.Controls.Add(copy, 1, 0);
         layout.Controls.Add(badge, 2, 0);
         header.Controls.Add(layout);
+        bool sizingHeader = false;
+        void FitHeaderText()
+        {
+            if (sizingHeader || copy.ClientSize.Width <= 0) return;
+            sizingHeader = true;
+            try
+            {
+                int copyHeight = copy.GetPreferredSize(new Size(copy.ClientSize.Width, 0)).Height;
+                int requiredHeight = Math.Max(ResponsiveWindowLayout.ScaleLogical(76, header.DeviceDpi),
+                    copyHeight + header.Padding.Vertical + layout.Padding.Vertical + copy.Margin.Vertical);
+                if (header.Height != requiredHeight) header.Height = requiredHeight;
+            }
+            finally { sizingHeader = false; }
+        }
+        header.Layout += (_, _) => FitHeaderText();
+        copy.FontChanged += (_, _) => FitHeaderText();
         header.ClientSizeChanged += (_, _) =>
         {
             badge.Visible = header.ClientSize.Width >=
@@ -1261,13 +1279,18 @@ public sealed partial class MainForm : Form
         var statusPanel = new BufferedPanel
         {
             Dock = DockStyle.Fill,
+            BackColor = SurfaceBackColor,
+            Margin = new Padding(0)
+        };
+        var statusTextPanel = new BufferedPanel
+        {
+            Dock = DockStyle.Fill,
             AutoScroll = true,
             BackColor = SurfaceBackColor,
             Padding = new Padding(12),
             Margin = new Padding(0)
         };
-        _viewerStatusLabel.Dock = DockStyle.Fill;
-        _viewerStatusLabel.Font = new Font(Font, FontStyle.Regular);
+        _viewerStatusLabel.Dock = DockStyle.Top;
         _viewerStatusLabel.ContextMenuStrip = CreateViewerStatusMenu();
         _remoteFilePullProgressBar = new ProgressBar
         {
@@ -1278,19 +1301,11 @@ public sealed partial class MainForm : Form
             MarqueeAnimationSpeed = 0,
             Visible = false
         };
-        statusPanel.Controls.Add(_viewerStatusLabel);
+        statusTextPanel.Controls.Add(_viewerStatusLabel);
+        statusPanel.Controls.Add(statusTextPanel);
         statusPanel.Controls.Add(_remoteFilePullProgressBar);
         _remoteFilePullProgressBar.BringToFront();
-        void UpdateViewerStatusWrapWidth()
-        {
-            _viewerStatusLabel.MaximumSize = new Size(
-                Math.Max(1, statusPanel.ClientSize.Width - statusPanel.Padding.Horizontal),
-                0);
-        }
-
-        statusPanel.ClientSizeChanged += (_, _) => UpdateViewerStatusWrapWidth();
-        statusPanel.HandleCreated += (_, _) => UpdateViewerStatusWrapWidth();
-        UpdateViewerStatusWrapWidth();
+        ConfigureScrollableStatusLabel(statusTextPanel, _viewerStatusLabel);
         long statusCreatedAt = Stopwatch.GetTimestamp();
 
         var statusSection = CreateSection(
@@ -2040,18 +2055,7 @@ public sealed partial class MainForm : Form
         }
         long tabsAppliedAt = Stopwatch.GetTimestamp();
 
-        if (_discoveredHostsList is not null)
-        {
-            int itemHeight =
-                ResponsiveWindowLayout.ScaleLogical(
-                    52,
-                    dpi);
-            if (_discoveredHostsList.ItemHeight != itemHeight)
-            {
-                _discoveredHostsList.ItemHeight = itemHeight;
-                _discoveredHostsList.Invalidate();
-            }
-        }
+        UpdateDiscoveredHostItemHeight(dpi);
         long listAppliedAt = Stopwatch.GetTimestamp();
 
         if (_discoveredHostsBox is not null)
@@ -2130,6 +2134,7 @@ public sealed partial class MainForm : Form
             UpdateSavedDeviceActionState();
         _discoveredHostsList.ContextMenuStrip = _savedDeviceMenu;
         _discoveredHostsList.DrawItem += (_, args) => DrawDiscoveredHostItem(args);
+        _discoveredHostsList.FontChanged += (_, _) => UpdateDiscoveredHostItemHeight(_discoveredHostsList.DeviceDpi);
         _discoveredHostsList.SelectedIndexChanged += (_, _) => DiscoveredHostListChanged();
         _discoveredHostsList.MouseDown += (_, args) =>
         {
@@ -2150,6 +2155,80 @@ public sealed partial class MainForm : Form
                 await ToggleViewerAsync();
             }
         };
+    }
+
+    internal static void ConfigureScrollableStatusLabel(ScrollableControl panel, Label label)
+    {
+        bool applying = false;
+        bool queued = false;
+        void RefreshAfterLayout()
+        {
+            if (queued || !panel.IsHandleCreated || panel.IsDisposed) return;
+            queued = true;
+            panel.BeginInvoke((Action)(() =>
+            {
+                queued = false;
+                if (panel.IsDisposed || label.IsDisposed) return;
+                Update();
+                // SizeChanged can run inside the scroll owner's layout. The
+                // minimum then changes while its native scroll range retains
+                // the previous shorter content height. Refresh after layout;
+                // DisplayRectangle excludes padding, AutoScrollMinSize does not.
+                if (panel.DisplayRectangle.Height + panel.Padding.Vertical !=
+                    Math.Max(panel.ClientSize.Height, panel.AutoScrollMinSize.Height))
+                    panel.PerformLayout();
+            }));
+        }
+        void Update()
+        {
+            if (applying || panel.IsDisposed || label.IsDisposed) return;
+            applying = true;
+            bool changed = false;
+            try
+            {
+                int width = Math.Max(1, panel.ClientSize.Width - panel.Padding.Horizontal);
+                var limit = new Size(width, 0);
+                if (label.MaximumSize != limit) { label.MaximumSize = limit; changed = true; }
+                int height = label.GetPreferredSize(limit).Height + panel.Padding.Vertical;
+                var extent = new Size(0, height);
+                if (panel.AutoScrollMinSize != extent) { panel.AutoScrollMinSize = extent; changed = true; }
+            }
+            finally { applying = false; }
+            if (changed) RefreshAfterLayout();
+        }
+        // Top docking plus an explicit vertical extent keeps long diagnostic
+        // output scrollable. Fill-docked AutoSize labels are not counted by
+        // WinForms AutoScroll and can extend invisibly below the viewport.
+        panel.AutoScroll = true;
+        label.Dock = DockStyle.Top;
+        label.AutoSize = true;
+        panel.ClientSizeChanged += (_, _) => Update();
+        panel.HandleCreated += (_, _) => Update();
+        label.SizeChanged += (_, _) => Update();
+        label.TextChanged += (_, _) => Update();
+        label.FontChanged += (_, _) => Update();
+        Update();
+    }
+
+    internal static (int ItemHeight, int PrimaryHeight, int SecondaryOffset, int SecondaryHeight, int VerticalInset)
+        CalculateDiscoveredHostRowMetrics(Font font, int dpi)
+    {
+        int primaryHeight = Math.Max(ResponsiveWindowLayout.ScaleLogical(20, dpi), font.Height);
+        int secondaryHeight = Math.Max(ResponsiveWindowLayout.ScaleLogical(18, dpi), font.Height);
+        int secondaryOffset = primaryHeight + ResponsiveWindowLayout.ScaleLogical(2, dpi);
+        int verticalInset = ResponsiveWindowLayout.ScaleLogical(7, dpi);
+        int itemHeight = Math.Max(ResponsiveWindowLayout.ScaleLogical(52, dpi),
+            verticalInset * 2 + secondaryOffset + secondaryHeight);
+        return (itemHeight, primaryHeight, secondaryOffset, secondaryHeight, verticalInset);
+    }
+
+    private void UpdateDiscoveredHostItemHeight(int dpi)
+    {
+        if (_discoveredHostsList is null) return;
+        int height = CalculateDiscoveredHostRowMetrics(_discoveredHostsList.Font, dpi).ItemHeight;
+        if (_discoveredHostsList.ItemHeight == height) return;
+        _discoveredHostsList.ItemHeight = height;
+        _discoveredHostsList.Invalidate();
     }
 
     private void DrawDiscoveredHostItem(DrawItemEventArgs args)
@@ -2174,10 +2253,11 @@ public sealed partial class MainForm : Form
 
         int dpi = _discoveredHostsList.DeviceDpi;
         int horizontalInset = ResponsiveWindowLayout.ScaleLogical(12, dpi);
-        int verticalInset = ResponsiveWindowLayout.ScaleLogical(7, dpi);
-        int primaryLineHeight = ResponsiveWindowLayout.ScaleLogical(20, dpi);
-        int secondaryOffset = ResponsiveWindowLayout.ScaleLogical(22, dpi);
-        int secondaryLineHeight = ResponsiveWindowLayout.ScaleLogical(18, dpi);
+        var rowMetrics = CalculateDiscoveredHostRowMetrics(_discoveredHostsList.Font, dpi);
+        int verticalInset = rowMetrics.VerticalInset;
+        int primaryLineHeight = rowMetrics.PrimaryHeight;
+        int secondaryOffset = rowMetrics.SecondaryOffset;
+        int secondaryLineHeight = rowMetrics.SecondaryHeight;
         Rectangle content = new(
             args.Bounds.Left + horizontalInset,
             args.Bounds.Top + verticalInset,
@@ -2188,14 +2268,14 @@ public sealed partial class MainForm : Form
         TextRenderer.DrawText(
             args.Graphics,
             device.DisplayName,
-            Font,
+            _discoveredHostsList.Font,
             new Rectangle(content.Left, content.Top, content.Width, primaryLineHeight),
             primaryTextColor,
             TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
         TextRenderer.DrawText(
             args.Graphics,
             device.GetListSecondaryText(status),
-            Font,
+            _discoveredHostsList.Font,
             new Rectangle(content.Left, content.Top + secondaryOffset, content.Width, secondaryLineHeight),
             secondaryTextColor,
             TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);

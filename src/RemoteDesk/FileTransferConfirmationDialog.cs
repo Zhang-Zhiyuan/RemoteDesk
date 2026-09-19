@@ -384,12 +384,15 @@ internal sealed class FileTransferConfirmationDialog : Form
             RowCount = 5,
             Padding = new Padding(12)
         };
+        // An implicit AutoSize column retains long paths' preferred width
+        // after shrinking the window and pushes the confirmation button out
+        // of view. Only the grid may scroll horizontally, not the dialog.
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        Controls.Add(root);
 
         long totalBytes = items.Sum(item => Math.Max(0, item.SizeBytes));
         bool hasDeferredDirectorySize = items.Any(item =>
@@ -441,21 +444,23 @@ internal sealed class FileTransferConfirmationDialog : Form
             DataPropertyName = nameof(FileTransferConfirmationItem.TransferName),
             AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
             FillWeight = 25,
-            MinimumWidth = 80
+            MinimumWidth = 140
         });
         grid.Columns.Add(new DataGridViewTextBoxColumn
         {
             HeaderText = "原始位置",
             DataPropertyName = nameof(FileTransferConfirmationItem.SourcePath),
             AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
-            FillWeight = 45
+            FillWeight = 45,
+            MinimumWidth = 140
         });
         grid.Columns.Add(new DataGridViewTextBoxColumn
         {
             HeaderText = "传输后位置",
             DataPropertyName = nameof(FileTransferConfirmationItem.DestinationPath),
             AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
-            FillWeight = 55
+            FillWeight = 55,
+            MinimumWidth = 160
         });
         grid.CellFormatting += (_, args) =>
         {
@@ -524,6 +529,7 @@ internal sealed class FileTransferConfirmationDialog : Form
 
         AcceptButton = confirmButton;
         CancelButton = cancelButton;
+        FileTransferDialogLayout.Attach(this, root, grid);
 
         void UpdateWrappingWidths()
         {

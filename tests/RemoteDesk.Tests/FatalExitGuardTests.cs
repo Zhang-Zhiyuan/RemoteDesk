@@ -5,6 +5,59 @@ namespace RemoteDesk.Tests;
 public sealed class FatalExitGuardTests
 {
     [Fact]
+    public void BackgroundTaskFailureIsObservedAndReportedWithoutExiting()
+    {
+        var args = new UnobservedTaskExceptionEventArgs(new AggregateException(new IOException("private input")));
+        string? report = null;
+        FatalExitGuard.ObserveBackgroundTaskFailure(args, message =>
+        {
+            Assert.True(args.Observed);
+            report = message;
+        });
+        Assert.True(args.Observed);
+        Assert.Contains("application kept running", report);
+        Assert.Contains("System.IO.IOException", report);
+        Assert.DoesNotContain("private input", report);
+    }
+
+    [Fact]
+    public void BackgroundTaskFailureStaysObservedIfDiagnosticWriterFails()
+    {
+        var args = new UnobservedTaskExceptionEventArgs(new AggregateException(new IOException("fixture")));
+        Assert.Null(Record.Exception(() => FatalExitGuard.ObserveBackgroundTaskFailure(args,
+            _ => throw new IOException("logging unavailable"))));
+        Assert.True(args.Observed);
+    }
+
+    [Fact]
+    public void ExceptionSummaryIncludesCodeIdentityButNotMessagesPathsOrData()
+    {
+        Exception error = Record.Exception(ThrowPrivateDiagnosticFixture)!;
+        error.Data["private"] = "do-not-log-this-secret";
+        string summary = FatalExitGuard.DescribeException(error);
+        Assert.Contains("System.IO.IOException", summary);
+        Assert.Contains(nameof(ThrowPrivateDiagnosticFixture), summary);
+        Assert.Contains("HRESULT=", summary);
+        Assert.DoesNotContain("sensitive", summary);
+        Assert.DoesNotContain("do-not-log-this-secret", summary);
+        Assert.DoesNotContain("C:\\", summary);
+    }
+
+    [Fact]
+    public void ExceptionSummaryBoundsAggregateAndHandlesUnknownException()
+    {
+        var error = new AggregateException(Enumerable.Range(0, 100).Select(_ => new IOException("fixture")));
+        string summary = FatalExitGuard.DescribeException(error);
+        Assert.InRange(summary.Length, 1, 4096);
+        Assert.True(summary.Split("HRESULT=").Length <= 9);
+        Assert.Equal("unknown exception", FatalExitGuard.DescribeException(null));
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void ThrowPrivateDiagnosticFixture() =>
+        throw new IOException(@"sensitive C:\private\clipboard.txt");
+
+    [Fact]
     public void BeginFatalExitStartsOnlyOnce()
     {
         int exitStarted = 0;

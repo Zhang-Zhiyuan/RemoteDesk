@@ -100,7 +100,7 @@ def input_session(port, password, output):
 
 def host_probe(output):
     report = {"machine": platform.machine(), "kernel": platform.release(),
-              "scope": "physical machine, isolated Xvfb; not the user's graphical desktop",
+              "scope": "Linux runtime, isolated Xvfb; inspect kernel to distinguish WSL/physical; not the user's graphical desktop",
               "dependencies": {name: shutil.which(name) for name in ("ffmpeg", "import", "convert")},
               "complete": False, "sessions": []}
     children, files = [], []

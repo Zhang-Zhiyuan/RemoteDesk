@@ -143,6 +143,7 @@ SOCKET_RECEIVE_BUFFER_BYTES = 128 * 1024
 SOCKET_SEND_BUFFER_BYTES = 32 * 1024
 VIEWER_HEARTBEAT_INTERVAL_SECONDS = 5.0
 VIEWER_HEARTBEAT_TIMEOUT_SECONDS = 18.0
+VIEWER_FILE_TRANSFER_HEARTBEAT_TIMEOUT_SECONDS = 150.0
 VIEWER_HEARTBEAT_POLL_SECONDS = 0.25
 VIEWER_RECONNECT_DELAYS_SECONDS = (0.5, 1.0, 2.0, 4.0, 8.0, 10.0)
 VIEWER_RECONNECT_STABLE_SECONDS = 5.0
@@ -3256,6 +3257,8 @@ class ViewerConnection:
         self.last_ping_sent_at = 0.0
         self.last_message_received_at = 0.0
         self.awaiting_pong_since: float | None = None
+        self._outgoing_file_transfer: tuple[object, Any, Any] | None = None
+        self._outgoing_file_drain: tuple[tuple[object, Any, Any], float] | None = None
         self.frame_condition = threading.Condition()
         self.pending_frame: tuple[int, int, int, int, int, bytes, float] | None = None
         self.pending_h264_frames: deque[tuple[int, int, int, int, int, bytes, float]] = deque()
@@ -3651,6 +3654,8 @@ class ViewerConnection:
         with self.file_receipt_lock:
             self.file_receipt = receipt
         transfer_active = False
+        heartbeat_lease = self._begin_outgoing_file_transfer()
+        legacy_drain = False
         try:
             self._write_file_control(encode_file_transfer_start(transfer_id, transfer_name, file_size))
             transfer_active = True
@@ -3703,8 +3708,12 @@ class ViewerConnection:
                     raise OSError(receipt.message or "远端保存文件失败。")
                 self._put_event("viewer_status", receipt.message)
             transfer_active = False
+            legacy_drain = receipt is None
             return (receipt.message or "远端确认保存，但未提供实际路径。") if receipt is not None else "旧版远端未返回保存确认或实际路径，请到被控端检查。"
         except Exception as ex:
+            # A best-effort cancel can itself wait behind TCP data. Failure
+            # must restore the normal watchdog before attempting that write.
+            self._end_outgoing_file_transfer(heartbeat_lease)
             if transfer_active and send_cancel:
                 try:
                     self._write_file_control(encode_file_transfer_cancel(transfer_id, f"Linux viewer cancelled: {ex}"))
@@ -3713,6 +3722,7 @@ class ViewerConnection:
             raise
 
         finally:
+            self._end_outgoing_file_transfer(heartbeat_lease, legacy_drain=legacy_drain)
             with self.file_receipt_lock:
                 if self.file_receipt is receipt:
                     self.file_receipt = None
@@ -3839,6 +3849,8 @@ class ViewerConnection:
         with self.heartbeat_lock:
             self.heartbeat_active = False
             self.awaiting_pong_since = None
+            self._outgoing_file_transfer = None
+            self._outgoing_file_drain = None
 
     def _mark_pong_received(self) -> None:
         with self.heartbeat_lock:
@@ -3943,15 +3955,38 @@ class ViewerConnection:
             return False
         current = time.monotonic() if now is None else now
         with self.heartbeat_lock:
+            outgoing = self._outgoing_file_transfer
+            drain = self._outgoing_file_drain
+            draining = (
+                drain is not None
+                and drain[0][1] is self.sock
+                and drain[0][2] is self.session
+                and 0 <= current - drain[1] < VIEWER_FILE_TRANSFER_HEARTBEAT_TIMEOUT_SECONDS
+            )
+            if drain is not None and not draining:
+                self._outgoing_file_drain = None
+            # File chunks and Ping share one serialized TCP stream. A slow
+            # relay can queue Ping behind healthy upload traffic, while a
+            # static desktop produces no inbound frames. Keep a bounded grace
+            # for this exact transport, including the remote save receipt.
+            # Legacy peers cannot acknowledge Complete: retain an independent
+            # bounded tail-drain phase after its local write. An older Pong
+            # may precede those tail bytes, so receiving it cannot end drain.
+            # Local writes never count as authenticated inbound activity.
+            timeout = (
+                VIEWER_FILE_TRANSFER_HEARTBEAT_TIMEOUT_SECONDS
+                if draining or (outgoing is not None and outgoing[1] is self.sock and outgoing[2] is self.session)
+                else VIEWER_HEARTBEAT_TIMEOUT_SECONDS
+            )
             timed_out = (
                 self.heartbeat_active
                 and self.awaiting_pong_since is not None
                 and current >= self.awaiting_pong_since
                 and current - self.awaiting_pong_since
-                >= VIEWER_HEARTBEAT_TIMEOUT_SECONDS
+                >= timeout
                 and current >= self.last_message_received_at
                 and current - self.last_message_received_at
-                >= VIEWER_HEARTBEAT_TIMEOUT_SECONDS
+                >= timeout
             )
             if timed_out:
                 # Atomically claim this timeout so heartbeat and watchdog
@@ -3966,6 +4001,24 @@ class ViewerConnection:
         )
         self._interrupt_transport()
         return False
+
+    def _begin_outgoing_file_transfer(self) -> tuple[object, Any, Any]:
+        with self.heartbeat_lock:
+            lease = (object(), self.sock, self.session)
+            self._outgoing_file_transfer = lease
+            self._outgoing_file_drain = None
+            return lease
+
+    def _end_outgoing_file_transfer(self, lease: tuple[object, Any, Any], *, legacy_drain: bool = False) -> None:
+        with self.heartbeat_lock:
+            if self._outgoing_file_transfer is lease:
+                self._outgoing_file_transfer = None
+                self._outgoing_file_drain = (
+                    (lease, time.monotonic())
+                    if legacy_drain and not self.stop_event.is_set()
+                    and self.heartbeat_active and lease[1] is self.sock and lease[2] is self.session
+                    else None
+                )
 
     def _liveness_loop(self) -> None:
         # This worker never takes write_lock.  If a file/frame/control send is
@@ -6937,18 +6990,26 @@ class RemoteDeskLinuxApp:
 
         content = ttk.Frame(dialog, padding=14, style="App.TFrame")
         content.pack(fill=tk.BOTH, expand=True)
+        content.columnconfigure(0, weight=1)
+        # Reserve the choices before allocating space to the file list. Pack's
+        # first-come allocation previously hid both choices at 480x360 / 200%.
+        # The two scrollable regions can shrink without losing any file paths.
+        content.rowconfigure(1, weight=2)
+        content.rowconfigure(2, weight=3)
         total_bytes = sum(max(0, item.size_bytes) for item in items)
         summary = ttk.Label(
             content,
             text=f"{action_text}\n共 {len(items)} 项，合计 {format_transfer_bytes(total_bytes)}。",
             style="Status.TLabel",
+            padding=0,
             wraplength=820,
             justify=tk.LEFT,
         )
-        summary.pack(fill=tk.X, pady=(0, 8))
+        summary.grid(row=0, column=0, sticky=tk.EW, pady=(0, 8))
 
         table_frame = ttk.Frame(content, style="App.TFrame")
-        table_frame.pack(fill=tk.BOTH, expand=True)
+        table_frame.grid(row=1, column=0, sticky=tk.NSEW)
+        table_frame.grid_propagate(False)
         columns = ("kind", "size", "name", "source", "destination")
         tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=min(10, max(4, len(items))))
         tree.heading("kind", text="类型")
@@ -6969,6 +7030,8 @@ class RemoteDeskLinuxApp:
         horizontal_scrollbar.grid(row=1, column=0, sticky=tk.EW)
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
+        row_height = int(ttk.Style(dialog).lookup("Treeview", "rowheight") or 24)
+        content.rowconfigure(1, minsize=2 * row_height + horizontal_scrollbar.winfo_reqheight())
         for item in items:
             tree.insert(
                 "",
@@ -6977,12 +7040,15 @@ class RemoteDeskLinuxApp:
             )
 
         details_frame = ttk.Frame(content)
-        details_frame.pack(fill=tk.X, pady=(8, 0))
+        details_frame.grid(row=2, column=0, sticky=tk.NSEW, pady=(8, 0))
+        details_frame.grid_propagate(False)
+        details_frame.columnconfigure(0, weight=1)
+        details_frame.rowconfigure(0, weight=1)
         selected_details = tk.Text(details_frame, height=3, wrap=tk.CHAR, state=tk.DISABLED)
         details_scroll = ttk.Scrollbar(details_frame, orient=tk.VERTICAL, command=selected_details.yview)
         selected_details.configure(yscrollcommand=details_scroll.set)
-        details_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        selected_details.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        details_scroll.grid(row=0, column=1, sticky=tk.NS)
+        selected_details.grid(row=0, column=0, sticky=tk.NSEW)
 
         def show_selected_details(_event: Any = None) -> None:
             selection = tree.selection()
@@ -6991,26 +7057,16 @@ class RemoteDeskLinuxApp:
             item = items[tree.index(selection[0])]
             selected_details.configure(state=tk.NORMAL)
             selected_details.delete("1.0", tk.END)
-            selected_details.insert("1.0", f"文件名：{item.transfer_name}\n原始位置：{item.source_path}\n接收位置：{item.destination_path}")
+            selected_details.insert("1.0", f"文件名：{item.transfer_name}\n接收位置：{item.destination_path}\n原始位置：{item.source_path}"
+                                    + (f"\n说明：{note}" if note else ""))
             selected_details.configure(state=tk.DISABLED)
         tree.bind("<<TreeviewSelect>>", show_selected_details)
         if tree.get_children():
             tree.selection_set(tree.get_children()[0])
             show_selected_details()
 
-        note_label: ttk.Label | None = None
-        if note:
-            note_label = ttk.Label(
-                content,
-                text=note,
-                style="Status.TLabel",
-                wraplength=820,
-                justify=tk.LEFT,
-            )
-            note_label.pack(fill=tk.X, pady=(8, 0))
-
         buttons = ttk.Frame(content, style="App.TFrame")
-        buttons.pack(fill=tk.X, pady=(12, 0))
+        buttons.grid(row=3, column=0, sticky=tk.EW, pady=(10, 0))
 
         def accept() -> None:
             result["confirmed"] = True
@@ -7041,8 +7097,6 @@ class RemoteDeskLinuxApp:
         def update_dialog_wrap(event: tk.Event[Any]) -> None:
             wrap_length = max(240, int(event.width) - 28)
             summary.configure(wraplength=wrap_length)
-            if note_label is not None:
-                note_label.configure(wraplength=wrap_length)
 
         content.bind("<Configure>", update_dialog_wrap, add="+")
         dialog.wait_window()

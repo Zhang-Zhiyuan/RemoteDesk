@@ -138,3 +138,35 @@ continuous rendering; retain and recheck them instead of treating them as passes
 Use `--min-android-fps 15` to require both the observed average and recent
 presentation rate to reach 15 FPS. The default (0) checks basic connectivity,
 not smooth video; counter-derived rates are recorded independently of UI labels.
+
+## Received files and slow uploads
+
+Launch `com.remotedesk.agent.MainActivity --ez receivedFilesProbe true` **in this
+probe package**, then read its private `files/received-files-probe.json`. It creates
+two synthetic MediaStore rows, checks the product file-list/complete location,
+blocks only the test storage worker to check UI responsiveness, cancels the query,
+and removes its own rows. The baseline records whether the platform already hides
+pending downloads; explicit filtering is not counted as a reproduced bug when it
+already does. No production preferences or received files are used.
+
+`LayoutProbeActivity --ei width 240 --ei height 480 --ef fontScale 2.0` checks
+the actual viewer controls at the requested dimensions/font size without changing
+system settings. The requested rectangle must fit the current display; otherwise
+clipping is a test-setup error. Repeat at 320×480 and 600×360, fonts 1/1.5/2.
+
+`verify_clipboard_viewer.py --files --file-silence-seconds 25 --upload-only` uploads
+a 3 MiB synthetic file while the authenticated peer stops reading and sending
+frames for 25 seconds. It verifies exact bytes, save acknowledgement and unchanged
+connection ownership. Without the transfer-specific watchdog allowance, the old
+viewer disconnects at 18 seconds. This is controlled local fault injection, not
+a measurement of public-relay latency. The original clipboard/UI suite still runs
+when `--upload-only` is omitted. Owned MuMu instances use `--mumu-manager <exe>`;
+the script verifies the loopback serial against that manager's running VM list.
+Use `--legacy-file-watchdog` only as a labelled negative control: the **probe**
+closes its upload lease to restore the prior 18-second watchdog policy. This test
+switch is not compiled into the production APK. Every transfer fixture has a
+unique name so DocumentsProvider cannot reuse metadata from an earlier size.
+Add `--legacy-no-file-receipt` to emulate an older peer without save ACK support:
+the smaller 256 KiB upload completes locally before the 25s quiet interval ends.
+The verifier checks that the UI clearly marks saving unconfirmed, the bounded
+tail drain is active after the sender finishes, and the same connection survives.

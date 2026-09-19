@@ -10,7 +10,7 @@ using RemoteDesk;
 // synthetic text, never an interactive user's clipboard or input target.
 internal static class ClipboardShortcutProbe
 {
-    internal static Task<int> RunAsync(string output, nint desktop)
+    internal static Task<int> RunAsync(string output, nint desktop, bool contextMenus = false)
     {
         var completion = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         var thread = new Thread(() =>
@@ -22,7 +22,9 @@ internal static class ClipboardShortcutProbe
                 using var pump = new Form { ShowInTaskbar = false };
                 pump.Shown += async (_, _) =>
                 {
-                    try { completion.TrySetResult(await RunCasesAsync(output, desktop)); }
+                    try { completion.TrySetResult(contextMenus
+                        ? await ClipboardContextMenuProbe.RunCasesAsync(output)
+                        : await RunCasesAsync(output, desktop)); }
                     catch (Exception error) { completion.TrySetException(error); }
                     finally { pump.Close(); }
                 };

@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace RemoteDesk;
@@ -138,7 +139,9 @@ internal enum RemoteControlKind : byte
     HostVideoDiagnosticsRequest = 36,
     HostVideoDiagnostics = 37,
     FileReceiveLocationRequest = 38,
-    FileReceiveLocation = 39
+    FileReceiveLocation = 39,
+    ClipboardSnapshotRequest = 40,
+    ClipboardSnapshot = 41
 }
 
 internal sealed record LowLatencyVideoOffer(
@@ -182,7 +185,10 @@ internal sealed record RemoteControlMessage(
     LowLatencyVideoOffer? LowLatencyVideoOffer = null,
     ulong LowLatencyVideoChannelId = 0,
     uint LowLatencyVideoEpoch = 0,
-    byte LowLatencyVideoStopReason = 0);
+    byte LowLatencyVideoStopReason = 0,
+    string? ClipboardRevision = null,
+    bool ClipboardHasText = false,
+    bool ClipboardChanged = false);
 
 internal readonly record struct RemoteInputCommand(
     RemoteInputKind Kind,
@@ -254,6 +260,8 @@ internal static class RemoteMessageCodec
     private const int MaxClipboardTextChars = 256_000;
     private const int MaxControlStringChars = 4_096;
     private const int Sha256HexLength = 64;
+    internal const int MaxClipboardSnapshotTextChars = 256_000;
+    private static readonly UTF8Encoding SnapshotUtf8 = new(false, true);
 
     public static byte[] EncodeFrame(int width, int height, byte[] jpegBytes)
     {
@@ -724,6 +732,68 @@ internal static class RemoteMessageCodec
         return [(byte)RemoteControlKind.ClipboardGetText];
     }
 
+    public static byte[] EncodeClipboardSnapshotRequest(string requestId, string knownRevision)
+    {
+        ValidateClipboardSnapshotRequest(requestId, knownRevision);
+        using var output = new MemoryStream();
+        using var writer = new BinaryWriter(output, SnapshotUtf8);
+        writer.Write((byte)RemoteControlKind.ClipboardSnapshotRequest);
+        writer.Write(requestId);
+        writer.Write(knownRevision);
+        return output.ToArray();
+    }
+
+    public static byte[] EncodeClipboardSnapshot(string requestId, bool success, string revision,
+        bool hasText, bool changed, string text, string statusMessage)
+    {
+        ValidateClipboardSnapshot(requestId, success, revision, hasText, changed, text, statusMessage);
+        using var output = new MemoryStream();
+        using var writer = new BinaryWriter(output, SnapshotUtf8);
+        writer.Write((byte)RemoteControlKind.ClipboardSnapshot);
+        writer.Write(requestId);
+        writer.Write(success);
+        writer.Write(revision);
+        writer.Write(hasText);
+        writer.Write(changed);
+        writer.Write(text);
+        writer.Write(statusMessage);
+        return output.ToArray();
+    }
+
+    internal static string ComputeClipboardRevision(string text) =>
+        Convert.ToHexString(SHA256.HashData(SnapshotUtf8.GetBytes(text))).ToLowerInvariant();
+
+    private static void ValidateClipboardSnapshotRequest(string requestId, string knownRevision)
+    {
+        if (string.IsNullOrEmpty(requestId) || requestId.Length > 64)
+            throw new InvalidDataException("剪贴板快照请求标识无效。");
+        ValidateClipboardRevision(knownRevision, allowEmpty: true);
+    }
+
+    private static void ValidateClipboardRevision(string revision, bool allowEmpty)
+    {
+        if (revision is null || (revision.Length == 0 ? !allowEmpty :
+            revision.Length != 64 || revision.Any(c => c is not (>= '0' and <= '9') and not (>= 'a' and <= 'f'))))
+            throw new InvalidDataException("剪贴板快照版本无效。");
+    }
+
+    private static void ValidateClipboardSnapshot(string requestId, bool success, string revision,
+        bool hasText, bool changed, string text, string statusMessage)
+    {
+        ValidateClipboardSnapshotRequest(requestId, revision);
+        if (text is null || text.Length > MaxClipboardSnapshotTextChars ||
+            statusMessage is null || statusMessage.Length > MaxControlStringChars)
+            throw new InvalidDataException("剪贴板快照文本过长或无效。");
+        ValidateClipboardRevision(revision, allowEmpty: !success);
+        if ((!success && (hasText || changed || text.Length != 0)) ||
+            (success && ((!changed && text.Length != 0) ||
+                (changed && hasText != (text.Length != 0)) ||
+                (!hasText && revision != ComputeClipboardRevision(string.Empty)) ||
+                (hasText && revision == ComputeClipboardRevision(string.Empty)) ||
+                (changed && revision != ComputeClipboardRevision(text)))))
+            throw new InvalidDataException("剪贴板快照字段不一致。");
+    }
+
     public static byte[] EncodeClipboardSetText(string text)
     {
         ValidateClipboardText(text);
@@ -960,6 +1030,8 @@ internal static class RemoteMessageCodec
                 Array.Empty<CaptureTargetInfo>(),
                 null,
                 null),
+            RemoteControlKind.ClipboardSnapshotRequest => DecodeClipboardSnapshotRequest(reader),
+            RemoteControlKind.ClipboardSnapshot => DecodeClipboardSnapshot(reader),
             RemoteControlKind.ClipboardSetText => DecodeClipboardText(kind, reader),
             RemoteControlKind.ClipboardText => DecodeClipboardText(kind, reader),
             RemoteControlKind.ClipboardStatus => new RemoteControlMessage(
@@ -1316,6 +1388,53 @@ internal static class RemoteMessageCodec
         string text = reader.ReadString();
         ValidateClipboardText(text);
         return new RemoteControlMessage(kind, Array.Empty<CaptureTargetInfo>(), null, null, text);
+    }
+
+    private static RemoteControlMessage DecodeClipboardSnapshotRequest(BinaryReader reader)
+    {
+        string requestId = ReadClipboardSnapshotString(reader, 64);
+        string revision = ReadClipboardSnapshotString(reader, 64);
+        ValidateClipboardSnapshotRequest(requestId, revision);
+        return new RemoteControlMessage(RemoteControlKind.ClipboardSnapshotRequest, [], null, null,
+            TransferId: requestId, ClipboardRevision: revision);
+    }
+
+    private static RemoteControlMessage DecodeClipboardSnapshot(BinaryReader reader)
+    {
+        string requestId = ReadClipboardSnapshotString(reader, 64);
+        bool success = ReadClipboardSnapshotBoolean(reader);
+        string revision = ReadClipboardSnapshotString(reader, 64);
+        bool hasText = ReadClipboardSnapshotBoolean(reader);
+        bool changed = ReadClipboardSnapshotBoolean(reader);
+        string text = ReadClipboardSnapshotString(reader, MaxClipboardSnapshotTextChars);
+        string status = ReadClipboardSnapshotString(reader, MaxControlStringChars);
+        ValidateClipboardSnapshot(requestId, success, revision, hasText, changed, text, status);
+        return new RemoteControlMessage(RemoteControlKind.ClipboardSnapshot, [], null, null, Text: text,
+            Success: success, StatusMessage: status, TransferId: requestId, ClipboardRevision: revision,
+            ClipboardHasText: hasText, ClipboardChanged: changed);
+    }
+
+    private static bool ReadClipboardSnapshotBoolean(BinaryReader reader) => reader.ReadByte() switch
+    {
+        0 => false,
+        1 => true,
+        _ => throw new InvalidDataException("剪贴板快照布尔字段无效。")
+    };
+
+    private static string ReadClipboardSnapshotString(BinaryReader reader, int maxChars)
+    {
+        int bytes;
+        try { bytes = reader.Read7BitEncodedInt(); }
+        catch (FormatException error) { throw new InvalidDataException("剪贴板快照字符串长度无效。", error); }
+        if (bytes < 0 || bytes > maxChars * 4)
+            throw new InvalidDataException("剪贴板快照字符串过长。");
+        if (bytes > reader.BaseStream.Length - reader.BaseStream.Position)
+            throw new EndOfStreamException("剪贴板快照字符串不完整。");
+        string value;
+        try { value = SnapshotUtf8.GetString(reader.ReadBytes(bytes)); }
+        catch (DecoderFallbackException) { throw new InvalidDataException("剪贴板快照字符串编码无效。"); }
+        if (value.Length > maxChars) throw new InvalidDataException("剪贴板快照字符串过长。");
+        return value;
     }
 
     private static string ReadHostVideoDiagnostics(BinaryReader reader)

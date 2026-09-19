@@ -9,7 +9,7 @@ using RemoteDesk;
 // user's interactive WinSta0 clipboard for an automated test.
 internal static class ClipboardSystemProbe
 {
-    internal static int Run(bool relayFiles = false, bool shortcuts = false)
+    internal static int Run(bool relayFiles = false, bool shortcuts = false, bool contextMenus = false)
     {
         using var config = JsonDocument.Parse(Console.ReadLine()!);
         string output = config.RootElement.GetProperty("output").GetString()!;
@@ -27,7 +27,7 @@ internal static class ClipboardSystemProbe
         var worker = new Thread(() => {
             try {
                 if (!SetThreadDesktop(desktop)) throw new Win32Exception();
-                result = (shortcuts ? ClipboardShortcutProbe.RunAsync(output, desktop) : relayFiles ? FileClipboardRelayProbe.RunAsync(output,
+                result = (shortcuts || contextMenus ? ClipboardShortcutProbe.RunAsync(output, desktop, contextMenus) : relayFiles ? FileClipboardRelayProbe.RunAsync(output,
                     config.RootElement.GetProperty("expectedServer").GetString()!) : RunAsync(output)).GetAwaiter().GetResult();
             } catch (Exception error) { failure = error; }
         });
@@ -49,6 +49,24 @@ internal static class ClipboardSystemProbe
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(35));
         await ClipboardTextService.SetTextAsync(sample);
         Check("real Windows clipboard Unicode/newline roundtrip", await ClipboardTextService.GetTextAsync() == sample);
+        var hostClipboard = new RemoteHostServer.ViewerSessionState
+        {
+            Capabilities = RemoteDeviceCapabilities.ClipboardText | RemoteDeviceCapabilities.ClipboardSnapshotV1
+        };
+        async Task<RemoteControlMessage> Snapshot(string id, string revision = "") =>
+            RemoteMessageCodec.DecodeControl((await RemoteHostServer.BuildClipboardSnapshotResponseAsync(
+                RemoteMessageCodec.DecodeControl(RemoteMessageCodec.EncodeClipboardSnapshotRequest(id, revision)),
+                hostClipboard, timeout.Token))!);
+        var firstSnapshot = await Snapshot("first");
+        Check("real Windows host snapshot returns Unicode and content revision", firstSnapshot.Success &&
+            firstSnapshot.Text == sample && firstSnapshot.ClipboardRevision == ClipboardAutoSyncCoordinator.Revision(sample));
+        var unchangedSnapshot = await Snapshot("unchanged", firstSnapshot.ClipboardRevision!);
+        Check("real host cached clipboard snapshot omits unchanged text", unchangedSnapshot.Success &&
+            !unchangedSnapshot.ClipboardChanged && unchangedSnapshot.ClipboardHasText && unchangedSnapshot.Text == "");
+        await ClipboardTextService.SetTextAsync("Windows host changed 中文😀");
+        var changedSnapshot = await Snapshot("changed", firstSnapshot.ClipboardRevision!);
+        Check("real host clipboard sequence invalidates stale cached text", changedSnapshot.Success &&
+            changedSnapshot.ClipboardChanged && changedSnapshot.Text == "Windows host changed 中文😀");
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         var cases = System.Threading.Channels.Channel.CreateUnbounded<ReadCase>();

@@ -13,7 +13,11 @@ final class AndroidViewerHeartbeat {
     }
 
     static boolean hasInboundTimedOut(long nowNanos, long lastInboundNanos) {
-        return elapsedAtLeast(nowNanos, lastInboundNanos, INBOUND_TIMEOUT_NANOS);
+        return hasInboundTimedOut(nowNanos, lastInboundNanos, INBOUND_TIMEOUT_NANOS);
+    }
+
+    static boolean hasInboundTimedOut(long nowNanos, long lastInboundNanos, long timeoutNanos) {
+        return elapsedAtLeast(nowNanos, lastInboundNanos, timeoutNanos);
     }
 
     static boolean hasDeviceInfoTimedOut(

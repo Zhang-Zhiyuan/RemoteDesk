@@ -157,19 +157,8 @@ public sealed partial class MainForm
     private void AddDevice()
     {
         if (_viewerActionInProgress || _viewerClient.IsConnected) return;
-        using var dialog = new Form { Text = "新增设备", ClientSize = new Size(460, 350), Font = Font,
-            StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false };
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), ColumnCount = 2, AutoScroll = true };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        var address = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "IP / 主机名" };
-        var port = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "留空自动探测" };
-        var password = new TextBox { Dock = DockStyle.Fill, UseSystemPasswordChar = true };
-        var remark = new TextBox { Dock = DockStyle.Fill, MaxLength = AppSettingsService.MaxSavedDeviceRemarkLength };
-        TextBox[] fields = [address, port, password, remark]; string[] labels = ["IP / 主机名", "端口（可选）", "设备密钥", "备注（可选）"];
-        for (int i = 0; i < fields.Length; i++) { layout.Controls.Add(new Label { Text = labels[i], AutoSize = true, Padding = new Padding(0, 7, 0, 0) }, 0, i); layout.Controls.Add(fields[i], 1, i); }
-        var error = new Label { AutoSize = true, ForeColor = DangerColor, MaximumSize = new Size(420, 80) }; layout.Controls.Add(error, 0, 4); layout.SetColumnSpan(error, 2);
-        var save = new Button { Text = "保存设备", AutoSize = true }; var cancel = new Button { Text = "取消", AutoSize = true, DialogResult = DialogResult.Cancel };
-        layout.Controls.Add(cancel, 0, 5); layout.Controls.Add(save, 1, 5); dialog.Controls.Add(layout); dialog.AcceptButton = save; dialog.CancelButton = cancel;
+        using var dialog = CreateAddDeviceDialog(Font, out TextBox[] fields, out Label error, out Button save);
+        TextBox address = fields[0], port = fields[1], password = fields[2], remark = fields[3];
         save.Click += (_, _) =>
         {
             try
@@ -186,7 +175,43 @@ public sealed partial class MainForm
             }
             catch (ArgumentException ex) { error.Text = ex.Message; }
         };
-        ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(500, 400), new Size(360, 240));
         dialog.ShowDialog(this);
+    }
+
+    internal static Form CreateAddDeviceDialog(Font font, out TextBox[] fields, out Label error, out Button save)
+    {
+        var dialog = new Form { Text = "新增设备", ClientSize = new Size(460, 350), Font = font,
+            StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), ColumnCount = 1, RowCount = 10 };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        var address = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "IP / 主机名" };
+        var port = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "留空自动探测" };
+        var password = new TextBox { Dock = DockStyle.Fill, UseSystemPasswordChar = true };
+        var remark = new TextBox { Dock = DockStyle.Fill, MaxLength = AppSettingsService.MaxSavedDeviceRemarkLength };
+        fields = [address, port, password, remark]; string[] labels = ["IP / 主机名", "端口（可选）", "设备密钥", "备注（可选）"];
+        for (int i = 0; i < fields.Length; i++)
+        {
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.Controls.Add(new Label { Text = labels[i], AutoSize = true, Dock = DockStyle.Top,
+                UseMnemonic = false, Margin = new Padding(0, i == 0 ? 0 : 10, 0, 3) }, 0, i * 2);
+            fields[i].Dock = DockStyle.Top;
+            fields[i].Margin = new Padding(0);
+            fields[i].AccessibleName = labels[i];
+            layout.Controls.Add(fields[i], 0, i * 2 + 1);
+        }
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        error = new Label { AutoSize = true, Dock = DockStyle.Top, ForeColor = DangerColor,
+            UseMnemonic = false, Margin = new Padding(0, 8, 0, 0) };
+        layout.Controls.Add(error, 0, 8);
+        save = new Button { Text = "保存设备", AutoSize = true }; var cancel = new Button { Text = "取消", AutoSize = true, DialogResult = DialogResult.Cancel };
+        var actions = new FlowLayoutPanel { Dock = DockStyle.Top, Margin = new Padding(0, 8, 0, 0) };
+        actions.Controls.Add(save); actions.Controls.Add(cancel);
+        ConfigureWrappingDialogActions(actions);
+        layout.Controls.Add(actions, 0, 9);
+        dialog.Controls.Add(layout); dialog.AcceptButton = save; dialog.CancelButton = cancel;
+        ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(500, 400), new Size(360, 240));
+        return dialog;
     }
 }

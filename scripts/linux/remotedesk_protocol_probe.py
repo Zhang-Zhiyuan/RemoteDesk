@@ -65,7 +65,10 @@ CONTROL_DEVICE_IDENTITY = 34
 CONTROL_FILE_TRANSFER_RECEIPT = 35
 CONTROL_FILE_RECEIVE_LOCATION_REQUEST = 38
 CONTROL_FILE_RECEIVE_LOCATION = 39
+CONTROL_CLIPBOARD_SNAPSHOT_REQUEST = 40
+CONTROL_CLIPBOARD_SNAPSHOT = 41
 CAPABILITY_FILE_RECEIVE_LOCATION = 1 << 27
+CAPABILITY_CLIPBOARD_SNAPSHOT_V1 = 1 << 28
 CAPABILITY_DEVICE_IDENTITY = 1 << 22
 CAPABILITY_CLIPBOARD_PASTE_SHORTCUT = 1 << 23
 CAPABILITY_FILE_TRANSFER_RECEIPT = 1 << 24
@@ -123,6 +126,7 @@ MAX_UNIQUE_FILE_PATH_ATTEMPTS = 10_000
 MAX_SAFE_ARCHIVE_ENTRY_BYTES = 4_096
 MAX_CONTROL_ITEMS = 64
 MAX_CLIPBOARD_TEXT_CHARS = 256_000
+MAX_CLIPBOARD_SNAPSHOT_UTF8_BYTES = 1024 * 1024
 MAX_CONTROL_STRING_CHARS = 4_096
 SHA256_HEX_LENGTH = 64
 MAX_PASSWORD_UTF8_BYTES = 4_096
@@ -183,6 +187,7 @@ CAPABILITIES = [
     (1 << 23, "ClipboardPasteShortcut"),
     (CAPABILITY_FILE_TRANSFER_RECEIPT, "FileTransferReceipt"),
     (CAPABILITY_FILE_RECEIVE_LOCATION, "FileReceiveLocation"),
+    (CAPABILITY_CLIPBOARD_SNAPSHOT_V1, "ClipboardSnapshotV1"),
 ]
 
 RESERVED_FILE_NAMES = {
@@ -686,6 +691,47 @@ def encode_clipboard_status(success: bool, message: str) -> bytes:
     )
 
 
+def validate_clipboard_snapshot_id(request_id: str) -> None:
+    if not request_id or len(request_id.encode("utf-16-le")) // 2 > 64:
+        raise ProtocolError("clipboard snapshot request id must contain 1..64 UTF-16 units")
+
+
+def validate_clipboard_snapshot_revision(revision: str, *, allow_empty: bool = True) -> None:
+    if allow_empty and revision == "":
+        return
+    if len(revision) != 64 or any(value not in "0123456789abcdef" for value in revision):
+        raise ProtocolError("clipboard snapshot revision must be lowercase SHA-256")
+
+
+def validate_clipboard_snapshot(success: bool, revision: str, has_text: bool, changed: bool, text: str) -> None:
+    validate_clipboard_snapshot_revision(revision, allow_empty=not success)
+    raw = text.encode("utf-8")
+    if len(raw) > MAX_CLIPBOARD_SNAPSHOT_UTF8_BYTES or len(text.encode("utf-16-le")) // 2 > MAX_CLIPBOARD_TEXT_CHARS:
+        raise ProtocolError("clipboard snapshot text is too large")
+    if (not success or not changed or not has_text) and text:
+        raise ProtocolError("clipboard snapshot contains unexpected text")
+    if success and changed:
+        if has_text != bool(text) or hashlib.sha256(raw).hexdigest() != revision:
+            raise ProtocolError("clipboard snapshot content does not match its revision")
+
+
+def encode_clipboard_snapshot_request(request_id: str, known_revision: str) -> bytes:
+    validate_clipboard_snapshot_id(request_id)
+    validate_clipboard_snapshot_revision(known_revision)
+    return (bytes([CONTROL_CLIPBOARD_SNAPSHOT_REQUEST])
+            + encode_dotnet_string(request_id, 64) + encode_dotnet_string(known_revision, 64))
+
+
+def encode_clipboard_snapshot(request_id: str, success: bool, revision: str,
+                              has_text: bool, changed: bool, text: str, status_message: str = "") -> bytes:
+    validate_clipboard_snapshot_id(request_id)
+    validate_clipboard_snapshot(success, revision, has_text, changed, text)
+    return (bytes([CONTROL_CLIPBOARD_SNAPSHOT]) + encode_dotnet_string(request_id, 64)
+            + bytes([bool(success)]) + encode_dotnet_string(revision, 64)
+            + bytes([bool(has_text), bool(changed)]) + encode_dotnet_string(text, MAX_CLIPBOARD_TEXT_CHARS)
+            + encode_dotnet_string(status_message))
+
+
 def encode_session_rejected(message: str) -> bytes:
     return bytes([CONTROL_SESSION_REJECTED]) + encode_bounded_dotnet_string(
         message,
@@ -923,6 +969,25 @@ def decode_control(payload: bytes, *, include_clipboard_text: bool = False) -> d
         # interactive viewer explicitly opts in to receiving the actual text.
         if include_clipboard_text:
             message["text"] = text
+    elif kind == CONTROL_CLIPBOARD_SNAPSHOT_REQUEST:
+        request_id = cursor.read_dotnet_string(64)
+        known_revision = cursor.read_dotnet_string(64)
+        validate_clipboard_snapshot_id(request_id)
+        validate_clipboard_snapshot_revision(known_revision)
+        message.update(requestId=request_id, knownRevision=known_revision)
+    elif kind == CONTROL_CLIPBOARD_SNAPSHOT:
+        request_id = cursor.read_dotnet_string(64)
+        success = cursor.read_bool()
+        revision = cursor.read_dotnet_string(64)
+        has_text, changed = cursor.read_bool(), cursor.read_bool()
+        text = cursor.read_dotnet_string(MAX_CLIPBOARD_TEXT_CHARS)
+        status_message = cursor.read_dotnet_string()
+        validate_clipboard_snapshot_id(request_id)
+        validate_clipboard_snapshot(success, revision, has_text, changed, text)
+        message.update(requestId=request_id, success=success, revision=revision,
+                       hasText=has_text, changed=changed, textLength=len(text), statusMessage=status_message)
+        if include_clipboard_text:
+            message["text"] = text
     elif kind in (CONTROL_FILE_TRANSFER_START, CONTROL_REMOTE_UPDATE_START):
         message["transferId"] = cursor.read_dotnet_string()
         message["fileName"] = cursor.read_dotnet_string()
@@ -1020,6 +1085,8 @@ def control_name(kind: int) -> str:
         CONTROL_CLIPBOARD_SET_TEXT: "ClipboardSetText",
         CONTROL_CLIPBOARD_TEXT: "ClipboardText",
         CONTROL_CLIPBOARD_STATUS: "ClipboardStatus",
+        CONTROL_CLIPBOARD_SNAPSHOT_REQUEST: "ClipboardSnapshotRequest",
+        CONTROL_CLIPBOARD_SNAPSHOT: "ClipboardSnapshot",
         CONTROL_FILE_TRANSFER_START: "FileTransferStart",
         CONTROL_FILE_TRANSFER_CHUNK: "FileTransferChunk",
         CONTROL_FILE_TRANSFER_COMPLETE: "FileTransferComplete",

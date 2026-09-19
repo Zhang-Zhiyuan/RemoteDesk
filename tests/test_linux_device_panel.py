@@ -23,7 +23,7 @@ class DevicePanelUiTests(unittest.TestCase):
     def setUp(self):
         from remotedesk_linux_app import RemoteDeskLinuxApp
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
-        self.root = tk.Tk(); self.root.geometry("900x400"); self.addCleanup(self.root.destroy)
+        self.root = tk.Tk(); self.root.geometry("900x400"); self.addCleanup(self.close_tk_fixture)
         self.app = SimpleNamespace(root=self.root, viewer=None, viewer_host=tk.StringVar(), viewer_port=tk.StringVar(),
                                    viewer_password=tk.StringVar(), connect_viewer=mock.Mock(),
                                    _wrap_action_buttons=RemoteDeskLinuxApp._wrap_action_buttons,
@@ -32,9 +32,22 @@ class DevicePanelUiTests(unittest.TestCase):
         store = model.Store(Path(self.temp.name) / "devices")
         with mock.patch.object(model, "Store", return_value=store):
             self.panel = panel.DevicePanel(self.app, self.root)
-        self.addCleanup(self.panel.close); self.panel.pack(fill=tk.BOTH)
+        self.panel.pack(fill=tk.BOTH)
         self.panel.refreshed = time.monotonic()  # Network is covered by separate bounded loopback tests.
         self.wait(lambda:self.panel.ready)
+
+    def close_tk_fixture(self):
+        # Destroying the window does not release Python StringVar/widget
+        # cycles. Finalize those on their owning thread, before the next
+        # fixture starts a storage worker which could otherwise trigger GC.
+        if getattr(self, "panel", None) is not None:
+            self.panel.close()
+            self.panel.storage.shutdown(wait=True, cancel_futures=True)
+            self.panel = None
+        self.app = None
+        self.root.destroy()
+        self.root = None
+        gc.collect()
 
     def wait(self, predicate):
         end = time.monotonic() + 3
@@ -60,7 +73,9 @@ class DevicePanelUiTests(unittest.TestCase):
         self.wait(lambda:self.app.viewer_password.get() == password)
 
     def test_add_merge_rename_restart_and_delete(self):
+        self.assertIn("暂无已保存设备", self.panel.status.cget("text"))
         self.add_device("PC.", "45678", "test-one", "测试电脑")
+        self.assertIn("已保存 1 个设备", self.panel.status.cget("text"))
         original = self.panel.book.nodes[0].id
         self.add_device("pc", "45678", "test-two", "")
         self.assertEqual(1, len(self.panel.book.nodes)); self.assertEqual(original, self.panel.book.nodes[0].id)
@@ -75,6 +90,7 @@ class DevicePanelUiTests(unittest.TestCase):
             self.button("删除记录").invoke()
         self.wait(lambda:not self.panel.book.nodes)
         self.assertFalse(self.panel.store.load().nodes)
+        self.assertIn("暂无已保存设备", self.panel.status.cget("text"))
 
     def test_refresh_never_overwrites_edited_fields(self):
         self.add_device("pc", "", "test-password", "备注")
@@ -106,6 +122,88 @@ class DevicePanelUiTests(unittest.TestCase):
         self.panel.tree.selection_set("found:pc:56565"); self.panel.fill_selection()
         self.assertEqual("", self.app.viewer_password.get())
         self.assertIn("saved:" + first.id, self.panel.rows)
+
+    def test_choose_many_long_named_candidates_is_scrollable_and_returns_selected_endpoint(self):
+        from remotedesk_linux_app import RemoteDeskLinuxApp
+        self.root.tk.call("tk", "scaling", 192 / 72)
+        RemoteDeskLinuxApp._configure_style(self.app)
+        devices = [model.Device("192.0.2.1", 40000 + index, "很长的测试设备名称" * 12) for index in range(40)]
+        for accept in (False, True):
+            errors = []
+            def inspect():
+                dialog = next(w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel))
+                try:
+                    dialog.minsize(1, 1)
+                    dialog.geometry("480x360")
+                    self.root.update()
+                    tree = next(w for w in self.widgets(dialog) if isinstance(w, ttk.Treeview))
+                    tree.selection_set("39"); tree.see("39")
+                    self.root.update()
+                    self.assertGreater(tree.yview()[0], 0)
+                    detail = next(w for w in self.widgets(dialog) if isinstance(w, tk.Text))
+                    self.assertIn(devices[-1].name, detail.get("1.0", tk.END))
+                    self.assertIn("192.0.2.1:40039", detail.get("1.0", tk.END))
+                    for title in ("取消", "连接此设备"):
+                        button = self.button(title, dialog)
+                        self.assertTrue(button.winfo_ismapped())
+                        self.assertGreaterEqual(button.winfo_rootx(), dialog.winfo_rootx())
+                        self.assertLessEqual(button.winfo_rootx() + button.winfo_width(), dialog.winfo_rootx() + dialog.winfo_width())
+                        self.assertLessEqual(button.winfo_rooty() + button.winfo_height(), dialog.winfo_rooty() + dialog.winfo_height())
+                    self.button("连接此设备" if accept else "取消", dialog).invoke()
+                except Exception as error:
+                    errors.append(error); dialog.destroy()
+            self.root.after(80, inspect)
+            result = self.panel.choose(devices)
+            self.assertEqual([], errors)
+            self.assertIs(devices[-1] if accept else None, result)
+        self.assertIsNone(self.panel.choose([]))
+        self.assertIs(devices[0], self.panel.choose(devices[:1]))
+
+    def test_add_dialog_large_font_inputs_fit_small_display(self):
+        import remotedesk_linux_app as application
+        self.root.tk.call("tk", "scaling", 192 / 72)
+        application.RemoteDeskLinuxApp._configure_style(self.app)
+        errors = []
+        def inspect():
+            dialog = next(w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel))
+            try:
+                self.root.update()
+                self.assertLessEqual(dialog.winfo_width(), 592)
+                self.assertLessEqual(dialog.winfo_height(), 432)
+                for widget in (w for w in self.widgets(dialog) if isinstance(w, (ttk.Entry, ttk.Button))):
+                    self.assertTrue(widget.winfo_ismapped())
+                    self.assertGreaterEqual(widget.winfo_rootx(), dialog.winfo_rootx())
+                    self.assertLessEqual(widget.winfo_rootx() + widget.winfo_width(), dialog.winfo_rootx() + dialog.winfo_width())
+                    self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(), dialog.winfo_rooty() + dialog.winfo_height())
+                self.button("取消", dialog).invoke()
+            except Exception as error:
+                errors.append(error); dialog.destroy()
+        self.root.after(80, inspect)
+        with mock.patch.object(application, "query_xrandr_monitor_bounds", return_value=[(0, 0, 640, 480)]):
+            self.panel.add()
+        self.assertEqual([], errors)
+
+    def test_add_invalid_endpoint_reports_error_without_losing_fields(self):
+        errors = []
+        def inspect():
+            dialog = next(w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel))
+            try:
+                fields = [w for w in dialog.winfo_children() if isinstance(w, ttk.Entry)]
+                for field, value in zip(fields, ("192.0.2.1", "70000", "fixture", "备注")):
+                    field.insert(0, value)
+                with mock.patch.object(panel.messagebox, "showwarning") as warning:
+                    self.button("保存设备", dialog).invoke()
+                warning.assert_called_once()
+                self.assertIs(dialog, warning.call_args.kwargs["parent"])
+                self.assertEqual("70000", fields[1].get())
+                self.assertEqual("备注", fields[3].get())
+                self.assertEqual([], self.panel.book.nodes)
+                self.button("取消", dialog).invoke()
+            except Exception as error:
+                errors.append(error); dialog.destroy()
+        self.root.after(60, inspect)
+        self.panel.add()
+        self.assertEqual([], errors)
 
 
 @unittest.skipUnless(sys.platform.startswith("linux") and os.environ.get("DISPLAY"), "Tk display required")

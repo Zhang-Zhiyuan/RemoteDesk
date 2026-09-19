@@ -22,10 +22,21 @@ public final class LayoutProbeActivity extends Activity {
     private TextView desktop;
     private int actions, hits;
     private boolean compact;
+    private android.content.res.Resources probeResources;
     private final JSONObject result = new JSONObject();
+
+    @Override public android.content.res.Resources getResources() {
+        return probeResources == null ? super.getResources() : probeResources;
+    }
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        float testFontScale = getIntent().getFloatExtra("fontScale", 0);
+        if (testFontScale >= 1f && testFontScale <= 2f) {
+            android.content.res.Configuration override = new android.content.res.Configuration(super.getResources().getConfiguration());
+            override.fontScale = testFontScale;
+            probeResources = createConfigurationContext(override).getResources(); // Probe only; no device settings change.
+        }
         compact = getIntent().getIntExtra("height", 640) < 420;
         chrome = new AndroidViewerChrome(this, new AndroidViewerChrome.Actions() {
             public void keyboard(boolean open) { actions++; }

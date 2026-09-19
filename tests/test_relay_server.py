@@ -359,15 +359,18 @@ class RelayServerTests(unittest.IsolatedAsyncioTestCase):
         for writer in (left, right):
             writer.drain = mock.AsyncMock()
             writer.wait_closed = mock.AsyncMock()
-        task = asyncio.create_task(relay.bridge_streams(first, left, second, right))
-        first.feed_data(b"x")
-        for _ in range(100):
-            if right.write.called:
-                break
-            await asyncio.sleep(.001)
-        right.write.assert_called_once_with(b"x")
-        first.feed_eof()
-        await asyncio.wait_for(task, 1)
+        with mock.patch.object(relay, "print", create=True) as report:
+            task = asyncio.create_task(relay.bridge_streams(first, left, second, right))
+            first.feed_data(b"x")
+            for _ in range(100):
+                if right.write.called:
+                    break
+                await asyncio.sleep(.001)
+            right.write.assert_called_once_with(b"x")
+            first.feed_eof()
+            await asyncio.wait_for(task, 1)
+            report.assert_called_once_with("relay bridge ended: reason=eof direction=first-to-second stage=read",
+                                           file=sys.stderr, flush=True)
         for writer in (left, right):
             writer.close.assert_not_called()
             writer.transport.abort.assert_called_once()
@@ -380,11 +383,69 @@ class RelayServerTests(unittest.IsolatedAsyncioTestCase):
             writer.drain = mock.AsyncMock(side_effect=blocked.wait)
             writer.wait_closed = mock.AsyncMock()
         first.feed_data(b"unchanged encrypted bytes")
-        with mock.patch.object(relay, "BRIDGE_WRITE_TIMEOUT_SECONDS", .02):
+        with (mock.patch.object(relay, "BRIDGE_WRITE_TIMEOUT_SECONDS", .02),
+              mock.patch.object(relay, "print", create=True) as report):
             await asyncio.wait_for(relay.bridge_streams(first, left, second, right), 1)
+            report.assert_called_once_with("relay bridge ended: reason=drain-timeout direction=first-to-second stage=drain error=TimeoutError",
+                                           file=sys.stderr, flush=True)
         right.write.assert_called_once_with(b"unchanged encrypted bytes")
         for writer in (left, right):
             writer.close.assert_not_called()
+            writer.transport.abort.assert_called_once()
+
+    async def test_bridge_errors_are_classified_without_logging_exception_messages(self):
+        for error, category in ((ConnectionResetError("private token=do-not-log"), "connection-error"),
+                                (ValueError("private payload=do-not-log"), "error")):
+            with self.subTest(category=category):
+                first, second = asyncio.StreamReader(), mock.Mock()
+                second.read = mock.AsyncMock(side_effect=error)
+                left, right = mock.Mock(), mock.Mock()
+                for writer in (left, right):
+                    writer.drain = mock.AsyncMock()
+                    writer.wait_closed = mock.AsyncMock()
+                with mock.patch.object(relay, "print", create=True) as report:
+                    await asyncio.wait_for(relay.bridge_streams(first, left, second, right), 1)
+                    report.assert_called_once()
+                    message = report.call_args.args[0]
+                    self.assertIn(f"reason={category}", message)
+                    self.assertIn("direction=second-to-first stage=read", message)
+                    self.assertIn(f"error={type(error).__name__}", message)
+                    self.assertNotIn("private", message)
+                    self.assertNotIn("do-not-log", message)
+                    self.assertLessEqual(len(message), 256)
+                for writer in (left, right):
+                    writer.close.assert_not_called()
+                    writer.transport.abort.assert_called_once()
+
+    async def test_bridge_external_cancellation_reports_once_and_preserves_cleanup(self):
+        first, second = asyncio.StreamReader(), asyncio.StreamReader()
+        left, right = mock.Mock(), mock.Mock()
+        for writer in (left, right):
+            writer.drain = mock.AsyncMock()
+            writer.wait_closed = mock.AsyncMock()
+        with mock.patch.object(relay, "print", create=True) as report:
+            task = asyncio.create_task(relay.bridge_streams(first, left, second, right))
+            await asyncio.sleep(0)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            report.assert_called_once_with("relay bridge ended: reason=cancelled direction=bridge stage=wait",
+                                           file=sys.stderr, flush=True)
+        for writer in (left, right):
+            writer.transport.abort.assert_called_once()
+
+    async def test_bridge_diagnostic_failure_cannot_break_cleanup(self):
+        first, second = asyncio.StreamReader(), asyncio.StreamReader()
+        first.feed_eof()
+        second.feed_eof()
+        left, right = mock.Mock(), mock.Mock()
+        for writer in (left, right):
+            writer.drain = mock.AsyncMock()
+            writer.wait_closed = mock.AsyncMock()
+        with mock.patch.object(relay, "print", create=True, side_effect=OSError("stderr unavailable")) as report:
+            await asyncio.wait_for(relay.bridge_streams(first, left, second, right), 1)
+            report.assert_called_once()
+        for writer in (left, right):
             writer.transport.abort.assert_called_once()
 
     async def test_close_timeout_does_not_poison_later_owner_cleanup(self):

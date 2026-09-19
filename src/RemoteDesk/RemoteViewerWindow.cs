@@ -369,14 +369,14 @@ internal sealed partial class RemoteViewerWindow : Form
             _statusFooterPanel,
             _statusBar,
             _fileTransferActionsPanel);
-        _fileTransferActionsPanel.SizeChanged += (_, _) => UpdateStatusFooterLayout();
-        _fileTransferActionsPanel.VisibleChanged += (_, _) => UpdateStatusFooterLayout();
+        _fileTransferActionsPanel.SizeChanged += (_, _) => QueueStatusFooterLayout();
+        _fileTransferActionsPanel.VisibleChanged += (_, _) => QueueStatusFooterLayout();
         foreach (Control action in _fileTransferActionsPanel.Controls)
         {
-            action.VisibleChanged += (_, _) => UpdateStatusFooterLayout();
-            action.TextChanged += (_, _) => UpdateStatusFooterLayout();
+            action.VisibleChanged += (_, _) => QueueStatusFooterLayout();
+            action.TextChanged += (_, _) => QueueStatusFooterLayout();
         }
-        _statusFooterPanel.ClientSizeChanged += (_, _) => UpdateStatusFooterLayout();
+        _statusFooterPanel.ClientSizeChanged += (_, _) => QueueStatusFooterLayout();
 
         _remoteFilePullProgressBar = new ProgressBar
         {
@@ -444,6 +444,7 @@ internal sealed partial class RemoteViewerWindow : Form
         _client.CaptureTargetAvailabilityChanged +=
             OnCaptureTargetAvailabilityChanged;
         _client.ClipboardStatusReceived += OnClipboardStatusReceived;
+        InitializeAutomaticClipboard();
         _client.FileTransferStatusReceived += OnFileTransferStatusReceived;
         _client.RemoteClipboardFileRequestPendingChanged += OnRemoteClipboardFileRequestPendingChanged;
 
@@ -484,6 +485,7 @@ internal sealed partial class RemoteViewerWindow : Form
         _displayScaleButton.Click +=
             (_, _) => ToggleDisplayScaleMode();
         _fullScreenButton.Click += (_, _) => ToggleFullScreen();
+        InitializeStatusActionOverflow();
         UpdateRemoteInputMethodControls();
         ResumeLayout(performLayout: false);
         PerformLayout();
@@ -538,6 +540,7 @@ internal sealed partial class RemoteViewerWindow : Form
     {
         base.OnDpiChanged(args);
         ApplyDpiMetrics(args.DeviceDpiNew);
+        QueueStatusFooterLayout(refreshMetrics: true);
         if (_fullScreenRestoreState is not null)
         {
             Screen targetScreen =
@@ -1059,6 +1062,7 @@ internal sealed partial class RemoteViewerWindow : Form
 
     protected override void OnDeactivate(EventArgs args)
     {
+        _clipboardDeactivateUntil = Environment.TickCount64 + 1000;
         ReleaseAllRemoteInputs();
         base.OnDeactivate(args);
     }
@@ -1319,10 +1323,8 @@ internal sealed partial class RemoteViewerWindow : Form
         int actionWidth = ResponsiveWindowLayout.ScaleLogical(64, dpi);
         int actionGap = ResponsiveWindowLayout.ScaleLogical(2, dpi);
         int actionVerticalPadding = ResponsiveWindowLayout.ScaleLogical(2, dpi);
-        Button[] actionButtons =
-            _fileTransferActionsPanel.Controls
-                .OfType<Button>()
-                .ToArray();
+        Button[] actionButtons = _statusActionOverflow?.Buttons.ToArray() ??
+            _fileTransferActionsPanel.Controls.OfType<Button>().ToArray();
         foreach (Button button in actionButtons)
         {
             button.MinimumSize = new Size(actionWidth, actionHeight);
@@ -1360,7 +1362,7 @@ internal sealed partial class RemoteViewerWindow : Form
 
     private void UpdateStatusFooterLayout(int? requestedDpi = null)
     {
-        if (_updatingStatusFooterLayout || _statusFooterPanel.IsDisposed)
+        if (_isClosing || IsDisposed || _updatingStatusFooterLayout || _statusFooterPanel.IsDisposed || !_statusFooterPanel.Visible)
         {
             return;
         }
@@ -1368,8 +1370,15 @@ internal sealed partial class RemoteViewerWindow : Form
         _updatingStatusFooterLayout = true;
         try
         {
+            if (Visible) _statusActionOverflow?.Apply(_statusFooterPanel.ClientSize.Width, Font);
+            int dpi = requestedDpi ?? _statusBar.DeviceDpi;
+            int lineHeight = MeasureStatusTextHeight(_statusBar.Font);
+            int statusHeight = CalculateStatusBarPreferredHeight(_statusFooterPanel.ClientSize.Width,
+                _statusBar.Padding, _statusBar.HasDetails, dpi, lineHeight);
+            int actionsHeight = ResponsiveWindowLayout.MeasureFlowLayout(_fileTransferActionsPanel, int.MaxValue).Height;
+            _statusBar.CompactDetails = _statusBar.HasDetails && statusHeight + actionsHeight > Math.Max(1, ClientSize.Height - 80);
             LayoutStatusFooter(_statusFooterPanel, _statusBar, _fileTransferActionsPanel,
-                _statusBar.HasDetails, requestedDpi ?? _statusBar.DeviceDpi);
+                _statusBar.HasVisibleDetails, dpi);
         }
         finally
         {
@@ -1386,13 +1395,16 @@ internal sealed partial class RemoteViewerWindow : Form
         bool stacked = width - singleRow.Width <
             ResponsiveWindowLayout.ScaleLogical(180, dpi) + status.Padding.Horizontal;
         int statusWidth = stacked ? width : width - singleRow.Width;
-        int statusHeight = CalculateStatusBarPreferredHeight(statusWidth, status.Padding, hasDetails, dpi);
+        int statusHeight = CalculateStatusBarPreferredHeight(statusWidth, status.Padding, hasDetails, dpi,
+            MeasureStatusTextHeight(status.Font));
         int actionHeight = stacked
             ? ResponsiveWindowLayout.MeasureFlowLayout(actions, width).Height
             : singleRow.Height;
-        var actionSize = new Size(stacked ? width : singleRow.Width, actionHeight);
         DockStyle actionDock = stacked ? DockStyle.Bottom : DockStyle.Right;
         int footerHeight = stacked ? statusHeight + actionHeight : Math.Max(statusHeight, actionHeight);
+        // A Right-docked panel is stretched to the footer height by WinForms.
+        // Comparing with the shorter button row would resize it on every pass.
+        var actionSize = new Size(stacked ? width : singleRow.Width, stacked ? actionHeight : footerHeight);
         if (!actions.AutoSize && actions.WrapContents == stacked && actions.Dock == actionDock &&
             actions.Size == actionSize && footer.Height == footerHeight)
             return;
@@ -1773,6 +1785,7 @@ internal sealed partial class RemoteViewerWindow : Form
     public void SetClipboardTextEnabled(bool enabled)
     {
         _clipboardTextEnabled = enabled;
+        if (!enabled) ResetAutomaticClipboard();
     }
 
     public void SetFilePasteEnabled(bool enabled)
@@ -2154,9 +2167,11 @@ internal sealed partial class RemoteViewerWindow : Form
     {
         if (disposing)
         {
+            DisposeAutomaticClipboard();
             ReleaseAllRemoteInputs();
             UninstallSystemKeyboardCapture();
             _isClosing = true;
+            _statusActionOverflow?.Dispose();
             ClearPendingVideoFramesForShutdown();
             CancelRemoteDragOut(status: null, cancelTransfer: true);
             CancelPendingClipboardPull();
@@ -6063,7 +6078,7 @@ internal sealed partial class RemoteViewerWindow : Form
                 : string.Empty;
     }
 
-    private void PictureBox_MouseDown(object? sender, MouseEventArgs args)
+    private void PictureBox_MouseDownCore(object? sender, MouseEventArgs args)
     {
         _pictureBox.Focus();
         if (_remoteDragOutStage != RemoteDragOutStage.None)
@@ -6101,7 +6116,7 @@ internal sealed partial class RemoteViewerWindow : Form
         }
     }
 
-    private void PictureBox_MouseUp(object? sender, MouseEventArgs args)
+    private void PictureBox_MouseUpCore(object? sender, MouseEventArgs args)
     {
         if (args.Button == MouseButtons.Left)
         {
@@ -7261,6 +7276,8 @@ internal sealed partial class RemoteViewerWindow : Form
             // A just-issued remote copy may still be returning over a slow
             // connection. Wait for it before reading the local clipboard;
             // otherwise Ctrl+C, Ctrl+V would paste the previous local value.
+            await _clipboardAutoTask;
+            if (!IsCurrentPaste()) return;
             Task<bool>? precedingCopy = _clipboardPullTask;
             uint precedingSequence = _clipboardPullLocalSequence;
             if (precedingCopy is not null)
@@ -7886,6 +7903,7 @@ internal sealed partial class RemoteViewerWindow : Form
         {
             // The legacy protocol has one reply slot. Drain an earlier read
             // before sending another so quick repeated copies are not dropped.
+            await _clipboardAutoTask;
             if (previous is not null) await previous;
             owner.Token.ThrowIfCancellationRequested();
             bool supportsSequenceTracking = _client.SupportsRemoteClipboardSequenceTracking;
@@ -8357,12 +8375,17 @@ internal sealed partial class RemoteViewerWindow : Form
         int clientWidth,
         Padding padding,
         bool hasDetails,
-        int dpi = ResponsiveWindowLayout.DesignDpi)
+        int dpi = ResponsiveWindowLayout.DesignDpi,
+        int minimumTextHeight = 0)
     {
         int contentWidth = Math.Max(0, clientWidth - padding.Horizontal);
         int sideBySideMinimumWidth = CalculateStatusBarSideBySideMinimumWidth(dpi);
         int logicalHeight = hasDetails && contentWidth < sideBySideMinimumWidth ? 52 : 30;
-        return ResponsiveWindowLayout.ScaleLogical(logicalHeight, dpi);
+        bool stacked = hasDetails && contentWidth < sideBySideMinimumWidth;
+        int textHeight = Math.Max(0, minimumTextHeight) + ResponsiveWindowLayout.ScaleLogical(4, dpi);
+        int measuredHeight = textHeight * (stacked ? 2 : 1) + padding.Vertical +
+            (stacked ? ResponsiveWindowLayout.ScaleLogical(2, dpi) : 0);
+        return Math.Max(ResponsiveWindowLayout.ScaleLogical(logicalHeight, dpi), measuredHeight);
     }
 
     internal static int CalculateStatusFooterPreferredHeight(
@@ -8523,6 +8546,7 @@ internal sealed partial class RemoteViewerWindow : Form
         {
             Text = text,
             AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             MinimumSize = new Size(64, 26),
             Padding = new Padding(4, 0, 4, 0),
             Margin = new Padding(0, 0, 2, 0),
@@ -8909,6 +8933,9 @@ internal sealed partial class RemoteViewerWindow : Form
 
         public bool HasDetails => !string.IsNullOrWhiteSpace(DetailsText);
 
+        public bool CompactDetails { get; set; }
+        public bool HasVisibleDetails => HasDetails && !CompactDetails;
+
         public void SetStatus(string text, Color color)
         {
             if (string.Equals(StatusText, text, StringComparison.Ordinal) &&
@@ -8955,8 +8982,8 @@ internal sealed partial class RemoteViewerWindow : Form
             int preferredHeight = CalculateStatusBarPreferredHeight(
                 ClientSize.Width,
                 Padding,
-                !string.IsNullOrWhiteSpace(DetailsText),
-                DeviceDpi);
+                HasVisibleDetails,
+                DeviceDpi, MeasureStatusTextHeight(Font));
             if (Height == preferredHeight)
             {
                 return false;
@@ -8997,6 +9024,7 @@ internal sealed partial class RemoteViewerWindow : Form
                 TextFormatFlags.Left |
                 TextFormatFlags.VerticalCenter |
                 TextFormatFlags.EndEllipsis |
+                TextFormatFlags.SingleLine |
                 TextFormatFlags.NoPadding);
 
             if (!detailsBounds.IsEmpty)
@@ -9010,6 +9038,7 @@ internal sealed partial class RemoteViewerWindow : Form
                     TextFormatFlags.Right |
                     TextFormatFlags.VerticalCenter |
                     TextFormatFlags.EndEllipsis |
+                    TextFormatFlags.SingleLine |
                     TextFormatFlags.NoPadding);
             }
         }
@@ -9019,7 +9048,7 @@ internal sealed partial class RemoteViewerWindow : Form
             return CalculateStatusBarLayout(
                 ClientSize,
                 Padding,
-                !string.IsNullOrWhiteSpace(DetailsText),
+                HasVisibleDetails,
                 DeviceDpi);
         }
     }

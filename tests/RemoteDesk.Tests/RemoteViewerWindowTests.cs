@@ -1429,7 +1429,17 @@ public sealed class RemoteViewerWindowTests
                     Application.DoEvents();
                     Control actions =
                         Assert.IsAssignableFrom<Control>(
-                            button.Parent);
+                            typeof(RemoteViewerWindow).GetField("_fileTransferActionsPanel",
+                                BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(window));
+                    var overflow = Assert.IsType<ViewerActionOverflow>(
+                        typeof(RemoteViewerWindow).GetField("_statusActionOverflow",
+                            BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(window));
+                    // A narrow footer moves available commands into More.
+                    // The original button then belongs to an unshown owner,
+                    // not to the visible toolbar; verify both representations.
+                    overflow.RebuildMenu();
+                    Assert.True(button.Parent == actions ||
+                        overflow.MenuForTests.Items.OfType<ToolStripMenuItem>().Any(item => item.Text == button.Text));
                     Control footer =
                         Assert.IsAssignableFrom<Control>(
                             actions.Parent);
@@ -1468,7 +1478,7 @@ public sealed class RemoteViewerWindowTests
                     window.ToggleFullScreen();
                     Application.DoEvents();
                     bool fullScreenHidden =
-                        !button.Visible;
+                        !actions.Visible && !overflow.MenuForTests.Visible;
                     window.ToggleFullScreen();
                     Application.DoEvents();
                     bool restoredVisible =

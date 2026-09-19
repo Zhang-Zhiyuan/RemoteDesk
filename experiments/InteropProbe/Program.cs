@@ -13,10 +13,14 @@ internal static class Program
     static int Main(string[] args)
     {
         Console.InputEncoding = System.Text.Encoding.UTF8;
+        if (args.Length > 0 && args[0] == "main-layout-isolated") return MainFormClippingProbe.Run();
         if (args.Length > 0 && args[0] == "layout-isolated") return AdaptiveLayoutProbe.Run();
+        if (args.Length > 0 && args[0] == "popup-layout-isolated") return PopupClippingProbe.Run();
+        if (args.Length > 0 && args[0] == "viewer-layout-isolated") return AdaptiveLayoutProbe.Run(viewerClipping: true);
         if (args.Length > 0 && args[0] == "software-paint-isolated") return AdaptiveLayoutProbe.Run(softwarePaint: true);
         if (args.Length > 0 && args[0] == "clipboard-isolated") return ClipboardSystemProbe.Run();
         if (args.Length > 0 && args[0] == "clipboard-shortcuts-isolated") return ClipboardSystemProbe.Run(shortcuts: true);
+        if (args.Length > 0 && args[0] == "clipboard-context-isolated") return ClipboardSystemProbe.Run(contextMenus: true);
         if (args.Length > 0 && args[0] == "file-relay-isolated") return ClipboardSystemProbe.Run(relayFiles: true);
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         // Surface UI-thread failures as evidence, not an unattended modal dialog.
@@ -26,6 +30,9 @@ internal static class Program
         var c = config.RootElement;
         var output = Path.GetFullPath(c.GetProperty("output").GetString()!);
         Directory.CreateDirectory(output);
+        if (args[0] == "background-fault") return BackgroundFaultProbe.Run(output);
+        if (args[0] == "slow-file-transfer") return SlowFileTransferProbe.RunAsync(output).GetAwaiter().GetResult();
+        if (args[0] == "slow-file-transfer-legacy") return SlowFileTransferProbe.RunAsync(output, legacyPeer: true).GetAwaiter().GetResult();
         if (args[0] == "keyboard-focus") return KeyboardFocusProbe.Run(output);
         if (args[0] == "file-relay-ui") return FileClipboardRelayProbe.RunAsync(output,
             c.GetProperty("expectedServer").GetString()!, interactiveFileUi: true).GetAwaiter().GetResult();

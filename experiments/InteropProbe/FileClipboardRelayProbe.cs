@@ -9,12 +9,17 @@ internal static class FileClipboardRelayProbe
 {
     internal static async Task<int> RunAsync(string output, string expectedServer, bool interactiveFileUi = false)
     {
+        // Receipts contain absolute OS paths; normalize the fixture path before
+        // checking them, including when invoked with a relative output folder.
+        output = Path.GetFullPath(output);
         RelaySettings saved = new AppSettingsService().Load().Relay;
         if (string.IsNullOrWhiteSpace(expectedServer) || saved.ServerAddress != expectedServer)
             throw new InvalidOperationException("Unexpected relay; no connection attempted");
         var options = new RelayConnectionOptions(saved.ServerAddress, saved.RelayPort,
             AppSettingsService.UnprotectSecret(saved.ProtectedAccessToken), saved.TlsCertificateSha256!, Guid.NewGuid().ToString("D")).Validate();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+        // Several upload/download passes on a genuinely slow WAN can exceed
+        // three minutes. Keep a test deadline without masking product watchdogs.
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
         var checks = new List<object>();
         void Check(string name, bool pass) { checks.Add(new { name, passed = pass }); if (!pass) throw new InvalidOperationException(name); }
         string source = Path.Combine(output, "source"), received = Path.Combine(output, "remote"), returned = Path.Combine(output, "returned");
@@ -28,7 +33,20 @@ internal static class FileClipboardRelayProbe
         using var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
         using var connector = new RelayHostConnector();
         using var viewer = new RemoteViewerClient(() => returned, _ => Task.CompletedTask);
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        var transportLog = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        void Record(string message)
+        {
+            transportLog.Enqueue($"{elapsed.Elapsed.TotalSeconds:F3}s {message}");
+            while (transportLog.Count > 128) transportLog.TryDequeue(out _);
+        }
+        viewer.Log += Record;
+        viewer.FileTransferStatusReceived += (_, message) => Record(message);
+        connector.StatusChanged += message => Record("host connector: " + message);
         string remoteClipboard = "";
+        long peerFileBytes = 0;
+        int peerPings = 0;
+        string peerStage = "starting";
         var shutdown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         Task? host = null;
         try
@@ -54,9 +72,10 @@ internal static class FileClipboardRelayProbe
                 try {
                     while (!shutdown.Task.IsCompleted) {
                         var message = await Protocol.ReadMessageAsync(stream, session, timeout.Token);
-                        if (message.Type == MessageType.Ping) { await Protocol.WriteMessageAsync(stream, MessageType.Pong, ReadOnlyMemory<byte>.Empty, session, writeLock, timeout.Token); continue; }
+                        if (message.Type == MessageType.Ping) { Interlocked.Increment(ref peerPings); await Protocol.WriteMessageAsync(stream, MessageType.Pong, ReadOnlyMemory<byte>.Empty, session, writeLock, timeout.Token); continue; }
                         if (message.Type != MessageType.Control) continue;
                         var control = RemoteMessageCodec.DecodeControl(message.PayloadMemory);
+                        peerStage = control.Kind.ToString();
                         switch (control.Kind) {
                             case RemoteControlKind.FileReceiveLocationRequest:
                                 await Write(RemoteMessageCodec.EncodeFileReceiveLocation(control.TransferId!, true,
@@ -71,7 +90,7 @@ internal static class FileClipboardRelayProbe
                                 else receiver.Start(control);
                                 break;
                             case RemoteControlKind.FileTransferChunk:
-                                if (receiver.HasActiveTransfer) await receiver.WriteChunkAsync(control, timeout.Token); break;
+                                if (receiver.HasActiveTransfer) { await receiver.WriteChunkAsync(control, timeout.Token); Interlocked.Add(ref peerFileBytes, control.FileBytes.Length); } break;
                             case RemoteControlKind.FileTransferChecksum:
                                 if (receiver.HasActiveTransfer) receiver.SetExpectedChecksum(control); break;
                             case RemoteControlKind.FileTransferComplete:
@@ -86,13 +105,15 @@ internal static class FileClipboardRelayProbe
                                 await Write(RemoteMessageCodec.EncodeFileTransferClipboardFilesPreview(
                                     [new("文件", binary, "return.bin", bytes.Length, "isolated receiver")], "owned fixture")); break;
                             case RemoteControlKind.FileTransferConfirmClipboardFiles:
+                                Record("peer starting reverse file writes");
                                 string id = Guid.NewGuid().ToString("N");
                                 await Write(RemoteMessageCodec.EncodeFileTransferStart(id, "return.bin", bytes.Length));
                                 for (int at = 0; at < bytes.Length; at += 32768)
                                     await Write(RemoteMessageCodec.EncodeFileTransferChunk(id, at, bytes.AsMemory(at, Math.Min(32768, bytes.Length - at)).ToArray()));
                                 await Write(RemoteMessageCodec.EncodeFileTransferChecksum(id, Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant()));
                                 await Write(RemoteMessageCodec.EncodeFileTransferComplete(id));
-                                await Write(RemoteMessageCodec.EncodeFileTransferStatus(true, "远端文件回传完成：1 个")); break;
+                                await Write(RemoteMessageCodec.EncodeFileTransferStatus(true, "远端文件回传完成：1 个"));
+                                Record("peer completed all reverse file writes"); break;
                         }
                     }
                 } catch (Exception error) when (shutdown.Task.IsCompleted && error is IOException or SocketException or OperationCanceledException) { }
@@ -127,17 +148,23 @@ internal static class FileClipboardRelayProbe
                 batch.Results.Where(item => item.Success).All(item => item.Details.Contains(received, StringComparison.Ordinal)));
             viewer.ConfirmRemoteClipboardFileTransfer = (items, _) => items.Count == 1 && items[0].TransferName == "return.bin" && items[0].SizeBytes == bytes.Length;
             var download = await viewer.RequestRemoteClipboardFilesForDragOutAsync(timeout.Token);
+            Record($"reverse result: {download.Outcome}; {download.Message}; paths={download.LocalPaths.Count}");
             Check("confirmed reverse file transfer over public relay", download.Success && download.LocalPaths.Count == 1 && File.ReadAllBytes(download.LocalPaths[0]).SequenceEqual(bytes));
             if (interactiveFileUi)
                 checks.AddRange(await FileClipboardUiProbe.RunAsync(viewer, binary, received));
             Program.Save(Path.Combine(output, "public-relay.json"), new { passed = true, server = options.ServerAddress, checks,
                 scope = interactiveFileUi
                     ? "Real public relay, production file receiver and owned file-paste confirmation dialogs. Explicit fixture paths replace clipboard reading; no user clipboard or files accessed."
-                    : "Real pinned public relay; synthetic authenticated peer and production file receiver; private Windows clipboard. No production desktop or files touched." });
+                    : "Real pinned public relay; synthetic authenticated peer and production file receiver; private Windows clipboard. No production desktop or files touched.",
+                elapsedSeconds = elapsed.Elapsed.TotalSeconds, peerFileBytes, peerPings,
+                transportLog = transportLog.ToArray() });
             return 0;
         }
         catch (Exception error) {
-            Program.Save(Path.Combine(output, "public-relay.json"), new { passed = false, checks, error = error.GetType().Name + ": " + error.Message });
+            Program.Save(Path.Combine(output, "public-relay.json"), new { passed = false, checks,
+                error = error.GetType().Name + ": " + error.Message,
+                peerFailure = host?.Exception?.GetBaseException().ToString(), peerStage, peerFileBytes, peerPings,
+                transportLog = transportLog.ToArray() });
             return 1;
         }
         finally {

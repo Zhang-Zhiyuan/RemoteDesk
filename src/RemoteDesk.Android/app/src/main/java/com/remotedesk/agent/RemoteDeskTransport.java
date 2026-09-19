@@ -404,6 +404,28 @@ final class RemoteDeskTransport {
         return output.toByteArray();
     }
 
+    static byte[] encodeClipboardSnapshotRequest(String requestId, String knownRevision) throws IOException {
+        AndroidClipboardSnapshot.validateRequest(requestId, knownRevision);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        output.write(RemoteDeskProtocol.CONTROL_CLIPBOARD_SNAPSHOT_REQUEST);
+        writeSnapshotString(output, requestId, 64);
+        writeSnapshotString(output, knownRevision, 64);
+        return output.toByteArray();
+    }
+
+    static byte[] encodeClipboardSnapshot(AndroidClipboardSnapshot snapshot) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        output.write(RemoteDeskProtocol.CONTROL_CLIPBOARD_SNAPSHOT);
+        writeSnapshotString(output, snapshot.requestId, 64);
+        output.write(snapshot.success ? 1 : 0);
+        writeSnapshotString(output, snapshot.revision, 64);
+        output.write(snapshot.hasText ? 1 : 0);
+        output.write(snapshot.changed ? 1 : 0);
+        writeSnapshotString(output, snapshot.text, MAX_CLIPBOARD_TEXT_CHARS);
+        writeSnapshotString(output, snapshot.statusMessage, MAX_CONTROL_STRING_CHARS);
+        return output.toByteArray();
+    }
+
     static byte[] encodeFileTransferStatus(boolean success, String message) throws IOException {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         output.write(RemoteDeskProtocol.CONTROL_FILE_TRANSFER_STATUS);
@@ -508,6 +530,20 @@ final class RemoteDeskTransport {
         long fileOffset = 0;
         byte[] fileBytes = null;
         switch (kind) {
+            case RemoteDeskProtocol.CONTROL_CLIPBOARD_SNAPSHOT_REQUEST: {
+                AndroidClipboardSnapshot request = AndroidClipboardSnapshot.request(
+                    cursor.readSnapshotString(64), cursor.readSnapshotString(64));
+                cursor.ensureFullyRead();
+                return new ControlMessage(kind, request);
+            }
+            case RemoteDeskProtocol.CONTROL_CLIPBOARD_SNAPSHOT: {
+                AndroidClipboardSnapshot snapshot = new AndroidClipboardSnapshot(
+                    cursor.readSnapshotString(64), cursor.readBoolean(), cursor.readSnapshotString(64),
+                    cursor.readBoolean(), cursor.readBoolean(),
+                    cursor.readSnapshotString(MAX_CLIPBOARD_TEXT_CHARS), cursor.readSnapshotString(MAX_CONTROL_STRING_CHARS));
+                cursor.ensureFullyRead();
+                return new ControlMessage(kind, snapshot);
+            }
             case RemoteDeskProtocol.CONTROL_FILE_RECEIVE_LOCATION_REQUEST:
                 transferId = cursor.readString(MAX_CONTROL_STRING_CHARS);
                 break;
@@ -965,6 +1001,11 @@ final class RemoteDeskTransport {
         output.write(bytes);
     }
 
+    private static void writeSnapshotString(ByteArrayOutputStream output, String value, int maxChars) throws IOException {
+        AndroidClipboardSnapshot.requireValidUnicode(value);
+        writeString(output, value, maxChars);
+    }
+
     private static void writeBoundedString(ByteArrayOutputStream output, String value, String fallback) throws IOException {
         String text = value == null || value.trim().isEmpty() ? fallback : value.trim();
         writeString(
@@ -1165,6 +1206,12 @@ final class RemoteDeskTransport {
         final long lowLatencyVideoChannelId;
         final int lowLatencyVideoEpoch;
         final int lowLatencyVideoStopReason;
+        final AndroidClipboardSnapshot clipboardSnapshot;
+
+        ControlMessage(int kind, AndroidClipboardSnapshot clipboardSnapshot) {
+            this(kind, null, null, null, 0, 0, null, RemoteDeskProtocol.VIDEO_CODEC_JPEG,
+                null, null, null, null, 0, null, false, null, null, 0, 0, 0, clipboardSnapshot);
+        }
 
         ControlMessage(
             int kind,
@@ -1269,6 +1316,20 @@ final class RemoteDeskTransport {
             long lowLatencyVideoChannelId,
             int lowLatencyVideoEpoch,
             int lowLatencyVideoStopReason) {
+            this(kind, text, transferId, fileName, fileLength, fileOffset, fileBytes, videoCodecs,
+                checksumAlgorithm, checksumHex, machineName, platform, capabilities, captureTargets,
+                success, statusMessage, lowLatencyVideoOffer, lowLatencyVideoChannelId,
+                lowLatencyVideoEpoch, lowLatencyVideoStopReason, null);
+        }
+
+        private ControlMessage(
+            int kind, String text, String transferId, String fileName, long fileLength,
+            long fileOffset, byte[] fileBytes, int videoCodecs, String checksumAlgorithm,
+            String checksumHex, String machineName, String platform, int capabilities,
+            CaptureTarget[] captureTargets, boolean success, String statusMessage,
+            LowLatencyVideoProtocol.Offer lowLatencyVideoOffer, long lowLatencyVideoChannelId,
+            int lowLatencyVideoEpoch, int lowLatencyVideoStopReason,
+            AndroidClipboardSnapshot clipboardSnapshot) {
             this.kind = kind;
             this.text = text;
             this.transferId = transferId;
@@ -1289,6 +1350,7 @@ final class RemoteDeskTransport {
             this.lowLatencyVideoChannelId = lowLatencyVideoChannelId;
             this.lowLatencyVideoEpoch = lowLatencyVideoEpoch;
             this.lowLatencyVideoStopReason = lowLatencyVideoStopReason;
+            this.clipboardSnapshot = clipboardSnapshot;
         }
     }
 
@@ -1343,6 +1405,31 @@ final class RemoteDeskTransport {
             }
 
             return bytes[offset++] & 0xFF;
+        }
+
+        boolean readBoolean() throws IOException {
+            int value = readUnsignedByte();
+            if (value > 1) throw new IOException("Invalid clipboard snapshot boolean.");
+            return value == 1;
+        }
+
+        String readSnapshotString(int maxChars) throws IOException {
+            int length = 0;
+            for (int shift = 0; ; shift += 7) {
+                int next = readUnsignedByte();
+                if (shift == 28 && next > 15) throw new IOException("Invalid clipboard snapshot string length.");
+                length |= (next & 127) << shift;
+                if ((next & 128) == 0) break;
+            }
+            if (length < 0 || length > maxChars * 4 || length > bytes.length - offset)
+                throw new IOException("Invalid clipboard snapshot string length.");
+            String value = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                .decode(java.nio.ByteBuffer.wrap(bytes, offset, length)).toString();
+            offset += length;
+            if (value.length() > maxChars) throw new IOException("Clipboard snapshot string is too large.");
+            return value;
         }
 
         String readString(int maxChars) throws IOException {

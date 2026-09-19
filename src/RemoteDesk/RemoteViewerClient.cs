@@ -96,6 +96,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
             RemoteDeviceCapabilities.UdpVideoCongestionFeedback |
             RemoteDeviceCapabilities.LowLatencyUdpVideoXorFec;
     private const RemoteDeviceCapabilities LocalViewerBaselineCapabilities =
+        RemoteDeviceCapabilities.ClipboardText |
+        RemoteDeviceCapabilities.ClipboardSnapshotV1 |
         RemoteDeviceCapabilities.FileChecksum |
         RemoteDeviceCapabilities.FileTransferReceipt |
         RemoteDeviceCapabilities.FileTransferCancel |
@@ -182,6 +184,11 @@ internal sealed partial class RemoteViewerClient : IDisposable
     private long _lastPingSentTicks;
     private int _pingAwaitingPong;
     private int _fileTransferConfirmationWaiters;
+    private sealed record OutgoingFileTransferHeartbeatState(
+        CancellationTokenSource OwnerConnection,
+        long? DrainStartedTicks = null);
+
+    private OutgoingFileTransferHeartbeatState? _outgoingFileTransferHeartbeat;
     private int _returnedClipboardFileRequestPending;
     private int _suppressInputUntilReturnedClipboardRequestDrained;
     private bool _inputWriteInProgress;
@@ -1459,8 +1466,12 @@ internal sealed partial class RemoteViewerClient : IDisposable
     private int _manualClipboardReplyTimeoutMilliseconds = ClipboardRequestTracker.TimeoutMilliseconds;
 
     public async Task<bool> SendClipboardTextToRemoteAsync(string text, string? successMessage = null,
-        bool forPasteShortcut = false)
+        bool forPasteShortcut = false, long? expectedGeneration = null)
     {
+        CancellationTokenSource? owner = _cancellationTokenSource;
+        long requestGeneration = InputConnectionGeneration;
+        if (!IsCurrentConnection(owner) ||
+            (expectedGeneration is { } generation && requestGeneration != generation)) return false;
         if (string.IsNullOrEmpty(text))
         {
             ClipboardStatusReceived?.Invoke("本机剪贴板没有文本。");
@@ -1468,8 +1479,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
         }
 
         byte[] payload = RemoteMessageCodec.EncodeClipboardSetText(text);
-        CancellationTokenSource? owner = _cancellationTokenSource;
-        ClipboardRequestTracker.Request? request = _clipboardRequests.Begin(InputConnectionGeneration, read: false,
+        if (!IsCurrentConnection(owner) || InputConnectionGeneration != requestGeneration) return false;
+        ClipboardRequestTracker.Request? request = _clipboardRequests.Begin(requestGeneration, read: false,
             timeoutMilliseconds: forPasteShortcut ? ClipboardRequestTracker.TimeoutMilliseconds
                 : _manualClipboardReplyTimeoutMilliseconds);
         if (request is null)
@@ -1485,7 +1496,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
             return false;
         }
         bool success = await WaitForClipboardReplyAsync(request, owner);
-        if (success && IsCurrentConnection(owner))
+        if (success && IsCurrentConnection(owner) && successMessage != string.Empty)
             ClipboardStatusReceived?.Invoke(successMessage ?? "已写入远端文本剪贴板。");
         return success && IsCurrentConnection(owner);
     }
@@ -2171,6 +2182,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
         string transferId = Guid.NewGuid().ToString("N");
         bool transferStarted = false;
+        bool pendingFileDelivery = false;
         bool sendChecksum = _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.FileChecksum);
         bool sendCancel = _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.FileTransferCancel);
         bool requireReceipt = !remoteUpdate && _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.FileTransferReceipt);
@@ -2181,6 +2193,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
             : null;
         string transferAction = remoteUpdate ? "正在发送远程更新包" : "正在发送文件";
         string transferStartedError = remoteUpdate ? "连接已断开，无法发送远程更新包。" : "连接已断开，无法发送文件。";
+        BeginOutgoingFileTransfer(ownerConnection);
         try
         {
             FileTransferStatusReceived?.Invoke(true, $"{transferAction}：{fileName} ({RemoteFileTransfer.FormatBytes(fileLength)})");
@@ -2287,6 +2300,10 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 FileTransferStatusReceived?.Invoke(true, result.StatusMessage ?? $"远端已保存：{fileName}");
                 return result.StatusMessage ?? $"远端已确认保存 {fileName}，但未返回实际路径。";
             }
+            // A completed local TCP write may still be buffered in the relay.
+            // Legacy receivers and remote updates do not provide a correlated
+            // save receipt, so retain only a bounded tail-delivery grace.
+            pendingFileDelivery = true;
             return $"已发送 {fileName}；旧版远端未返回保存确认或实际路径，请到被控端检查。";
         }
         catch (Exception ex) when (transferStarted && RemoteFileTransfer.IsRecoverableTransferException(ex))
@@ -2300,6 +2317,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
         }
         finally
         {
+            EndOutgoingFileTransfer(ownerConnection, pendingFileDelivery);
             _fileReceipts.TryRemove(transferId, out _);
         }
     }
@@ -2818,7 +2836,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
                     GetLastMessageAge(),
                     IsHeartbeatTimeoutSuppressed(
                         IsWaitingForFileTransferConfirmation(),
-                        IsRemoteClipboardFileRequestPending)))
+                        IsRemoteClipboardFileRequestPending,
+                        IsOutgoingFileTransferPending(ownerCancellationTokenSource))))
             {
                 continue;
             }
@@ -2936,6 +2955,9 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 }
 
                 break;
+            case RemoteControlKind.ClipboardSnapshot:
+                CompleteClipboardSnapshot(control, ownerConnection, inputConnectionGeneration);
+                break;
             case RemoteControlKind.ClipboardText:
                 var clipboardRequest = _clipboardRequests.Take(inputConnectionGeneration, textReply: true, success: true);
                 if (clipboardRequest is null) break;
@@ -2946,9 +2968,10 @@ internal sealed partial class RemoteViewerClient : IDisposable
                         ClipboardStatusReceived?.Invoke("远端没有可读取的文本，本机剪贴板保持不变。");
                         break;
                     }
-                    await ClipboardTextService.SetTextAsync(control.Text, () =>
+                    uint appliedSequence = await ClipboardTextService.SetTextAndGetSequenceAsync(control.Text, () =>
                         IsCurrentConnection(ownerConnection) && !ownerConnection.IsCancellationRequested &&
                         _clipboardRequests.CanApply(clipboardRequest, ClipboardTextService.ReadClipboardSequenceNumber()));
+                    LocalClipboardTextApplied?.Invoke(inputConnectionGeneration, appliedSequence, control.Text);
                     ClipboardStatusReceived?.Invoke("已读取远程剪贴板到本机。");
                     clipboardRequest.Completion.TrySetResult(true);
                 }
@@ -4723,10 +4746,44 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
     internal static bool IsHeartbeatTimeoutSuppressed(
         bool fileTransferConfirmationPending,
-        bool returnedClipboardFileRequestPending)
+        bool returnedClipboardFileRequestPending,
+        bool outgoingFileTransferPending = false)
     {
-        return fileTransferConfirmationPending || returnedClipboardFileRequestPending;
+        return fileTransferConfirmationPending || returnedClipboardFileRequestPending || outgoingFileTransferPending;
     }
+
+    internal void BeginOutgoingFileTransfer(CancellationTokenSource ownerConnection) =>
+        Volatile.Write(ref _outgoingFileTransferHeartbeat,
+            new OutgoingFileTransferHeartbeatState(ownerConnection));
+
+    internal void EndOutgoingFileTransfer(CancellationTokenSource ownerConnection, bool pendingDelivery = false)
+    {
+        while (Volatile.Read(ref _outgoingFileTransferHeartbeat) is { } current &&
+            ReferenceEquals(current.OwnerConnection, ownerConnection))
+        {
+            OutgoingFileTransferHeartbeatState? next = pendingDelivery
+                ? new OutgoingFileTransferHeartbeatState(ownerConnection, Stopwatch.GetTimestamp())
+                : null;
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _outgoingFileTransferHeartbeat, next, current), current))
+                return;
+        }
+    }
+
+    internal bool IsOutgoingFileTransferPending(CancellationTokenSource ownerConnection)
+    {
+        // Uploads (including updates) are serialized by _fileTransferLock. Ping
+        // shares their TCP stream and can be queued behind slow file traffic.
+        // Only that connection gets the bounded grace, through its save receipt.
+        // Local send progress must never reset authenticated inbound liveness.
+        OutgoingFileTransferHeartbeatState? pending = Volatile.Read(ref _outgoingFileTransferHeartbeat);
+        return !ownerConnection.IsCancellationRequested &&
+            pending is not null && ReferenceEquals(pending.OwnerConnection, ownerConnection) &&
+            (pending.DrainStartedTicks is not { } started ||
+                IsOutgoingFileDeliveryDrainPending(Stopwatch.GetElapsedTime(started)));
+    }
+
+    internal static bool IsOutgoingFileDeliveryDrainPending(TimeSpan elapsed) =>
+        elapsed >= TimeSpan.Zero && elapsed < SuppressedHeartbeatTimeout;
 
     private static string FormatVideoCodecs(RemoteVideoCodecs codecs)
     {

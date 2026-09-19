@@ -152,3 +152,38 @@ class FileTransferDialogTkTests(unittest.TestCase):
         self.assertEqual(details, text.get("1.0", "end-1c"))
         self.assertEqual("disabled", text.cget("state"))
         self.capture(dialog, "linux-result.png")
+
+    def test_confirmation_keeps_paths_and_choices_visible_at_large_font_and_narrow_size(self):
+        self.root.tk.call("tk", "scaling", 192 / 72)
+        self.ui._configure_style()
+        destination = "/receive/" + "目录/" * 50 + "中文报告.txt"
+        note = "旧版设备位置未确认。" * 100
+        item = app.FileTransferPreviewItem("文件", "/source/中文报告.txt", "中文报告.txt", 1024, destination)
+        for width, height in ((800, 600), (480, 360)):
+            errors = []
+            def inspect():
+                dialog = next(c for c in self.root.winfo_children() if isinstance(c, app.tk.Toplevel))
+                try:
+                    dialog.minsize(1, 1)
+                    dialog.geometry(f"{width}x{height}")
+                    self.root.update()
+                    text = next(c for c in self.descendants(dialog) if isinstance(c, app.tk.Text))
+                    self.assertIn(destination, text.get("1.0", app.tk.END))
+                    self.assertIn(note, text.get("1.0", app.tk.END))
+                    # Even a viewport smaller than the dialog's normal minimum
+                    # must retain a readable line and its working scrollbar.
+                    self.assertGreaterEqual(text.winfo_height(), 40)
+                    tree = next(c for c in self.descendants(dialog) if isinstance(c, app.ttk.Treeview))
+                    self.assertGreaterEqual(tree.winfo_height(), 60)
+                    for button in (c for c in self.descendants(dialog) if isinstance(c, app.ttk.Button)):
+                        self.assertTrue(button.winfo_ismapped())
+                        self.assertGreaterEqual(button.winfo_rootx(), dialog.winfo_rootx())
+                        self.assertLessEqual(button.winfo_rootx() + button.winfo_width(), dialog.winfo_rootx() + dialog.winfo_width())
+                        self.assertLessEqual(button.winfo_rooty() + button.winfo_height(), dialog.winfo_rooty() + dialog.winfo_height())
+                    next(c for c in self.descendants(dialog) if isinstance(c, app.ttk.Button) and c.cget("text") == "取消").invoke()
+                except Exception as error:
+                    errors.append(error); dialog.destroy()
+            self.root.after(80, inspect)
+            self.assertFalse(self.ui._show_file_transfer_confirmation_dialog(
+                self.root, "确认发送文件", "确认后才会开始传输。", [item], note))
+            self.assertEqual([], errors)

@@ -20,7 +20,12 @@ final class AndroidClipboardText {
     }
 
     static String getText(Context context) throws Exception {
+        return getText(context, () -> true);
+    }
+
+    static String getText(Context context, BooleanSupplier isCurrent) throws Exception {
         return runOnMainThread(() -> {
+            if (!isCurrent.getAsBoolean()) throw new IllegalStateException("剪贴板请求已失效，内容未读取。");
             ClipboardManager manager = clipboardManager(context);
             if (manager == null || !manager.hasPrimaryClip()) {
                 throw new IllegalStateException("剪贴板没有可读取的文字，或系统限制后台读取；请让 RemoteDesk 位于手机前台后重试。本机剪贴板不会被清空。");

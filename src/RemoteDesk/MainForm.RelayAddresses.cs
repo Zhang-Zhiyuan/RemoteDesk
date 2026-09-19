@@ -23,18 +23,9 @@ public sealed partial class MainForm
                 "设备地址", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        using var dialog = new Form { Text = $"{device.MachineName} · 最新地址", ClientSize = new Size(540, 270),
-            Font = Font, StartPosition = FormStartPosition.CenterParent, MinimizeBox = false, MaximizeBox = false };
-        var note = new Label { Dock = DockStyle.Top, Height = 80, Padding = new Padding(12),
-            Text = $"设备 ID：{device.DeviceId}\n同一局域网 / 可路由网络可使用下列地址；跨网仍用中继。" };
-        var list = new ListBox { Dock = DockStyle.Fill };
-        list.Items.AddRange(device.DirectAddresses.Select(address => $"{address}:{device.DirectPort}").ToArray());
-        list.SelectedIndex = 0;
-        var use = new Button { Text = "填入 IP 直连", Dock = DockStyle.Bottom, Height = 42,
-            DialogResult = DialogResult.OK, Enabled = !RelayDeviceSelectionPolicy.IsLocalDevice(device, _settings.Relay.DeviceId) };
-        dialog.Controls.Add(list); dialog.Controls.Add(note); dialog.Controls.Add(use); dialog.AcceptButton = use;
-        ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(580, 350), new Size(360, 230));
-        if (dialog.ShowDialog(this) != DialogResult.OK || list.SelectedIndex < 0 || !use.Enabled) return;
+        using var dialog = CreateRelayAddressesDialog(device, _settings.Relay.DeviceId, Font, out ListBox list);
+        if (dialog.ShowDialog(this) != DialogResult.OK || list.SelectedIndex < 0 ||
+            dialog.AcceptButton is not Button { Enabled: true }) return;
         _selectedHistoryDevice = GetRecentDevices().FirstOrDefault(saved => RemoteDeviceIdentity.Same(saved.DeviceId, id));
         _viewerHostBox.Text = device.DirectAddresses[list.SelectedIndex];
         _viewerPortBox.Value = device.DirectPort;
@@ -42,5 +33,35 @@ public sealed partial class MainForm
         _viewerPasswordBox.Text = _relayViewerPasswordBox.Text;
         _tabs.SelectedIndex = 1;
         SetViewerStatus("已填入最新地址和端口。确认设备后点击连接；地址不可达时可回到中继连接。", MutedTextColor);
+    }
+
+    internal static Form CreateRelayAddressesDialog(RelayOnlineDevice device, string localDeviceId, Font font, out ListBox addresses)
+    {
+        var dialog = new Form { Text = $"{device.MachineName} · 最新地址", ClientSize = new Size(540, 300),
+            Font = font, StartPosition = FormStartPosition.CenterParent, MinimizeBox = false, MaximizeBox = false };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 3 };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        var note = new Label { Dock = DockStyle.Top, AutoSize = true, UseMnemonic = false,
+            Margin = new Padding(0, 0, 0, 10),
+            Text = $"设备 ID：{device.DeviceId}\n同一局域网 / 可路由网络可使用下列地址；跨网仍用中继。" };
+        var list = new ListBox { Dock = DockStyle.Fill, Height = 150, MinimumSize = new Size(0, 100),
+            HorizontalScrollbar = true, IntegralHeight = false, AccessibleName = "设备最新地址" };
+        list.Items.AddRange(device.DirectAddresses.Select(address => address.Contains(':')
+            ? $"[{address}]:{device.DirectPort}" : $"{address}:{device.DirectPort}").ToArray());
+        if (list.Items.Count > 0) list.SelectedIndex = 0;
+        addresses = list;
+        var use = new Button { Text = "填入 IP 直连", AutoSize = true, DialogResult = DialogResult.OK,
+            Enabled = list.Items.Count > 0 && !RelayDeviceSelectionPolicy.IsLocalDevice(device, localDeviceId) };
+        var close = new Button { Text = "关闭", AutoSize = true, DialogResult = DialogResult.Cancel };
+        var actions = new FlowLayoutPanel { Dock = DockStyle.Top, Margin = new Padding(0, 10, 0, 0) };
+        actions.Controls.Add(use); actions.Controls.Add(close);
+        ConfigureWrappingDialogActions(actions);
+        layout.Controls.Add(note, 0, 0); layout.Controls.Add(list, 0, 1); layout.Controls.Add(actions, 0, 2);
+        dialog.Controls.Add(layout); dialog.AcceptButton = use; dialog.CancelButton = close;
+        ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(580, 380), new Size(360, 230));
+        return dialog;
     }
 }

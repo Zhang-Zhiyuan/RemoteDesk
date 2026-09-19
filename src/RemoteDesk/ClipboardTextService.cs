@@ -20,21 +20,39 @@ internal static class ClipboardTextService
 
     public static Task SetTextAsync(string text) => SetTextAsync(text, static () => true);
 
-    internal static async Task SetTextAsync(string text, Func<bool> isCurrent)
+    internal static async Task SetTextAsync(string text, Func<bool> isCurrent) =>
+        _ = await SetTextAndGetSequenceAsync(text, isCurrent);
+
+    internal static async Task<uint> SetTextAndGetSequenceAsync(string text, Func<bool> isCurrent)
     {
         using var lifetime = new CancellationTokenSource();
         CancellationToken token = lifetime.Token;
         try
         {
-            await RunStaAsync(() => RunClipboardOperationWithRetries<object?>(() =>
+            return await RunStaAsync(() => RunClipboardOperationWithRetries(() =>
             {
                 token.ThrowIfCancellationRequested();
                 if (!isCurrent()) throw new OperationCanceledException("剪贴板请求已失效，未修改本机内容。");
                 SetClipboardText(text);
-                return null;
+                // SetText releases the OS clipboard lock. Another application may
+                // already have copied something new; never mark its sequence as ours.
+                // Verification failure must not retry the write over that new copy.
+                try { return ReadVerifiedTextSequence(text, ReadClipboardSequenceNumber, ReadClipboardText); }
+                catch (Exception ex) when (ex is System.Runtime.InteropServices.ExternalException)
+                {
+                    throw new OperationCanceledException("剪贴板写入后已变化，未标记为自动同步内容。", ex);
+                }
             }));
         }
         finally { lifetime.Cancel(); } // A timed-out queued STA operation must not write later.
+    }
+
+    internal static uint ReadVerifiedTextSequence(string text, Func<uint> readSequence, Func<string> readText)
+    {
+        uint sequence = readSequence();
+        if (sequence == 0 || !string.Equals(text, readText(), StringComparison.Ordinal) || readSequence() != sequence)
+            throw new OperationCanceledException("剪贴板写入后已变化，未标记为自动同步内容。");
+        return sequence;
     }
 
     public static Task<IReadOnlyList<string>> GetFileDropListAsync()

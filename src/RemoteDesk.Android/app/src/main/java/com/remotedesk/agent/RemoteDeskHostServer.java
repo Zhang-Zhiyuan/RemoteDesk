@@ -921,6 +921,9 @@ final class RemoteDeskHostServer {
         AndroidFileTransferReceiver fileTransferReceiver,
         AndroidFileCompletionCoordinator fileCompletionCoordinator,
         AndroidSessionLivenessTracker inboundLiveness) {
+        AndroidClipboardSnapshotQueue clipboardSnapshots = new AndroidClipboardSnapshotQueue(
+            executor, () -> running.get() && state.running.get() && !socket.isClosed(),
+            () -> { state.tryStop(); closeQuietly(socket); });
         AndroidHostHeartbeatResponder heartbeat = new AndroidHostHeartbeatResponder(
             () -> {
                 if (running.get() && state.running.get()) {
@@ -953,6 +956,7 @@ final class RemoteDeskHostServer {
                         writeLock,
                         fileTransferReceiver,
                         fileCompletionCoordinator,
+                        clipboardSnapshots,
                         state,
                         socket);
                 }
@@ -962,6 +966,7 @@ final class RemoteDeskHostServer {
         } finally {
             state.tryStop();
             closeQuietly(socket);
+            clipboardSnapshots.close();
             heartbeat.close();
             fileCompletionCoordinator.close();
             fileTransferReceiver.abortActiveTransfer();
@@ -993,11 +998,20 @@ final class RemoteDeskHostServer {
         Object writeLock,
         AndroidFileTransferReceiver fileTransferReceiver,
         AndroidFileCompletionCoordinator fileCompletionCoordinator,
+        AndroidClipboardSnapshotQueue clipboardSnapshots,
         AndroidHostSessionState state,
         Socket sessionSocket) throws IOException, GeneralSecurityException {
         RemoteDeskTransport.ControlMessage control = RemoteDeskTransport.decodeControl(payload);
         boolean receipts = (state.viewerCapabilities.get() & RemoteDeskProtocol.CAPABILITY_FILE_TRANSFER_RECEIPT) != 0;
         switch (control.kind) {
+            case RemoteDeskProtocol.CONTROL_CLIPBOARD_SNAPSHOT_REQUEST:
+                // Never emit a new control kind without negotiated clipboard access.
+                if (canReadClipboardSnapshot(state, sessionSocket) &&
+                    !clipboardSnapshots.offer(() -> sendClipboardSnapshot(
+                        control.clipboardSnapshot, output, session, writeLock, state, sessionSocket))) {
+                    throw new IOException("Clipboard snapshot queue is unavailable or full.");
+                }
+                break;
             case RemoteDeskProtocol.CONTROL_FILE_RECEIVE_LOCATION_REQUEST:
                 String directory = "", note;
                 boolean locationAvailable;
@@ -1200,6 +1214,31 @@ final class RemoteDeskHostServer {
         }
     }
 
+    private boolean canReadClipboardSnapshot(AndroidHostSessionState state, Socket socket) {
+        return running.get() && state.running.get() && !socket.isClosed() &&
+            state.viewerCapabilitiesReceived.get() && AndroidClipboardSnapshot.isNegotiated(
+                getCapabilities(), state.viewerCapabilities.get());
+    }
+
+    private void sendClipboardSnapshot(AndroidClipboardSnapshot request, OutputStream output,
+        RemoteDeskTransport.SecureSession session, Object writeLock,
+        AndroidHostSessionState state, Socket socket) throws IOException, GeneralSecurityException {
+        if (!canReadClipboardSnapshot(state, socket)) return;
+        AndroidClipboardSnapshot snapshot;
+        try {
+            // Only the OS clipboard access runs on the main thread. Hashing and
+            // the response write remain off both UI and authenticated read pump.
+            String text = AndroidClipboardText.getText(appContext,
+                () -> canReadClipboardSnapshot(state, socket));
+            snapshot = AndroidClipboardSnapshot.capture(request.requestId, request.revision, text);
+        } catch (Exception error) {
+            snapshot = AndroidClipboardSnapshot.unavailable(request.requestId);
+        }
+        if (!canReadClipboardSnapshot(state, socket)) return;
+        RemoteDeskTransport.writeMessage(output, RemoteDeskProtocol.MESSAGE_CONTROL,
+            RemoteDeskTransport.encodeClipboardSnapshot(snapshot), session, writeLock);
+    }
+
     private void setClipboardText(
         String text,
         OutputStream output,
@@ -1389,6 +1428,7 @@ final class RemoteDeskHostServer {
         boolean inputEnabled) {
         int capabilities = RemoteDeskProtocol.CAPABILITY_REMOTE_DESKTOP |
             RemoteDeskProtocol.CAPABILITY_CLIPBOARD_TEXT |
+            RemoteDeskProtocol.CAPABILITY_CLIPBOARD_SNAPSHOT_V1 |
             RemoteDeskProtocol.CAPABILITY_FILE_RECEIVE |
             RemoteDeskProtocol.CAPABILITY_FILE_TRANSFER_RECEIPT |
             RemoteDeskProtocol.CAPABILITY_FILE_RECEIVE_LOCATION |

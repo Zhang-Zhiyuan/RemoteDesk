@@ -15,6 +15,8 @@ internal sealed class ClipboardRequestTracker
 
     internal ClipboardRequestTracker(Func<long>? clock = null) => _clock = clock ?? (() => Environment.TickCount64);
 
+    internal bool IsPending { get { lock (_gate) return _pending is not null; } }
+
     internal Request? Begin(long generation, bool read, uint localSequence = 0,
         int timeoutMilliseconds = TimeoutMilliseconds)
     {

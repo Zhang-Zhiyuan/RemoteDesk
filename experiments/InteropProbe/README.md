@@ -126,6 +126,13 @@ Clipboard/file regressions also have bounded standalone modes:
 
 - `clipboard-isolated` and `clipboard-shortcuts-isolated` take `output` on stdin;
   they use a private window station and never access the interactive clipboard.
+- `clipboard-context-isolated` also takes `output`. It runs the actual Windows
+  viewer and native TextBox copy/paste menu handlers against encrypted synthetic
+  Windows/Linux peers: no Ctrl+C/V, delayed ACK mouse ordering, timer-driven
+  remote copies, stale reply protection, non-text preservation, oversized text
+  fallback, and an eight-second blocked-write deadline. `clipboard-isolated`
+  additionally checks the actual Windows host snapshot reader/cache. These are
+  isolated component/integration checks, not physical cross-platform sessions.
 - `file-relay-isolated` takes `output` and `expectedServer`. It reuses the locally
   saved, pinned relay configuration, registers a temporary node and verifies
   text/file round trips with generated fixtures and the product file receiver.
@@ -323,6 +330,38 @@ a new output path and captures only the specified main window.
 on a private desktop. It checks every visible action/input after scrolling,
 checks ancestor clipping and layout convergence, and captures the three pages
 at repeated widths. It does not start app services or load/save user settings.
+It also exercises file confirmation/result dialogs using synthetic long Chinese
+paths, partial failures, 9/14-point fonts, and 360–1000-pixel viewports. Every
+input/action must become fully visible through normal focus traversal, whole-
+dialog horizontal overflow is rejected, and shrinking then restoring a dialog
+must settle without repeated layouts. The file list itself may scroll sideways;
+the selected file's complete paths remain available in its read-only details.
 `Measure-WindowsUi.ps1 -Action AuditLayout -ScreenshotPath <new-directory>`
 captures those pages on an explicitly selected installed instance and restores
 its bounds/tab. Evidence and limitations: `docs/UiAudit-20260915.md`.
+
+`main-layout-isolated`, `popup-layout-isolated`, and `viewer-layout-isolated`
+extend the same private-window-station checks with runtime font changes, long
+diagnostic text, narrow add-device/shared-name/address dialogs, and the viewer's
+overflow menu. Supply `{"output":"<new-directory>"}` on stdin. These probes use
+synthetic settings and disconnected viewer controls, never real sessions or
+clipboard data. They check actual scroll ranges, focus accessibility and idle
+layout convergence; the viewer also checks the real scaling menu action and
+fullscreen restoration. Their screenshots are rendered at the machine's current
+DPI, not a claim of physical multi-monitor DPI coverage. Findings and evidence:
+`docs/WindowsUiAudit-20260919.md`.
+
+`background-fault` drives a real WinForms message loop in its own process and
+collects one faulted task. It verifies that the product records the unobserved
+background exception without closing the host. No windows or remote sessions
+are opened. Supply a new `output` directory on stdin.
+
+`slow-file-transfer` uses an owned loopback peer and generated 1 MiB file, with
+normal encrypted protocol/authentication and the production file receiver.
+It consumes each 32 KiB chunk one second apart, so heartbeats queue behind the
+upload. The 90-second probe checks SHA-256, the save receipt and the surviving
+connection, with no user clipboard, settings, relay or desktop access. Supply
+a new `output` directory; existing evidence is never overwritten.
+`slow-file-transfer-legacy` repeats this with a peer that does not advertise
+save receipts, checking that local send completion cannot truncate the bytes
+still queued for delivery. It independently checks the peer's saved file.

@@ -18,6 +18,7 @@ import json
 import math
 import os
 import re
+import selectors
 import shutil
 import socket
 import struct
@@ -46,6 +47,7 @@ if (__name__ == "__main__" and sys.platform.startswith("linux")
 from remotedesk_protocol_probe import (
     CAPABILITY_CAPTURE_TARGET_SELECTION,
     CAPABILITY_CLIPBOARD_TEXT,
+    CAPABILITY_CLIPBOARD_SNAPSHOT_V1,
     CAPABILITY_FILE_CHECKSUM,
     CAPABILITY_FILE_RECEIVE,
     CAPABILITY_FILE_TRANSFER_RECEIPT,
@@ -63,6 +65,7 @@ from remotedesk_protocol_probe import (
     CONTROL_CAPTURE_TARGET_CHANGED,
     CONTROL_CLIPBOARD_GET_TEXT,
     CONTROL_CLIPBOARD_SET_TEXT,
+    CONTROL_CLIPBOARD_SNAPSHOT_REQUEST,
     CONTROL_FILE_TRANSFER_CANCEL,
     CONTROL_FILE_TRANSFER_CHECKSUM,
     CONTROL_FILE_TRANSFER_CHUNK,
@@ -85,6 +88,8 @@ from remotedesk_protocol_probe import (
     RECOMMENDED_FILE_TRANSFER_CHUNK_BYTES,
     INPUT_PAYLOAD_LENGTH,
     MAX_FILE_TRANSFER_BYTES,
+    MAX_CLIPBOARD_TEXT_CHARS,
+    MAX_CLIPBOARD_SNAPSHOT_UTF8_BYTES,
     MAX_FRAME_PAYLOAD_BYTES,
     MESSAGE_CONTROL,
     MESSAGE_FRAME,
@@ -108,6 +113,7 @@ from remotedesk_protocol_probe import (
     encode_capture_target_list,
     encode_clipboard_status,
     encode_clipboard_text,
+    encode_clipboard_snapshot,
     encode_device_info,
     encode_file_transfer_cancel,
     encode_file_transfer_checksum,
@@ -151,6 +157,7 @@ RETURN_WORKER_STOP_TIMEOUT_SECONDS = 0.25
 BASE_HOST_CAPABILITIES = (
     CAPABILITY_REMOTE_DESKTOP
     | CAPABILITY_CLIPBOARD_TEXT
+    | CAPABILITY_CLIPBOARD_SNAPSHOT_V1
     | CAPABILITY_FILE_RECEIVE
     | CAPABILITY_FILE_TRANSFER_RECEIPT
     | CAPABILITY_FILE_RECEIVE_LOCATION
@@ -279,6 +286,7 @@ CAPABILITY_NAMES = (
     (CAPABILITY_REMOTE_DESKTOP, "RemoteDesktop"),
     (CAPABILITY_INPUT_CONTROL, "InputControl"),
     (CAPABILITY_CLIPBOARD_TEXT, "ClipboardText"),
+    (CAPABILITY_CLIPBOARD_SNAPSHOT_V1, "ClipboardSnapshotV1"),
     (CAPABILITY_FILE_RECEIVE, "FileReceive"),
     (CAPABILITY_FILE_RECEIVE_LOCATION, "FileReceiveLocation"),
     (CAPABILITY_FILE_TRANSFER_RECEIPT, "FileTransferReceipt"),
@@ -518,6 +526,8 @@ class InputCommand:
 class ClipboardOperation:
     kind: int
     text: str = ""
+    request_id: str = ""
+    known_revision: str = ""
 
 
 class HostPressedInputState:
@@ -3486,6 +3496,8 @@ class LinuxHostSession:
             self._handle_clipboard_get()
         elif kind == CONTROL_CLIPBOARD_SET_TEXT:
             self._handle_clipboard_set(str(control.get("text") or ""))
+        elif kind == CONTROL_CLIPBOARD_SNAPSHOT_REQUEST:
+            self._handle_clipboard_snapshot(control["requestId"], control["knownRevision"])
         elif kind == CONTROL_FILE_TRANSFER_START:
             self._handle_file_transfer_start(payload)
         elif kind == CONTROL_FILE_TRANSFER_CHUNK:
@@ -3791,6 +3803,22 @@ class LinuxHostSession:
         ):
             log("Linux clipboard worker queue is full; ignored SetText request.")
 
+    def _handle_clipboard_snapshot(self, request_id: str, known_revision: str) -> None:
+        # Snapshot responses have their own correlated wire kind. Never send
+        # them to an older viewer or consume a legacy Get/Set reply slot.
+        if not self._clipboard_snapshot_negotiated():
+            return
+        if not self._queue_clipboard_operation(ClipboardOperation(
+                CONTROL_CLIPBOARD_SNAPSHOT_REQUEST, request_id=request_id, known_revision=known_revision)):
+            self._write_clipboard_snapshot_failure(request_id, "Linux 剪贴板忙，请稍后重试。")
+
+    def _clipboard_snapshot_negotiated(self) -> bool:
+        return bool(getattr(self, "viewer_capabilities", 0) & CAPABILITY_CLIPBOARD_SNAPSHOT_V1)
+
+    def _write_clipboard_snapshot_failure(self, request_id: str, message: str) -> None:
+        if self._clipboard_session_is_active() and self._clipboard_snapshot_negotiated():
+            self._write_control(encode_clipboard_snapshot(request_id, False, "", False, False, "", message))
+
     def _queue_clipboard_operation(
         self,
         operation: ClipboardOperation,
@@ -3804,10 +3832,10 @@ class LinuxHostSession:
             ):
                 return False
 
-            # Clipboard messages have no request identifier. Every Get must
-            # retain its reply and relative order. Only replace a pending Set
-            # at the tail, never across a Get, so Set→Get remains observable
-            # while rapid editor updates stay bounded.
+            # Legacy Get/Set messages have no request identifier. Every Get
+            # and correlated Snapshot must retain its reply and relative
+            # order. Only replace a pending Set at the tail, never across a
+            # read, so Set→Get remains observable during rapid editor updates.
             if self.clipboard_queue:
                 tail = self.clipboard_queue[-1]
                 if (
@@ -3877,8 +3905,38 @@ class LinuxHostSession:
                             else "Linux clipboard text write failed.",
                         )
                     )
+                elif operation.kind == CONTROL_CLIPBOARD_SNAPSHOT_REQUEST:
+                    if not self._clipboard_snapshot_negotiated():
+                        continue
+                    if not getattr(self, "host_capabilities", 0) & CAPABILITY_CLIPBOARD_TEXT:
+                        self._write_clipboard_snapshot_failure(operation.request_id, "此会话不允许读取剪贴板。")
+                        continue
+                    text = read_clipboard_snapshot_text(self._clipboard_session_is_active)
+                    if not self._clipboard_session_is_active() or not self._clipboard_snapshot_negotiated():
+                        continue
+                    if not getattr(self, "host_capabilities", 0) & CAPABILITY_CLIPBOARD_TEXT:
+                        self._write_clipboard_snapshot_failure(operation.request_id, "此会话不允许读取剪贴板。")
+                    elif text is None:
+                        self._write_clipboard_snapshot_failure(operation.request_id, "Linux 剪贴板暂不可读取。")
+                    else:
+                        raw = text.encode("utf-8")
+                        if len(raw) > MAX_CLIPBOARD_SNAPSHOT_UTF8_BYTES or len(text.encode("utf-16-le")) // 2 > MAX_CLIPBOARD_TEXT_CHARS:
+                            raise ProtocolError("Clipboard snapshot exceeds the text limit.")
+                        revision = hashlib.sha256(raw).hexdigest()
+                        changed = revision != operation.known_revision
+                        self._write_control(encode_clipboard_snapshot(
+                            operation.request_id, True, revision, bool(text), changed, text if changed else "", ""))
             except Exception as ex:
                 if self._clipboard_session_is_active():
+                    if operation.kind == CONTROL_CLIPBOARD_SNAPSHOT_REQUEST:
+                        # Exception representations can include clipboard bytes
+                        # (for example invalid UTF-8); never log those contents.
+                        log(f"Linux clipboard snapshot failed: {type(ex).__name__}")
+                        try:
+                            self._write_clipboard_snapshot_failure(operation.request_id, "Linux 剪贴板快照读取失败或内容超过上限。")
+                        except Exception:
+                            pass
+                        continue
                     message = f"Linux clipboard operation failed: {ex}"
                     log(message)
                     try:
@@ -4753,6 +4811,94 @@ def capture_frame(width: int, height: int, mode: str) -> tuple[int, int, bytes]:
 
     frame_size = image_size_from_bytes(FALLBACK_PNG) or (width, height)
     return frame_size[0], frame_size[1], FALLBACK_PNG
+
+
+def _read_clipboard_command_bounded(command: list[str], deadline: float,
+                                    is_active: Callable[[], bool], limit: int) -> bytes | None:
+    """Read a test/clipboard helper without unbounded communicate() buffering."""
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, bufsize=0)
+    selector = selectors.DefaultSelector()
+    data = bytearray()
+    output_complete = False
+    try:
+        assert process.stdout is not None
+        fd = process.stdout.fileno()
+        os.set_blocking(fd, False)
+        selector.register(fd, selectors.EVENT_READ)
+        while True:
+            if not is_active():
+                raise TransferCancelledError("Clipboard snapshot request was cancelled.")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Clipboard snapshot helper timed out.")
+            if output_complete:
+                try:
+                    code = process.wait(timeout=min(.05, remaining))
+                    return bytes(data) if code == 0 else None
+                except subprocess.TimeoutExpired:
+                    continue
+            for _key, _event in selector.select(min(.05, remaining)):
+                chunk = os.read(fd, min(64 * 1024, limit + 1 - len(data)))
+                if not chunk:
+                    selector.unregister(fd)
+                    output_complete = True
+                    break
+                data.extend(chunk)
+                if len(data) > limit:
+                    raise ProtocolError("Clipboard snapshot helper output exceeds the limit.")
+    finally:
+        selector.close()
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=.5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def read_clipboard_snapshot_text(is_active: Callable[[], bool] | None = None) -> str | None:
+    """Bounded, read-only snapshot; None means unavailable, never empty success.
+
+    Only a successfully enumerated non-text selection or an actual empty text
+    result returns ''. Missing helpers, access failures and timeouts cannot be
+    mistaken for a user clearing their clipboard.
+    """
+    active = is_active or (lambda: True)
+    deadline = time.monotonic() + 2.0
+    backends: list[tuple[list[str] | None, list[str]]] = []
+    if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-paste"):
+        backends.extend((
+            (["wl-paste", "--list-types"], ["wl-paste", "--no-newline", "--type", "text/plain;charset=utf-8"]),
+            (None, ["wl-paste", "--no-newline", "--type", "text/plain"]),
+        ))
+    if shutil.which("xclip"):
+        backends.append((["xclip", "-selection", "clipboard", "-o", "-t", "TARGETS"],
+                         ["xclip", "-selection", "clipboard", "-o"]))
+    if shutil.which("xsel"):
+        backends.append((None, ["xsel", "-ob"]))
+    for targets_command, read_command in backends:
+        if targets_command is not None:
+            targets = _read_clipboard_command_bounded(targets_command, deadline, active, 16 * 1024)
+            if targets is not None:
+                formats = targets.decode("utf-8", errors="strict").casefold().splitlines()
+                text_available = any(value in ("utf8_string", "string", "text", "compound_text")
+                                     or value.startswith("text/plain") for value in formats)
+                if not text_available:
+                    return ""
+        raw = _read_clipboard_command_bounded(read_command, deadline, active, MAX_CLIPBOARD_SNAPSHOT_UTF8_BYTES)
+        if raw is None:
+            continue
+        text = raw.decode("utf-8", errors="strict")
+        if len(text.encode("utf-16-le")) // 2 > MAX_CLIPBOARD_TEXT_CHARS:
+            raise ProtocolError("Clipboard snapshot text exceeds the character limit.")
+        return text
+    return None
 
 
 def read_clipboard_text() -> str | None:

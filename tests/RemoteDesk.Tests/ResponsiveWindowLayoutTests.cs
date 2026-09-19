@@ -32,8 +32,18 @@ public sealed class ResponsiveWindowLayoutTests
             form.PerformLayout();
             scroll.PerformLayout();
             table.PerformLayout();
-            Assert.True(table.ClientRectangle.Contains(input.Bounds));
-            Assert.True(table.ClientRectangle.Contains(accept.Bounds));
+            bool inputContained = table.ClientRectangle.Contains(input.Bounds);
+            bool acceptContained = table.ClientRectangle.Contains(accept.Bounds);
+            string? geometry = inputContained && acceptContained ? null :
+                $"viewport={viewport}; formClient={form.ClientSize}; " +
+                $"table={table.Bounds}/{table.ClientRectangle}, preferred={table.PreferredSize}; " +
+                $"input={input.Bounds}, preferred={input.PreferredSize}; " +
+                $"accept={accept.Bounds}, preferred={accept.PreferredSize}; " +
+                $"scale={form.AutoScaleDimensions}, currentScale={form.CurrentAutoScaleDimensions}, dpi={form.DeviceDpi}; " +
+                $"handles={form.IsHandleCreated}/{scroll.IsHandleCreated}/{table.IsHandleCreated}; " +
+                $"scroll={scroll.AutoScrollPosition}/{scroll.AutoScrollMinSize}/{scroll.DisplayRectangle}";
+            Assert.True(inputContained, geometry);
+            Assert.True(acceptContained, geometry);
             Assert.Equal("Keep draft", input.Text);
         }
     }

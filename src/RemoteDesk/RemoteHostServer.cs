@@ -1667,6 +1667,7 @@ internal sealed partial class RemoteHostServer : IDisposable
         internal NativeDetailHostSession? NativeDetails { get; set; }
         internal NativeDetailOffer? LastNativeOffer { get; set; }
         internal HostVideoDiagnostics VideoDiagnostics { get; } = new();
+        internal ClipboardSnapshotService ClipboardSnapshots { get; init; } = new();
         private readonly object _clipboardFileReturnLock = new();
         private readonly object _clipboardInputSequenceLock = new();
         private readonly object
@@ -5090,6 +5091,7 @@ internal sealed partial class RemoteHostServer : IDisposable
             RemoteControlKind kind) =>
         kind is
             RemoteControlKind.ClipboardGetText or
+            RemoteControlKind.ClipboardSnapshotRequest or
             RemoteControlKind.HostVideoDiagnosticsRequest or
             RemoteControlKind
                 .FileTransferRequestClipboardFiles;
@@ -5462,6 +5464,27 @@ internal sealed partial class RemoteHostServer : IDisposable
         await Protocol.WriteMessageAsync(stream, MessageType.Control, payload, session, writeLock, cancellationToken);
     }
 
+    internal static async Task<byte[]?> BuildClipboardSnapshotResponseAsync(
+        RemoteControlMessage control,
+        ViewerSessionState viewerState,
+        CancellationToken cancellationToken)
+    {
+        const RemoteDeviceCapabilities required = RemoteDeviceCapabilities.ClipboardText |
+            RemoteDeviceCapabilities.ClipboardSnapshotV1;
+        if (control.Kind != RemoteControlKind.ClipboardSnapshotRequest ||
+            (viewerState.Capabilities & required) != required)
+            return null;
+
+        ClipboardSnapshotResult snapshot = await viewerState.ClipboardSnapshots.ReadAsync(
+            control.ClipboardRevision ?? string.Empty, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        // Negotiation may be withdrawn while a busy clipboard is being read.
+        if ((viewerState.Capabilities & required) != required)
+            return null;
+        return RemoteMessageCodec.EncodeClipboardSnapshot(control.TransferId!, snapshot.Success,
+            snapshot.Revision, snapshot.HasText, snapshot.Changed, snapshot.Text, snapshot.StatusMessage);
+    }
+
     private static async Task HandleControlMessageAsync(
         ReadOnlyMemory<byte> payload,
         NetworkStream stream,
@@ -5487,6 +5510,15 @@ internal sealed partial class RemoteHostServer : IDisposable
             viewerState.PendingRemoteUpdateTransferId != control.TransferId;
         switch (control.Kind)
         {
+            case RemoteControlKind.ClipboardSnapshotRequest:
+                byte[]? snapshotReply = await BuildClipboardSnapshotResponseAsync(control, viewerState, cancellationToken);
+                if (snapshotReply is not null)
+                {
+                    using (writePriority.BeginControlWritePriority())
+                        await Protocol.WriteMessageAsync(stream, MessageType.Control, snapshotReply,
+                            session, writeLock, cancellationToken);
+                }
+                break;
             case RemoteControlKind.FileReceiveLocationRequest:
                 string receiveLocation;
                 string receiveNote;

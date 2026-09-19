@@ -64,6 +64,15 @@ public final class ViewerProbeApplication extends Application implements Applica
             Object owner=field(viewer,"connectionOwner");
             data.put("sampleUptimeMs", android.os.SystemClock.elapsedRealtime());
             if (owner != null) {
+                data.put("fileBusy", ((java.util.concurrent.atomic.AtomicBoolean) field(owner, "fileBusy")).get());
+                data.put("fileSenderActive", field(owner, "fileSender") != null);
+                Object uploadLease = field(field(owner, "fileLiveness"), "active");
+                // Explicit probe-only negative control. Production never receives
+                // this intent or callback; restore its former 18-second policy.
+                if (uploadLease != null && viewer.getIntent().getBooleanExtra("legacyFileWatchdogProbe", false))
+                    ((AutoCloseable) uploadLease).close();
+                data.put("fileWatchdogLease", field(field(owner, "fileLiveness"), "active") != null);
+                data.put("fileLegacyDrain", field(field(owner, "fileLiveness"), "legacyDraining"));
                 Object health = field(owner, "healthTracker");
                 // Observe totals without snapshot(), which advances the real
                 // UI's FPS sampling interval. Read consistently under its lock.
@@ -106,6 +115,8 @@ public final class ViewerProbeApplication extends Application implements Applica
         handler.postDelayed(this::snapshot,300);
     }
     public void onActivityCreated(Activity activity,Bundle state) {
+        if (activity instanceof MainActivity main && activity.getIntent().getBooleanExtra("receivedFilesProbe", false))
+            handler.postDelayed(() -> ReceivedFilesUiProbe.start(main), 600);
         if(activity instanceof RemoteDeskViewerActivity){
             viewer=(RemoteDeskViewerActivity)activity;
             surfaceChanges=0;

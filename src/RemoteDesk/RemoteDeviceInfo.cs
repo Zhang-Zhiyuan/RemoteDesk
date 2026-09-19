@@ -40,7 +40,8 @@ internal enum RemoteDeviceCapabilities
     // Reserved negotiated tier. Do not advertise until the endpoint's full
     // native capture/request/render path is enabled and qualified.
     NativeDetailV1 = 1 << 26,
-    FileReceiveLocation = 1 << 27
+    FileReceiveLocation = 1 << 27,
+    ClipboardSnapshotV1 = 1 << 28
 }
 
 internal static class RemoteDevicePlatforms
@@ -107,6 +108,7 @@ internal static class RemoteDeviceCapabilityInfo
             RemoteDeviceCapabilities.RemoteDesktop |
             RemoteDeviceCapabilities.InputControl |
             RemoteDeviceCapabilities.ClipboardText |
+            RemoteDeviceCapabilities.ClipboardSnapshotV1 |
             RemoteDeviceCapabilities.FileReceive |
             RemoteDeviceCapabilities.CaptureTargetSelection |
             RemoteDeviceCapabilities.FileDropPaste |

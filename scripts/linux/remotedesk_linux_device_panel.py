@@ -60,6 +60,9 @@ class DevicePanel(ttk.LabelFrame):
             except queue.Empty: break
             if row[0] == "book":
                 first = not self.ready; self.ready = True; self.book = row[1]; self.render()
+                if not self.busy:
+                    self.status.config(text=f"已保存 {len(self.book.nodes)} 个设备。双击设备可连接。" if self.book.nodes
+                                       else "暂无已保存设备，可新增设备或查找附近设备。")
                 if first and self.book.nodes and not self.app.viewer_host.get(): self.fill(self.book.nodes[0])
                 callback = self.storage_callbacks.pop(row[3], None)
                 if callback: callback(row[2])
@@ -179,31 +182,83 @@ class DevicePanel(ttk.LabelFrame):
         self.scan(None if node else host, resolved)
 
     def choose(self, devices):
+        if not devices: return None
         if len(devices) == 1: return devices[0]
+        from remotedesk_linux_app import apply_adaptive_window_geometry
         dialog = tk.Toplevel(self.app.root); dialog.title("选择设备 / 端口"); dialog.transient(self.app.root)
-        choice = tk.StringVar(value="0"); result = []
+        dialog.columnconfigure(0, weight=1); dialog.rowconfigure(0, weight=1)
+        content = ttk.Frame(dialog, padding=12)
+        content.grid(row=0, column=0, sticky=tk.NSEW)
+        content.columnconfigure(0, weight=1); content.rowconfigure(0, weight=1)
+        tree = ttk.Treeview(content, columns=("address",), show="tree headings", height=8, selectmode="browse")
+        tree.heading("#0", text="设备"); tree.heading("address", text="IP / 端口")
+        tree.column("#0", width=330, minwidth=120); tree.column("address", width=240, minwidth=160)
+        vertical = ttk.Scrollbar(content, orient=tk.VERTICAL, command=tree.yview)
+        horizontal = ttk.Scrollbar(content, orient=tk.HORIZONTAL, command=tree.xview)
+        tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        tree.grid(row=0, column=0, sticky=tk.NSEW); vertical.grid(row=0, column=1, sticky=tk.NS)
+        horizontal.grid(row=1, column=0, sticky=tk.EW)
+        details = tk.Text(content, height=2, width=1, wrap=tk.CHAR, state=tk.DISABLED)
+        details_scroll = ttk.Scrollbar(content, orient=tk.VERTICAL, command=details.yview)
+        details.configure(yscrollcommand=details_scroll.set)
+        details.grid(row=2, column=0, sticky=tk.EW, pady=(8, 0))
+        details_scroll.grid(row=2, column=1, sticky=tk.NS, pady=(8, 0))
+        result = []
         for index, device in enumerate(devices):
-            ttk.Radiobutton(dialog, text=f"{device.name or device.host} · {device.address}", variable=choice, value=str(index)).pack(anchor=tk.W, padx=20, pady=4)
-        ttk.Button(dialog, text="连接此设备", command=lambda:(result.append(devices[int(choice.get())]), dialog.destroy())).pack(pady=12)
+            tree.insert("", tk.END, iid=str(index), text=device.name or device.host, values=(device.address,))
+        def selected(_event=None):
+            selection = tree.selection()
+            if not selection: return
+            device = devices[int(selection[0])]
+            details.configure(state=tk.NORMAL); details.delete("1.0", tk.END)
+            details.insert("1.0", f"地址：{device.address}\n设备：{device.name or device.host}")
+            details.configure(state=tk.DISABLED)
+        def accept(_event=None):
+            selection = tree.selection()
+            if selection:
+                result.append(devices[int(selection[0])]); dialog.destroy()
+        tree.bind("<<TreeviewSelect>>", selected)
+        tree.bind("<Return>", accept); tree.bind("<Double-1>", accept)
+        tree.selection_set("0"); tree.focus("0"); selected()
+        actions = ttk.Frame(dialog, padding=(12, 0, 12, 12)); actions.grid(row=1, column=0, sticky=tk.EW)
+        ttk.Button(actions, text="取消", command=dialog.destroy, width=6).pack(side=tk.RIGHT)
+        ttk.Button(actions, text="连接此设备", command=accept, width=10, style="Accent.TButton").pack(side=tk.RIGHT, padx=(0, 8))
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        apply_adaptive_window_geometry(dialog, preferred_size=(720, 460), minimum_size=(360, 300), parent=self.app.root)
+        tree.focus_set()
         dialog.grab_set(); self.app.root.wait_window(dialog)
         return result[0] if result else None
 
     def add(self):
+        from remotedesk_linux_app import APP_BG, apply_adaptive_window_geometry, normalize_tk_ui_scale
         dialog = tk.Toplevel(self.app.root); dialog.title("新增设备"); dialog.transient(self.app.root)
+        dialog.configure(bg=APP_BG)
+        dialog.columnconfigure(1, weight=1)
         values = [tk.StringVar() for _ in range(4)]
+        fields = []
         for i, title in enumerate(("IP / 主机名", "端口（留空自动探测）", "设备密钥", "备注（可选）")):
-            ttk.Label(dialog, text=title).grid(row=i, column=0, padx=14, pady=7, sticky=tk.W)
-            ttk.Entry(dialog, textvariable=values[i], show="*" if i == 2 else "", width=32).grid(row=i, column=1, padx=14, pady=7)
-        error = ttk.Label(dialog, text=""); error.grid(row=4, column=0, columnspan=2)
+            ttk.Label(dialog, text=title, wraplength=180, justify=tk.LEFT).grid(row=i, column=0, padx=14, pady=7, sticky=tk.W)
+            entry = ttk.Entry(dialog, textvariable=values[i], show="*" if i == 2 else "", width=12)
+            entry.grid(row=i, column=1, padx=14, pady=7, sticky=tk.EW); fields.append(entry)
         def save():
             try:
                 host, port, explicit = model.endpoint(values[0].get(), values[1].get()); password = values[2].get(); note = values[3].get()
                 if not password.strip(): raise ValueError("请输入设备密钥。")
                 self.mutate(lambda book:book.remember(host, port, password, remark=note or None, auto_port=not explicit), self.fill)
                 dialog.destroy()
-            except ValueError as ex: error.config(text=str(ex))
-        ttk.Button(dialog, text="保存设备", command=save, style="Accent.TButton").grid(row=5, column=1, pady=14)
-        ttk.Button(dialog, text="取消", command=dialog.destroy).grid(row=5, column=0, pady=14)
+            except ValueError as ex:
+                messagebox.showwarning("无法保存设备", str(ex), parent=dialog)
+        ttk.Button(dialog, text="保存设备", command=save, style="Accent.TButton").grid(row=4, column=1, pady=14)
+        ttk.Button(dialog, text="取消", command=dialog.destroy, width=6).grid(row=4, column=0, pady=14)
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.update_idletasks()
+        scale = normalize_tk_ui_scale(float(dialog.tk.call("tk", "scaling")))
+        # Requested widget height already includes the user's font scaling.
+        # Convert it back to logical units instead of scaling it twice.
+        logical_height = round(dialog.winfo_reqheight() / scale)
+        apply_adaptive_window_geometry(dialog, preferred_size=(round(620 / scale), logical_height),
+                                       minimum_size=(round(360 / scale), logical_height), parent=self.app.root)
+        fields[0].focus_set()
         dialog.grab_set(); self.app.root.wait_window(dialog)
         for value in values: value.set("")
     def rename(self):
