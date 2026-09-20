@@ -455,6 +455,12 @@ WINDOWS_VK_TO_X11_KEYSYM = {
     **WINDOWS_VK_TO_XDOTOOL,
     0x20: "space",
 }
+WINDOWS_MODIFIER_VKS = frozenset((0x10, 0x11, 0x12, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5))
+X11_MODIFIER_TO_WINDOWS_VK = {
+    "Shift_L": 0xA0, "Shift_R": 0xA1,
+    "Control_L": 0xA2, "Control_R": 0xA3,
+    "Alt_L": 0xA4, "Alt_R": 0xA5,
+}
 
 WINDOWS_SCAN_TO_X11_KEY = {
     (0x1C, True): "KP_Enter",
@@ -575,7 +581,7 @@ class HostPressedInputState:
                 ),
                 -1,
             )
-            if pressed_index < 0:
+            if pressed_index < 0 and command.data not in WINDOWS_MODIFIER_VKS:
                 pressed_index = next(
                     (
                         index
@@ -1021,8 +1027,32 @@ def decode_input_payload(payload: bytes) -> InputCommand:
     return InputCommand(kind, button, x, y, data)
 
 
+def input_keyboard_flags(command: InputCommand) -> int:
+    # Older Windows viewers incorrectly marked right Shift's scan 0x36 as E0.
+    # Normalize only that known Shift identity, never real extended Ctrl/Alt or
+    # unrelated keys. Share the rule with held-key tracking so corrected key-up
+    # metadata cannot accidentally release the other concurrently held Shift.
+    if (
+        command.kind in (INPUT_KEY_DOWN, INPUT_KEY_UP)
+        and command.data in (0x10, 0xA1)
+        and command.x == 0x36
+        and command.y & REMOTE_KEYBOARD_HAS_SCAN_CODE
+    ):
+        return command.y & ~REMOTE_KEYBOARD_EXTENDED
+    return command.y
+
+
 def input_key_identity(command: InputCommand) -> tuple[int, int, int]:
-    return command.data, command.x, command.y
+    if command.data in WINDOWS_MODIFIER_VKS:
+        # Raw input and low-level keyboard hooks may alternate generic and
+        # side-specific VKs, or omit scans for an explicit side. Track the side
+        # actually injected, not the representation; retain the original down
+        # command separately for disconnect cleanup. A generic no-scan key has
+        # only the existing left-side meaning, never permission to clear right.
+        side = X11_MODIFIER_TO_WINDOWS_VK.get(input_command_key_name(command))
+        if side is not None:
+            return side, 0, 0
+    return command.data, command.x, input_keyboard_flags(command)
 
 
 def enqueue_input_command(queue_items: deque[InputCommand], command: InputCommand, max_items: int) -> bool:
@@ -1303,11 +1333,12 @@ def x11_key_name(virtual_key: int) -> str | None:
 def input_command_key_name(command: InputCommand) -> str | None:
     if command.kind not in (INPUT_KEY_DOWN, INPUT_KEY_UP):
         return None
-    if command.y & REMOTE_KEYBOARD_HAS_SCAN_CODE:
+    flags = input_keyboard_flags(command)
+    if flags & REMOTE_KEYBOARD_HAS_SCAN_CODE:
         physical_name = WINDOWS_SCAN_TO_X11_KEY.get(
             (
                 command.x,
-                bool(command.y & REMOTE_KEYBOARD_EXTENDED),
+                bool(flags & REMOTE_KEYBOARD_EXTENDED),
             )
         )
         if physical_name is not None:

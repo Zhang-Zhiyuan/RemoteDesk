@@ -50,6 +50,9 @@ internal static class ClipboardShortcutProbe
             new Scenario("Windows right Ctrl+V held", "Windows", true, Keys.Control | Keys.V, Hold: true),
             new Scenario("Linux terminal Ctrl+Shift+V", "Linux", true, Keys.Control | Keys.Shift | Keys.V),
             new Scenario("Windows Shift+Insert", "Windows", true, Keys.Shift | Keys.Insert),
+            new Scenario("Late Alt must not turn paste into Ctrl+Alt+V", "Windows", true, Keys.Control | Keys.V, LateKey: Keys.LMenu),
+            new Scenario("Late Shift must not change the requested paste chord", "Windows", true, Keys.Control | Keys.V, LateKey: Keys.LShiftKey),
+            new Scenario("Late Ctrl must not modify Shift+Insert", "Windows", true, Keys.Shift | Keys.Insert, LateKey: Keys.LControlKey),
             new Scenario("Reject write does not paste old text", "Windows", true, Keys.Control | Keys.V, Reject: true),
             new Scenario("Lost focus cancels delayed paste", "Windows", true, Keys.Control | Keys.V, LoseFocus: true),
             new Scenario("Held V does not paste repeatedly", "Windows", true, Keys.Control | Keys.V, Repeat: true),
@@ -155,9 +158,14 @@ internal static class ClipboardShortcutProbe
                 await copied.Task.WaitAsync(timeout.Token);
                 Invoke(window, "ReleaseAllRemoteInputs");
             }
+            if (scenario.LateKey != Keys.None)
+            {
+                await copied.Task.WaitAsync(timeout.Token);
+                Invoke(window, "TryForwardKeyboardCommand", RemoteInputCommand.KeyDown((int)scenario.LateKey), scenario.LateKey);
+            }
             await Task.Delay(scenario.CopyFirst ? 1700 : 850, timeout.Token);
             var commands = inputs.ToArray();
-            bool expectPaste = !scenario.Reject && !scenario.LoseFocus;
+            bool expectPaste = !scenario.Reject && !scenario.LoseFocus && scenario.LateKey == Keys.None;
             bool expectedClipboardWrite = !scenario.NonTextCopy;
             bool passed = (expectedClipboardWrite ? copied.Task.IsCompletedSuccessfully && copied.Task.Result == expectedText : !copied.Task.IsCompleted) &&
                 (expectPaste ? pasted.Task.IsCompletedSuccessfully && pasted.Task.Result == expectedText : !pasted.Task.IsCompleted) &&
@@ -174,6 +182,8 @@ internal static class ClipboardShortcutProbe
             Console.WriteLine($"{(passed ? "PASS" : "FAIL")}: {scenario.Name}");
             if (!passed) failed++;
             if (scenario.Hold) foreach (var modifier in modifiers.AsEnumerable().Reverse()) Send(modifier, false);
+            if (scenario.LateKey != Keys.None)
+                Invoke(window, "TryForwardKeyboardCommand", RemoteInputCommand.KeyUp((int)scenario.LateKey), scenario.LateKey);
             window.Close();
             await client.DisconnectAsync();
             timeout.Cancel();
@@ -254,7 +264,8 @@ internal static class ClipboardShortcutProbe
         instance.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(instance, args);
 
     private sealed record Scenario(string Name, string Platform, bool Native, Keys Shortcut,
-        bool Reject = false, bool LoseFocus = false, bool Repeat = false, bool Hold = false, bool CopyFirst = false, bool NonTextCopy = false);
+        bool Reject = false, bool LoseFocus = false, bool Repeat = false, bool Hold = false, bool CopyFirst = false, bool NonTextCopy = false,
+        Keys LateKey = Keys.None);
 
     [DllImport("user32.dll", SetLastError = true)] private static extern bool SetThreadDesktop(nint desktop);
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();

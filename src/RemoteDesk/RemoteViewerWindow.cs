@@ -166,6 +166,7 @@ internal sealed partial class RemoteViewerWindow : Form
     private bool _remoteDragOutMouseReleased;
     private bool _suppressRemoteFilePullShortcutKeyUp;
     private bool _suppressFullScreenShortcutKeyUp;
+    private bool _inputReleaseRetryInProgress;
     private bool _fileDropRegistrationUnavailable;
     private bool _isAndroidRemote;
     private bool _isWindowsRemote;
@@ -464,7 +465,7 @@ internal sealed partial class RemoteViewerWindow : Form
         _pictureBox.KeyDown += PictureBox_KeyDown;
         _pictureBox.KeyPress += PictureBox_KeyPress;
         _pictureBox.KeyUp += PictureBox_KeyUp;
-        _pictureBox.LostFocus += (_, _) => ReleaseAllRemoteInputs();
+        _pictureBox.LostFocus += (_, _) => ReleaseRemoteInputsForFocusLoss();
         _pictureBox.DragEnter += RemoteViewerFileDragEnter;
         _pictureBox.DragOver += RemoteViewerFileDragOver;
         _pictureBox.DragDrop += RemoteViewerFileDragDrop;
@@ -644,6 +645,13 @@ internal sealed partial class RemoteViewerWindow : Form
                 WmSysKeyUp;
         Keys keyCode =
             keyData & Keys.KeyCode;
+        // A locally consumed down owns its repeats until key-up, even if
+        // releasing remote modifiers changes the hook's reconstructed chord.
+        if (keyDown && ((_suppressFullScreenShortcutKeyUp && keyCode == Keys.F11) ||
+            (_suppressRemoteFilePullShortcutKeyUp && keyCode == Keys.R)))
+        {
+            return true;
+        }
         if (keyUp &&
             _suppressFullScreenShortcutKeyUp &&
             keyCode == Keys.F11)
@@ -662,17 +670,16 @@ internal sealed partial class RemoteViewerWindow : Form
             return true;
         }
 
-        if (!keyDown)
+        if (!keyDown || IsRemoteWindowsKeyHeld())
         {
             return false;
         }
 
         if (IsFullScreenShortcut(keyData))
         {
-            _suppressFullScreenShortcutKeyUp =
-                _pictureBox.ContainsFocus;
             ReleaseAllRemoteInputs();
             ToggleFullScreen();
+            _suppressFullScreenShortcutKeyUp = true;
             return true;
         }
 
@@ -694,9 +701,8 @@ internal sealed partial class RemoteViewerWindow : Form
             return false;
         }
 
-        _suppressRemoteFilePullShortcutKeyUp =
-            _pictureBox.ContainsFocus;
         ReleaseAllRemoteInputs();
+        _suppressRemoteFilePullShortcutKeyUp = true;
         _ = PullRemoteClipboardFilesAsync();
         return true;
     }
@@ -741,6 +747,8 @@ internal sealed partial class RemoteViewerWindow : Form
         {
             keyboardFlags |= RemoteKeyboardFlags.Extended;
         }
+
+        keyboardFlags = RemoteKeyboardInput.NormalizeFlags(virtualKey, scanCode, keyboardFlags);
 
         command = kind == RemoteInputKind.KeyDown
             ? RemoteInputCommand.KeyDown(
@@ -787,6 +795,8 @@ internal sealed partial class RemoteViewerWindow : Form
             keyboardFlags |=
                 RemoteKeyboardFlags.Extended;
         }
+
+        keyboardFlags = RemoteKeyboardInput.NormalizeFlags(virtualKey, scanCode, keyboardFlags);
 
         command = kind == RemoteInputKind.KeyDown
             ? RemoteInputCommand.KeyDown(
@@ -848,7 +858,8 @@ internal sealed partial class RemoteViewerWindow : Form
             (_clipboardTextEnabled || _remoteFilePullEnabled) &&
             TryGetClipboardPullReason(
                 new KeyEventArgs(keyData),
-                out string clipboardPullReason))
+                out string clipboardPullReason,
+                windowsKeyHeld: IsRemoteWindowsKeyHeld()))
         {
             ScheduleRemoteClipboardPull(clipboardPullReason);
         }
@@ -1063,7 +1074,7 @@ internal sealed partial class RemoteViewerWindow : Form
     protected override void OnDeactivate(EventArgs args)
     {
         _clipboardDeactivateUntil = Environment.TickCount64 + 1000;
-        ReleaseAllRemoteInputs();
+        ReleaseRemoteInputsForFocusLoss();
         base.OnDeactivate(args);
     }
 
@@ -1732,8 +1743,10 @@ internal sealed partial class RemoteViewerWindow : Form
                     "仅已启用输入控制的 Windows 远端支持此操作。");
             }
 
-            await _client.SendInputsAsync(
-                CreateRemoteInputMethodSwitchCommands());
+            long generation = _client.InputConnectionGeneration;
+            if (_remoteInputOwnership.HasPendingReleases(generation) ||
+                !_client.TryQueueKeyboardChord(CreateRemoteInputMethodSwitchCommands(), generation))
+                throw new IOException("输入队列繁忙，未发送不完整的 Win+Space；请稍后重试。");
             using var timeout =
                 new CancellationTokenSource(
                     TimeSpan.FromSeconds(3));
@@ -2592,6 +2605,13 @@ internal sealed partial class RemoteViewerWindow : Form
             bool currentPending = _client.IsRemoteClipboardFileRequestPending;
             SetRemoteFilePullPending(
                 ShouldShowRemoteFilePullPending(currentPending, _remoteDragOutStage));
+            if (!currentPending)
+            {
+                // A cancelled file-return drain temporarily rejects input
+                // without disconnecting. Resume only pending releases once
+                // the existing terminal notification lifts that barrier.
+                SchedulePendingInputReleaseRetry();
+            }
         });
     }
 
@@ -6099,7 +6119,10 @@ internal sealed partial class RemoteViewerWindow : Form
                 _remoteInputOwnership.TryQueueMouseDown(
                     button,
                     remotePoint,
+                    _client.InputConnectionGeneration,
+                    _client.TryQueueOwnedInput,
                     _client.TryQueueOwnedInput);
+            SchedulePendingInputReleaseRetry();
             if (mouseDownQueued &&
                 CanArmRemoteDragOut(
                     _client.IsConnected,
@@ -6156,11 +6179,7 @@ internal sealed partial class RemoteViewerWindow : Form
                 out Point mappedRemotePoint)
                 ? mappedRemotePoint
                 : null;
-        _remoteInputOwnership.TryQueueMouseUp(
-            button,
-            remotePoint,
-            _client.InputConnectionGeneration,
-            _client.TryQueueOwnedInput);
+        QueueOwnedRemoteMouseUp(button, remotePoint);
     }
 
     private void PictureBox_MouseMove(object? sender, MouseEventArgs args)
@@ -6276,6 +6295,17 @@ internal sealed partial class RemoteViewerWindow : Form
             return;
         }
 
+        long inputGeneration = _client.InputConnectionGeneration;
+        if (!CanSendRemoteDragOutKeyboard(inputGeneration))
+        {
+            // Keep the ordinary remote drag and its mouse ownership/capture.
+            // Only disable automatic file pull for this gesture; otherwise a
+            // later move after Ctrl rises could unexpectedly restart it.
+            _remoteDragOutPressPicturePoint = null;
+            SetStatus("按住按键时不自动拖出文件；松开后请重新拖出，或使用工具栏“取回文件”。", MutedTextColor);
+            return;
+        }
+
         // A delayed automatic pull from an earlier Ctrl+C must not race this explicit drag batch.
         CancelPendingClipboardPull();
         var owner = new CancellationTokenSource();
@@ -6293,12 +6323,16 @@ internal sealed partial class RemoteViewerWindow : Form
         try
         {
             SetStatus("正在取消远端拖动并取回所选文件，请继续按住鼠标…", MutedTextColor);
-            QueueRemoteDragOutCancel(remotePoint);
+            if (!QueueRemoteDragOutCancel(remotePoint))
+                throw new IOException("按键状态已变化或输入队列繁忙，未发送取消拖动快捷键；请用工具栏“取回文件”重试。");
 
             await _client.FlushInputAsync(owner.Token);
 
             await Task.Delay(RemoteDragOutCancelSettleDelayMs, owner.Token);
-            await _client.SendInputsAsync(CreateRemoteDragOutCopyCommands());
+            if (_client.InputConnectionGeneration != inputGeneration ||
+                !_client.TryQueueKeyboardChord(
+                    CreateRemoteDragOutCopyCommands(CanSendRemoteDragOutKeyboard(inputGeneration)), inputGeneration))
+                throw new IOException("连接、按键状态已变化或输入队列繁忙，未发送复制快捷键；松开按键后请用工具栏“取回文件”重试。");
 
             await _client.FlushInputAsync(owner.Token);
 
@@ -6498,11 +6532,7 @@ internal sealed partial class RemoteViewerWindow : Form
                 : _remoteDragOutLastRemotePoint;
         if (remotePoint is { } releasePoint)
         {
-            _remoteInputOwnership.TryQueueMouseUp(
-                RemoteMouseButton.Left,
-                releasePoint,
-                _client.InputConnectionGeneration,
-                _client.TryQueueOwnedInput);
+            QueueOwnedRemoteMouseUp(RemoteMouseButton.Left, releasePoint);
         }
     }
 
@@ -6687,8 +6717,18 @@ internal sealed partial class RemoteViewerWindow : Form
             System.ComponentModel.Win32Exception;
     }
 
-    internal static RemoteInputCommand[] CreateRemoteDragOutCancelCommands(Point remotePoint)
+    internal static bool CanSendRemoteDragOutKeyboard(bool hasHeldKeys, bool hasPendingReleases) =>
+        !hasHeldKeys && !hasPendingReleases;
+
+    private bool CanSendRemoteDragOutKeyboard(long generation) =>
+        CanSendRemoteDragOutKeyboard(
+            _remoteInputOwnership.AnyPressedKey(generation, _ => true),
+            _remoteInputOwnership.HasPendingReleases(generation));
+
+    internal static RemoteInputCommand[] CreateRemoteDragOutCancelCommands(Point remotePoint, bool keyboardAllowed = true)
     {
+        if (!keyboardAllowed)
+            return [RemoteInputCommand.MouseUp(RemoteMouseButton.Left, remotePoint.X, remotePoint.Y)];
         return
         [
             RemoteInputCommand.KeyDown((int)Keys.Escape),
@@ -6697,24 +6737,25 @@ internal sealed partial class RemoteViewerWindow : Form
         ];
     }
 
-    private void QueueRemoteDragOutCancel(
+    private bool QueueRemoteDragOutCancel(
         Point remotePoint)
     {
-        _ = _client.SendInputAsync(
-            RemoteInputCommand.KeyDown(
-                (int)Keys.Escape));
-        _ = _client.SendInputAsync(
-            RemoteInputCommand.KeyUp(
-                (int)Keys.Escape));
-        _remoteInputOwnership.TryQueueMouseUp(
-            RemoteMouseButton.Left,
-            remotePoint,
-            _client.InputConnectionGeneration,
-            _client.TryQueueOwnedInput);
+        long generation = _client.InputConnectionGeneration;
+        bool ownsCurrentMouse = _remoteInputOwnership.TryGetPressedMouseButton(
+            RemoteMouseButton.Left, out _, out long mouseGeneration) && mouseGeneration == generation;
+        RemoteInputCommand[] cancel = CreateRemoteDragOutCancelCommands(remotePoint,
+            ownsCurrentMouse && CanSendRemoteDragOutKeyboard(generation));
+        // Escape must be balanced and unmodified. A rejected keyboard cancel
+        // never prevents the separate owned mouse release during capture loss.
+        bool keyboardQueued = cancel.Length > 1 &&
+            _client.TryQueueKeyboardChord(cancel[..^1], generation);
+        QueueOwnedRemoteMouseUp(RemoteMouseButton.Left, remotePoint);
+        return keyboardQueued;
     }
 
-    internal static RemoteInputCommand[] CreateRemoteDragOutCopyCommands()
+    internal static RemoteInputCommand[] CreateRemoteDragOutCopyCommands(bool keyboardAllowed = true)
     {
+        if (!keyboardAllowed) return [];
         return
         [
             RemoteInputCommand.KeyDown((int)Keys.ControlKey),
@@ -6754,6 +6795,12 @@ internal sealed partial class RemoteViewerWindow : Form
     {
         if (_remoteDragOutStage != RemoteDragOutStage.None)
         {
+            return;
+        }
+
+        if (_remoteInputOwnership.HasPendingReleases(_client.InputConnectionGeneration))
+        {
+            SchedulePendingInputReleaseRetry();
             return;
         }
 
@@ -6830,6 +6877,15 @@ internal sealed partial class RemoteViewerWindow : Form
             return;
         }
 
+        if (_isAndroidRemote && IsUnsupportedAndroidKeyChord(args))
+        {
+            // Shift belongs to the local IME/text composer. Do not silently
+            // strip it from a navigation or clipboard chord sent to Android.
+            args.SuppressKeyPress = true;
+            SetStatus("安卓暂不支持此组合键；文字粘贴请使用 Ctrl+V。", MutedTextColor);
+            return;
+        }
+
         if (TryHandleClipboardPasteKey(RemoteInputKind.KeyDown, args))
         {
             args.SuppressKeyPress = true;
@@ -6843,7 +6899,7 @@ internal sealed partial class RemoteViewerWindow : Form
 
         string clipboardPullReason = string.Empty;
         bool shouldPullClipboard = (_clipboardTextEnabled || _remoteFilePullEnabled) &&
-            TryGetClipboardPullReason(args, out clipboardPullReason);
+            TryGetClipboardPullReason(args, out clipboardPullReason, windowsKeyHeld: IsRemoteWindowsKeyHeld());
 
         if (_isAndroidRemote && args.KeyCode == Keys.Enter)
         {
@@ -6930,19 +6986,14 @@ internal sealed partial class RemoteViewerWindow : Form
             return;
         }
 
-        if (_isAndroidRemote && IsLocalImeKey(args.KeyCode, _pictureBox.IsImeComposing))
+        if (_isAndroidRemote)
         {
-            return;
-        }
-
-        if (_isAndroidRemote && args.KeyCode == Keys.Enter)
-        {
-            args.SuppressKeyPress = true;
-            return;
-        }
-
-        if (_isAndroidRemote && ShouldSendAsTextInput(args))
-        {
+            // Ownership was decided on key-down, not by the current IME mode
+            // or modifiers (Ctrl may have risen before C). Unowned local text
+            // keys do not produce a remote release.
+            SendRemoteKeyUp(args.KeyCode);
+            if (!IsLocalImeKey(args.KeyCode, _pictureBox.IsImeComposing))
+                args.SuppressKeyPress = !ShouldSendAsTextInput(args);
             return;
         }
 
@@ -7035,6 +7086,7 @@ internal sealed partial class RemoteViewerWindow : Form
             _client.InputConnectionGeneration,
             _client.TryQueueOwnedInput,
             _client.TryQueueOwnedInput);
+        SchedulePendingInputReleaseRetry();
     }
 
     private void ReleaseAllRemoteInputs()
@@ -7046,7 +7098,68 @@ internal sealed partial class RemoteViewerWindow : Form
         _remoteInputOwnership.ReleaseAll(
             _client.InputConnectionGeneration,
             _client.TryQueueOwnedInput);
+        SchedulePendingInputReleaseRetry();
     }
+
+    private void QueueOwnedRemoteMouseUp(RemoteMouseButton button, Point? point)
+    {
+        _remoteInputOwnership.TryQueueMouseUp(button, point,
+            _client.InputConnectionGeneration, _client.TryQueueOwnedInput);
+        SchedulePendingInputReleaseRetry();
+    }
+
+    private void SchedulePendingInputReleaseRetry()
+    {
+        long generation = _client.InputConnectionGeneration;
+        if (_inputReleaseRetryInProgress || _isClosing || IsDisposed || !_client.IsConnected ||
+            !_remoteInputOwnership.HasPendingReleases(generation)) return;
+        _inputReleaseRetryInProgress = true;
+        _ = RetryPendingInputReleasesAsync(generation);
+    }
+
+    private async Task RetryPendingInputReleasesAsync(long generation)
+    {
+        try
+        {
+            while (!_isClosing && !IsDisposed && _client.IsConnected &&
+                _client.InputConnectionGeneration == generation &&
+                _remoteInputOwnership.HasPendingReleases(generation))
+            {
+                // Reuse the sender's drain notification; no polling timer and
+                // no press/move replay. Normal typing remains synchronous.
+                await _client.FlushInputAsync();
+                if (_isClosing || IsDisposed || !_client.IsConnected ||
+                    _client.InputConnectionGeneration != generation) return;
+                _remoteInputOwnership.RetryPendingReleases(generation, _client.TryQueueOwnedInput);
+            }
+        }
+        catch (Exception error) when (error is IOException or ObjectDisposedException or OperationCanceledException)
+        {
+            DiagnosticLog.Append("VIEWER", "输入释放等待中断：" + error.GetType().Name);
+        }
+        finally
+        {
+            _inputReleaseRetryInProgress = false;
+            // A previous connection's task may have deferred scheduling a new
+            // connection's release; never pass old commands into that retry.
+            if (_client.InputConnectionGeneration != generation) SchedulePendingInputReleaseRetry();
+        }
+    }
+
+    private void ReleaseRemoteInputsForFocusLoss()
+    {
+        ReleaseAllRemoteInputs();
+        _suppressFullScreenShortcutKeyUp = false;
+        _suppressRemoteFilePullShortcutKeyUp = false;
+    }
+
+    private bool IsRemoteWindowsKeyHeld() => _remoteInputOwnership.AnyPressedKey(
+        _client.InputConnectionGeneration, key => key.VirtualKey is (int)Keys.LWin or (int)Keys.RWin);
+
+    internal static bool IsUnsupportedAndroidKeyChord(KeyEventArgs args) =>
+        !IsModifierVirtualKey((int)args.KeyCode) && !ShouldSendAsTextInput(args) &&
+        (args.Control || args.Shift || args.Alt) &&
+        !(args.Control && !args.Shift && !args.Alt && args.KeyCode is Keys.A or Keys.C or Keys.X or Keys.V);
 
     private static bool ShouldSendAsTextInput(KeyEventArgs args)
     {
@@ -7250,8 +7363,7 @@ internal sealed partial class RemoteViewerWindow : Form
         if (kind != RemoteInputKind.KeyDown) return false;
         if (_clipboardPasteKeys.Contains(args.KeyCode)) return true; // Held-key repeat.
         if (!IsPasteShortcut(args) || (!_clipboardTextEnabled && !_filePasteEnabled && !_isAndroidRemote) ||
-            _remoteInputOwnership.AnyPressedKey(_client.InputConnectionGeneration,
-                key => key.VirtualKey is (int)Keys.LWin or (int)Keys.RWin)) return false;
+            IsRemoteWindowsKeyHeld()) return false;
 
         _clipboardPasteKeys.Add(args.KeyCode);
         if (_clipboardPasteInProgress)
@@ -7290,12 +7402,21 @@ internal sealed partial class RemoteViewerWindow : Form
                     // A remote file/image copy need not have a text reply.
                     // Keep that clipboard on the peer instead of replacing it
                     // with the unchanged local text or round-tripping its files.
+                    if (!IsPasteKeyStateCompatible(shortcutArgs, clipboardGeneration))
+                    {
+                        SetStatus("按键状态已变化，未执行延迟粘贴；松开其他按键后请重试。", MutedTextColor);
+                        return;
+                    }
                     if (_inputEnabled && (!_isAndroidRemote || _client.SupportsRemoteClipboardPasteShortcut) &&
                         TryCreateRemotePasteTriggerCommandSequence(shortcutArgs, out var remoteOnlyCommands,
                             controlHeld: _remoteInputOwnership.AnyPressedKey(clipboardGeneration, key => IsControlVirtualKey(key.VirtualKey)),
                             shiftHeld: _remoteInputOwnership.AnyPressedKey(clipboardGeneration, key => IsShiftVirtualKey(key.VirtualKey))))
                     {
-                        await _client.SendInputsAsync(remoteOnlyCommands, clipboardGeneration);
+                        if (!_client.TryQueueKeyboardChord(remoteOnlyCommands, clipboardGeneration))
+                        {
+                            SetStatus("输入队列繁忙，未执行粘贴；请稍后重试。", MutedTextColor);
+                            return;
+                        }
                         SetStatus("已使用远端自身剪贴板粘贴，未用本机旧内容覆盖", MutedTextColor);
                     }
                     else SetStatus("远端复制未同步成功，未粘贴本机旧内容；请重新复制后重试", DangerTextColor);
@@ -7329,7 +7450,8 @@ internal sealed partial class RemoteViewerWindow : Form
                 {
                     clipboardSynced = await _client.SendClipboardTextToRemoteAsync(
                         text,
-                        "已同步本机文本剪贴板到远程。", forPasteShortcut: true);
+                        "已同步本机文本剪贴板到远程。", forPasteShortcut: true,
+                        expectedGeneration: clipboardGeneration);
                 }
                 catch (Exception ex) when (ex is InvalidDataException or InvalidOperationException or IOException)
                 {
@@ -7360,14 +7482,23 @@ internal sealed partial class RemoteViewerWindow : Form
                 return;
             }
 
+            if (!IsPasteKeyStateCompatible(shortcutArgs, clipboardGeneration))
+            {
+                SetStatus("剪贴板已同步，但按键状态已变化，未自动粘贴；松开其他按键后请重试。", MutedTextColor);
+                return;
+            }
+
             if (clipboardSynced && (!_isAndroidRemote || _client.SupportsRemoteClipboardPasteShortcut) && TryCreateRemotePasteTriggerCommandSequence(
                 shortcutArgs,
                 out RemoteInputCommand[] pasteCommands,
                 controlHeld: _remoteInputOwnership.AnyPressedKey(clipboardGeneration, key => IsControlVirtualKey(key.VirtualKey)),
                 shiftHeld: _remoteInputOwnership.AnyPressedKey(clipboardGeneration, key => IsShiftVirtualKey(key.VirtualKey))))
             {
-                await _client.SendInputsAsync(
-                    pasteCommands, clipboardGeneration);
+                if (!_client.TryQueueKeyboardChord(pasteCommands, clipboardGeneration))
+                {
+                    SetStatus("剪贴板已同步，但输入队列繁忙，未自动粘贴；请稍后重试。", MutedTextColor);
+                    return;
+                }
                 DiagnosticLog.Append("CLIPBOARD", "paste:shortcut-queued after remote acknowledgement");
                 OnUi(() => SetStatus("已同步文本剪贴板并触发远程粘贴", SuccessTextColor));
                 return;
@@ -7739,6 +7870,14 @@ internal sealed partial class RemoteViewerWindow : Form
 
     private void TrySendRemoteMouseMove(Point remotePoint)
     {
+        if (_remoteInputOwnership.HasPendingReleases(_client.InputConnectionGeneration))
+        {
+            // The remote may still be dragging or holding a modifier. Drop
+            // this motion rather than move it ahead of the outstanding up.
+            SchedulePendingInputReleaseRetry();
+            return;
+        }
+
         if (_remoteInputOwnership.PressedMouseButtonCount > 0)
         {
             _remoteInputOwnership.UpdatePressedMousePosition(
@@ -7802,6 +7941,15 @@ internal sealed partial class RemoteViewerWindow : Form
             (args.Shift && !args.Control && args.KeyCode == Keys.Insert));
     }
 
+    private bool IsPasteKeyStateCompatible(KeyEventArgs shortcut, long generation) =>
+        !_remoteInputOwnership.HasPendingReleases(generation) &&
+        !_remoteInputOwnership.AnyPressedKey(generation,
+            key => !IsCompatiblePasteHeldKey(shortcut, key.VirtualKey));
+
+    internal static bool IsCompatiblePasteHeldKey(KeyEventArgs shortcut, int virtualKey) =>
+        (shortcut.Control && IsControlVirtualKey(virtualKey)) ||
+        (shortcut.Shift && IsShiftVirtualKey(virtualKey));
+
     internal static bool TryCreateRemotePasteTriggerCommands(
         KeyEventArgs args,
         out RemoteInputCommand keyDown,
@@ -7845,17 +7993,19 @@ internal sealed partial class RemoteViewerWindow : Form
         return false;
     }
 
-    internal static bool TryGetClipboardPullReason(KeyEventArgs args, out string reason)
+    internal static bool TryGetClipboardPullReason(KeyEventArgs args, out string reason, bool windowsKeyHeld = false)
     {
+        reason = string.Empty;
+        if (args.Alt || windowsKeyHeld) return false;
         if ((args.Control && args.KeyCode == Keys.C) ||
-            (args.Control && args.KeyCode == Keys.Insert))
+            (args.Control && !args.Shift && args.KeyCode == Keys.Insert))
         {
             reason = "复制";
             return true;
         }
 
-        if ((args.Control && args.KeyCode == Keys.X) ||
-            (args.Shift && args.KeyCode == Keys.Delete))
+        if ((args.Control && !args.Shift && args.KeyCode == Keys.X) ||
+            (args.Shift && !args.Control && args.KeyCode == Keys.Delete))
         {
             reason = "剪切";
             return true;

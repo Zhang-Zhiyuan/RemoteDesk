@@ -397,7 +397,7 @@ public final class RemoteDeskViewerActivity extends Activity {
             long route = owner.mouseRouteGeneration.get(), generation = owner.inputCapabilityGeneration.get();
             List<AndroidViewerInputQueue.Command> batch = text == null
                 ? AndroidViewerKeyboard.shortcut(route, generation, keys)
-                : AndroidViewerKeyboard.text(text, route, generation);
+                : AndroidViewerKeyboard.text(text, route, generation, owner.remotePlatform);
             queued = canSendRemoteInput(owner) && owner.inputQueue.offerKeyboardBatch(batch);
         }
         if (!queued) toast("输入队列忙或没有可发送的文字，内容已保留，请稍后重试");

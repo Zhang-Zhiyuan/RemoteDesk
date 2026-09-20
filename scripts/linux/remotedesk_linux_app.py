@@ -248,6 +248,7 @@ MOUSE_MIDDLE = 3
 TK_KEYSYM_TO_WINDOWS_VK = {
     "BackSpace": 0x08,
     "Tab": 0x09,
+    "ISO_Left_Tab": 0x09,  # X11 reports this keysym while either Shift is held.
     "Return": 0x0D,
     "Enter": 0x0D,
     "Shift_L": 0xA0,
@@ -261,6 +262,11 @@ TK_KEYSYM_TO_WINDOWS_VK = {
     "Escape": 0x1B,
     "space": 0x20,
     "Caps_Lock": 0x14,
+    "Num_Lock": 0x90,
+    "Scroll_Lock": 0x91,
+    "Pause": 0x13,
+    "Print": 0x2C,
+    "Menu": 0x5D,
     "Prior": 0x21,
     "Next": 0x22,
     "End": 0x23,
@@ -1396,6 +1402,12 @@ def tk_event_to_windows_virtual_key(event: tk.Event[Any]) -> int | None:
     # Tk's numeric keycode is an X11/Wayland platform code, not a portable
     # Windows virtual-key value. Never put it in the wire Data field.
     return None
+
+
+def is_clipboard_shortcut_state(state: int) -> bool:
+    # Allow Shift (terminal copy/paste), CapsLock and NumLock, but never steal
+    # Ctrl+Alt, Ctrl+Super/Meta, or AltGr/group-switch application shortcuts.
+    return bool(state & 0x4) and not bool(state & (0x8 | 0x20 | 0x40 | 0x80))
 
 
 class ViewerPressedKeyState:
@@ -3227,6 +3239,7 @@ class ViewerClipboardRequest:
     success: bool = False
     text: str = ""
     automatic: bool = False
+    paste_revision: int = 0
 
 
 @dataclass(frozen=True)
@@ -3485,6 +3498,10 @@ class ViewerConnection:
         self.frame_stream_epoch = 0
         self.input_condition = threading.Condition()
         self.pending_inputs: deque[tuple[int, bytes]] = deque()
+        # Desired key state after the accepted input queue; guarded by
+        # input_condition so an asynchronous paste cannot release a user's key.
+        self.input_pressed_keys: set[int] = set()
+        self.clipboard_paste_revision = 0
         self.input_send_active = False
         self.capture_target_condition = threading.Condition()
         self.pending_capture_target_id: str | None = None
@@ -3817,12 +3834,18 @@ class ViewerConnection:
                 failures += 1
 
     def send_input(self, kind: int, button: int = MOUSE_NONE, x: int = 0, y: int = 0, data: int = 0) -> bool:
-        if self.session is None or self.sock is None:
+        if self.session is None or self.sock is None or self.stop_event.is_set():
             return False
         payload = encode_input(kind, button, x, y, data)
         with self.input_condition:
+            if self.stop_event.is_set():
+                return False
             queued = enqueue_input_payload(self.pending_inputs, (kind, payload), INPUT_QUEUE_LIMIT)
             if queued:
+                if kind == INPUT_KEY_DOWN:
+                    self.input_pressed_keys.add(data)
+                elif kind == INPUT_KEY_UP:
+                    self.input_pressed_keys.discard(data)
                 self.input_condition.notify()
             return queued
 
@@ -3851,7 +3874,8 @@ class ViewerConnection:
 
     def request_clipboard(self, *, read: bool, text: str = "", baseline: str | None = None,
                           paste: bool = False, after_copy: bool = False, paste_shift: bool = False,
-                          _queued_deadline: float | None = None) -> bool:
+                          _queued_deadline: float | None = None,
+                          _paste_revision: int | None = None) -> bool:
         if self.stop_event.is_set() or self.sock is None or self.session is None:
             return False
         if not self.remote_capabilities & CAPABILITY_CLIPBOARD_TEXT:
@@ -3869,6 +3893,8 @@ class ViewerConnection:
         deadline = _queued_deadline or time.monotonic() + timeout
         if time.monotonic() >= deadline:
             return False
+        with self.input_condition:
+            paste_revision = self.clipboard_paste_revision if _paste_revision is None else _paste_revision
         with self.clipboard_lock:
             self.clipboard_manual_epoch += 1
             if self.clipboard_manual_waiting and _queued_deadline is None:
@@ -3879,7 +3905,8 @@ class ViewerConnection:
                     self.clipboard_manual_waiting = True
                     threading.Thread(target=self._wait_manual_clipboard,
                         args=(dict(read=read, text=text, baseline=baseline, paste=paste,
-                                   after_copy=after_copy, paste_shift=paste_shift, _queued_deadline=deadline),),
+                                   after_copy=after_copy, paste_shift=paste_shift, _queued_deadline=deadline,
+                                   _paste_revision=paste_revision),),
                         name="RemoteDeskManualClipboard", daemon=True).start()
                     return True
                 self._put_event("viewer_status", "上一项剪贴板操作仍在等待远端，请稍后重试；长时间无响应请重连。")
@@ -3887,12 +3914,19 @@ class ViewerConnection:
             # Manual relay transfers may wait across a slow in-flight frame.
             # Keep automatic paste short-lived so it cannot unexpectedly target
             # another input field much later. Read replies retain local fences.
-            request = ViewerClipboardRequest(read, baseline, deadline=deadline)
+            request = ViewerClipboardRequest(read, baseline, deadline=deadline, paste_revision=paste_revision)
             self.clipboard_pending = self.clipboard_latest = request
         threading.Thread(target=self._exchange_clipboard,
                          args=(request, payload, paste, after_copy, paste_shift),
                          name="RemoteDeskViewerClipboard", daemon=True).start()
         return True
+
+    def cancel_pending_clipboard_paste(self) -> None:
+        # Invalidate only delayed input injection, not an already authorized
+        # ClipboardSet. New toolbar requests capture the new revision and do
+        # not depend on the remote surface currently holding local focus.
+        with self.input_condition:
+            self.clipboard_paste_revision += 1
 
     def _wait_manual_clipboard(self, arguments: dict[str, Any]) -> None:
         try:
@@ -3943,14 +3977,31 @@ class ViewerConnection:
                 else:
                     status("远端没有可读取的文字，本机剪贴板保持不变。")
             elif paste and self.remote_capabilities & CAPABILITY_INPUT_CONTROL:
+                if (getattr(self, "remote_device_info", {}).get("platform", "").lower() == "android"
+                        and paste_shift):
+                    status("文字已写入远端剪贴板；Android 不支持 Ctrl+Shift+V，请使用 Ctrl+V 或长按粘贴。")
+                    return
                 if (getattr(self, "remote_device_info", {}).get("platform", "").lower() == "android" and
                         not self.remote_capabilities & CAPABILITY_CLIPBOARD_PASTE_SHORTCUT):
                     status("文字已写入远端剪贴板；此旧版 Android 请长按输入框粘贴，或更新远端后使用快捷粘贴。")
                     return
-                keys = [0x11, 0x10, 0x56] if paste_shift else [0x11, 0x56]
-                commands = [(INPUT_KEY_DOWN, encode_input(INPUT_KEY_DOWN, data=key)) for key in keys]
-                commands += [(INPUT_KEY_UP, encode_input(INPUT_KEY_UP, data=key)) for key in reversed(keys)]
                 with self.input_condition:
+                    if request.paste_revision != self.clipboard_paste_revision:
+                        status("剪贴板已写入，但控制焦点或输入状态已改变，已取消延迟粘贴。")
+                        return
+                    held = self.input_pressed_keys
+                    controls, shifts = {0x11, 0xA2, 0xA3}, {0x10, 0xA0, 0xA1}
+                    if held - (controls | shifts) or (not paste_shift and held & shifts):
+                        status("剪贴板已写入，但其他按键仍被按住，未自动粘贴；松开后请重试。")
+                        return
+                    # Queue one atomic chord and release only modifiers this
+                    # chord adds. User-held left/right Ctrl/Shift remain down.
+                    keys = ([] if held & controls else [0x11])
+                    if paste_shift and not held & shifts:
+                        keys.append(0x10)
+                    keys.append(0x56)
+                    commands = [(INPUT_KEY_DOWN, encode_input(INPUT_KEY_DOWN, data=key)) for key in keys]
+                    commands += [(INPUT_KEY_UP, encode_input(INPUT_KEY_UP, data=key)) for key in reversed(keys)]
                     if self.stop_event.is_set() or len(self.pending_inputs) + len(commands) > INPUT_QUEUE_LIMIT:
                         status("剪贴板已写入，但输入队列忙，未粘贴；请重试。")
                         return
@@ -4290,6 +4341,8 @@ class ViewerConnection:
             self.frame_condition.notify_all()
         with self.input_condition:
             self.pending_inputs.clear()
+            self.input_pressed_keys.clear()
+            self.clipboard_paste_revision += 1
             self.input_condition.notify_all()
         with self.capture_target_condition:
             self.pending_capture_target_id = None
@@ -7705,7 +7758,7 @@ class RemoteDeskLinuxApp:
         if viewer is None:
             return
         baseline = self._local_clipboard_text()
-        if not read:
+        if not read and not paste:
             self._release_pressed_viewer_inputs(flush=True, background_flush=True)
         viewer.request_clipboard(read=read, text=baseline or "", baseline=baseline,
                                  paste=paste, after_copy=after_copy, paste_shift=paste_shift)
@@ -7827,10 +7880,13 @@ class RemoteDeskLinuxApp:
 
     def _viewer_key_press(self, event: tk.Event[Any]) -> str:
         virtual_key = tk_event_to_windows_virtual_key(event)
-        if virtual_key == 0x56 and getattr(event, "state", 0) & 0x4:
-            self.viewer_clipboard(paste=True, paste_shift=bool(event.state & 0x1))
+        if virtual_key == 0x56 and is_clipboard_shortcut_state(getattr(event, "state", 0)):
+            if not getattr(self, "viewer_clipboard_paste_key", False):
+                self.viewer_clipboard(paste=True, paste_shift=bool(event.state & 0x1))
             self.viewer_clipboard_paste_key = True
             return "break"
+        if virtual_key == 0x56:
+            self.viewer_clipboard_paste_key = False
         if virtual_key is not None and self._send_virtual_key_input(
             INPUT_KEY_DOWN,
             virtual_key,
@@ -7848,7 +7904,7 @@ class RemoteDeskLinuxApp:
             virtual_key,
         ):
             self.viewer_pressed_keys.observe_up(virtual_key)
-            if virtual_key in (0x43, 0x58) and getattr(event, "state", 0) & 0x4:
+            if virtual_key in (0x43, 0x58) and is_clipboard_shortcut_state(getattr(event, "state", 0)):
                 self.viewer_clipboard(read=True, after_copy=True)
         return "break"
 
@@ -7873,10 +7929,15 @@ class RemoteDeskLinuxApp:
         flush: bool = False,
         background_flush: bool = False,
     ) -> int:
+        self.viewer_clipboard_paste_key = False
         viewer = self.viewer
         if viewer is None:
             self.viewer_pressed_keys.clear()
             return 0
+
+        cancel_paste = getattr(viewer, "cancel_pending_clipboard_paste", None)
+        if callable(cancel_paste):
+            cancel_paste()
 
         released = 0
         for button, x, y in self.viewer_pressed_keys.mouse_buttons_in_release_order():

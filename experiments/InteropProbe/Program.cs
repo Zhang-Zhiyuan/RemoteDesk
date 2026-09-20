@@ -13,6 +13,7 @@ internal static class Program
     static int Main(string[] args)
     {
         Console.InputEncoding = System.Text.Encoding.UTF8;
+        if (args.Length > 0 && args[0] == "keyboard-modifiers-isolated") return ClipboardSystemProbe.Run(keyboardModifiers: true);
         if (args.Length > 0 && args[0] == "main-layout-isolated") return MainFormClippingProbe.Run();
         if (args.Length > 0 && args[0] == "layout-isolated") return AdaptiveLayoutProbe.Run();
         if (args.Length > 0 && args[0] == "popup-layout-isolated") return PopupClippingProbe.Run();

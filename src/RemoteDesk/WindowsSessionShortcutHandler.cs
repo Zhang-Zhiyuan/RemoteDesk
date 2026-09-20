@@ -40,7 +40,12 @@ internal sealed class WindowsSessionShortcutHandler
         if (command.Kind == RemoteInputKind.KeyDown)
             _modifiers[ToPhysicalKey(command)] = command;
         else if (command.Kind == RemoteInputKind.KeyUp)
-            _modifiers.Remove(ToPhysicalKey(command));
+        {
+            if (_modifiers.Remove(ToPhysicalKey(command))) return;
+            foreach (var pressed in _modifiers.Where(pair =>
+                RemoteKeyboardInput.MatchesLegacyRelease(pair.Value, command)).ToArray())
+                _modifiers.Remove(pressed.Key);
+        }
     }
 
     internal bool TryConsumeRelease(RemoteInputCommand pressed)
@@ -52,7 +57,7 @@ internal sealed class WindowsSessionShortcutHandler
 
     private static bool IsWindowsKey(int key) => key is (int)Keys.LWin or (int)Keys.RWin;
     private static RemotePhysicalKey ToPhysicalKey(RemoteInputCommand command) =>
-        new(command.Data, command.X, (RemoteKeyboardFlags)command.Y);
+        RemoteKeyboardInput.PhysicalKey(command);
     private static bool IsModifier(int key) => IsWindowsKey(key) || key is
         (int)Keys.ShiftKey or (int)Keys.LShiftKey or (int)Keys.RShiftKey or
         (int)Keys.ControlKey or (int)Keys.LControlKey or (int)Keys.RControlKey or

@@ -94,10 +94,14 @@ final class AndroidInputInjector {
         }
 
         if (kind == INPUT_KEY_DOWN || kind == INPUT_KEY_UP) {
-            int shortcut = gestureState.clipboardKeys.key(data, kind == INPUT_KEY_DOWN);
+            // Key messages use the existing X/Y slots for scanCode/flags, not screen geometry.
+            int shortcut = gestureState.clipboardKeys.key(data, frameX, frameY, kind == INPUT_KEY_DOWN);
             if (shortcut != 0)
                 return RemoteDeskAccessibilityService.clipboardActionFromAnyThread(shortcut, authorized);
             if (AndroidClipboardShortcutState.isModifier(data) || kind == INPUT_KEY_UP) return true;
+            // Unsupported chords must not become bare Android global actions
+            // (e.g. Shift+Tab opening Quick Settings or Ctrl+Home going Home).
+            if (!gestureState.clipboardKeys.permitsBareKey(data)) return false;
             return dispatchKeyAction(data, authorized);
         }
 
@@ -236,6 +240,8 @@ final class AndroidInputInjector {
     }
 
     private static boolean dispatchKeyAction(int virtualKey, java.util.function.BooleanSupplier authorized) {
+        int textCodePoint = textCodePointForKey(virtualKey);
+        if (textCodePoint >= 0) return dispatchTextInput(textCodePoint, authorized);
         switch (virtualKey) {
             case VK_BACK:
                 return RemoteDeskAccessibilityService.deleteTextBeforeCursorFromAnyThread(authorized);
@@ -254,13 +260,27 @@ final class AndroidInputInjector {
         }
     }
 
+    static int textCodePointForKey(int virtualKey) {
+        // Viewers send toolbar Enter and committed newlines as balanced VK_RETURN
+        // events. Android has no generic key injection; use the same focused-text
+        // action as explicit Unicode input, after the caller's modifier gate.
+        return virtualKey == 0x0d ? '\n' : -1;
+    }
+
     private static boolean dispatchTextInput(int codePoint, java.util.function.BooleanSupplier authorized) {
-        if (!Character.isValidCodePoint(codePoint) || isUnsupportedTextControl(codePoint)) {
+        if (!isSupportedTextCodePoint(codePoint)) {
             return false;
         }
 
         return RemoteDeskAccessibilityService.inputTextFromAnyThread(
             new String(Character.toChars(codePoint)), authorized);
+    }
+
+    static boolean isSupportedTextCodePoint(int codePoint) {
+        // Character.isValidCodePoint includes UTF-16 surrogate code units, but
+        // the wire carries one complete Unicode scalar in a 32-bit value.
+        return Character.isValidCodePoint(codePoint) &&
+            !(codePoint >= 0xd800 && codePoint <= 0xdfff) && !isUnsupportedTextControl(codePoint);
     }
 
     private static boolean isUnsupportedTextControl(int codePoint) {

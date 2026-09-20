@@ -572,9 +572,11 @@ final class RemoteDeskHostServer {
             if (!running.get() || !state.running.get()) {
                 return false;
             }
-            if (RemoteDeskAccessibilityService.isEnteringUnlockPin()) return false;
-            if (AndroidRemoteUnlock.isScreenOff(appContext)) {
-                RemoteDeskAccessibilityService.requestRemoteWake(() -> running.get() && state.running.get());
+            boolean enteringUnlockPin = RemoteDeskAccessibilityService.isEnteringUnlockPin();
+            boolean screenOff = !enteringUnlockPin && AndroidRemoteUnlock.isScreenOff(appContext);
+            if (state.blocksInputForScreenState(screenOff, enteringUnlockPin)) {
+                if (!enteringUnlockPin)
+                    RemoteDeskAccessibilityService.requestRemoteWake(() -> running.get() && state.running.get());
                 return false;
             }
             return AndroidInputInjector.apply(

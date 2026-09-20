@@ -44,6 +44,47 @@ internal sealed class RemoteInputOwnershipTracker
         }
     }
 
+    public bool HasPendingKeyReleases(long connectionGeneration)
+    {
+        lock (_syncRoot)
+        {
+            return HasPendingKeyReleasesLocked(connectionGeneration);
+        }
+    }
+
+    public int RetryPendingKeyReleases(
+        long connectionGeneration,
+        Func<RemoteInputCommand, long, bool> queueOwned)
+    {
+        ArgumentNullException.ThrowIfNull(queueOwned);
+        lock (_syncRoot)
+        {
+            // A delayed retry for an old connection must neither release nor
+            // discard a newer press of the same key. queueOwned also fences
+            // admission against the currently connected generation.
+            return RetryPendingKeyReleasesLocked(connectionGeneration, queueOwned);
+        }
+    }
+
+    public bool HasPendingReleases(long connectionGeneration)
+    {
+        lock (_syncRoot)
+        {
+            return HasPendingReleasesLocked(connectionGeneration);
+        }
+    }
+
+    public int RetryPendingReleases(
+        long connectionGeneration,
+        Func<RemoteInputCommand, long, bool> queueOwned)
+    {
+        ArgumentNullException.ThrowIfNull(queueOwned);
+        lock (_syncRoot)
+        {
+            return RetryPendingReleasesLocked(connectionGeneration, queueOwned);
+        }
+    }
+
     public bool TryQueueKey(
         RemoteInputCommand command,
         long currentConnectionGeneration,
@@ -53,15 +94,21 @@ internal sealed class RemoteInputOwnershipTracker
     {
         ArgumentNullException.ThrowIfNull(queueCurrent);
         ArgumentNullException.ThrowIfNull(queueOwned);
-        var key = new RemotePhysicalKey(
-            command.Data,
-            command.X,
-            (RemoteKeyboardFlags)command.Y);
+        RemotePhysicalKey key = RemoteKeyboardInput.PhysicalKey(command);
 
         lock (_syncRoot)
         {
             if (command.Kind == RemoteInputKind.KeyDown)
             {
+                RemoveStaleOwnershipLocked(currentConnectionGeneration);
+                RetryPendingReleasesLocked(currentConnectionGeneration, queueOwned);
+                if (HasPendingReleasesLocked(currentConnectionGeneration))
+                {
+                    // Do not allow a later letter/re-press to overtake a failed
+                    // release. Only marked KeyUp/MouseUp are automatically retried.
+                    return false;
+                }
+
                 RemoteInputQueueAdmission admission =
                     queueCurrent(command);
                 if (!admission.Accepted)
@@ -79,14 +126,13 @@ internal sealed class RemoteInputOwnershipTracker
                     _pressedKeys.Add(
                         new PressedRemoteKey(
                             key,
+                            command,
                             admission.ConnectionGeneration));
                 }
                 else
                 {
-                    _pressedKeys[existingIndex] =
-                        new PressedRemoteKey(
-                            key,
-                            admission.ConnectionGeneration);
+                    _pressedKeys[existingIndex] = _pressedKeys[existingIndex] with
+                    { ConnectionGeneration = admission.ConnectionGeneration };
                 }
 
                 return true;
@@ -109,8 +155,7 @@ internal sealed class RemoteInputOwnershipTracker
                 pressedIndex =
                     _pressedKeys.FindLastIndex(
                         pressed =>
-                            pressed.Key.VirtualKey ==
-                                key.VirtualKey);
+                            RemoteKeyboardInput.MatchesLegacyRelease(pressed.Command, command));
             }
 
             if (pressedIndex < 0)
@@ -120,15 +165,12 @@ internal sealed class RemoteInputOwnershipTracker
 
             PressedRemoteKey pressedKey =
                 _pressedKeys[pressedIndex];
-            RemoteInputCommand release =
-                RemoteInputCommand.KeyUp(
-                    pressedKey.Key.VirtualKey,
-                    pressedKey.Key.ScanCode,
-                    pressedKey.Key.Flags);
+            RemoteInputCommand release = pressedKey.Command with { Kind = RemoteInputKind.KeyUp };
             if (!queueOwned(
                     release,
                     pressedKey.ConnectionGeneration))
             {
+                _pressedKeys[pressedIndex] = pressedKey with { PendingRelease = true };
                 return false;
             }
 
@@ -146,26 +188,57 @@ internal sealed class RemoteInputOwnershipTracker
         ArgumentNullException.ThrowIfNull(queueCurrent);
         lock (_syncRoot)
         {
-            RemoteInputQueueAdmission admission =
-                queueCurrent(
-                    RemoteInputCommand.MouseDown(
-                        button,
-                        remotePoint.X,
-                        remotePoint.Y));
-            if (!admission.Accepted)
+            // Legacy callers cannot fence/retry a release. Do not let them
+            // overwrite pending ownership or overtake an unreleased modifier.
+            if (_pressedKeys.Any(pressed => pressed.PendingRelease) ||
+                _pressedMouseButtons.Values.Any(pressed => pressed.PendingReleasePoint.HasValue))
             {
                 return false;
             }
 
-            RemoveStaleOwnershipLocked(
-                admission.ConnectionGeneration);
-            _pressedMouseButtons[button] =
-                new PressedRemoteMouseButton(
-                    remotePoint,
-                    admission.ConnectionGeneration);
-            UpdatePressedMouseButtonCountLocked();
-            return true;
+            return TryQueueMouseDownLocked(button, remotePoint, queueCurrent);
         }
+    }
+
+    public bool TryQueueMouseDown(
+        RemoteMouseButton button,
+        Point remotePoint,
+        long currentConnectionGeneration,
+        Func<RemoteInputCommand, RemoteInputQueueAdmission> queueCurrent,
+        Func<RemoteInputCommand, long, bool> queueOwned)
+    {
+        ArgumentNullException.ThrowIfNull(queueCurrent);
+        ArgumentNullException.ThrowIfNull(queueOwned);
+        lock (_syncRoot)
+        {
+            RemoveStaleOwnershipLocked(currentConnectionGeneration);
+            RetryPendingReleasesLocked(currentConnectionGeneration, queueOwned);
+            if (HasPendingReleasesLocked(currentConnectionGeneration))
+            {
+                return false;
+            }
+
+            return TryQueueMouseDownLocked(button, remotePoint, queueCurrent);
+        }
+    }
+
+    private bool TryQueueMouseDownLocked(
+        RemoteMouseButton button,
+        Point remotePoint,
+        Func<RemoteInputCommand, RemoteInputQueueAdmission> queueCurrent)
+    {
+        RemoteInputQueueAdmission admission = queueCurrent(
+            RemoteInputCommand.MouseDown(button, remotePoint.X, remotePoint.Y));
+        if (!admission.Accepted)
+        {
+            return false;
+        }
+
+        RemoveStaleOwnershipLocked(admission.ConnectionGeneration);
+        _pressedMouseButtons[button] = new PressedRemoteMouseButton(
+            remotePoint, admission.ConnectionGeneration);
+        UpdatePressedMouseButtonCountLocked();
+        return true;
     }
 
     public bool TryQueueMouseUp(
@@ -187,7 +260,7 @@ internal sealed class RemoteInputOwnershipTracker
             }
 
             Point releasePoint =
-                mappedRemotePoint ?? pressed.LastRemotePoint;
+                pressed.PendingReleasePoint ?? mappedRemotePoint ?? pressed.LastRemotePoint;
             if (!queueOwned(
                     RemoteInputCommand.MouseUp(
                         button,
@@ -195,6 +268,7 @@ internal sealed class RemoteInputOwnershipTracker
                         releasePoint.Y),
                     pressed.ConnectionGeneration))
             {
+                _pressedMouseButtons[button] = pressed with { PendingReleasePoint = releasePoint };
                 return false;
             }
 
@@ -241,13 +315,15 @@ internal sealed class RemoteInputOwnershipTracker
             foreach (KeyValuePair<RemoteMouseButton, PressedRemoteMouseButton>
                 entry in _pressedMouseButtons.ToArray())
             {
+                Point releasePoint = entry.Value.PendingReleasePoint ?? entry.Value.LastRemotePoint;
                 if (!queueOwned(
                         RemoteInputCommand.MouseUp(
                             entry.Key,
-                            entry.Value.LastRemotePoint.X,
-                            entry.Value.LastRemotePoint.Y),
+                            releasePoint.X,
+                            releasePoint.Y),
                         entry.Value.ConnectionGeneration))
                 {
+                    _pressedMouseButtons[entry.Key] = entry.Value with { PendingReleasePoint = releasePoint };
                     continue;
                 }
 
@@ -263,15 +339,71 @@ internal sealed class RemoteInputOwnershipTracker
                 PressedRemoteKey pressed =
                     _pressedKeys[index];
                 if (!queueOwned(
-                        RemoteInputCommand.KeyUp(
-                            pressed.Key.VirtualKey,
-                            pressed.Key.ScanCode,
-                            pressed.Key.Flags),
+                        pressed.Command with { Kind = RemoteInputKind.KeyUp },
                         pressed.ConnectionGeneration))
                 {
+                    _pressedKeys[index] = pressed with { PendingRelease = true };
                     continue;
                 }
 
+                _pressedKeys.RemoveAt(index);
+                released++;
+            }
+        }
+
+        return released;
+    }
+
+    private bool HasPendingKeyReleasesLocked(long connectionGeneration) =>
+        _pressedKeys.Any(pressed =>
+            pressed.ConnectionGeneration == connectionGeneration && pressed.PendingRelease);
+
+    private bool HasPendingReleasesLocked(long connectionGeneration) =>
+        HasPendingKeyReleasesLocked(connectionGeneration) ||
+        _pressedMouseButtons.Values.Any(pressed =>
+            pressed.ConnectionGeneration == connectionGeneration && pressed.PendingReleasePoint.HasValue);
+
+    private int RetryPendingReleasesLocked(
+        long connectionGeneration,
+        Func<RemoteInputCommand, long, bool> queueOwned)
+    {
+        int released = 0;
+        foreach (var entry in _pressedMouseButtons.ToArray())
+        {
+            if (entry.Value.ConnectionGeneration != connectionGeneration ||
+                entry.Value.PendingReleasePoint is not Point releasePoint)
+            {
+                continue;
+            }
+
+            if (queueOwned(RemoteInputCommand.MouseUp(entry.Key, releasePoint.X, releasePoint.Y),
+                    entry.Value.ConnectionGeneration))
+            {
+                _pressedMouseButtons.Remove(entry.Key);
+                released++;
+            }
+        }
+
+        UpdatePressedMouseButtonCountLocked();
+        return released + RetryPendingKeyReleasesLocked(connectionGeneration, queueOwned);
+    }
+
+    private int RetryPendingKeyReleasesLocked(
+        long connectionGeneration,
+        Func<RemoteInputCommand, long, bool> queueOwned)
+    {
+        int released = 0;
+        for (int index = _pressedKeys.Count - 1; index >= 0; index--)
+        {
+            PressedRemoteKey pressed = _pressedKeys[index];
+            if (pressed.ConnectionGeneration != connectionGeneration || !pressed.PendingRelease)
+            {
+                continue;
+            }
+
+            if (queueOwned(pressed.Command with { Kind = RemoteInputKind.KeyUp },
+                    pressed.ConnectionGeneration))
+            {
                 _pressedKeys.RemoveAt(index);
                 released++;
             }
@@ -333,9 +465,12 @@ internal sealed class RemoteInputOwnershipTracker
 
     private readonly record struct PressedRemoteKey(
         RemotePhysicalKey Key,
-        long ConnectionGeneration);
+        RemoteInputCommand Command,
+        long ConnectionGeneration,
+        bool PendingRelease = false);
 
     private readonly record struct PressedRemoteMouseButton(
         Point LastRemotePoint,
-        long ConnectionGeneration);
+        long ConnectionGeneration,
+        Point? PendingReleasePoint = null);
 }

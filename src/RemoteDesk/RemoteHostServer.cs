@@ -5264,8 +5264,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                         pressedIndex =
                             _pressedKeys.FindLastIndex(
                                 pressed =>
-                                    pressed.Data ==
-                                    command.Data);
+                                    RemoteKeyboardInput.MatchesLegacyRelease(pressed, command));
                     }
 
                     if (pressedIndex >= 0)
@@ -5366,10 +5365,7 @@ internal sealed partial class RemoteHostServer : IDisposable
 
         private static RemotePhysicalKey ToPhysicalKey(
             RemoteInputCommand command) =>
-            new(
-                command.Data,
-                command.X,
-                (RemoteKeyboardFlags)command.Y);
+            RemoteKeyboardInput.PhysicalKey(command);
 
         private void IncrementVirtualKey(
             int virtualKey)

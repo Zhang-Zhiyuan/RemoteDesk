@@ -7,7 +7,7 @@ internal sealed class WindowsSecureDesktopKeyState
     private readonly Dictionary<RemotePhysicalKey, RemoteInputCommand> _keys = [];
     internal int Count => _keys.Count;
 
-    internal void Press(RemoteInputCommand command) => _keys[Identity(command)] = command;
+    internal void Press(RemoteInputCommand command) => _keys.TryAdd(Identity(command), command);
 
     internal void ForgetReleased(RemoteInputCommand command)
     {
@@ -36,9 +36,17 @@ internal sealed class WindowsSecureDesktopKeyState
     {
         var identity = Identity(command);
         bool physical = ((RemoteKeyboardFlags)command.Y).HasFlag(RemoteKeyboardFlags.HasScanCode);
-        return _keys.Keys.Where(key => physical ? key == identity : key.VirtualKey == command.Data).ToArray();
+        bool genericModifier = !physical && command.Data is 0x10 or 0x11 or 0x12;
+        // A precise release only consumes its exact owner when present. If a
+        // modifier was synthesized without a scan code, permit the bounded
+        // legacy match; it never matches a different known physical side.
+        if (!genericModifier && _keys.ContainsKey(identity)) return [identity];
+        // Legacy generic release intentionally keeps the existing all-matching
+        // contract, including when a generic owner itself is also present.
+        return _keys.Keys.Where(key =>
+            RemoteKeyboardInput.MatchesLegacyRelease(_keys[key], command)).ToArray();
     }
 
     private static RemotePhysicalKey Identity(RemoteInputCommand command) =>
-        new(command.Data, command.X, (RemoteKeyboardFlags)command.Y);
+        RemoteKeyboardInput.PhysicalKey(command);
 }

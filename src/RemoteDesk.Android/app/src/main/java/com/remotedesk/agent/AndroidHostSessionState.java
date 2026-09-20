@@ -31,6 +31,15 @@ final class AndroidHostSessionState {
         return gestureState.closeGracefully(GESTURE_CLOSE_TIMEOUT_MILLIS);
     }
 
+    boolean blocksInputForScreenState(boolean screenOff, boolean enteringUnlockPin) {
+        if (!screenOff && !enteringUnlockPin) return false;
+        // These phases intentionally discard input, including key/button-up.
+        // Clear this owner's held state so it cannot survive wake/unlock as a
+        // stuck modifier or drag. Do not stop the session or alter permissions.
+        gestureState.reset();
+        return true;
+    }
+
     void closeLowLatencyVideo() {
         AndroidLowLatencyVideoTransport.Host transport = lowLatencyVideo;
         lowLatencyVideo = null;

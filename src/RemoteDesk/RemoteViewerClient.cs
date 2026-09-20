@@ -1307,6 +1307,52 @@ internal sealed partial class RemoteViewerClient : IDisposable
         return Task.CompletedTask;
     }
 
+    internal bool TryQueueKeyboardChord(
+        IReadOnlyList<RemoteInputCommand> commands,
+        long expectedGeneration)
+    {
+        if (commands is null || commands.Count == 0 || commands.Count > MaxQueuedInputs)
+        {
+            return false;
+        }
+
+        // Bound and snapshot a synthetic chord before touching the queue. This
+        // API intentionally excludes text/pointer batches and does not consume
+        // the reserve needed to release already-held physical keys/buttons.
+        var chord = new RemoteInputCommand[commands.Count];
+        for (int index = 0; index < chord.Length; index++)
+        {
+            RemoteInputCommand command = commands[index];
+            if (command.Kind is not (RemoteInputKind.KeyDown or RemoteInputKind.KeyUp))
+            {
+                return false;
+            }
+            chord[index] = command;
+        }
+
+        CancellationTokenSource? expectedConnection = _cancellationTokenSource;
+        lock (_inputLock)
+        {
+            if (_inputConnectionGeneration != expectedGeneration ||
+                !CanQueueInput(expectedConnection) ||
+                chord.Length > MaxQueuedInputs - _inputQueue.Count)
+            {
+                return false;
+            }
+
+            // Capacity for every key, including its release, is reserved by the
+            // same lock. No eviction or partially accepted chord is possible.
+            foreach (RemoteInputCommand command in chord)
+            {
+                _inputQueue.Enqueue(command, MaxQueuedInputs);
+            }
+            InvalidateNativeDetails();
+        }
+
+        ReleaseInputLoop();
+        return true;
+    }
+
     private bool TryQueueInputLocked(
         RemoteInputCommand command)
     {

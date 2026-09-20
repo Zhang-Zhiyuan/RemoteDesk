@@ -559,7 +559,12 @@ internal static class InputInjector
             command.Kind == RemoteInputKind.KeyUp;
         var remoteFlags =
             (RemoteKeyboardFlags)command.Y;
-        if (remoteFlags.HasFlag(
+        // Older viewers can mislabel right Shift as E0 36. Repair at the
+        // receiving boundary too, including input on the secure desktop.
+        remoteFlags = RemoteKeyboardInput.NormalizeFlags(command.Data, command.X, remoteFlags);
+        // Pause's E1 prefix is not represented by this protocol. Sending its
+        // truncated scan would inject Ctrl/NumLock instead; use VK_PAUSE.
+        if (!RemoteKeyboardInput.RequiresVirtualKey(command.Data) && remoteFlags.HasFlag(
                 RemoteKeyboardFlags.HasScanCode))
         {
             uint nativeFlags =

@@ -5,6 +5,88 @@ namespace RemoteDesk.Tests;
 public sealed class WindowsSessionShortcutHandlerTests
 {
     [Theory]
+    [InlineData(0x10, 0xA1, 0x36, false)]
+    [InlineData(0x11, 0xA3, 0x1D, true)]
+    [InlineData(0x12, 0xA5, 0x38, true)]
+    public void PhysicalReleaseOfSyntheticLegacyModifierRestoresUnmodifiedShortcut(int generic, int sided, int scan, bool extended)
+    {
+        var handler = new WindowsSessionShortcutHandler();
+        var win = RemoteInputCommand.KeyDown((int)Keys.LWin);
+        handler.Observe(win);
+        handler.Observe(RemoteInputCommand.KeyDown(generic));
+        handler.Observe(RemoteInputCommand.KeyUp(sided, scan,
+            RemoteKeyboardFlags.HasScanCode | (extended ? RemoteKeyboardFlags.Extended : 0)));
+        int mockLocks = 0;
+        Assert.True(handler.TryHandle(RemoteInputCommand.KeyDown((int)Keys.L),
+            pressed => Assert.Equal(win, pressed), () => mockLocks++));
+        Assert.Equal(1, mockLocks);
+    }
+
+    [Fact]
+    public void ExactPhysicalModifierUpLeavesLegacyAndOtherSideGuardedUntilTheirOwnReleases()
+    {
+        var handler = new WindowsSessionShortcutHandler();
+        var generic = RemoteInputCommand.KeyDown((int)Keys.ShiftKey);
+        var left = RemoteInputCommand.KeyDown((int)Keys.LShiftKey, 0x2A, RemoteKeyboardFlags.HasScanCode);
+        var right = RemoteInputCommand.KeyDown((int)Keys.RShiftKey, 0x36, RemoteKeyboardFlags.HasScanCode);
+        handler.Observe(RemoteInputCommand.KeyDown((int)Keys.LWin));
+        handler.Observe(generic); handler.Observe(left); handler.Observe(right);
+        handler.Observe(right with { Kind = RemoteInputKind.KeyUp });
+        handler.Observe(left with { Kind = RemoteInputKind.KeyUp });
+        Assert.False(handler.TryHandle(RemoteInputCommand.KeyDown((int)Keys.L), _ => Assert.Fail(), () => Assert.Fail()));
+        handler.Observe(generic with { Kind = RemoteInputKind.KeyUp });
+        int mockLocks = 0;
+        Assert.True(handler.TryHandle(RemoteInputCommand.KeyDown((int)Keys.L), _ => { }, () => mockLocks++));
+        Assert.Equal(1, mockLocks);
+    }
+
+    [Theory]
+    [MemberData(nameof(RemoteKeyboardOwnershipRegressionTests.Modifiers), MemberType = typeof(RemoteKeyboardOwnershipRegressionTests))]
+    public void ModifierReleasedThroughAnotherCaptureSourceDoesNotBlockLaterWinL(
+        int generic, int sided, int scan, bool extended, bool reverse)
+    {
+        var flags = RemoteKeyboardFlags.HasScanCode | (extended ? RemoteKeyboardFlags.Extended : 0);
+        var down = RemoteInputCommand.KeyDown(reverse ? generic : sided, scan, flags);
+        var up = RemoteInputCommand.KeyUp(reverse ? sided : generic, scan, flags);
+        var win = RemoteInputCommand.KeyDown((int)Keys.LWin, 0x5B,
+            RemoteKeyboardFlags.HasScanCode | RemoteKeyboardFlags.Extended);
+        var handler = new WindowsSessionShortcutHandler();
+        handler.Observe(win);
+        handler.Observe(down);
+        Assert.False(handler.TryHandle(RemoteInputCommand.KeyDown((int)Keys.L),
+            _ => Assert.Fail("Modifier remains held"), () => Assert.Fail("No OS locking callback")));
+        handler.Observe(up);
+        var order = new List<string>();
+        Assert.True(handler.TryHandle(RemoteInputCommand.KeyDown((int)Keys.L),
+            command => { Assert.Equal(win, command); order.Add("release-owned-win"); },
+            () => order.Add("mock-lock-only")));
+        Assert.Equal(["release-owned-win", "mock-lock-only"], order);
+    }
+
+    [Fact]
+    public void ReleasingOneShiftSideDoesNotDropTheOtherModifierFromShortcutGuard()
+    {
+        var handler = new WindowsSessionShortcutHandler();
+        var win = RemoteInputCommand.KeyDown((int)Keys.LWin);
+        var left = RemoteInputCommand.KeyDown((int)Keys.LShiftKey, 0x2A, RemoteKeyboardFlags.HasScanCode);
+        var right = RemoteInputCommand.KeyDown((int)Keys.RShiftKey, 0x36,
+            RemoteKeyboardFlags.HasScanCode | RemoteKeyboardFlags.Extended);
+        handler.Observe(win);
+        handler.Observe(left);
+        // An unowned opposite-side up must not clear the held left Shift.
+        handler.Observe(RemoteInputCommand.KeyUp((int)Keys.ShiftKey, 0x36, RemoteKeyboardFlags.HasScanCode));
+        Assert.False(handler.TryHandle(RemoteInputCommand.KeyDown((int)Keys.L), _ => Assert.Fail(), () => Assert.Fail()));
+        handler.Observe(right);
+        handler.Observe(RemoteInputCommand.KeyUp((int)Keys.ShiftKey, 0x36, RemoteKeyboardFlags.HasScanCode));
+        Assert.False(handler.TryHandle(RemoteInputCommand.KeyDown((int)Keys.L), _ => Assert.Fail(), () => Assert.Fail()));
+        handler.Observe(RemoteInputCommand.KeyUp((int)Keys.ShiftKey, 0x2A, RemoteKeyboardFlags.HasScanCode));
+        int mockLocks = 0;
+        Assert.True(handler.TryHandle(RemoteInputCommand.KeyDown((int)Keys.L),
+            command => Assert.Equal(win, command), () => mockLocks++));
+        Assert.Equal(1, mockLocks);
+    }
+
+    [Theory]
     [InlineData((int)Keys.LWin, 0, 0)]
     [InlineData((int)Keys.RWin, 0, 0)]
     [InlineData((int)Keys.LWin, 0x5B, 3)]
