@@ -184,8 +184,10 @@ CAPABILITIES = [
     (1 << 19, "HighFrameRateH264"),
     (1 << 20, "AuthenticatedUdpHeartbeat"),
     (1 << 21, "HighQualityJpeg"),
+    (CAPABILITY_DEVICE_IDENTITY, "DeviceIdentity"),
     (1 << 23, "ClipboardPasteShortcut"),
     (CAPABILITY_FILE_TRANSFER_RECEIPT, "FileTransferReceipt"),
+    (1 << 25, "HostVideoDiagnostics"),
     (CAPABILITY_FILE_RECEIVE_LOCATION, "FileReceiveLocation"),
     (CAPABILITY_CLIPBOARD_SNAPSHOT_V1, "ClipboardSnapshotV1"),
 ]

@@ -14,7 +14,6 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.List;
-import java.util.Locale;
 
 public final class RemoteDeskFileProvider extends ContentProvider {
     static final String AUTHORITY = "com.remotedesk.agent.files";
@@ -63,25 +62,12 @@ public final class RemoteDeskFileProvider extends ContentProvider {
             return "application/octet-stream";
         }
 
-        String extension = extensionForMimeLookup(file.getName());
-        String type = extension == null || extension.isEmpty()
-            ? null
-            : MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension);
-        return type == null ? "application/octet-stream" : type;
+        return AndroidFileMimeType.resolve(file.getName(),
+            MimeTypeMap.getSingleton()::getMimeTypeFromExtension);
     }
 
     static String extensionForMimeLookup(String fileName) {
-        if (fileName == null) {
-            return "";
-        }
-
-        String normalized = fileName.trim();
-        int dot = normalized.lastIndexOf('.');
-        if (dot <= 0 || dot == normalized.length() - 1) {
-            return "";
-        }
-
-        return normalized.substring(dot + 1).toLowerCase(Locale.ROOT);
+        return AndroidFileMimeType.extension(fileName);
     }
 
     @Override

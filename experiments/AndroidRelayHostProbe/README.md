@@ -21,3 +21,11 @@ keep its discovery presence running, but TCP 56565 must be free.
 After testing, stop the owned projection/service and uninstall this test APK,
 which removes its private test secrets and temporary accessibility service. Keep
 the installed production app and its prior permission/settings state unchanged.
+
+`FileReceiveProbeActivity` is a separate, offline regression check for Android
+10+ public Downloads. It needs no relay credentials, accessibility or screen
+sharing. Launch it in this test APK, then read `files/file-receive-probe.json`
+with `adb shell run-as com.remotedesk.relayhostprobe`. It reproduces the old
+generic-MIME duplicate-name bug and checks the production receiver's filenames,
+MIME types, contents and receipts. Every public test row has a per-run UUID;
+only those rows are deleted at completion. Uninstall the test APK afterwards.

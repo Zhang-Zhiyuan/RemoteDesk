@@ -7,6 +7,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.provider.MediaStore;
+import android.webkit.MimeTypeMap;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -47,7 +48,6 @@ final class AndroidFileTransferReceiver {
     private static final String TEMPORARY_FILE_PREFIX = ".remotedesk-";
     private static final String TEMPORARY_FILE_SUFFIX = ".rdtransfer";
     private static final int TEMPORARY_FILE_ID_LENGTH = 32;
-    private static final String MIME_TYPE_BINARY = "application/octet-stream";
     private static final String CHECKSUM_ALGORITHM = "SHA256";
     private static final long STALE_TEMPORARY_FILE_MILLIS = 24L * 60L * 60L * 1000L;
     private static final Set<String> RESERVED_NAMES = new HashSet<>();
@@ -459,7 +459,12 @@ final class AndroidFileTransferReceiver {
         ContentResolver resolver = context.getContentResolver();
         ContentValues values = new ContentValues();
         values.put(MediaStore.MediaColumns.DISPLAY_NAME, transfer.fileName);
-        values.put(MediaStore.MediaColumns.MIME_TYPE, MIME_TYPE_BINARY);
+        // MediaStore uses MIME + extension to split duplicate names. Reporting
+        // a known .txt/.zip as octet-stream produces "name.txt (1)" on Android,
+        // which loses the usable extension. Never trust a peer-supplied MIME;
+        // resolve only the sanitized filename using the platform's own map.
+        values.put(MediaStore.MediaColumns.MIME_TYPE, AndroidFileMimeType.resolve(
+            transfer.fileName, MimeTypeMap.getSingleton()::getMimeTypeFromExtension));
         values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + File.separator + RECEIVE_FOLDER_NAME);
         values.put(MediaStore.MediaColumns.IS_PENDING, 1);
 

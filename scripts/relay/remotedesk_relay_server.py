@@ -28,7 +28,7 @@ from typing import Optional
 from pathlib import Path
 
 
-RELAY_RELEASE_VERSION = "1.0.30"
+RELAY_RELEASE_VERSION = "1.0.31"
 # Capture once when this process loads, not when an installer replaces the file.
 RELAY_SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
