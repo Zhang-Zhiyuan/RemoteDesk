@@ -858,10 +858,8 @@ function New-LinuxHostWrapper {
 #!/usr/bin/env sh
 set -eu
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-export PYTHONHOME="$SCRIPT_DIR/runtime"
-export PYTHONPATH="$SCRIPT_DIR/runtime/lib/python3/dist-packages:$SCRIPT_DIR/runtime/lib/python3.12/dist-packages:/usr/lib/python3/dist-packages:/usr/local/lib/python3.12/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
-export LD_LIBRARY_PATH="$SCRIPT_DIR/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec "$SCRIPT_DIR/runtime/bin/python" "$SCRIPT_DIR/app/remotedesk_linux_host.py" "$@"
+. "$SCRIPT_DIR/app/remotedesk_linux_runtime.sh"
+remotedesk_python "$SCRIPT_DIR" "$SCRIPT_DIR/app/remotedesk_linux_host.py" "$@"
 '@ | Write-Utf8NoBomContent -Path $Path -NoNewline
 }
 
@@ -872,10 +870,8 @@ function New-LinuxProbeWrapper {
 #!/usr/bin/env sh
 set -eu
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-export PYTHONHOME="$SCRIPT_DIR/runtime"
-export PYTHONPATH="$SCRIPT_DIR/runtime/lib/python3/dist-packages:$SCRIPT_DIR/runtime/lib/python3.12/dist-packages:/usr/lib/python3/dist-packages:/usr/local/lib/python3.12/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
-export LD_LIBRARY_PATH="$SCRIPT_DIR/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec "$SCRIPT_DIR/runtime/bin/python" "$SCRIPT_DIR/app/remotedesk_protocol_probe.py" "$@"
+. "$SCRIPT_DIR/app/remotedesk_linux_runtime.sh"
+remotedesk_python "$SCRIPT_DIR" "$SCRIPT_DIR/app/remotedesk_protocol_probe.py" "$@"
 '@ | Write-Utf8NoBomContent -Path $Path -NoNewline
 }
 
@@ -890,10 +886,8 @@ HOME_DIR="${HOME:-/tmp}"
 LOG_DIR="${XDG_CACHE_HOME:-$HOME_DIR/.cache}/remotedesk"
 mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="/tmp"
 LOG_FILE="$LOG_DIR/remotedesk-linux-app.log"
-export PYTHONHOME="$SCRIPT_DIR/runtime"
-export PYTHONPATH="$SCRIPT_DIR/runtime/lib/python3/dist-packages:$SCRIPT_DIR/runtime/lib/python3.12/dist-packages:/usr/lib/python3/dist-packages:/usr/local/lib/python3.12/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
-export LD_LIBRARY_PATH="$SCRIPT_DIR/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-"$SCRIPT_DIR/runtime/bin/python" "$SCRIPT_DIR/app/remotedesk_linux_app.py" "$@" >"$LOG_FILE" 2>&1
+. "$SCRIPT_DIR/app/remotedesk_linux_runtime.sh"
+(remotedesk_python "$SCRIPT_DIR" "$SCRIPT_DIR/app/remotedesk_linux_app.py" "$@") >"$LOG_FILE" 2>&1
 code=$?
 if [ "$code" -eq 125 ]; then
   exit 0 # User cancelled the dependency installation/authentication dialog.
@@ -934,9 +928,7 @@ APP_ROOT="$SCRIPT_DIR"
 RUNTIME_ROOT="$APP_ROOT/runtime"
 APP_DIR="$APP_ROOT/app"
 LOG_FILE="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/remotedesk/remotedesk-linux-app.log"
-export PYTHONHOME="$RUNTIME_ROOT"
-export PYTHONPATH="$RUNTIME_ROOT/lib/python3/dist-packages:$RUNTIME_ROOT/lib/python3.12/dist-packages:$APP_DIR:/usr/lib/python3/dist-packages:/usr/local/lib/python3.12/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
-export LD_LIBRARY_PATH="$RUNTIME_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+. "$APP_DIR/remotedesk_linux_runtime.sh"
 echo "RemoteDesk Linux doctor"
 echo "app_root=$APP_ROOT"
 echo "date=$(date -Iseconds 2>/dev/null || date)"
@@ -983,11 +975,12 @@ fi
 if command -v ffmpeg >/dev/null 2>&1; then
   ffmpeg -version 2>/dev/null | head -n 1 | sed 's/^/ffmpeg_version=/'
 fi
-echo "--- bundled runtime ---"
-"$RUNTIME_ROOT/bin/python" - <<'PY'
+echo "--- selected runtime ---"
+(remotedesk_python "$APP_ROOT" - <<'PY'
 import os
 import sys
 print("python=" + sys.version.replace("\n", " "))
+print("interpreter=" + sys.executable)
 checks = []
 for name in ("tkinter", "cryptography", "PIL", "remotedesk_linux_app"):
     try:
@@ -1025,6 +1018,7 @@ try:
 except Exception as ex:
     print(f"tk_root=fail {ex!r}")
 PY
+)
 code=$?
 echo "runtime_check_exit=$code"
 if [ -f "$LOG_FILE" ]; then
@@ -1043,10 +1037,8 @@ function New-LinuxHostInstallWrapper {
     @'
 #!/usr/bin/env sh
 set -eu
-export PYTHONHOME=/opt/remotedesk/runtime
-export PYTHONPATH="/opt/remotedesk/runtime/lib/python3/dist-packages:/opt/remotedesk/runtime/lib/python3.12/dist-packages:/usr/lib/python3/dist-packages:/usr/local/lib/python3.12/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
-export LD_LIBRARY_PATH="/opt/remotedesk/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec /opt/remotedesk/runtime/bin/python /opt/remotedesk/app/remotedesk_linux_host.py "$@"
+. /opt/remotedesk/app/remotedesk_linux_runtime.sh
+remotedesk_python /opt/remotedesk /opt/remotedesk/app/remotedesk_linux_host.py "$@"
 '@ | Write-Utf8NoBomContent -Path $Path -NoNewline
 }
 
@@ -1056,10 +1048,8 @@ function New-LinuxProbeInstallWrapper {
     @'
 #!/usr/bin/env sh
 set -eu
-export PYTHONHOME=/opt/remotedesk/runtime
-export PYTHONPATH="/opt/remotedesk/runtime/lib/python3/dist-packages:/opt/remotedesk/runtime/lib/python3.12/dist-packages:/usr/lib/python3/dist-packages:/usr/local/lib/python3.12/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
-export LD_LIBRARY_PATH="/opt/remotedesk/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec /opt/remotedesk/runtime/bin/python /opt/remotedesk/app/remotedesk_protocol_probe.py "$@"
+. /opt/remotedesk/app/remotedesk_linux_runtime.sh
+remotedesk_python /opt/remotedesk /opt/remotedesk/app/remotedesk_protocol_probe.py "$@"
 '@ | Write-Utf8NoBomContent -Path $Path -NoNewline
 }
 
@@ -1073,10 +1063,8 @@ HOME_DIR="${HOME:-/tmp}"
 LOG_DIR="${XDG_CACHE_HOME:-$HOME_DIR/.cache}/remotedesk"
 mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="/tmp"
 LOG_FILE="$LOG_DIR/remotedesk-linux-app.log"
-export PYTHONHOME=/opt/remotedesk/runtime
-export PYTHONPATH="/opt/remotedesk/runtime/lib/python3/dist-packages:/opt/remotedesk/runtime/lib/python3.12/dist-packages:/usr/lib/python3/dist-packages:/usr/local/lib/python3.12/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
-export LD_LIBRARY_PATH="/opt/remotedesk/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-/opt/remotedesk/runtime/bin/python /opt/remotedesk/app/remotedesk_linux_app.py "$@" >"$LOG_FILE" 2>&1
+. /opt/remotedesk/app/remotedesk_linux_runtime.sh
+(remotedesk_python /opt/remotedesk /opt/remotedesk/app/remotedesk_linux_app.py "$@") >"$LOG_FILE" 2>&1
 code=$?
 if [ "$code" -eq 125 ]; then
   exit 0 # User cancelled the dependency installation/authentication dialog.
@@ -1116,9 +1104,7 @@ APP_ROOT=/opt/remotedesk
 RUNTIME_ROOT="$APP_ROOT/runtime"
 APP_DIR="$APP_ROOT/app"
 LOG_FILE="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/remotedesk/remotedesk-linux-app.log"
-export PYTHONHOME="$RUNTIME_ROOT"
-export PYTHONPATH="$RUNTIME_ROOT/lib/python3/dist-packages:$RUNTIME_ROOT/lib/python3.12/dist-packages:$APP_DIR:/usr/lib/python3/dist-packages:/usr/local/lib/python3.12/dist-packages${PYTHONPATH:+:$PYTHONPATH}"
-export LD_LIBRARY_PATH="$RUNTIME_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+. "$APP_DIR/remotedesk_linux_runtime.sh"
 echo "RemoteDesk Linux doctor"
 echo "app_root=$APP_ROOT"
 echo "date=$(date -Iseconds 2>/dev/null || date)"
@@ -1165,11 +1151,12 @@ fi
 if command -v ffmpeg >/dev/null 2>&1; then
   ffmpeg -version 2>/dev/null | head -n 1 | sed 's/^/ffmpeg_version=/'
 fi
-echo "--- bundled runtime ---"
-"$RUNTIME_ROOT/bin/python" - <<'PY'
+echo "--- selected runtime ---"
+(remotedesk_python "$APP_ROOT" - <<'PY'
 import os
 import sys
 print("python=" + sys.version.replace("\n", " "))
+print("interpreter=" + sys.executable)
 checks = []
 for name in ("tkinter", "cryptography", "PIL", "remotedesk_linux_app"):
     try:
@@ -1207,6 +1194,7 @@ try:
 except Exception as ex:
     print(f"tk_root=fail {ex!r}")
 PY
+)
 code=$?
 echo "runtime_check_exit=$code"
 if [ -f "$LOG_FILE" ]; then
@@ -1254,6 +1242,8 @@ function New-LinuxSelfContainedRuntime {
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_protocol_probe.py") -Destination (Join-Path $Staging "app\remotedesk_protocol_probe.py") -Force
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_app.py") -Destination (Join-Path $Staging "app\remotedesk_linux_app.py") -Force
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_dependencies.py") -Destination (Join-Path $Staging "app\remotedesk_linux_dependencies.py") -Force
+    Get-Content -LiteralPath (Join-Path $Root "scripts/linux/remotedesk_linux_runtime.sh") -Raw |
+        Write-Utf8NoBomContent -Path (Join-Path $Staging "app/remotedesk_linux_runtime.sh")
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_relay.py") -Destination (Join-Path $Staging "app\remotedesk_linux_relay.py") -Force
     Copy-Item -LiteralPath (Join-Path $Root 'scripts/linux/remotedesk_linux_relay_login.py') -Destination (Join-Path $Staging 'app/remotedesk_linux_relay_login.py') -Force
     Copy-Item -LiteralPath (Join-Path $Root 'scripts/relay/read_remotedesk_relay_config.py') -Destination (Join-Path $Staging 'app/read_remotedesk_relay_config.py') -Force

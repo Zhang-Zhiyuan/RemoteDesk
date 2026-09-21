@@ -42,6 +42,20 @@ STREAM_CLOSE_TIMEOUT_SECONDS = 2
 MAX_DIRECT_ADDRESSES = 8
 
 
+def _cancel_path_attempt(task):
+    # Python 3.10 has no Task.cancelling(). Remember our cancellation even
+    # when a native TLS operation suppresses CancelledError during cleanup.
+    task._remotedesk_cancel_requested = True
+    task.cancel()
+
+
+def _path_attempt_cancel_requested():
+    task = asyncio.current_task()
+    cancelling = getattr(task, "cancelling", None)
+    return bool(getattr(task, "_remotedesk_cancel_requested", False)
+                or (cancelling is not None and cancelling()))
+
+
 def normalize_address_report(message):
     port, values = message.get("directPort"), message.get("directAddresses")
     if type(port) is not int or not 1 <= port <= 65535 or not isinstance(values, list):
@@ -520,7 +534,7 @@ class RelayNetworkPathSelector:
             try:
                 return await attempt(options, path)
             except Exception:
-                if not asyncio.current_task().cancelling() and self.identity(path) == cached:
+                if not _path_attempt_cancel_requested() and self.identity(path) == cached:
                     failed_preferred = True
                 raise
 
@@ -566,7 +580,7 @@ class RelayNetworkPathSelector:
             started, connection = time.monotonic(), None
             try:
                 connection = await attempt(options, path)
-                return math.inf if asyncio.current_task().cancelling() else (time.monotonic() - started) * 1000
+                return math.inf if _path_attempt_cancel_requested() else (time.monotonic() - started) * 1000
             except (Exception, asyncio.CancelledError):
                 return math.inf
             finally:
@@ -582,7 +596,7 @@ class RelayNetworkPathSelector:
         finally:
             for task in tasks:
                 if not task.done():
-                    task.cancel()
+                    _cancel_path_attempt(task)
             # Keep the only audit slot until uncooperative native work ends.
             # This wait is never on the foreground connection's event loop.
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -622,7 +636,7 @@ class RelayNetworkPathSelector:
                     path = tasks.pop(task)
                     try:
                         return path, task.result()
-                    except (OSError, ValueError, ssl.SSLError) as error:
+                    except (OSError, ValueError, ssl.SSLError, asyncio.TimeoutError) as error:
                         failures.append(error)
             identity = next((error for error in failures if isinstance(error, RelayIdentityError)), None)
             raise identity or (failures[0] if failures else ConnectionError("没有可用的中转网络路径。"))
@@ -637,7 +651,7 @@ class RelayNetworkPathSelector:
         finally:
             for task in tasks:
                 task.add_done_callback(release_loser)
-                task.cancel()
+                _cancel_path_attempt(task)
 
 
 async def _connect_tls_path(options, path):
@@ -683,12 +697,20 @@ _relay_path_selector = RelayNetworkPathSelector(background_probes=True)
 async def _relay_deadline(operation):
     try:
         return await asyncio.wait_for(operation, TIMEOUT)
-    except TimeoutError as error:
+    except (TimeoutError, asyncio.TimeoutError) as error:
         cause = error.__cause__
-        while cause is not None:
+        seen = set()
+        while cause is not None and id(cause) not in seen:
+            seen.add(id(cause))
             if isinstance(cause, RelayIdentityError):
                 raise RelayIdentityError("服务器身份与已保存的信息不符；原配置未更改。") from error
-            cause = cause.__cause__
+            # Python 3.10 may recreate CancelledError in Task.result(), keeping
+            # the original pin rejection in __context__ rather than __cause__.
+            cause = cause.__cause__ or (None if cause.__suppress_context__ else cause.__context__)
+        if not isinstance(error, TimeoutError):
+            # Keep the public error contract identical on Python 3.10, where
+            # asyncio.TimeoutError is not yet an alias of built-in TimeoutError.
+            raise TimeoutError("中继连接超时，请检查服务器和网络。") from error
         raise
 
 
@@ -716,7 +738,7 @@ async def discover_server_identity(server_address, port):
         finally:
             await close_writer(writer)
 
-    return await asyncio.wait_for(observe(), TIMEOUT)
+    return await _relay_deadline(observe())
 
 
 def run_setup_request(operation, stop_event):
@@ -989,7 +1011,7 @@ class RelayHostConnector:
                 except RelayIdentityError as error:
                     self._status(str(error))
                     return
-                except (OSError, ValueError, asyncio.IncompleteReadError, TimeoutError):
+                except (OSError, ValueError, asyncio.IncompleteReadError, TimeoutError, asyncio.TimeoutError):
                     delay = (1, 2, 5, 10, 20)[min(failures, 4)]
                     failures += 1
                     self._status(f"中转离线，{delay} 秒后重试。")
@@ -1062,7 +1084,7 @@ class RelayHostConnector:
             await hello(reader, remote_writer, self.options, "host-data",
                         deviceId=self.options.device_id, sessionId=session_id)
             await bridge((local_reader, local_writer), (reader, remote_writer))
-        except (OSError, ValueError, asyncio.IncompleteReadError, TimeoutError):
+        except (OSError, ValueError, asyncio.IncompleteReadError, TimeoutError, asyncio.TimeoutError):
             self._status("中转会话未建立或已结束，请确认本机被控端正在运行。")
         finally:
             await asyncio.gather(close_writer(local_writer, abort=True), close_writer(remote_writer, abort=True))

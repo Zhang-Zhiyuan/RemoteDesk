@@ -48,21 +48,25 @@ class RelayPathTests(unittest.IsolatedAsyncioTestCase):
             await relay.RelayNetworkPathSelector.race(OPTIONS, [None, WIFI], connect)
 
     async def test_deadline_does_not_mask_completed_identity_rejection(self):
-        deadlines = []
+        rejected = asyncio.Event()
         async def connect(options, path):
             if path is not None:
                 # Expire only after the identity rejection actually happened.
                 # A 50 ms wall-clock budget could expire during discovery when
                 # the full cross-platform build saturated the test machine.
-                deadlines[0].reschedule(asyncio.get_running_loop().time())
+                rejected.set()
                 raise relay.RelayIdentityError("pin")
             await asyncio.Event().wait()
         selector = relay.RelayNetworkPathSelector(mock.AsyncMock(return_value=[WIFI]), connect)
         original_connect = selector.connect
         async def expire_after_rejection(options):
-            async with asyncio.timeout(None) as deadline:
-                deadlines.append(deadline)
-                return await original_connect(options)
+            task = asyncio.create_task(original_connect(options))
+            try:
+                await rejected.wait()
+                return await asyncio.wait_for(task, 0)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         selector.connect = expire_after_rejection
         with mock.patch.object(relay, "_relay_path_selector", selector):
             with self.assertRaises(relay.RelayIdentityError):

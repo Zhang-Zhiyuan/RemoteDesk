@@ -61,6 +61,11 @@ class RelayInstallerTests(unittest.TestCase):
         self.port = self._free_port()
         self._command("id", '#!/bin/sh\n[ "$1" != "-u" ] || printf "0\\n"\n')
         self._command("chown", "#!/bin/sh\nexit 0\n")
+        self._command("useradd", "#!/bin/sh\nexit 0\n")
+        # On non-root Ubuntu logins /usr/sbin may be absent from PATH. Never
+        # let a missing fixture command fall through to a real package manager.
+        for manager in ("apt-get", "dnf", "yum"):
+            self._command(manager, "#!/bin/sh\necho 'Unexpected package installation in fixture' >&2\nexit 99\n")
         self._command("ufw", "#!/bin/sh\nexit 1\n")
         self._command("firewall-cmd", "#!/bin/sh\nexit 1\n")
         # Real Python/TLS relay, but ONLY a private fixture process. No systemd

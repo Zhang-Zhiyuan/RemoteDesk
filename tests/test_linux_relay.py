@@ -258,8 +258,9 @@ class LinuxRelayTlsTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*self.tasks, return_exceptions=True)
 
     async def wait_for(self, predicate, seconds=5):
-        async with asyncio.timeout(seconds):
+        async def poll():
             while not predicate(): await asyncio.sleep(.02)
+        await asyncio.wait_for(poll(), seconds)
 
     async def start_host(self):
         async def echo(reader, writer):

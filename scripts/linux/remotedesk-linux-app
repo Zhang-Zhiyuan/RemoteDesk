@@ -1,4 +1,5 @@
 #!/usr/bin/env sh
 set -eu
 script_dir=$(dirname -- "$(readlink -f -- "$0")")
-exec python3 "$script_dir/app/remotedesk_linux_app.py" "$@"
+. "$script_dir/app/remotedesk_linux_runtime.sh"
+remotedesk_python "$script_dir" "$script_dir/app/remotedesk_linux_app.py" "$@"

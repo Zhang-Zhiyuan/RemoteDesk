@@ -749,7 +749,7 @@ class LinuxIncomingFileTransferTests(unittest.TestCase):
             self.assertTrue(malformed.exists())
 
     def test_sanitized_file_name_fits_linux_byte_limit(self) -> None:
-        sanitized = protocol.sanitize_file_name(f"{'\U0001f600' * 180}.txt")
+        sanitized = protocol.sanitize_file_name("\U0001f600" * 180 + ".txt")
         archive_name = host.create_directory_archive_name(Path("\U0001f600" * 180))
 
         self.assertLessEqual(len(sanitized.encode("utf-8")), protocol.MAX_SAFE_FILE_NAME_LENGTH)

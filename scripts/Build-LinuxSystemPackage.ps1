@@ -34,6 +34,9 @@ try {
     Copy-Item -LiteralPath (Join-Path $repoRoot 'scripts/relay/read_remotedesk_relay_config.py') -Destination (Join-Path $staging 'app/read_remotedesk_relay_config.py')
     Copy-Item -LiteralPath (Join-Path $repoRoot "src/RemoteDesk/Assets/RemoteDesk.png") -Destination (Join-Path $staging "app/RemoteDesk.png")
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts/linux/remotedesk-linux-app") -Destination $staging
+    $runtimeSource = [IO.File]::ReadAllText((Join-Path $repoRoot "scripts/linux/remotedesk_linux_runtime.sh"))
+    [IO.File]::WriteAllText((Join-Path $staging "app/remotedesk_linux_runtime.sh"),
+        $runtimeSource.Replace("`r`n", "`n").Replace("`r", "`n"), [Text.UTF8Encoding]::new($false))
     Copy-Item -LiteralPath (Join-Path $repoRoot "docs/Linux-SystemPackage.md") -Destination (Join-Path $staging "README.md")
     Copy-Item -LiteralPath (Join-Path $repoRoot "THIRD-PARTY-NOTICES.md") -Destination $staging
     $wslStaging = Convert-LocalDrivePathToWsl $staging

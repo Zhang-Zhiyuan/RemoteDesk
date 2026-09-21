@@ -65,13 +65,13 @@ Windows 版包含管理员启动清单，调试运行也请使用管理员终端
 
 ### Linux
 
-需要 Python 3.12 和图形桌面：
+需要 Python 3.10 或更高版本和图形桌面：
 
 ```bash
 python3 scripts/linux/remotedesk_linux_app.py
 ```
 
-Debian / Ubuntu 缺少运行依赖时，程序会列出缺项，经确认和系统授权后安装。便携包的使用方式见 [Linux 安装说明](docs/Linux-SystemPackage.md)。
+Debian / Ubuntu 缺少运行依赖时，程序会列出缺项，经确认和系统授权后安装。Ubuntu 22.04 请用便携包（自动使用系统 Python），不要强装要求 glibc 2.38 的 amd64 deb。安装方式见 [Linux 安装说明](docs/Linux-SystemPackage.md)。
 
 ### Android
 

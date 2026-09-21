@@ -72,7 +72,7 @@ class DisplayHandoffTests(unittest.TestCase):
                     with self.Image.open(io.BytesIO(encoded)) as decoded:
                         old = decoded.convert("RGB").resize(
                             app.calculate_fitted_image_size(*source_size, *viewport),
-                            self.Image.Resampling.LANCZOS)
+                            getattr(self.Image, "Resampling", self.Image).LANCZOS)
                     current = app.convert_frame_for_tk(encoded, *viewport, *source_size)
                     self.assertIsNotNone(current)
                     with self.Image.open(io.BytesIO(current)) as new:
