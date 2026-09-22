@@ -239,6 +239,13 @@ public final class RemoteDeskAccessibilityService extends AccessibilityService {
     protected void onServiceConnected() {
         instance = null;
         AndroidInputInjector.onAccessibilityServiceUnavailable();
+        if (Build.VERSION.SDK_INT >= 33) {
+            AccessibilityServiceInfo info = getServiceInfo();
+            if (info != null) {
+                info.flags |= AccessibilityServiceInfo.FLAG_INPUT_METHOD_EDITOR;
+                setServiceInfo(info);
+            }
+        }
         instance = this;
         AndroidHostResume.tryResume(this);
     }
@@ -332,6 +339,11 @@ public final class RemoteDeskAccessibilityService extends AccessibilityService {
             if (!node.refresh() || !node.isFocused() || !node.isEditable()) {
                 return;
             }
+            if (Build.VERSION.SDK_INT >= 33 && commitFocusedInput(node, insertedText, deleteBeforeCursor)) return;
+            // Password nodes may expose only bullet characters. Never rebuild
+            // the real password using that masked value on older/OEM editors.
+            if (node.isPassword() && !AndroidFocusedTextEdit.canReplacePassword(
+                    node.getText(), node.isShowingHintText(), node.getTextSelectionStart(), node.getTextSelectionEnd())) return;
             AndroidFocusedTextEdit edit = AndroidFocusedTextEdit.create(
                 node.getText(), node.isShowingHintText(), node.getTextSelectionStart(),
                 node.getTextSelectionEnd(), insertedText, deleteBeforeCursor);
@@ -351,5 +363,24 @@ public final class RemoteDeskAccessibilityService extends AccessibilityService {
         } finally {
             node.recycle();
         }
+    }
+
+    @androidx.annotation.RequiresApi(33)
+    private boolean commitFocusedInput(AccessibilityNodeInfo node, String text, boolean delete) {
+        android.accessibilityservice.InputMethod method = getInputMethod();
+        if (method == null) return false;
+        android.view.inputmethod.EditorInfo editor = method.getCurrentInputEditorInfo();
+        android.accessibilityservice.InputMethod.AccessibilityInputConnection connection = method.getCurrentInputConnection();
+        if (editor == null || connection == null || !android.text.TextUtils.equals(editor.packageName, node.getPackageName())) return false;
+        // Let the editor retain its real contents, selection, composition and
+        // password transformation. Do not route secrets through the clipboard.
+        if (delete) {
+            long now = android.os.SystemClock.uptimeMillis();
+            for (int action : new int[] {android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.ACTION_UP})
+                connection.sendKeyEvent(new android.view.KeyEvent(now, now, action,
+                    android.view.KeyEvent.KEYCODE_DEL, 0, 0, android.view.KeyCharacterMap.VIRTUAL_KEYBOARD,
+                    0, android.view.KeyEvent.FLAG_SOFT_KEYBOARD));
+        } else connection.commitText(text, 1, null);
+        return true;
     }
 }

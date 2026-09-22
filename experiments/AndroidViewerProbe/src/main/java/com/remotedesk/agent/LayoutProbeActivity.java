@@ -49,6 +49,7 @@ public final class LayoutProbeActivity extends Activity {
             public void upscale() { actions++; }
             public void diagnostics() { actions++; }
             public void shortcut(int... keys) { actions++; }
+            public void phoneNavigation(int key) { actions++; }
             public boolean text(String text) { actions++; return true; }
         });
         root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL);
@@ -61,6 +62,7 @@ public final class LayoutProbeActivity extends Activity {
             dp(getIntent().getIntExtra("width", 320)), dp(getIntent().getIntExtra("height", 640))));
         chrome.composer.setShowSoftInputOnFocus(false);
         chrome.mode(false, false); chrome.adapt(compact);
+        chrome.phoneNavigation(getIntent().getStringExtra("platform"));
         root.postDelayed(() -> runStage(0), 250);
     }
 
@@ -107,7 +109,22 @@ public final class LayoutProbeActivity extends Activity {
             } else if (stage == 4) {
                 for (int i = 0; i < chrome.mousePanel.getChildCount(); i++) tap(chrome.mousePanel.getChildAt(i));
             } else {
-                require(actions == 10, "Mouse action taps missed callbacks: " + actions);
+                if (stage == 5) require(actions == 10, "Mouse action taps missed callbacks: " + actions);
+                if (AndroidViewerNavigation.isAndroid(getIntent().getStringExtra("platform"))) {
+                    if (stage == 5) {
+                        for (View button : new View[] {chrome.phoneBack, chrome.phoneHome, chrome.phoneRecents}) tap(button);
+                        // Native Button.performClick can be posted after ACTION_UP.
+                        root.postDelayed(() -> runStage(6), 150); return;
+                    }
+                    require(actions == 13, "Phone navigation taps missed callbacks");
+                    chrome.controls(false);
+                    require(!chrome.phoneBack.isEnabled() && !chrome.phoneHome.isEnabled() && !chrome.phoneRecents.isEnabled(),
+                        "Read-only navigation still enabled");
+                    chrome.phoneNavigation("Windows");
+                    require(!chrome.phoneBack.isShown() && !chrome.phoneHome.isShown() && !chrome.phoneRecents.isShown(),
+                        "Phone navigation shown for Windows");
+                    result.put("phoneNavigationTaps", 3);
+                }
                 result.put("passed", true); result.put("coordinateTaps", hits);
                 result.put("widthDp", getIntent().getIntExtra("width", 320));
                 result.put("heightDp", getIntent().getIntExtra("height", 640));
@@ -121,6 +138,7 @@ public final class LayoutProbeActivity extends Activity {
         }
     }
     private void save() throws Exception {
+        result.put("runId", getIntent().getStringExtra("runId"));
         try (FileOutputStream output = new FileOutputStream(new File(getFilesDir(), "layout-probe.json"))) {
             output.write(result.toString(2).getBytes(StandardCharsets.UTF_8));
         }

@@ -190,7 +190,9 @@ final class AndroidInputInjector {
         }
 
         float distance = Math.max(80, Math.min(360, sourceHeight * 0.18f));
-        float direction = wheelDelta > 0 ? 1 : -1;
+        // The wire uses desktop wheel signs: positive scrolls toward the top.
+        // Accessibility needs the finger motion (down for a positive wheel).
+        float direction = scrollFingerDirection(wheelDelta);
         float startY = clamp(point.y + direction * distance / 2, 1, sourceHeight - 2);
         float endY = clamp(point.y - direction * distance / 2, 1, sourceHeight - 2);
 
@@ -198,6 +200,10 @@ final class AndroidInputInjector {
         path.moveTo(point.x, startY);
         path.lineTo(point.x, endY);
         return dispatch(path, 220);
+    }
+
+    static float scrollFingerDirection(int wheelDelta) {
+        return wheelDelta > 0 ? -1 : wheelDelta < 0 ? 1 : 0;
     }
 
     private static boolean dispatch(Path path, long durationMillis) {

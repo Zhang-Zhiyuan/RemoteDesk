@@ -5,6 +5,25 @@ namespace RemoteDesk.Tests;
 public sealed class ViewerActionOverflowTests
 {
     [Fact]
+    public void SmallPhoneToolbarKeepsBackAndHomeAheadOfDisplayActions()
+    {
+        using var panel = new FlowLayoutPanel { Width = 215 };
+        Button[] buttons = new[] { "返回", "主页", "最近任务", "允许放大" }
+            .Select(text => new Button { Text = text, MinimumSize = new Size(60, 30),
+                AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = Padding.Empty }).ToArray();
+        panel.Controls.AddRange(buttons);
+        var more = new Button { Text = "更多", MinimumSize = new Size(60, 30), AutoSize = true, Margin = Padding.Empty };
+        using var layout = new ViewerActionOverflow(panel, more,
+            buttons.Select(b => (b, (Action)(() => { }))).ToArray(),
+            buttons.Select(b => new[] { b }).ToArray(), () => { });
+        layout.Apply(215, panel.Font);
+        Assert.Same(panel, buttons[0].Parent);
+        Assert.Same(panel, buttons[1].Parent);
+        Assert.Contains(buttons[2], layout.OverflowButtons);
+        Assert.Contains(buttons[3], layout.OverflowButtons);
+    }
+
+    [Fact]
     public void NarrowToolbarKeepsAllCommandsAndScalePairTogether()
     {
         using var panel = new FlowLayoutPanel { Width = 300 };

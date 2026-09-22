@@ -42,7 +42,9 @@ public final class TextInputProbeActivity extends android.app.Activity {
             finishReport(false, "Owned focused test editor or accessibility unavailable");
             return;
         }
-        if (index == 16) { finishReport(true, ""); return; }
+        if (index == 24) { checkDelete(); return; }
+        editor.setInputType(android.text.InputType.TYPE_CLASS_TEXT |
+            (index >= 16 ? android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD : android.text.InputType.TYPE_TEXT_VARIATION_NORMAL));
         String before = "prefix-原有😀-suffix";
         String inserted = "LinuxToAndroid中文42😀-" + index;
         int cursor = index % 2 == 0 ? 7 : before.length();
@@ -50,10 +52,10 @@ public final class TextInputProbeActivity extends android.app.Activity {
         editor.requestFocus();
         editor.setSelection(cursor);
         previousEditor.setText("untouched");
-        if (index >= 8) previousEditor.requestFocus();
+        if (index >= 8 && index < 16) previousEditor.requestFocus();
         handler.postDelayed(() -> {
             int[] points = inserted.codePoints().toArray();
-            if (index >= 8) {
+            if (index >= 8 && index < 16) {
                 // A slow network can deliver click and typing in one burst.
                 // Match the real host's worker thread, not the Android UI thread.
                 int[] position = new int[2];
@@ -91,7 +93,7 @@ public final class TextInputProbeActivity extends android.app.Activity {
                 if (!ownsInput()) { finishReport(false, "Foreground lost; no further input"); return; }
                 String expected = before.substring(0, cursor) + inserted + before.substring(cursor);
                 String actual = editor.getText().toString();
-                boolean pass = index < 8 ? expected.equals(actual) : actual.contains(inserted) &&
+                boolean pass = index < 8 || index >= 16 ? expected.equals(actual) : actual.contains(inserted) &&
                     actual.replace(inserted, "").equals(before) && "untouched".contentEquals(previousEditor.getText());
                 try {
                     cases.put(new org.json.JSONObject().put("index", index).put("passed", pass)
@@ -101,6 +103,28 @@ public final class TextInputProbeActivity extends android.app.Activity {
                 next();
             }, 1000);
         }, 250);
+    }
+
+    private void checkDelete() {
+        editor.setText("A😀B"); editor.requestFocus(); editor.setSelection(3);
+        handler.postDelayed(() -> {
+            if (!ownsInput()) { finishReport(false, "Foreground lost"); return; }
+            RemoteDeskAccessibilityService.deleteTextBeforeCursorFromAnyThread();
+            handler.postDelayed(() -> {
+                try { cases.put(new org.json.JSONObject().put("index",24).put("passed","AB".contentEquals(editor.getText()))); }
+                catch (org.json.JSONException e) { throw new IllegalStateException(e); }
+                editor.setText("ABC"); editor.setSelection(0,2);
+                handler.postDelayed(() -> {
+                    if (!ownsInput()) { finishReport(false,"Foreground lost"); return; }
+                    RemoteDeskAccessibilityService.deleteTextBeforeCursorFromAnyThread();
+                    handler.postDelayed(() -> {
+                        try { cases.put(new org.json.JSONObject().put("index",25).put("passed","C".contentEquals(editor.getText()))); }
+                        catch (org.json.JSONException e) { throw new IllegalStateException(e); }
+                        finishReport(true, "");
+                    },300);
+                },250);
+            },300);
+        },250);
     }
 
     private void finishReport(boolean completed, String failure) {

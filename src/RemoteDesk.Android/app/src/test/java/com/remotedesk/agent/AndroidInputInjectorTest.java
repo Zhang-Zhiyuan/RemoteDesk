@@ -6,6 +6,13 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public final class AndroidInputInjectorTest {
+    @Test public void desktopWheelSignBecomesTheOppositeFingerSwipe() {
+        org.junit.Assert.assertEquals(-1f, AndroidInputInjector.scrollFingerDirection(120), 0f);
+        org.junit.Assert.assertEquals(1f, AndroidInputInjector.scrollFingerDirection(-120), 0f);
+        org.junit.Assert.assertEquals(-1f, AndroidInputInjector.scrollFingerDirection(Integer.MAX_VALUE), 0f);
+        org.junit.Assert.assertEquals(1f, AndroidInputInjector.scrollFingerDirection(Integer.MIN_VALUE), 0f);
+        org.junit.Assert.assertEquals(0f, AndroidInputInjector.scrollFingerDirection(0), 0f);
+    }
     @Test public void typingAndNextClickWaitForThePreviousClickToFinish() {
         assertTrue(AndroidInputInjector.requiresCompletedPointerRelease(7));
         assertTrue(AndroidInputInjector.requiresCompletedPointerRelease(5));

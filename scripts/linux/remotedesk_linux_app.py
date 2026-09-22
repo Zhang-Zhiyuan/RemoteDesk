@@ -3849,6 +3849,21 @@ class ViewerConnection:
                 self.input_condition.notify()
             return queued
 
+    def send_android_navigation(self, virtual_key: int) -> bool:
+        """Queue a complete global-key pair only for this authenticated Android session."""
+        if virtual_key not in (0x1B, 0x24, 0x7B):
+            return False
+        with self.input_condition:
+            if (self.stop_event.is_set() or self.session is None or self.sock is None or
+                    str(getattr(self, "remote_device_info", {}).get("platform", "")).lower() != "android" or
+                    not self.remote_capabilities & CAPABILITY_INPUT_CONTROL or self.input_pressed_keys or
+                    len(self.pending_inputs) + 2 > INPUT_QUEUE_LIMIT):
+                return False
+            self.pending_inputs.extend((kind, encode_input(kind, data=virtual_key))
+                                       for kind in (INPUT_KEY_DOWN, INPUT_KEY_UP))
+            self.input_condition.notify()
+            return True
+
     def flush_pending_inputs(self, timeout_seconds: float = 0.2) -> bool:
         deadline = time.monotonic() + max(0.0, timeout_seconds)
         with self.input_condition:
@@ -7016,6 +7031,23 @@ class RemoteDeskLinuxApp:
         clipboard_bar.bind("<Configure>", update_clipboard_layout, add="+")
         clipboard_bar.after_idle(update_clipboard_layout)
         controls.pack(fill=tk.X)
+        phone_bar = ttk.Frame(footer, style="ViewerToolbar.TFrame", padding=(10, 4))
+        phone_buttons = []
+        for label, key in (("返回", 0x1B), ("主页", 0x24), ("最近任务", 0x7B)):
+            phone_buttons.append(ttk.Button(phone_bar, text=label, state=tk.DISABLED,
+                command=lambda key=key: self._send_android_navigation(key), style="Viewer.TButton"))
+        self.viewer_android_bar = phone_bar
+        self.viewer_android_buttons = phone_buttons
+        self.viewer_android_anchor = clipboard_bar
+        self.viewer_android_fallback_anchor = controls
+        def layout_phone_navigation(_event: Any = None) -> None:
+            available = max(1, phone_bar.winfo_width() - 20)
+            columns = max(1, min(3, available // max(button.winfo_reqwidth() + 6 for button in phone_buttons)))
+            for index, button in enumerate(phone_buttons):
+                phone_bar.columnconfigure(index, weight=1 if index < columns else 0)
+                button.grid(row=index // columns, column=index % columns, sticky=tk.EW, padx=(0, 6), pady=2)
+        phone_bar.bind("<Configure>", layout_phone_navigation, add="+")
+        self._update_viewer_android_navigation()
         entry = ttk.Entry(
             controls,
             textvariable=self.text_input,
@@ -7101,7 +7133,8 @@ class RemoteDeskLinuxApp:
             control_height = (max(entry.winfo_reqheight(), button_height) if mode == "wide" else
                               entry.winfo_reqheight() + 8 + (button_height if mode == "medium" else 3 * (button_height + 6))) + 16
             target_height = target_bar.winfo_reqheight() if target_bar.winfo_manager() else 0
-            if clip_height + control_height + status.winfo_reqheight() + target_height > max(140, window.winfo_height() * .45):
+            phone_height = phone_bar.winfo_reqheight() if phone_bar.winfo_manager() else 0
+            if clip_height + control_height + status.winfo_reqheight() + target_height + phone_height > max(140, window.winfo_height() * .45):
                 mode = "overflow"
             if mode == toolbar_layout_state["mode"]:
                 return
@@ -7229,6 +7262,10 @@ class RemoteDeskLinuxApp:
         self.viewer_target_programmatic_update = False
         self.viewer_window_send_file_button = None
         self.viewer_window_send_folder_button = None
+        self.viewer_android_bar = None
+        self.viewer_android_buttons = ()
+        self.viewer_android_anchor = None
+        self.viewer_android_fallback_anchor = None
         self.frame_label = None
         self.last_photo = None
         self.native_presenter_active = False
@@ -7391,6 +7428,7 @@ class RemoteDeskLinuxApp:
         return payload
 
     def _set_viewer_file_action_state(self, enabled: bool) -> None:
+        self._update_viewer_android_navigation()
         enabled = bool(enabled) and not getattr(
             self,
             "viewer_file_preview_active",
@@ -7410,6 +7448,38 @@ class RemoteDeskLinuxApp:
                 button.config(state=state)
             except tk.TclError:
                 pass
+
+    def _update_viewer_android_navigation(self) -> None:
+        bar = getattr(self, "viewer_android_bar", None)
+        if bar is None:
+            return
+        viewer = self.viewer
+        android = str(getattr(viewer, "remote_device_info", {}).get("platform", "")).lower() == "android"
+        enabled = android and self._viewer_has_capability(viewer, CAPABILITY_INPUT_CONTROL)
+        try:
+            for button in self.viewer_android_buttons:
+                button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+            if android and not bar.winfo_manager():
+                anchor = self.viewer_android_anchor
+                if not anchor.winfo_manager():
+                    anchor = self.viewer_android_fallback_anchor
+                bar.pack(fill=tk.X, before=anchor)
+            elif not android:
+                bar.pack_forget()
+        except tk.TclError:
+            pass
+
+    def _send_android_navigation(self, virtual_key: int) -> None:
+        viewer = self.viewer
+        if viewer is None:
+            self._set_viewer_status("手机导航不可用：未连接。")
+            return
+        self._release_pressed_viewer_inputs(flush=True, background_flush=True)
+        if self.viewer is viewer and viewer.send_android_navigation(virtual_key):
+            label = {0x1B: "返回", 0x24: "主页", 0x7B: "最近任务"}[virtual_key]
+            self._set_viewer_status("已请求远端手机" + label + "。")
+        else:
+            self._set_viewer_status("手机导航未发送：非安卓远端、仅观看、断线或输入队列繁忙。")
 
     @staticmethod
     def _viewer_has_capability(viewer: Any, capability: int) -> bool:

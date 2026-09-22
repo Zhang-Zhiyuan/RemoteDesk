@@ -4,6 +4,15 @@ import static org.junit.Assert.assertEquals;
 import org.junit.Test;
 
 public final class AndroidFocusedTextEditTest {
+    @org.junit.Test public void passwordFallbackNeverTreatsMaskAsTheOriginalPassword() {
+        org.junit.Assert.assertFalse(AndroidFocusedTextEdit.canReplacePassword("••••", false, 4, 4));
+        org.junit.Assert.assertFalse(AndroidFocusedTextEdit.canReplacePassword("••••", false, -1, -1));
+        org.junit.Assert.assertFalse(AndroidFocusedTextEdit.canReplacePassword("••••", false, 1, 3));
+        org.junit.Assert.assertTrue(AndroidFocusedTextEdit.canReplacePassword("••••", false, 0, 4));
+        org.junit.Assert.assertTrue(AndroidFocusedTextEdit.canReplacePassword("••••", false, 4, 0));
+        org.junit.Assert.assertTrue(AndroidFocusedTextEdit.canReplacePassword("", false, 0, 0));
+        org.junit.Assert.assertTrue(AndroidFocusedTextEdit.canReplacePassword("Hint", true, -1, -1));
+    }
     @Test public void emptyHintIsNotInsertedIntoTheField() {
         AndroidFocusedTextEdit edit = AndroidFocusedTextEdit.create("Remote text input target", true, -1, -1, "R", false);
         assertEquals("R", edit.text);

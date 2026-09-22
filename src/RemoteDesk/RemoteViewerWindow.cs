@@ -100,6 +100,9 @@ internal sealed partial class RemoteViewerWindow : Form
     private readonly Button _displayScaleButton;
     private readonly Button _experimentalUpscaleButton;
     private readonly Button _fullScreenButton;
+    private readonly Button _androidBackButton;
+    private readonly Button _androidHomeButton;
+    private readonly Button _androidRecentsButton;
     private readonly ProgressBar _remoteFilePullProgressBar;
     private readonly ToolTip _toolTip;
     private readonly ContextMenuStrip _statusMenu;
@@ -336,6 +339,9 @@ internal sealed partial class RemoteViewerWindow : Form
         _experimentalUpscaleButton = CreateStatusActionButton("新版放大：关");
         _experimentalUpscaleButton.AccessibleName = "新版放大（实验），关闭";
         _fullScreenButton = CreateStatusActionButton("全屏");
+        _androidBackButton = CreateAndroidNavigationButton("返回", Keys.Escape);
+        _androidHomeButton = CreateAndroidNavigationButton("主页", Keys.Home);
+        _androidRecentsButton = CreateAndroidNavigationButton("最近任务", Keys.F12);
         _fileTransferActionsPanel = new FlowLayoutPanel
         {
             Dock = DockStyle.Right,
@@ -347,6 +353,7 @@ internal sealed partial class RemoteViewerWindow : Form
             Margin = new Padding(0),
             Padding = new Padding(0)
         };
+        _fileTransferActionsPanel.Controls.AddRange([_androidBackButton, _androidHomeButton, _androidRecentsButton]);
         _fileTransferActionsPanel.Controls.Add(_pullRemoteFilesButton);
         _fileTransferActionsPanel.Controls.Add(_openReceivedFilesButton);
         _fileTransferActionsPanel.Controls.Add(
@@ -1613,6 +1620,7 @@ internal sealed partial class RemoteViewerWindow : Form
 
     private void UpdateRemoteInputMethodControls()
     {
+        UpdateAndroidNavigationControls();
         if (_remoteInputMethodButton.IsDisposed)
         {
             return;

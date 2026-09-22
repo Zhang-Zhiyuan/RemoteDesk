@@ -28,6 +28,7 @@ final class AndroidViewerChrome {
         void upscale();
         void diagnostics();
         void shortcut(int... keys);
+        void phoneNavigation(int key);
         boolean text(String text);
     }
 
@@ -40,6 +41,9 @@ final class AndroidViewerChrome {
     private boolean compact;
     private boolean compactKeys;
     private final HorizontalScrollView shortcutStrip;
+    private final HorizontalScrollView phoneNavigationStrip;
+    final Button phoneBack, phoneHome, phoneRecents;
+    private boolean androidRemote;
     private final LinearLayout entryRow;
     private final Button compactSwitch, compactClose;
     private boolean modeInitialized, previousTrackpad, previousLocked;
@@ -69,6 +73,20 @@ final class AndroidViewerChrome {
         hint.setPadding(0, dp(3), 0, dp(5));
         hint.setText("轻触点击 · 长按拖动 · 双指滚动 / 缩放");
         dock.addView(hint);
+
+        LinearLayout phoneRow = row();
+        phoneBack = button("返回", v -> actions.phoneNavigation(AndroidViewerNavigation.BACK));
+        phoneHome = button("主页", v -> actions.phoneNavigation(AndroidViewerNavigation.HOME));
+        phoneRecents = button("最近任务", v -> actions.phoneNavigation(AndroidViewerNavigation.RECENTS));
+        for (Button navigation : new Button[] {phoneBack, phoneHome, phoneRecents}) {
+            navigation.setContentDescription("远端手机" + navigation.getText());
+            navigation.setEnabled(false); weighted(phoneRow, navigation);
+        }
+        phoneNavigationStrip = scroll(phoneRow);
+        phoneNavigationStrip.setContentDescription("远端手机导航栏：返回、主页、最近任务");
+        phoneNavigationStrip.setHorizontalScrollBarEnabled(true);
+        phoneNavigationStrip.setVisibility(View.GONE);
+        dock.addView(phoneNavigationStrip);
 
         keyboardPanel = column(); keyboardPanel.setVisibility(View.GONE);
         LinearLayout shortcuts = row();
@@ -157,6 +175,8 @@ final class AndroidViewerChrome {
 
     void controls(boolean enabled) {
         keyboard.setEnabled(enabled); mouse.setEnabled(enabled);
+        for (Button navigation : new Button[] {phoneBack, phoneHome, phoneRecents})
+            navigation.setEnabled(enabled && androidRemote);
         composer.setEnabled(enabled);
         updateSendState();
         keyboardPanel.setAlpha(enabled ? 1 : 0.45f);
@@ -171,6 +191,7 @@ final class AndroidViewerChrome {
 
     void adapt(boolean smallHeight) {
         compact = smallHeight;
+        phoneNavigationStrip.setVisibility(androidRemote && !(smallHeight && keyboardOpen) ? View.VISIBLE : View.GONE);
         composer.setMaxLines(smallHeight ? 1 : 2);
         health.setVisibility(smallHeight ? View.GONE : View.VISIBLE);
         hint.setVisibility(smallHeight || keyboardOpen ? View.GONE : View.VISIBLE);
@@ -196,6 +217,13 @@ final class AndroidViewerChrome {
         if (params.width != width || params.height != ViewGroup.LayoutParams.WRAP_CONTENT || params.weight != weight) {
             view.setLayoutParams(new LinearLayout.LayoutParams(width, ViewGroup.LayoutParams.WRAP_CONTENT, weight));
         }
+    }
+
+    void phoneNavigation(String platform) {
+        androidRemote = AndroidViewerNavigation.isAndroid(platform);
+        for (Button navigation : new Button[] {phoneBack, phoneHome, phoneRecents})
+            navigation.setEnabled(androidRemote && composer.isEnabled());
+        adapt(compact);
     }
 
     void mode(boolean trackpad, boolean locked) {

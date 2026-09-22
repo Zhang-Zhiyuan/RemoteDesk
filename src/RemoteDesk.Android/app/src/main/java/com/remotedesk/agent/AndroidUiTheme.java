@@ -167,6 +167,16 @@ final class AndroidUiTheme {
         button.setElevation(0.0f);
     }
 
+    static void styleDeviceButton(Context context, Button button) {
+        // Native button backgrounds have vertical insets. Multiline device names
+        // and addresses need real padding, not just the single-line minimum height.
+        button.setSingleLine(false);
+        button.setMaxLines(Integer.MAX_VALUE);
+        button.setEllipsize(null);
+        button.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        button.setPadding(dp(context, 16), dp(context, 12), dp(context, 16), dp(context, 12));
+    }
+
     static void styleViewerDisconnectButton(Context context, Button button) {
         int[][] states = new int[][] {
             new int[] { android.R.attr.state_pressed },

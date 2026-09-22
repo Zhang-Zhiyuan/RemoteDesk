@@ -267,6 +267,7 @@ public final class RemoteDeskViewerActivity extends Activity {
             public void upscale() { toggleExperimentalUpscaling(); }
             public void diagnostics() { showDiagnostics(); }
             public void shortcut(int... keys) { sendKeyboard(null, keys); }
+            public void phoneNavigation(int key) { sendPhoneNavigation(key); }
             public boolean text(String text) { return sendKeyboard(text); }
         });
         statusView = chrome.status; healthView = chrome.health;
@@ -387,6 +388,22 @@ public final class RemoteDeskViewerActivity extends Activity {
             }
         }
         return sendKeyboardRaw(text, keys);
+    }
+
+    private void sendPhoneNavigation(int key) {
+        ViewerConnectionOwner owner = connectionOwner;
+        if (owner == null || !AndroidViewerNavigation.allowed(owner.remotePlatform, key)) {
+            toast("仅安卓远端支持手机导航"); return;
+        }
+        releaseViewerGesture();
+        boolean queued;
+        synchronized (owner.inputRoutingLock) {
+            queued = isCurrentConnectionOwner(owner) && canSendRemoteInput(owner) &&
+                AndroidViewerNavigation.allowed(owner.remotePlatform, key) &&
+                owner.inputQueue.offerKeyboardBatch(AndroidViewerKeyboard.shortcut(
+                    owner.mouseRouteGeneration.get(), owner.inputCapabilityGeneration.get(), key));
+        }
+        if (!queued) toast("手机导航未发送：连接已变化、仅观看或输入队列繁忙");
     }
 
     private boolean sendKeyboardRaw(String text, int... keys) {
@@ -1339,6 +1356,7 @@ public final class RemoteDeskViewerActivity extends Activity {
                     // DeviceInfo can refresh names/capabilities repeatedly. It
                     // must not release a held button unless input authority changed.
                     // Read the current authority here, not a stale queued snapshot.
+                    chrome.phoneNavigation(owner.remotePlatform);
                     chrome.controls(canSendRemoteInput(owner));
                     chrome.screens.setEnabled(captureTargets.length > 0 &&
                         (owner.remoteCapabilities.get() & RemoteDeskProtocol.CAPABILITY_CAPTURE_TARGET_SELECTION) != 0);
@@ -2478,6 +2496,7 @@ public final class RemoteDeskViewerActivity extends Activity {
                 captureTargets = new RemoteDeskTransport.CaptureTarget[0];
                 selectedTargetId = "";
                 chrome.controls(false);
+                chrome.phoneNavigation("");
                 chrome.screens.setEnabled(false);
                 owner.remoteGestureActive = false;
                 owner.lastMoveSentAt = 0L;

@@ -333,6 +333,10 @@ VIEWER_CODEC_NEGOTIATION_GRACE_SECONDS = 2.0
 H264_FIRST_ACCESS_UNIT_TIMEOUT_SECONDS = 1.5
 H264_MAX_BUFFER_BYTES = 8 * 1024 * 1024
 H264_STALE_FRAME_SECONDS = 0.5
+# A frame freshness limit is not an encoder failure deadline. Brief X11/GPU
+# scheduling pauses must not permanently blacklist a working NVENC encoder.
+# Keep the latest-only mailbox/freshness limit unchanged; this adds no buffering.
+H264_ENCODER_STALL_SECONDS = 2.0
 H264_HARDWARE_ENCODERS = (
     ("h264_nvenc", "NVIDIA NVENC"),
     ("h264_qsv", "Intel Quick Sync"),
@@ -2442,7 +2446,7 @@ class ContinuousHardwareH264Capture:
             MIN_H264_MAX_BITRATE_BPS,
             min(MAX_H264_MAX_BITRATE_BPS, int(max_bitrate_bps)),
         )
-        self.stale_frame_seconds = max(H264_STALE_FRAME_SECONDS, 3.0 / self.fps)
+        self.stall_timeout_seconds = max(H264_ENCODER_STALL_SECONDS, 3.0 / self.fps)
         self.mode = mode
         self.ffmpeg_path = shutil.which("ffmpeg")
         self.jetson_gstreamer_path: str | None = None
@@ -2473,8 +2477,8 @@ class ContinuousHardwareH264Capture:
             if self.closed or self.fps == normalized_fps:
                 return False
             self.fps = normalized_fps
-            self.stale_frame_seconds = max(
-                H264_STALE_FRAME_SECONDS,
+            self.stall_timeout_seconds = max(
+                H264_ENCODER_STALL_SECONDS,
                 3.0 / self.fps,
             )
             self.generation += 1
@@ -2585,7 +2589,7 @@ class ContinuousHardwareH264Capture:
                 or active_process is None
                 or active_process.poll() is not None
                 or self.latest_at <= 0.0
-                or checked_at - self.latest_at <= self.stale_frame_seconds
+                or checked_at - self.latest_at <= self.stall_timeout_seconds
             ):
                 return False
             process = active_process
@@ -2601,7 +2605,7 @@ class ContinuousHardwareH264Capture:
         self._terminate_process(process)
         log(
             f"{encoder_name} H.264 output stalled for more than "
-            f"{self.stale_frame_seconds:g}s; trying next hardware encoder."
+            f"{self.stall_timeout_seconds:g}s; trying next hardware encoder."
         )
         return True
 

@@ -28,4 +28,9 @@ final class AndroidFocusedTextEdit {
     private static int selection(int value, int length) {
         return value < 0 ? length : Math.min(value, length);
     }
+
+    static boolean canReplacePassword(CharSequence observed, boolean showingHint, int start, int end) {
+        int length = showingHint || observed == null ? 0 : observed.length();
+        return length == 0 || Math.min(start, end) == 0 && Math.max(start, end) == length;
+    }
 }

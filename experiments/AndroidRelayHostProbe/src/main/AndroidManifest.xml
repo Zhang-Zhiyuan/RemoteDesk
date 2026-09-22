@@ -17,6 +17,7 @@
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode" />
         <activity android:name="com.remotedesk.agent.InteractionProbeActivity" android:exported="true" />
         <activity android:name="com.remotedesk.agent.TextInputProbeActivity" android:exported="true" />
+        <activity android:name="com.remotedesk.agent.DeviceButtonProbeActivity" android:exported="true" />
         <activity android:name="com.remotedesk.agent.ClipboardProbeActivity" android:exported="true" />
         <activity android:name="com.remotedesk.agent.FileReceiveProbeActivity" android:exported="true" />
         <activity android:name="com.remotedesk.agent.RelayNameProbeActivity" android:exported="true" />

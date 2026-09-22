@@ -897,7 +897,7 @@ class LinuxLowLatencyPolicyTests(unittest.TestCase):
 
         self.assertTrue(
             capture.expire_stalled_encoder_if_needed(
-                10.0 + host.H264_STALE_FRAME_SECONDS + 0.001,
+                10.0 + host.H264_ENCODER_STALL_SECONDS + 0.001,
             )
         )
 
@@ -906,6 +906,41 @@ class LinuxLowLatencyPolicyTests(unittest.TestCase):
         self.assertIsNone(capture.process)
         self.assertIsNone(capture.selected_encoder_name)
         self.assertIsNone(capture.latest_frame)
+
+    def test_brief_encoder_pause_does_not_permanently_force_jpeg(self) -> None:
+        capture = host.ContinuousHardwareH264Capture(1280, 720, 30.0, "x11")
+        process = mock.Mock()
+        process.poll.return_value = None
+        capture.process = process
+        capture.selected_encoder_name = "h264_nvenc"
+        capture.latest_at = 10.0
+        for gap in (0.5, 0.75, 1.0, host.H264_ENCODER_STALL_SECONDS):
+            self.assertFalse(capture.expire_stalled_encoder_if_needed(10.0 + gap))
+        process.terminate.assert_not_called()
+        self.assertIs(capture.process, process)
+        self.assertEqual("h264_nvenc", capture.selected_encoder_name)
+
+    def test_encoder_grace_does_not_make_old_frames_fresh(self) -> None:
+        capture = host.ContinuousHardwareH264Capture(1280, 720, 30.0, "x11")
+        process = mock.Mock()
+        process.poll.return_value = None
+        capture.process = process
+        capture.selected_encoder_name = "h264_nvenc"
+        capture.latest_at = 10.0
+        capture.latest_frame = host.H264EncodedFrame(1280, 720, host.FRAME_FLAG_KEY_FRAME,
+            b"\x00\x00\x00\x01\x65", 7, "h264_nvenc")
+        with mock.patch.object(host.time, "monotonic", return_value=10.75):
+            self.assertIsNone(capture.read_frame(0.0, 6))
+        process.terminate.assert_not_called()
+        with mock.patch.object(host.time, "monotonic", return_value=10.8):
+            capture.latest_at = 10.79
+            self.assertIs(capture.latest_frame, capture.read_frame(0.0, 6))
+
+    def test_encoder_stall_grace_tracks_low_fps_and_fps_changes(self) -> None:
+        capture = host.ContinuousHardwareH264Capture(1280, 720, 1.0, "x11")
+        self.assertEqual(3.0, capture.stall_timeout_seconds)
+        capture.update_fps(30.0)
+        self.assertEqual(host.H264_ENCODER_STALL_SECONDS, capture.stall_timeout_seconds)
 
     def test_dead_active_encoder_is_treated_as_failover_pending(self) -> None:
         capture = host.ContinuousHardwareH264Capture(1280, 720, 30.0, "x11")

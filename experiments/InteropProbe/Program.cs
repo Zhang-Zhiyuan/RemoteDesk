@@ -314,6 +314,9 @@ internal static class Program
         public Target(JsonElement config, string output)
         {
             this.config = config; this.output = output;
+            // The isolated host must advertise the same temporary identity as
+            // its relay registration. Never change the installed app's identity.
+            if (RelayOptions(config) is { } testRelay) RemoteDeviceIdentity.LocalId = testRelay.DeviceId;
             target = ScreenCaptureService.GetAvailableTargets().First(t => t.IsPrimary && !t.IsAllScreens);
             AutoScaleMode = AutoScaleMode.None; FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual; Bounds = target.Bounds;

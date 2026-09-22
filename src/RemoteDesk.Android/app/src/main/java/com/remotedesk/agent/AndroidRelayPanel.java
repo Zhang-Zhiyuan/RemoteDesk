@@ -44,6 +44,9 @@ final class AndroidRelayPanel extends LinearLayout {
     private AlertDialog nameDialog;
     private volatile int epoch;
     private long lastRefresh;
+    private List<AndroidRelay.Device> displayedDevices = java.util.Collections.emptyList();
+    private AndroidRelay.Options displayedOptions;
+    private int displayedEpoch = -1;
     private final Runnable ticker = new Runnable() {
         @Override public void run() {
             if (!active || closed) return;
@@ -392,7 +395,10 @@ final class AndroidRelayPanel extends LinearLayout {
         busy = true; lastRefresh = System.currentTimeMillis();
         final int generation = epoch;
         final AndroidRelay.Options options = saved;
-        devices.removeAllViews(); setStatus("正在读取在线设备……");
+        // Keep the current rows while the request is in flight. Clearing them
+        // here shrinks the enclosing ScrollView, clamps its offset and moves the
+        // device under the user's finger every time the timer refreshes.
+        if (devices.getChildCount() == 0) setStatus("正在读取在线设备……");
         worker.execute(() -> {
             List<AndroidRelay.Device> result = null;
             String identityError = null;
@@ -415,11 +421,20 @@ final class AndroidRelayPanel extends LinearLayout {
                     return;
                 }
                 setStatus(getContext().getString(R.string.relay_online_count, online.size()));
+                if (displayedOptions == options && displayedEpoch == generation &&
+                    devices.getChildCount() > 0 && AndroidRelayDeviceList.same(displayedDevices, online)) return;
+                // Replace a changed snapshot in one UI task; unchanged snapshots
+                // retain their views, keyboard/accessibility focus and touch state.
+                devices.removeAllViews();
+                displayedDevices = new java.util.ArrayList<>(online);
+                displayedOptions = options;
+                displayedEpoch = generation;
                 for (AndroidRelay.Device device : online) {
                     boolean local = device.deviceId.equals(deviceId);
                     Button item = button(device.name + " · " + device.platform + "\n" +
                         (local ? "本机（不可自连）" : device.busy ? "使用中（可接管）" : "在线 · 点击中转连接") +
                         "\n" + device.addressDisplay(), false);
+                    AndroidUiTheme.styleDeviceButton(getContext(), item);
                     item.setEnabled(!local);
                     item.setOnClickListener(view -> {
                         if (!closed && active && !setupBusy && epoch == generation && saved == options)

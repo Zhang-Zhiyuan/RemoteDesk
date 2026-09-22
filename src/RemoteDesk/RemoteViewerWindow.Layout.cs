@@ -13,7 +13,10 @@ internal sealed partial class RemoteViewerWindow
         more.ContextMenuStrip = _statusMenu;
         _toolTip.SetToolTip(more, "窗口较窄，其他操作在这里；右键可查看状态与放大算法设置。");
         _statusActionOverflow = new ViewerActionOverflow(_fileTransferActionsPanel, more,
-            [(_pullRemoteFilesButton, async () => await PullRemoteClipboardFilesAsync()),
+            [(_androidBackButton, async () => await SendAndroidNavigationAsync(Keys.Escape)),
+             (_androidHomeButton, async () => await SendAndroidNavigationAsync(Keys.Home)),
+             (_androidRecentsButton, async () => await SendAndroidNavigationAsync(Keys.F12)),
+             (_pullRemoteFilesButton, async () => await PullRemoteClipboardFilesAsync()),
              (_openReceivedFilesButton, OpenReceivedFilesDirectory),
              (_remoteInputMethodButton, async () => await SwitchRemoteInputMethodAsync()),
              (_switchCaptureTargetButton, async () => await SwitchCaptureTargetAsync()),
@@ -21,7 +24,8 @@ internal sealed partial class RemoteViewerWindow
              (_experimentalUpscaleButton, ToggleExperimentalUpscaling),
              (_nativeDetailButton, async () => await ToggleNativeDetailsAsync()),
              (_fullScreenButton, ToggleFullScreen)],
-            [[_displayScaleButton, _experimentalUpscaleButton], [_fullScreenButton], [_switchCaptureTargetButton],
+            [[_androidBackButton], [_androidHomeButton], [_androidRecentsButton],
+             [_displayScaleButton, _experimentalUpscaleButton], [_fullScreenButton], [_switchCaptureTargetButton],
              [_pullRemoteFilesButton, _openReceivedFilesButton], [_remoteInputMethodButton], [_nativeDetailButton]],
             ReleaseAllRemoteInputs);
         FontChanged += (_, _) => QueueStatusFooterLayout(refreshMetrics: true);
