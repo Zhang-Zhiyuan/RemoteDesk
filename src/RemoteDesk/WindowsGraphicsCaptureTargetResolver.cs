@@ -20,7 +20,8 @@ internal sealed record WindowsGraphicsMonitorIdentity(
 
 internal sealed record WindowsGraphicsOutputIdentity(
     int OutputIndex,
-    nint MonitorHandle);
+    nint MonitorHandle,
+    ModeRotation Rotation = ModeRotation.Identity);
 
 internal sealed record WindowsGraphicsAdapterIdentity(
     int AdapterIndex,
@@ -34,7 +35,14 @@ internal sealed record WindowsDesktopDuplicationTarget(
     uint AdapterVendorId,
     string AdapterDescription,
     string DeviceName,
-    Rectangle Bounds);
+    Rectangle Bounds,
+    ModeRotation Rotation = ModeRotation.Identity)
+{
+    // DXGI supplies an unrotated texture. FFmpeg's scale_d3d11 does not
+    // apply the desktop rotation, so only identity outputs can use this
+    // direct path. WGC and the exact-coordinate GDI fallback are upright.
+    public bool CanCaptureWithoutRotation => Rotation == ModeRotation.Identity;
+}
 
 internal static class WindowsGraphicsCaptureTargetResolver
 {
@@ -245,7 +253,8 @@ internal static class WindowsGraphicsCaptureTargetResolver
                 owningAdapter.VendorId,
                 owningAdapter.Description,
                 monitor.DeviceName,
-                monitor.Bounds);
+                monitor.Bounds,
+                owningOutput.Rotation);
 
         // gfxcapture can create its D3D11 frame pool on a render adapter
         // that does not own the selected monitor. The measured hybrid
@@ -363,10 +372,12 @@ internal static class WindowsGraphicsCaptureTargetResolver
 
                     using (output)
                     {
+                        OutputDescription outputDescription = output.Description;
                         outputs.Add(
                             new WindowsGraphicsOutputIdentity(
                                 checked((int)outputIndex),
-                                output.Description.Monitor));
+                                outputDescription.Monitor,
+                                outputDescription.Rotation));
                     }
                 }
 

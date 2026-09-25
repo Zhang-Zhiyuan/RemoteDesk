@@ -190,6 +190,15 @@ internal sealed class FfmpegH264Decoder : IDisposable
     private static readonly byte[] AccessUnitBoundary =
         [0x00, 0x00, 0x00, 0x01, 0x09, 0xF0];
     private static readonly TimeSpan DecodeTimeout = TimeSpan.FromMilliseconds(250);
+    // A cold process must initialize the decoder and, above 1080p, the
+    // high-quality MJPEG bridge before its first output. Native 4K
+    // portrait desktops cannot use the inbox MF height-limited path, and
+    // their valid first output can take longer than the steady-state budget.
+    // These are deadlines, not delays: the first successful backend wins
+    // immediately. The >1080p MJPEG bridge also needs a bounded allowance
+    // for its extra encode/decode work under load; raw 1080p stays at 250 ms.
+    private static readonly TimeSpan StartupDecodeTimeout = TimeSpan.FromMilliseconds(1500);
+    private static readonly TimeSpan LargeFrameDecodeTimeout = TimeSpan.FromMilliseconds(500);
     private const int DisposeWaitMilliseconds = 500;
     private const int ProbeTimeoutMilliseconds = 1500;
     private const int ErrorTailLength = 2048;
@@ -207,6 +216,9 @@ internal sealed class FfmpegH264Decoder : IDisposable
     private readonly FfmpegH264BackendCacheKey _cacheKey;
     private readonly int _rawFrameByteCount;
     private readonly CancellationTokenSource _cancellationTokenSource = new();
+    // Losing/failing the software candidate must not cancel the other
+    // hardware candidates. Only disposal owns the whole decoder race.
+    private readonly CancellationTokenSource _lifetimeCancellationTokenSource = new();
     private readonly SemaphoreSlim _frameSignal = new(0);
     private readonly SemaphoreSlim _transactionGate = new(1, 1);
     private readonly SemaphoreSlim _selectionGate = new(1, 1);
@@ -222,6 +234,7 @@ internal sealed class FfmpegH264Decoder : IDisposable
     private int _backendDisposeState;
     private int _disposeState;
     private bool _hasWrittenAccessUnit;
+    private int _hasDecodedFrame;
 
     private FfmpegH264Decoder(
         Process process,
@@ -270,6 +283,12 @@ internal sealed class FfmpegH264Decoder : IDisposable
     }
 
     internal static TimeSpan DecodeWaitTimeout => DecodeTimeout;
+
+    internal static TimeSpan GetDecodeWaitTimeout(bool hasDecodedFrame, Size frameSize = default) =>
+        !hasDecodedFrame ? StartupDecodeTimeout :
+        (long)frameSize.Width * frameSize.Height > MaxBgraRawPixels
+            ? LargeFrameDecodeTimeout
+            : DecodeTimeout;
 
     internal static IReadOnlyList<FfmpegH264Backend>
         HardwareRaceBackends => HardwareBackendCandidates;
@@ -867,7 +886,7 @@ internal sealed class FfmpegH264Decoder : IDisposable
         try
         {
             await _selectionGate.WaitAsync(
-                _cancellationTokenSource.Token).ConfigureAwait(false);
+                _lifetimeCancellationTokenSource.Token).ConfigureAwait(false);
             entered = true;
             winner = Volatile.Read(ref _winner);
             if (winner is not null)
@@ -961,11 +980,11 @@ internal sealed class FfmpegH264Decoder : IDisposable
         }
 
         using var raceTimeout =
-            new CancellationTokenSource(DecodeTimeout);
+            new CancellationTokenSource(GetDecodeWaitTimeout(hasDecodedFrame: false));
         using var linkedRaceTimeout =
             CancellationTokenSource.CreateLinkedTokenSource(
                 raceTimeout.Token,
-                _cancellationTokenSource.Token);
+                _lifetimeCancellationTokenSource.Token);
         FfmpegH264RaceWinner? raceWinner;
         try
         {
@@ -975,6 +994,11 @@ internal sealed class FfmpegH264Decoder : IDisposable
         }
         catch (OperationCanceledException)
         {
+            if (raceTimeout.IsCancellationRequested)
+            {
+                AppendErrorText("ffmpeg 首帧解码启动超时（1500 ms）。");
+            }
+
             ScheduleRaceLoserCleanup(
                 candidateTasks,
                 decodeTasks,
@@ -984,6 +1008,7 @@ internal sealed class FfmpegH264Decoder : IDisposable
 
         if (raceWinner is null)
         {
+            AppendErrorText("ffmpeg 首帧解码失败：没有可用后端返回完整画面。");
             ScheduleRaceLoserCleanup(
                 candidateTasks,
                 decodeTasks,
@@ -1178,7 +1203,9 @@ internal sealed class FfmpegH264Decoder : IDisposable
             return FfmpegH264DecodeResult.Failed(submissionId);
         }
 
-        using var timeout = new CancellationTokenSource(DecodeTimeout);
+        bool hasDecodedFrame = Volatile.Read(ref _hasDecodedFrame) != 0;
+        TimeSpan waitTimeout = GetDecodeWaitTimeout(hasDecodedFrame, _frameSize);
+        using var timeout = new CancellationTokenSource(waitTimeout);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(
             timeout.Token,
             _cancellationTokenSource.Token);
@@ -1206,14 +1233,33 @@ internal sealed class FfmpegH264Decoder : IDisposable
                 cancellationToken => _process.StandardInput.BaseStream.FlushAsync(cancellationToken),
                 TakeDecodedFrameOrWaitAsync,
                 DesynchronizeBridge).ConfigureAwait(false);
+            if (result?.Status == FfmpegH264DecodeStatus.Frame)
+            {
+                Volatile.Write(ref _hasDecodedFrame, 1);
+            }
+            else if (timeout.IsCancellationRequested)
+            {
+                AppendDecodeTimeout(hasDecodedFrame, waitTimeout);
+            }
+
             return result ?? FfmpegH264DecodeResult.Failed(submissionId);
         }
         catch (Exception ex) when (IsDecoderBridgeFailure(ex))
         {
+            if (timeout.IsCancellationRequested)
+            {
+                AppendDecodeTimeout(hasDecodedFrame, waitTimeout);
+            }
+
             DesynchronizeBridge();
             return FfmpegH264DecodeResult.Failed(submissionId);
         }
     }
+
+    private void AppendDecodeTimeout(bool hasDecodedFrame, TimeSpan waitTimeout) =>
+        AppendErrorText(
+            $"ffmpeg {(hasDecodedFrame ? "画面" : "首帧启动")}解码超时" +
+            $"（{waitTimeout.TotalMilliseconds:0} ms）。");
 
     internal static async Task<T?> ExecuteDecodeTransactionAsync<T>(
         SemaphoreSlim transactionGate,
@@ -1324,6 +1370,7 @@ internal sealed class FfmpegH264Decoder : IDisposable
 
         IReadOnlyList<Task<FfmpegH264Decoder?>>?
             candidateTasks = _raceCandidateTasks;
+        _lifetimeCancellationTokenSource.Cancel();
         if (candidateTasks is not null)
         {
             foreach (Task<FfmpegH264Decoder?> candidateTask in
@@ -1337,6 +1384,7 @@ internal sealed class FfmpegH264Decoder : IDisposable
 
         DisposeOwnBackendResources();
         _selectionGate.Dispose();
+        _lifetimeCancellationTokenSource.Dispose();
     }
 
     private static async Task DisposeCreatedCandidateAsync(

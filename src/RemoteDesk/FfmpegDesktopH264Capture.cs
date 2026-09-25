@@ -3026,6 +3026,12 @@ internal sealed class FfmpegDesktopH264Capture : IDisposable
                     "indices must be non-negative.";
             }
 
+            if (!duplicationTarget.CanCaptureWithoutRotation)
+            {
+                return "The direct DDA scaler cannot rotate this desktop; " +
+                    "use Windows Graphics Capture or exact-coordinate GDI capture.";
+            }
+
             if (string.IsNullOrWhiteSpace(
                     duplicationTarget.DeviceName))
             {

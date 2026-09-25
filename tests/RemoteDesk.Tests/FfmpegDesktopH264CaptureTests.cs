@@ -9,6 +9,27 @@ namespace RemoteDesk.Tests;
 
 public sealed class FfmpegDesktopH264CaptureTests
 {
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    [InlineData(2, false)]
+    [InlineData(3, false)]
+    [InlineData(4, false)]
+    public void DxgiResolverRetainsRotationWithoutDisablingUprightWgc(int rotation, bool directDdaAllowed)
+    {
+        var bounds = new Rectangle(-2160, 0, 2160, 3840);
+        WindowsGraphicsMonitorIdentity[] monitors = [new(0, new nint(321), @"\\.\DISPLAY2", bounds)];
+        WindowsGraphicsAdapterIdentity[] adapters = [new(0,
+            FfmpegDesktopH264Capture.NvidiaVendorId, "NVIDIA",
+            [new(1, new nint(321), (Vortice.DXGI.ModeRotation)rotation)])];
+        Assert.True(WindowsGraphicsCaptureTargetResolver.TryResolveCandidatesFromInventory(
+            @"\\.\DISPLAY2", bounds, monitors, adapters, out var wgc, out var dda, out string failure), failure);
+        Assert.Single(wgc);
+        Assert.NotNull(dda);
+        Assert.Equal((Vortice.DXGI.ModeRotation)rotation, dda.Rotation);
+        Assert.Equal(directDdaAllowed, dda.CanCaptureWithoutRotation);
+    }
+
     [Fact]
     public void CaptureProcessLeavesInteractionThreadsWithPriorityHeadroom()
     {

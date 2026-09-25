@@ -204,6 +204,7 @@ internal sealed partial class RemoteHostServer : IDisposable
         ArgumentNullException.ThrowIfNull(target);
         return !target.IsAllScreens &&
             resolvedTarget is not null &&
+            resolvedTarget.CanCaptureWithoutRotation &&
             resolvedTarget.AdapterIndex >= 0 &&
             resolvedTarget.OutputIndex >= 0 &&
             string.Equals(
@@ -266,7 +267,9 @@ internal sealed partial class RemoteHostServer : IDisposable
         ArgumentNullException.ThrowIfNull(graphicsCaptureTargets);
         WindowsDesktopDuplicationTarget?
             desktopDuplicationTarget =
-                options.DesktopDuplicationTarget;
+                options.DesktopDuplicationTarget is { CanCaptureWithoutRotation: true } unrotated
+                    ? unrotated
+                    : null;
         var attempts =
             new List<FfmpegDesktopH264CaptureOptions>();
 

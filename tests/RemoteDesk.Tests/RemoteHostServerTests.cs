@@ -2038,6 +2038,35 @@ public sealed class RemoteHostServerTests
             null));
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public void RotatedOrUnknownOutputSkipsUnrotatedDdaFallback(int rotation)
+    {
+        Rectangle bounds = new(-2160, 0, 2160, 3840);
+        var screen = new ScreenCaptureTarget("\\\\.\\DISPLAY2", "Portrait", bounds);
+        var dda = new WindowsDesktopDuplicationTarget(0, 1,
+            FfmpegDesktopH264Capture.NvidiaVendorId, "NVIDIA", screen.Id, bounds,
+            (Vortice.DXGI.ModeRotation)rotation);
+        var wgc = new WindowsGraphicsCaptureTarget(0, 0,
+            FfmpegDesktopH264Capture.NvidiaVendorId, "NVIDIA", screen.Id, bounds);
+        Assert.False(RemoteHostServer.CanUseDesktopDuplication(screen, dda));
+        var options = new FfmpegDesktopH264CaptureOptions(
+            FfmpegDesktopCaptureBackend.WindowsGraphicsCaptureMonitor, bounds, bounds.Size, 30,
+            GraphicsCaptureTarget: wgc, DesktopDuplicationTarget: dda);
+        var attempts = RemoteHostServer.CreateHardwareH264StartupOptions(options, [wgc], 30);
+        Assert.Equal(new[] { FfmpegDesktopCaptureBackend.WindowsGraphicsCaptureMonitor,
+            FfmpegDesktopCaptureBackend.GdiGrabBounds }, attempts.Select(a => a.Backend));
+        Assert.All(attempts, a => Assert.Equal(bounds.Size, a.OutputSize));
+        var ddaOptions = options with { Backend = FfmpegDesktopCaptureBackend.DesktopDuplicationOutput0 };
+        Assert.Single(RemoteHostServer.CreateHardwareH264StartupOptions(ddaOptions, [], 30),
+            a => a.Backend == FfmpegDesktopCaptureBackend.GdiGrabBounds);
+        Assert.Throws<ArgumentException>(() => FfmpegDesktopH264Capture.BuildArguments(
+            ddaOptions, FfmpegH264Encoder.MediaFoundation));
+    }
+
     [Fact]
     public void DesktopDuplicationRejectsStaleOrDifferentDisplayMapping()
     {

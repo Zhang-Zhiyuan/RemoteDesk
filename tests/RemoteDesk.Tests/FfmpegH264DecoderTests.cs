@@ -456,6 +456,99 @@ public sealed class FfmpegH264DecoderTests
     }
 
     [Fact]
+    public void ColdDecoderGetsStartupBudgetWithoutRelaxingSteadyStateDeadline()
+    {
+        Assert.Equal(TimeSpan.FromMilliseconds(1500),
+            FfmpegH264Decoder.GetDecodeWaitTimeout(hasDecodedFrame: false));
+        Assert.Equal(TimeSpan.FromMilliseconds(250),
+            FfmpegH264Decoder.GetDecodeWaitTimeout(hasDecodedFrame: true));
+    }
+
+    [Theory]
+    [InlineData(1920, 1080, 250)]
+    [InlineData(1080, 1920, 250)]
+    [InlineData(2160, 3840, 500)]
+    [InlineData(3840, 2160, 500)]
+    public void LargeFrameBridgeHasBoundedBudgetWithoutChanging1080p(int width, int height, int milliseconds)
+    {
+        var size = new Size(width, height);
+        Assert.Equal(TimeSpan.FromMilliseconds(milliseconds),
+            FfmpegH264Decoder.GetDecodeWaitTimeout(hasDecodedFrame: true, size));
+        Assert.Equal(TimeSpan.FromMilliseconds(1500),
+            FfmpegH264Decoder.GetDecodeWaitTimeout(hasDecodedFrame: false, size));
+    }
+
+    [Fact]
+    public async Task RealFfmpegPortrait4KColdAndWarmFramesDecodeWhenAvailable()
+    {
+        string? ffmpegPath = FfmpegH264Decoder.AvailablePath;
+        if (string.IsNullOrWhiteSpace(ffmpegPath)) return;
+
+        var startInfo = new ProcessStartInfo(ffmpegPath)
+        {
+            UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardOutput = true, RedirectStandardError = true
+        };
+        foreach (string argument in new[]
+        {
+            "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+            "-i", "testsrc2=size=2160x3840:rate=1", "-frames:v", "1",
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+            "-threads", "2", "-g", "1", "-pix_fmt", "yuv420p", "-f", "h264", "pipe:1"
+        }) startInfo.ArgumentList.Add(argument);
+
+        using var process = Process.Start(startInfo) ??
+            throw new InvalidOperationException("ffmpeg did not start.");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        using var encoded = new MemoryStream();
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await Task.WhenAll(
+                process.StandardOutput.BaseStream.CopyToAsync(encoded, deadline.Token),
+                process.WaitForExitAsync(deadline.Token));
+            Assert.True(process.ExitCode == 0, await stderr);
+            Assert.InRange(encoded.Length, 1, 8 * 1024 * 1024);
+            using FfmpegH264Decoder? decoder =
+                FfmpegH264Decoder.TryCreate(new Size(2160, 3840));
+            Assert.NotNull(decoder);
+            for (long submission = 1; submission <= 2; submission++)
+            {
+                FfmpegH264DecodeResult result = await decoder.DecodeAsync(
+                    submission, encoded.GetBuffer().AsMemory(0, checked((int)encoded.Length)))
+                    .WaitAsync(deadline.Token);
+                using Bitmap? bitmap = result.Bitmap;
+                Assert.True(result.Status == FfmpegH264DecodeStatus.Frame, decoder.FailureDetail);
+                Assert.Equal(submission, result.SubmissionId);
+                Assert.NotNull(bitmap);
+                Assert.Equal(new Size(2160, 3840), bitmap.Size);
+                Assert.True(decoder.IsRunning, decoder.FailureDetail);
+            }
+        }
+        finally
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+        }
+    }
+
+    [Fact]
+    public async Task RealFfmpegIncompleteStartupReportsFailureWhenAvailable()
+    {
+        if (string.IsNullOrWhiteSpace(FfmpegH264Decoder.AvailablePath)) return;
+        using FfmpegH264Decoder? decoder = FfmpegH264Decoder.TryCreate(new Size(64, 64));
+        Assert.NotNull(decoder);
+        // An AUD without a picture cannot produce an output frame, but must
+        // still hit a bounded startup deadline and explain the failure.
+        FfmpegH264DecodeResult result = await decoder.DecodeAsync(
+            1, new byte[] { 0, 0, 0, 1, 9, 0xF0 }).WaitAsync(TimeSpan.FromSeconds(5));
+        using Bitmap? bitmap = result.Bitmap;
+        Assert.Equal(FfmpegH264DecodeStatus.Failed, result.Status);
+        Assert.Null(bitmap);
+        Assert.False(string.IsNullOrWhiteSpace(decoder.FailureDetail));
+    }
+
+    [Fact]
     public async Task WriteAccessUnitAppendsAudBoundaryBeforeFlush()
     {
         await using var stream = new MemoryStream();
