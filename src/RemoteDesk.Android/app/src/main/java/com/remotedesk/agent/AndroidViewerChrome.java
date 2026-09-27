@@ -32,11 +32,11 @@ final class AndroidViewerChrome {
         boolean text(String text);
     }
 
-    final LinearLayout header, dock, mainRow, keyboardPanel, mousePanel;
+    final LinearLayout header, dock, mainRow, mainBar, keyboardPanel, mousePanel;
     final TextView status, health, hint;
     final View indicator;
     final EditText composer;
-    final Button mode, keyboard, mouse, drag, screens, send, upscale;
+    final Button mode, keyboard, mouse, drag, screens, send, upscale, more;
     boolean keyboardOpen, mouseOpen;
     private boolean compact;
     private boolean compactKeys;
@@ -149,7 +149,7 @@ final class AndroidViewerChrome {
         weighted(mainRow, button("缩放", v -> actions.zoom()));
         upscale = button("新版放大：关", v -> actions.upscale());
         weighted(mainRow, upscale);
-        weighted(mainRow, button("更多", v -> actions.more()));
+        more = button("更多", v -> actions.more());
         // Keep usable hit targets on split-screen/small displays and with large
         // system fonts. A weighted, fixed-width row used to squash five buttons
         // to a few pixels; an overflow strip preserves their natural widths.
@@ -157,7 +157,14 @@ final class AndroidViewerChrome {
         mainStrip.setHorizontalScrollBarEnabled(true);
         mainStrip.setScrollbarFadingEnabled(false);
         mainStrip.setContentDescription("远程操作栏，左右滑动可查看所有按钮");
-        dock.addView(mainStrip);
+        // Keep the menu reachable even when the other commands overflow or a
+        // system navigation gesture intercepts a swipe near the bottom edge.
+        mainBar = row();
+        mainBar.addView(mainStrip, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams menuParams = new LinearLayout.LayoutParams(-2, -2);
+        menuParams.setMargins(dp(4), dp(2), dp(2), dp(2));
+        mainBar.addView(more, menuParams);
+        dock.addView(mainBar);
     }
 
     void keyboard(boolean open) {
@@ -195,7 +202,7 @@ final class AndroidViewerChrome {
         composer.setMaxLines(smallHeight ? 1 : 2);
         health.setVisibility(smallHeight ? View.GONE : View.VISIBLE);
         hint.setVisibility(smallHeight || keyboardOpen ? View.GONE : View.VISIBLE);
-        mainRow.setVisibility(smallHeight && keyboardOpen ? View.GONE : View.VISIBLE);
+        mainBar.setVisibility(smallHeight && keyboardOpen ? View.GONE : View.VISIBLE);
         // Landscape IMEs can use most of the screen. Keep this dock to one
         // 48dp row, swapping text/shortcuts instead of covering the desktop.
         keyboardPanel.setOrientation(smallHeight ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);

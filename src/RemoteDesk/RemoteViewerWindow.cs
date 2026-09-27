@@ -184,6 +184,8 @@ internal sealed partial class RemoteViewerWindow : Form
     private long _directFrameUiSignature = long.MinValue;
     private RemoteFrameEncoding? _lastRenderedEncoding;
     private string _lastRenderedDecoderBackend = string.Empty;
+    // UI-thread owned. Only a video-recovery message may be cleared by a frame.
+    private bool _videoRecoveryStatusPending;
     private int _h264DecodeMisses;
     private long _lastMouseMoveAt;
     private long _lastFileDragStatusAt;
@@ -3275,7 +3277,7 @@ internal sealed partial class RemoteViewerWindow : Form
                                 ? string.Empty
                                 : $"（{TrimDiagnosticDetail(
                                     directDecode.FailureDetail)}）";
-                        OnUi(() => SetStatus(
+                        OnUi(() => SetVideoRecoveryStatus(
                             $"MF/D3D11 硬解失步，正在等待关键帧{detail}",
                             DangerTextColor));
                         continue;
@@ -3290,7 +3292,7 @@ internal sealed partial class RemoteViewerWindow : Form
                         DisableMediaFoundationDirectPath();
                         PrepareForH264DecoderRecovery();
                         RequestH264KeyFrameIfDue();
-                        OnUi(() => SetStatus(
+                        OnUi(() => SetVideoRecoveryStatus(
                             "硬解失效，等待恢复帧后切换软件解码",
                             DangerTextColor));
                         continue;
@@ -3319,14 +3321,14 @@ internal sealed partial class RemoteViewerWindow : Form
                                 _ = _client.UpdateViewerVideoCodecsAsync(RemoteVideoCodecs.Jpeg);
                             }
 
-                            OnUi(() => SetStatus(
+                            OnUi(() => SetVideoRecoveryStatus(
                                 "MF/D3D11 与 ffmpeg 均不可用，" +
                                     "正在请求 JPEG 通道",
                                 DangerTextColor));
                         }
                         else
                         {
-                            OnUi(() => SetStatus(
+                            OnUi(() => SetVideoRecoveryStatus(
                                 "强制 H.264 模式下 MF/D3D11 与 " +
                                     "ffmpeg 均不可用，且不会回退 JPEG",
                                 DangerTextColor));
@@ -3392,7 +3394,7 @@ internal sealed partial class RemoteViewerWindow : Form
                 }
                 else
                 {
-                    OnUi(() => SetStatus($"暂不支持的画面编码：{FormatFrameEncoding(frame.Encoding)}", DangerTextColor));
+                    OnUi(() => SetVideoRecoveryStatus($"暂不支持的画面编码：{FormatFrameEncoding(frame.Encoding)}", DangerTextColor));
                     continue;
                 }
 
@@ -3422,7 +3424,7 @@ internal sealed partial class RemoteViewerWindow : Form
                     return;
                 }
 
-                OnUi(() => SetStatus($"画面渲染失败，等待下一帧：{ex.Message}", DangerTextColor));
+                OnUi(() => SetVideoRecoveryStatus($"画面渲染失败，等待下一帧：{ex.Message}", DangerTextColor));
             }
             finally
             {
@@ -3462,7 +3464,7 @@ internal sealed partial class RemoteViewerWindow : Form
                 "VIEWER",
                 "H.264 解码连续无画面，已请求 JPEG 回退。");
             ResetH264Decoder();
-            OnUi(() => SetStatus(fallbackStatus, DangerTextColor));
+            OnUi(() => SetVideoRecoveryStatus(fallbackStatus, DangerTextColor));
             _ = _client.UpdateViewerVideoCodecsAsync(
                 RemoteVideoCodecs.Jpeg);
             return;
@@ -3480,7 +3482,7 @@ internal sealed partial class RemoteViewerWindow : Form
             string status = _client.AllowVideoFallback
                 ? $"H.264 解码失步，正在重建并等待关键帧{decoderFailure}"
                 : $"强制 H.264 模式下解码失步，正在重建并等待关键帧{decoderFailure}";
-            OnUi(() => SetStatus(status, DangerTextColor));
+            OnUi(() => SetVideoRecoveryStatus(status, DangerTextColor));
             return;
         }
 
@@ -3491,7 +3493,7 @@ internal sealed partial class RemoteViewerWindow : Form
             RequestH264KeyFrameIfDue();
             if (fallbackThresholdReached && !_client.AllowVideoFallback)
             {
-                OnUi(() => SetStatus(
+                OnUi(() => SetVideoRecoveryStatus(
                     "强制 H.264 模式下连续无画面，已请求关键帧",
                     DangerTextColor));
             }
@@ -4848,7 +4850,7 @@ internal sealed partial class RemoteViewerWindow : Form
             {
                 try
                 {
-                    SetStatus($"画面显示失败，等待下一帧：{ex.Message}", DangerTextColor);
+                    SetVideoRecoveryStatus($"画面显示失败，等待下一帧：{ex.Message}", DangerTextColor);
                 }
                 catch (Exception statusException)
                     when (statusException is InvalidOperationException or ObjectDisposedException or ArgumentException)
@@ -5320,7 +5322,7 @@ internal sealed partial class RemoteViewerWindow : Form
                 "VIEWER",
                 "MF/D3D11 直显像素资格检查失败，当前恢复帧将转入 " +
                     "ffmpeg 软件 H.264：" + validation.Detail);
-            OnUi(() => SetStatus(
+            OnUi(() => SetVideoRecoveryStatus(
                 "D3D11 直显未产生有效像素，已切换软件 H.264" +
                     $"（{TrimDiagnosticDetail(validation.Detail)}）",
                 DangerTextColor));
@@ -5408,7 +5410,7 @@ internal sealed partial class RemoteViewerWindow : Form
         RequestH264KeyFrameIfDue();
         string detail =
             TrimDiagnosticDetail(result.Detail);
-        SetStatus(
+        SetVideoRecoveryStatus(
             $"D3D11 直显失效，已切换软件解码并请求关键帧" +
                 (string.IsNullOrWhiteSpace(detail)
                     ? string.Empty
@@ -8458,8 +8460,18 @@ internal sealed partial class RemoteViewerWindow : Form
 
     private void SetStatus(string text, Color color)
     {
+        _videoRecoveryStatusPending = false;
         _statusBar.SetStatus(text, color);
         UpdateStatusToolTip(text);
+    }
+
+    private void SetVideoRecoveryStatus(string text, Color color)
+    {
+        SetStatus(text, color);
+        _videoRecoveryStatusPending = true;
+        // Request one UI notification from the next genuinely presented D3D11
+        // frame, even when dimensions/backend are unchanged. No per-frame post.
+        Interlocked.Exchange(ref _directFrameUiSignature, long.MinValue);
     }
 
     internal void SetPerformanceStatus(string text)
@@ -8748,7 +8760,7 @@ internal sealed partial class RemoteViewerWindow : Form
         string decoderBackend,
         string decodedVideoName)
     {
-        if (_lastRenderedEncoding == encoding &&
+        if (!_videoRecoveryStatusPending && _lastRenderedEncoding == encoding &&
             string.Equals(
                 _lastRenderedDecoderBackend,
                 decoderBackend,
@@ -8762,7 +8774,7 @@ internal sealed partial class RemoteViewerWindow : Form
             ref _lastRenderedDecoderBackend,
             decoderBackend);
         SetStatus(
-            $"已切换到 {decodedVideoName} 画面流",
+            _videoRecoveryStatusPending ? $"画面已恢复：{decodedVideoName}" : $"已切换到 {decodedVideoName} 画面流",
             SuccessTextColor);
     }
 

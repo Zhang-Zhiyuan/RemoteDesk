@@ -28,6 +28,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -846,6 +847,20 @@ class BoundedLineLengthTracker:
             )
             removed += partial_removed
         return removed
+
+
+def format_viewer_window_title(host, port, machine_name="", relay_device_id=""):
+    def label(value):
+        return "".join(c for c in str(value or "") if unicodedata.category(c) not in
+                       ("Cc", "Cf", "Zl", "Zp"))[:100].strip()
+    name = label(machine_name)
+    if relay_device_id:
+        return f"RemoteDesk - {name or label(relay_device_id)} · 公网中继"
+    address = label(host)
+    if ":" in address and not address.startswith("["):
+        address = f"[{address}]"
+    endpoint = f"{address}:{port}"
+    return f"RemoteDesk - {name + ' (' + endpoint + ')' if name else endpoint} · IP 直连"
 
 
 def calculate_adaptive_window_geometry(
@@ -6769,6 +6784,7 @@ class RemoteDeskLinuxApp:
         self.display_width = 1
         self.display_height = 1
         self.last_frame_status_update = 0.0
+        self.viewer_title_device_info = {}
         self._open_viewer_window(host, port)
         self.viewer_generation += 1
         self._apply_viewer_capture_target_transition(
@@ -6920,9 +6936,29 @@ class RemoteDeskLinuxApp:
             reconnect,
         )
 
+    def _viewer_window_title(self, host, port):
+        options = getattr(self, "viewer_relay_options", None)
+        info = getattr(self, "viewer_title_device_info", {})
+        name = info.get("machineName", "")
+        if options is not None:
+            # Use the active session's identity, never the current list selection
+            # or the direct-connect form (which may have been edited meanwhile).
+            device = getattr(self, "relay_devices", {}).get(options.device_id, {})
+            name = device.get("sharedName") or device.get("machineName") or name
+        return format_viewer_window_title(host, port, name, options.device_id if options is not None else "")
+
+    def _refresh_viewer_window_title(self, info):
+        if isinstance(info, dict):
+            self.viewer_title_device_info = info
+        target = getattr(self, "viewer_reconnect_target", None)
+        window = getattr(self, "viewer_window", None)
+        if window is not None and target is not None:
+            window.title(self._viewer_window_title(*target[:2]))
+
     def _open_viewer_window(self, host: str, port: int) -> None:
         if self.viewer_window is not None:
             try:
+                self.viewer_window.title(self._viewer_window_title(host, port))
                 self.viewer_window.deiconify()
                 self.viewer_window.lift()
                 return
@@ -6939,7 +6975,7 @@ class RemoteDeskLinuxApp:
                 self.frame_label = None
 
         window = tk.Toplevel(self.root, class_="RemoteDesk")
-        window.title(f"RemoteDesk - {host}:{port}")
+        window.title(self._viewer_window_title(host, port))
         apply_adaptive_window_geometry(
             window,
             preferred_size=(1120, 700),
@@ -8256,6 +8292,7 @@ class RemoteDeskLinuxApp:
                         )
                     )
                     viewer = self.viewer
+                    self._refresh_viewer_window_title(getattr(viewer, "remote_device_info", None))
                     if getattr(self, 'viewer_relay_options', None) is not None and self.viewer_reconnect_target is not None:
                         try:
                             relay.save_device_key(self.viewer_relay_options, self.viewer_reconnect_target[2])
@@ -8273,6 +8310,7 @@ class RemoteDeskLinuxApp:
                 info = self._unpack_viewer_event(value)
                 if isinstance(info, dict):
                     self.viewer_reconnect_device_id = device_model.identity(info.get("deviceId"))
+                    self._refresh_viewer_window_title(info)
                 if getattr(self, "device_panel", None) is not None: self.device_panel.record(info)
             elif event == "viewer_capture_metadata":
                 snapshot = self._unpack_viewer_event(value)
@@ -8388,7 +8426,9 @@ class RemoteDeskLinuxApp:
         backend_diagnostic: str = "",
     ) -> None:
         if self.frame_label is None:
-            self._open_viewer_window(self.viewer_host.get().strip() or "RemoteDesk", normalize_port(self.viewer_port.get()))
+            target = getattr(self, "viewer_reconnect_target", None)
+            self._open_viewer_window(*(target[:2] if target is not None else
+                (self.viewer_host.get().strip() or "RemoteDesk", normalize_port(self.viewer_port.get()))))
         frame_label = self.frame_label
         if frame_label is None:
             return

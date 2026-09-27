@@ -15,6 +15,12 @@ internal static class ViewerClippingProbe
         var status = Get<Control>(viewer, "_statusBar");
         var picture = viewer.Controls.OfType<PictureBox>().Single();
         var overflow = Get<ViewerActionOverflow>(viewer, "_statusActionOverflow");
+        var expectedActions = new[] {
+            "_androidBackButton", "_androidHomeButton", "_androidRecentsButton",
+            "_pullRemoteFilesButton", "_openReceivedFilesButton", "_remoteInputMethodButton",
+            "_switchCaptureTargetButton", "_displayScaleButton", "_experimentalUpscaleButton",
+            "_nativeDetailButton", "_fullScreenButton"
+        }.Select(name => Get<Button>(viewer, name)).ToHashSet();
         viewer.Show();
         Invoke(viewer, "UninstallSystemKeyboardCapture");
         Invoke(status, "SetStatus", "剪贴板已同步；远端正在等待确认文件接收位置。", Color.LightGreen);
@@ -56,8 +62,8 @@ internal static class ViewerClippingProbe
                 if (bounds.StatusBounds.Height < lineHeight || (hasDetails && bounds.DetailsBounds.Height < lineHeight))
                     problems.Add($"Status text height {lineHeight} (measured {RemoteViewerWindow.MeasureStatusTextHeight(status.Font)}) > rows {bounds.StatusBounds.Height}/{bounds.DetailsBounds.Height}");
                 var inline = actions.Controls.OfType<Button>().Where(b => b.Visible && b != overflow.MoreButton).ToArray();
-                if (inline.Concat(overflow.OverflowButtons).Distinct().Count() != 8)
-                    problems.Add("Inline + overflow actions do not cover all eight commands");
+                if (!expectedActions.SetEquals(inline.Concat(overflow.OverflowButtons)))
+                    problems.Add("Inline + overflow actions do not cover the exact expected commands, including Android navigation");
                 var scale = Get<Button>(viewer, "_displayScaleButton");
                 var upscale = Get<Button>(viewer, "_experimentalUpscaleButton");
                 if (scale.Parent != upscale.Parent) problems.Add("Scaling controls split across menu and toolbar");

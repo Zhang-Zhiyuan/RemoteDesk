@@ -5336,14 +5336,14 @@ public sealed partial class MainForm : Form
 
     private void ShowViewerWindow()
     {
+        string title = GetViewerWindowTitle();
         if (_viewerWindow is not null && !_viewerWindow.IsDisposed)
         {
+            _viewerWindow.Text = title;
             _viewerWindow.Activate();
             return;
         }
 
-        string host = _viewerHostBox.Text.Trim();
-        string title = $"RemoteDesk - {host}:{(int)_viewerPortBox.Value}";
         string remotePlatform =
             GetCurrentRemotePlatform();
         var viewerWindow = new RemoteViewerWindow(
@@ -5377,6 +5377,20 @@ public sealed partial class MainForm : Form
             GetCurrentViewerTelemetryIntentGeneration());
         viewerWindow.FormClosed += async (_, _) => await ViewerWindowClosedAsync(viewerWindow);
         viewerWindow.Show(this);
+    }
+
+    private string GetViewerWindowTitle()
+    {
+        ViewerConnectionSnapshot? connection;
+        lock (_viewerReconnectLock)
+        {
+            connection = _pendingViewerConnection?.Connection ?? _viewerReconnectIntent?.Connection;
+        }
+        string? sharedName = connection?.RelayRoute is { } route
+            ? _relayDevicesList.Items.Cast<ListViewItem>().Select(item => item.Tag).OfType<RelayOnlineDevice>()
+                .FirstOrDefault(device => string.Equals(device.DeviceId, route.DeviceId, StringComparison.OrdinalIgnoreCase))?.MachineName
+            : null;
+        return ViewerWindowTitle.Format(connection, _lastConnectedDeviceInfo, sharedName);
     }
 
     private async Task ViewerWindowClosedAsync(RemoteViewerWindow closedWindow)
@@ -8001,6 +8015,7 @@ public sealed partial class MainForm : Form
 
             RemoteDeviceDescriptor device = update.Device;
             _lastConnectedDeviceInfo = device;
+            if (_viewerWindow is { IsDisposed: false }) _viewerWindow.Text = GetViewerWindowTitle();
             _connectedViewerCapabilities = NormalizeCapabilities(device.Capabilities);
             ApplyViewerCapabilityState(_viewerClient.IsConnected);
             _viewerWindow?.SetRemotePlatform(device.Platform);

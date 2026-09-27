@@ -228,6 +228,11 @@ class RealTkAdaptiveLayoutTests(unittest.TestCase):
                 for parent in (footer, *footer.winfo_children()):
                     if parent is self.ui.viewer_target_bar:
                         continue  # Deliberately hidden until multiple targets are advertised.
+                    if parent is self.ui.viewer_android_bar:
+                        # A desktop peer must not expose phone-only commands.
+                        self.assertFalse(parent.winfo_ismapped())
+                        self.assertTrue(all(not b.winfo_ismapped() for b in self.ui.viewer_android_buttons))
+                        continue
                     for control in parent.winfo_children():
                         if isinstance(control, (app.ttk.Button, app.ttk.Entry)):
                             if not control.winfo_ismapped():
@@ -240,6 +245,43 @@ class RealTkAdaptiveLayoutTests(unittest.TestCase):
                             self.assertLessEqual(control.winfo_rooty() + control.winfo_height(), viewer.winfo_rooty() + viewer.winfo_height())
                             self.assertIs(control, viewer.winfo_containing(control.winfo_rootx() + control.winfo_width() // 2,
                                                                          control.winfo_rooty() + control.winfo_height() // 2))
+
+    def test_phone_navigation_is_clickable_and_tracks_read_only_state(self):
+        self.ui.viewer_window = None
+        self.ui.window_icon = None
+        self.ui.viewer = SimpleNamespace(remote_device_info={"platform": "Android"},
+                                        remote_capabilities=app.CAPABILITY_INPUT_CONTROL,
+                                        set_display_size=mock.Mock())
+        self.ui.native_presenter_active = False
+        self.ui.last_photo = None
+        self.ui.text_input = app.tk.StringVar(self.root)
+        self.ui._viewer_frame_focus_out = mock.Mock()
+        self.ui._send_android_navigation = mock.Mock()
+        with mock.patch.object(app, "apply_adaptive_window_geometry"):
+            self.ui._open_viewer_window("phone.test", 56565)
+        viewer = self.ui.viewer_window
+        for width, height in ((1280, 800), (640, 480), (480, 360), (800, 600)):
+            viewer.geometry(f"{width}x{height}")
+            self.root.update()
+            for button in self.ui.viewer_android_buttons:
+                with self.subTest(width=width, button=button.cget("text")):
+                    self.assertTrue(button.winfo_ismapped())
+                    self.assertLessEqual(button.winfo_rootx() + button.winfo_width(), viewer.winfo_rootx() + viewer.winfo_width())
+                    self.assertIs(button, viewer.winfo_containing(button.winfo_rootx() + button.winfo_width() // 2,
+                                                                  button.winfo_rooty() + button.winfo_height() // 2))
+                    button.invoke()
+        self.assertEqual([mock.call(key) for _ in range(4) for key in (0x1B, 0x24, 0x7B)],
+                         self.ui._send_android_navigation.call_args_list)
+        self.ui.viewer.remote_capabilities = 0
+        self.ui._update_viewer_android_navigation()
+        for button in self.ui.viewer_android_buttons:
+            self.assertTrue(button.instate(["disabled"]))
+            button.invoke()
+        self.assertEqual(12, self.ui._send_android_navigation.call_count)
+        self.ui.viewer.remote_device_info = {"platform": "Windows"}
+        self.ui._update_viewer_android_navigation()
+        self.root.update()
+        self.assertFalse(self.ui.viewer_android_bar.winfo_ismapped())
 
     def test_viewer_overflow_menu_preserves_actions_and_disabled_state(self):
         self.root.tk.call("tk", "scaling", 192 / 72)

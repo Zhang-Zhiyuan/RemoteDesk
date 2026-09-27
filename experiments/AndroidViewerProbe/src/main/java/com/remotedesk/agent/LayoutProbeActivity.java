@@ -87,12 +87,22 @@ public final class LayoutProbeActivity extends Activity {
     }
     private void runStage(int stage) {
         try {
+            Rect rootVisible = new Rect();
+            require(root.getLocalVisibleRect(rootVisible)
+                    && rootVisible.width() == root.getWidth() && rootVisible.height() == root.getHeight(),
+                "Test setup: requested viewport must fit the display: " + rootVisible);
             require(desktop.getHeight() > 0, "Toolbar covered desktop");
             require(chrome.dock.getBottom() <= root.getHeight(), "Dock outside window");
             if (stage == 0) {
+                // The menu must be reachable without scrolling, including at
+                // 240 dp / 200% font scale; do not use the helper's scrollTo.
+                Rect menuVisible = new Rect();
+                require(chrome.more.getGlobalVisibleRect(menuVisible)
+                        && menuVisible.width() == chrome.more.getWidth(), "Pinned menu clipped");
+                tap(chrome.more);
                 for (int i = 0; i < chrome.mainRow.getChildCount(); i++) tap(chrome.mainRow.getChildAt(i));
             } else if (stage == 1) {
-                require(chrome.mainRow.getChildCount() == 7 && actions == 6,
+                require(chrome.mainRow.getChildCount() == 6 && actions == 6,
                     "Coordinate taps missed callbacks (including zoom/upscale): " + actions);
                 chrome.keyboard(true); chrome.adapt(compact);
             } else if (stage == 2) {
