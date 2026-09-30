@@ -46,7 +46,7 @@ internal static class MainFormClippingProbe
             using var font = new Font("Microsoft YaHei UI", points);
             main.Font = font;
             main.Show(); Pump();
-            SetText(main, "_localIpsBox", "192.0.2.123; 2001:db8:1234:5678:abcd:ef12:3456:7890");
+            SetText(main, "_localIpsBox", "192.0.2.123\r\n2001:db8:1234:5678:abcd:ef12:3456:7890\r\nfd12:3456::1");
             SetText(main, "_hostStatusLabel", "正在监听 192.0.2.123:56565；管理员模式");
             SetText(main, "_viewerStatusLabel", string.Join("\r\n", Enumerable.Range(1, 18).Select(i => $"诊断 {i}：已连接很长的测试设备名称，网络链路正常；文件已保存到 C:\\SyntheticReceived\\测试目录\\远程传输结果.txt。")));
             SetText(main, "_relayServerSummaryLabel", "relay-with-a-very-long-synthetic-hostname.example.invalid:56567 · 已保存登录 · 本机 ID 12345678");
@@ -62,7 +62,7 @@ internal static class MainFormClippingProbe
             Type deviceItem = typeof(MainForm).GetNestedType("RemoteDeviceListItem", BindingFlags.NonPublic)!;
             directList.Items.Add(deviceItem.GetMethod("FromSaved", BindingFlags.Static | BindingFlags.Public)!.Invoke(null, new object[] { saved })!);
             var relayList = Field<ListView>(main, "_relayDevicesList");
-            relayList.Items.Add(new ListViewItem(new[] { "Synthetic-长名称测试工作站", "Windows", "1.0.25", "正在监听", "刚刚", "2001:db8:1234:5678:abcd:ef12:3456:7890:56565" }));
+            relayList.Items.Add(new ListViewItem(new[] { "Synthetic-长名称测试工作站", "Windows", "1.0.25", "正在监听", "刚刚", "[2001:db8:1234:5678:abcd:ef12:3456:7890]:56565" }));
             var tabs = Field<TabControl>(main, "_tabs");
             foreach (int logicalWidth in new[] { 1120, 800, 640, 520, 1120 })
             {
@@ -83,9 +83,26 @@ internal static class MainFormClippingProbe
                             int required = label.GetPreferredSize(new Size(Math.Max(1, label.Width), 0)).Height;
                             if (required > label.Height + 2)
                                 issues.Add($"{prefix}: label '{label.Text[..Math.Min(48, label.Text.Length)]}' height {label.Height} < preferred {required}; dock={label.Dock}");
+                            if (label.Parent is TableLayoutPanel table && table.ColumnCount == 2 &&
+                                table.GetColumn(label) == 0 && table.GetColumnSpan(label) == 1)
+                            {
+                                int singleLineWidth = TextRenderer.MeasureText(label.Text, label.Font, Size.Empty,
+                                    TextFormatFlags.SingleLine).Width + label.Padding.Horizontal;
+                                int labelBudget = (int)((table.ClientSize.Width - table.Padding.Horizontal) * .45) - label.Margin.Horizontal;
+                                if (singleLineWidth <= labelBudget && label.Width < singleLineWidth)
+                                    issues.Add($"{prefix}: field label '{label.Text}' wraps unnecessarily: {label.Width} < {singleLineWidth}");
+                            }
                         }
                         if (control is not (TextBox or ComboBox or NumericUpDown or Button or CheckBox or TrackBar)) continue;
+                        if (control is CheckBox checkBox && checkBox.Dock == DockStyle.Top &&
+                            checkBox.Height < ResponsiveWindowLayout.WrappedCheckBoxHeight(checkBox, checkBox.Width))
+                            issues.Add($"{prefix}: checkbox '{checkBox.Text}' does not fit its wrapped text");
+                        if (control is WrappingActionButton wrappedButton && wrappedButton.MaximumSize.Width > 0 &&
+                            wrappedButton.Height < wrappedButton.GetPreferredSize(new Size(wrappedButton.Width, 0)).Height)
+                            issues.Add($"{prefix}: button '{wrappedButton.Text}' does not fit its wrapped text");
                         page.ScrollControlIntoView(control); Pump();
+                        if (control is Button && control.Text == "部署 / 更新服务器")
+                            Save(main, Path.Combine(output, prefix + "-server-actions.png"));
                         Rectangle bounds = control.RectangleToScreen(control.ClientRectangle);
                         Rectangle viewport = page.RectangleToScreen(page.ClientRectangle);
                         if (bounds.Width < 24 || bounds.Height < 12 || !viewport.Contains(bounds))

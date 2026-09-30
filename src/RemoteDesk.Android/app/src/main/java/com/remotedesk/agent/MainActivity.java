@@ -43,11 +43,8 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.Inet4Address;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
-import java.net.InetAddress;
-import java.net.NetworkInterface;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -1623,7 +1620,7 @@ public final class MainActivity extends Activity {
             "扫描状态：" + discoveryStatus + "\n" +
             "被控能力：" + capabilitiesStatus + "\n" +
             "连接端口：56565，发现端口：56566\n" +
-            "本机地址：" + String.join(", ", localIpv4Addresses());
+            "本机地址：\n" + String.join("\n", localIpAddresses());
     }
 
     private void copyConnectionInfo() {
@@ -1638,7 +1635,7 @@ public final class MainActivity extends Activity {
         String h264Status = AndroidVideoCodecDiagnostics.formatH264Status(
             AndroidVideoCodecDiagnostics.cachedH264Report());
         String text = AndroidConnectionInfoFormatter.format(
-            localIpv4Addresses(),
+            localIpAddresses(),
             currentHeadline(),
             hasPassword,
             inputEnabled,
@@ -1768,28 +1765,9 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private static List<String> localIpv4Addresses() {
-        List<String> addresses = new ArrayList<>();
-        try {
-            for (NetworkInterface networkInterface : Collections.list(NetworkInterface.getNetworkInterfaces())) {
-                if (!networkInterface.isUp() || networkInterface.isLoopback()) {
-                    continue;
-                }
-
-                for (java.net.InetAddress address : Collections.list(networkInterface.getInetAddresses())) {
-                    if (address instanceof Inet4Address && !address.isLoopbackAddress()) {
-                        addresses.add(address.getHostAddress());
-                    }
-                }
-            }
-        } catch (Exception ignored) {
-        }
-
-        if (addresses.isEmpty()) {
-            addresses.add("未获取到局域网 IPv4");
-        }
-
-        return addresses;
+    private static List<String> localIpAddresses() {
+        List<String> addresses = AndroidRelayAddresses.local();
+        return addresses.isEmpty() ? Collections.singletonList("未获取到可用 IPv4 / IPv6") : addresses;
     }
 
     private static String formatBytes(long bytes) {

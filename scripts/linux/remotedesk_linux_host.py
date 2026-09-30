@@ -5203,13 +5203,42 @@ def create_directory_archive_name(directory: Path) -> str:
     return sanitize_file_name(name)
 
 
+def create_discovery_sockets(host, port):
+    sockets = []
+    targets = [(socket.AF_INET6 if ":" in host else socket.AF_INET, host)]
+    if host == "0.0.0.0" and socket.has_ipv6: targets.append((socket.AF_INET6, "::"))
+    for family, address in targets:
+        udp = None
+        try:
+            udp = socket.socket(family, socket.SOCK_DGRAM)
+            udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if family == socket.AF_INET6: udp.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            udp.bind((address, port)); udp.settimeout(.5)
+            if family == socket.AF_INET6:
+                from remotedesk_linux_devices import IPV6_DISCOVERY_GROUP
+                for index, name in socket.if_nameindex()[:32]:
+                    if name == "lo": continue
+                    try:
+                        udp.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP,
+                            struct.pack("=16sI", socket.inet_pton(socket.AF_INET6, IPV6_DISCOVERY_GROUP), index))
+                    except OSError: pass
+            sockets.append(udp)
+        except OSError:
+            if udp is not None: udp.close()
+            if not sockets: raise
+    return sockets
+
+
 def discovery_loop(args: argparse.Namespace, stop_event: threading.Event) -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
-        udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        udp.bind((args.discovery_host, args.discovery_port))
-        udp.settimeout(0.5)
+    sockets = create_discovery_sockets(args.discovery_host, args.discovery_port)
+    try:
+        selector = selectors.DefaultSelector()
+        for udp in sockets: selector.register(udp, selectors.EVENT_READ)
         log(f"UDP discovery listening on {args.discovery_host}:{args.discovery_port}")
         while not stop_event.is_set():
+            ready = selector.select(.5)
+            if not ready: continue
+            udp = ready[0][0].fileobj
             try:
                 data, address = udp.recvfrom(4096)
             except socket.timeout:
@@ -5232,6 +5261,9 @@ def discovery_loop(args: argparse.Namespace, stop_event: threading.Event) -> Non
                 "Capabilities": get_host_capabilities(),
             }
             udp.sendto(json.dumps(response, ensure_ascii=False).encode("utf-8"), address)
+    finally:
+        if 'selector' in locals(): selector.close()
+        for udp in sockets: udp.close()
 
 
 def close_client_socket(client: socket.socket) -> None:
@@ -5346,6 +5378,15 @@ def run_admitted_client(
         session_closed.set()
 
 
+def create_host_listener(host: str, port: int):
+    # Keep an explicitly bound address private. Only the default wildcard grows
+    # to both families; machines with IPv6 disabled retain their IPv4 listener.
+    dual = host in ("0.0.0.0", "::", "") and socket.has_dualstack_ipv6()
+    family = socket.AF_INET6 if dual or ":" in host else socket.AF_INET
+    return socket.create_server(("::" if dual else host, port), family=family,
+                                backlog=4, dualstack_ipv6=dual)
+
+
 def serve(args: argparse.Namespace) -> int:
     log_startup_summary(args)
     stop_event = threading.Event()
@@ -5357,10 +5398,7 @@ def serve(args: argparse.Namespace) -> int:
         discovery_thread = threading.Thread(target=discovery_loop, args=(args, stop_event), daemon=True)
         discovery_thread.start()
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((args.host, args.port))
-        server.listen(4)
+    with create_host_listener(args.host, args.port) as server:
         server.settimeout(0.5)
         log(f"RemoteDesk Linux host listening on {args.host}:{args.port}")
         deadline = time.monotonic() + args.serve_seconds if args.serve_seconds > 0 else None

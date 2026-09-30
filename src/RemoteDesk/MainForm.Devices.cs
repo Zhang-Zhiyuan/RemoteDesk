@@ -15,12 +15,16 @@ public sealed partial class MainForm
         var timer = new System.Windows.Forms.Timer { Interval = 30_000 };
         timer.Tick += async (_, _) =>
         {
-            if (Visible && WindowState != FormWindowState.Minimized && !_viewerClient.IsConnected && !_viewerActionInProgress &&
+            if (ShouldPollDirectDevices(Visible, WindowState == FormWindowState.Minimized, _tabs.SelectedIndex == 1,
+                    _viewerClient.IsConnected || _viewerActionInProgress || _isClosing) &&
                 _discoveryScanCancellation is null) await DiscoverHostsAsync(silent: true);
         };
         timer.Start();
         Disposed += (_, _) => timer.Dispose();
     }
+
+    internal static bool ShouldPollDirectDevices(bool visible, bool minimized, bool directPage, bool busy) =>
+        visible && !minimized && directPage && !busy;
 
     internal static (string Host, int Port, bool ExplicitPort) ParseDeviceEndpoint(string address, string port)
     {

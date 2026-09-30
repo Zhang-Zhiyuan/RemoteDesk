@@ -22,7 +22,7 @@ internal sealed record DiscoveredHost(
     public override string ToString()
     {
         string status = IsHostRunning ? "正在监听" : CanRemoteStart ? "可远程启动" : "仅软件运行";
-        return $"{MachineName} [{Platform}] ({Address}:{Port}) - {status}";
+        return $"{MachineName} [{Platform}] ({NetworkUtils.FormatEndpoint(Address, Port)}) - {status}";
     }
 }
 
@@ -61,6 +61,8 @@ internal sealed class NetworkDiscoveryResponder : IDisposable
     private static readonly byte[] DiscoveryRequest = Encoding.UTF8.GetBytes("RemoteDesk.Discover.v1");
 
     private UdpClient? _udpClient;
+    private UdpClient? _ipv6UdpClient;
+    private Task? _ipv6ListenTask;
     private CancellationTokenSource? _cancellationTokenSource;
     private Task? _listenTask;
     private readonly object _nonceLock = new();
@@ -138,6 +140,9 @@ internal sealed class NetworkDiscoveryResponder : IDisposable
 
             _udpClient = udpClient;
             _listenTask = Task.Run(() => ListenAsync(udpClient, _cancellationTokenSource.Token));
+            _ipv6UdpClient = Ipv6Discovery.OpenResponder(ListeningPort);
+            if (_ipv6UdpClient is UdpClient ipv6)
+                _ipv6ListenTask = Task.Run(() => ListenAsync(ipv6, _cancellationTokenSource.Token));
         }
         catch
         {
@@ -153,6 +158,10 @@ internal sealed class NetworkDiscoveryResponder : IDisposable
         UdpClient? udpClient = _udpClient;
         CancellationTokenSource? cancellationTokenSource = _cancellationTokenSource;
         Task? listenTask = _listenTask;
+        UdpClient? ipv6 = _ipv6UdpClient;
+        Task? ipv6Task = _ipv6ListenTask;
+        _ipv6UdpClient = null;
+        _ipv6ListenTask = null;
 
         _udpClient = null;
         _cancellationTokenSource = null;
@@ -168,6 +177,12 @@ internal sealed class NetworkDiscoveryResponder : IDisposable
 
         cancellationTokenSource?.Cancel();
         udpClient.Dispose();
+        ipv6?.Dispose();
+        if (ipv6Task is not null)
+        {
+            try { await ipv6Task.ConfigureAwait(false); }
+            catch (Exception ex) when (IsStopException(ex)) { }
+        }
 
         if (listenTask is not null)
         {
@@ -439,6 +454,9 @@ internal static class NetworkDiscoveryService
         {
             EnableBroadcast = true
         };
+        // IPv6-only targets do not send anything on this socket. Bind explicitly
+        // so waiting for optional IPv4 replies cannot throw before IPv6 completes.
+        udpClient.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
         DisableUdpConnectionReset(udpClient.Client);
 
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -511,8 +529,11 @@ internal static class NetworkDiscoveryService
         Task<IReadOnlyList<DiscoveredHost>> tcpProbeTask = directTcpProbeEndpoints.Count == 0
             ? Task.FromResult<IReadOnlyList<DiscoveredHost>>(Array.Empty<DiscoveredHost>())
             : ProbeDirectTcpHostsAsync(directTcpProbeEndpoints, tcpProbeCancellation);
+        Task<IReadOnlyList<DiscoveredHost>> ipv6Task = DiscoverIpv6Async(
+            resolvedDirectAddresses.Concat(resolvedDirectTargets.Select(target => target.Address)),
+            discoveryPorts, includeBroadcast, timeoutSource.Token);
 
-        foreach (IPEndPoint endpoint in endpoints)
+        foreach (IPEndPoint endpoint in endpoints.Where(endpoint => endpoint.AddressFamily == AddressFamily.InterNetwork))
         {
             if (timeoutSource.IsCancellationRequested) break;
             try
@@ -577,7 +598,8 @@ internal static class NetworkDiscoveryService
                 RemoteDeviceIdentity.Normalize(response.DeviceId));
         }
 
-        foreach (DiscoveredHost host in await tcpProbeTask.ConfigureAwait(false))
+        foreach (DiscoveredHost host in (await tcpProbeTask.ConfigureAwait(false))
+            .Concat(await ipv6Task.ConfigureAwait(false)))
         {
             string key = $"{host.Address}:{host.Port}";
             if (!discovered.ContainsKey(key))
@@ -591,6 +613,48 @@ internal static class NetworkDiscoveryService
             .OrderBy(host => host.MachineName, StringComparer.OrdinalIgnoreCase)
             .ThenBy(host => host.Address, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    private static async Task<IReadOnlyList<DiscoveredHost>> DiscoverIpv6Async(
+        IEnumerable<IPAddress> addresses, IReadOnlyList<int> ports, bool multicast, CancellationToken cancellationToken)
+    {
+        if (!Socket.OSSupportsIPv6 || cancellationToken.IsCancellationRequested) return [];
+        var targets = addresses.Where(ip => ip.AddressFamily == AddressFamily.InterNetworkV6).ToHashSet();
+        if (multicast) targets.UnionWith(Ipv6Discovery.MulticastTargets());
+        if (targets.Count == 0) return [];
+        var result = new Dictionary<string, DiscoveredHost>();
+        try
+        {
+            using var udp = new UdpClient(AddressFamily.InterNetworkV6);
+            udp.Client.DualMode = false;
+            udp.Client.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
+            foreach (IPAddress address in targets.Take(40)) foreach (int port in ports)
+            {
+                try { await udp.SendAsync(DiscoveryRequest, new IPEndPoint(address, port), cancellationToken).ConfigureAwait(false); }
+                catch (SocketException) { }
+            }
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                UdpReceiveResult packet;
+                try { packet = await udp.ReceiveAsync(cancellationToken).ConfigureAwait(false); }
+                catch (SocketException) { continue; }
+                if (!multicast && !targets.Contains(packet.RemoteEndPoint.Address)) continue;
+                DiscoveryResponse? response = ParseResponse(packet.Buffer);
+                if (response is null || response.Port is < 1 or > 65535) continue;
+                string address = packet.RemoteEndPoint.Address.ToString();
+                string key = NetworkUtils.FormatEndpoint(address, response.Port);
+                if (result.Count >= 64 && !result.ContainsKey(key)) continue;
+                bool canRemoteStart = response.CanRemoteStart ?? false;
+                result[key] = new DiscoveredHost(NormalizeDiscoveryText(response.MachineName, address), address,
+                    response.Port, NormalizeDiscoveryText(response.CaptureTarget, string.Empty),
+                    response.IsHostRunning ?? true, canRemoteStart,
+                    RemoteDevicePlatforms.Normalize(response.Platform, RemoteDevicePlatforms.Windows),
+                    response.Capabilities ?? RemoteDeviceCapabilityInfo.LegacyWindows(canRemoteStart),
+                    RemoteDeskBuildInfo.NormalizeBuildStamp(response.BuildStamp), RemoteDeviceIdentity.Normalize(response.DeviceId));
+            }
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or SocketException or NotSupportedException or ObjectDisposedException) { }
+        return result.Values.ToArray();
     }
 
     internal static IReadOnlyList<IPEndPoint> CreateTcpProbeEndpoints(
@@ -611,7 +675,7 @@ internal static class NetworkDiscoveryService
                 hostProbePort);
         foreach (IPAddress ipAddress in directAddresses)
         {
-            if (ipAddress.AddressFamily == AddressFamily.InterNetwork)
+            if (ipAddress.AddressFamily is AddressFamily.InterNetwork or AddressFamily.InterNetworkV6)
             {
                 foreach (int port in hostProbePorts)
                 {
@@ -625,7 +689,7 @@ internal static class NetworkDiscoveryService
 
         foreach (IPEndPoint target in directTargets)
         {
-            if (target.AddressFamily == AddressFamily.InterNetwork &&
+            if ((target.AddressFamily is AddressFamily.InterNetwork or AddressFamily.InterNetworkV6) &&
                 target.Port > 0 &&
                 target.Port <= IPEndPoint.MaxPort)
             {
@@ -698,7 +762,7 @@ internal static class NetworkDiscoveryService
         ArgumentOutOfRangeException.ThrowIfLessThan(discoveryPort, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(discoveryPort, IPEndPoint.MaxPort);
 
-        using var udpClient = new UdpClient(AddressFamily.InterNetwork);
+        using var udpClient = new UdpClient(ipAddress.AddressFamily);
         DisableUdpConnectionReset(udpClient.Client);
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout);
@@ -911,7 +975,7 @@ internal static class NetworkDiscoveryService
 
             if (IPAddress.TryParse(trimmedAddress, out IPAddress? ipAddress))
             {
-                if (ipAddress.AddressFamily == AddressFamily.InterNetwork)
+                if (ipAddress.AddressFamily is AddressFamily.InterNetwork or AddressFamily.InterNetworkV6)
                 {
                     addresses.Add(ipAddress);
                 }
@@ -928,11 +992,11 @@ internal static class NetworkDiscoveryService
             {
                 IPAddress[] resolved = await Dns.GetHostAddressesAsync(
                     trimmedAddress,
-                    AddressFamily.InterNetwork,
+                    AddressFamily.Unspecified,
                     dnsToken).ConfigureAwait(false);
                 foreach (IPAddress resolvedAddress in resolved)
                 {
-                    if (resolvedAddress.AddressFamily == AddressFamily.InterNetwork)
+                    if (resolvedAddress.AddressFamily is AddressFamily.InterNetwork or AddressFamily.InterNetworkV6)
                     {
                         addresses.Add(resolvedAddress);
                     }
@@ -1063,7 +1127,7 @@ internal static class NetworkDiscoveryService
     {
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout);
-        using var client = new TcpClient(AddressFamily.InterNetwork);
+        using var client = new TcpClient(address.AddressFamily);
         NetworkUtils.ConfigureLowLatencyTcpClient(
             client,
             receiveBufferSize: 8 * 1024,

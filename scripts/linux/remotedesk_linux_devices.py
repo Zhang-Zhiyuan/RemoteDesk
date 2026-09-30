@@ -2,12 +2,14 @@
 from __future__ import annotations
 import base64
 import ctypes
+import errno
 from dataclasses import asdict, dataclass, replace
 import ipaddress
 import json
 import os
 from pathlib import Path
 import socket
+import selectors
 import subprocess
 import threading
 import time
@@ -24,6 +26,60 @@ IDENTITY_REQUEST = 33
 IDENTITY_RESPONSE = 34
 LIMIT = 20
 SELF_CONNECTION_MESSAGE = "这是本机，不能连接自己。请使用另一台设备的 IP 或在中继列表选择其他设备。"
+IPV6_DISCOVERY_GROUP = "ff12::5244:4b31"
+
+
+def connect_tcp(host, port, *, timeout=6.0, stop_event=None):
+    """Stagger TCP candidates without threads; authenticate only the returned winner."""
+    deadline = time.monotonic() + timeout
+    if stop_event is not None and stop_event.is_set(): raise OSError("连接已取消。")
+    resolved = list(dict.fromkeys(socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)))[:32]
+    candidates = []
+    family = resolved[0][0] if resolved else socket.AF_INET
+    while resolved and len(candidates) < 8:
+        index = next((i for i, row in enumerate(resolved) if row[0] == family), 0)
+        row = resolved.pop(index); candidates.append(row)
+        family = socket.AF_INET if row[0] == socket.AF_INET6 else socket.AF_INET6
+    owned = []; selected = None; failure = None; next_start = 0; transferred = False
+    try:
+        with selectors.DefaultSelector() as selector:
+            while candidates or selector.get_map():
+                if stop_event is not None and stop_event.is_set(): raise OSError("连接已取消。")
+                now = time.monotonic()
+                if now >= deadline: raise socket.timeout("连接超时，请检查地址、端口和防火墙。")
+                if candidates and (now >= next_start or not selector.get_map()):
+                    family, kind, protocol, _, endpoint = candidates.pop(0)
+                    try:
+                        sock = socket.socket(family, kind, protocol); owned.append(sock); sock.setblocking(False)
+                        error = sock.connect_ex(endpoint)
+                    except OSError as error:
+                        failure = error; next_start = 0
+                        continue
+                    if error == 0: selected = sock; break
+                    if error in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
+                        selector.register(sock, selectors.EVENT_WRITE); next_start = now + .25
+                    else: failure = OSError(error, os.strerror(error)); sock.close(); next_start = 0
+                wait = min(.1, max(0, deadline-time.monotonic()))
+                if candidates: wait = min(wait, max(0, next_start-time.monotonic()))
+                for key, _ in selector.select(wait):
+                    sock = key.fileobj; selector.unregister(sock)
+                    error = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                    if not error: selected = sock; break
+                    failure = OSError(error, os.strerror(error)); sock.close(); next_start = 0
+                if selected is not None: break
+        if selected is None: raise failure or OSError("目标没有可用的 IPv4 / IPv6 地址。")
+        if stop_event is not None and stop_event.is_set(): raise OSError("连接已取消。")
+        selected.settimeout(timeout)
+        transferred = True
+        return selected
+    finally:
+        for sock in owned:
+            if sock is not selected or not transferred: sock.close()
+
+
+def ipv6_discovery_targets():
+    try: return [f"{IPV6_DISCOVERY_GROUP}%{index}" for index, name in socket.if_nameindex()[:32] if name != "lo"]
+    except OSError: return []
 
 
 class SelfConnectionError(ValueError):
@@ -80,7 +136,7 @@ def socket_endpoint_ip(endpoint):
     return normalized_ip(value)
 
 
-def local_ip_addresses():
+def local_ip_addresses(*, active_only=False):
     """Read all Linux interface addresses, without DNS, commands, or network I/O."""
     libc = ctypes.CDLL(None, use_errno=True)
     libc.getifaddrs.argtypes = [ctypes.POINTER(ctypes.POINTER(_Ifaddrs))]
@@ -95,7 +151,7 @@ def local_ip_addresses():
         current = head
         while current:
             address = current.contents.address
-            if address:
+            if address and (not active_only or current.contents.flags & 1):
                 family = address.contents.family
                 if family in (socket.AF_INET, socket.AF_INET6):
                     # Linux sockaddr_in: address at byte 4; sockaddr_in6: byte 8.
@@ -359,11 +415,12 @@ class Scanner:
     def scan(self, target=None, nodes=(), *, discovery_ports=DISCOVERY_PORTS, host_ports=HOST_PORTS, seconds=1.5):
         if self.cancelled.is_set(): return []
         destinations, own = interfaces(); explicit = set()
+        if socket.has_ipv6: destinations.update(ipv6_discovery_targets())
         own = {normalized_ip(address) for address in own}
         if not self.allow_self_connection_for_testing:
             own.update(local_ip_addresses())
         if target:
-            explicit = {row[4][0] for row in socket.getaddrinfo(target, 0, socket.AF_INET, socket.SOCK_DGRAM)}
+            explicit = {str(socket_endpoint_ip(row[4])) for row in socket.getaddrinfo(target, 0, socket.AF_UNSPEC, socket.SOCK_DGRAM)}
             explicit = {address for address in explicit if self.allow_self_connection_for_testing or not is_local_ip(address, own)}
             explicit = set(sorted(explicit)[:4]); destinations = explicit
             if not explicit: return []
@@ -371,25 +428,42 @@ class Scanner:
             for node in nodes:
                 try:
                     address = ipaddress.ip_address(node.host)
-                    if isinstance(address, ipaddress.IPv4Address) and not address.is_unspecified and not address.is_multicast:
+                    if not address.is_unspecified and not address.is_multicast:
                         destinations.add(node.host)
                 except ValueError: pass
         result = {}; rejected_self_endpoints = set(); started = time.monotonic()
         try:
             udp = self._socket(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)); udp.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1); udp.settimeout(.12)
             udp.bind(("0.0.0.0", 0)); rounds = 0
+            udp6 = None
+            if socket.has_ipv6:
+                try:
+                    udp6 = self._socket(socket.socket(socket.AF_INET6, socket.SOCK_DGRAM))
+                    udp6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                    udp6.bind(("::", 0)); udp6.settimeout(.12)
+                except OSError:
+                    if udp6 is not None: udp6.close()
+                    udp6 = None
+            selector = selectors.DefaultSelector()
+            selector.register(udp, selectors.EVENT_READ)
+            if udp6 is not None: selector.register(udp6, selectors.EVENT_READ)
             while not self.cancelled.is_set() and time.monotonic()-started < seconds:
                 if rounds == 0 or (rounds == 1 and time.monotonic()-started >= .6):
                     for host in list(destinations)[:40]:
                         for port in discovery_ports:
-                            try: udp.sendto(REQUEST, (host, port))
+                            try:
+                                sender = udp6 if ":" in host else udp
+                                if sender is not None: sender.sendto(REQUEST, (host, port))
                             except OSError: pass
                     rounds += 1
-                try: data, source = udp.recvfrom(8193)
+                ready = selector.select(.12)
+                if not ready: continue
+                try: data, source = ready[0][0].fileobj.recvfrom(8193)
                 except (socket.timeout, ConnectionResetError, ConnectionRefusedError): continue
-                if explicit and source[0] not in explicit: continue
-                if not self.allow_self_connection_for_testing and is_local_ip(source[0], own): continue
-                item = parse_response(data, source[0])
+                source_ip = str(socket_endpoint_ip(source))
+                if explicit and source_ip not in explicit: continue
+                if not self.allow_self_connection_for_testing and is_local_ip(source_ip, own): continue
+                item = parse_response(data, source_ip)
                 if item and self.local_device_id and item.device_id == self.local_device_id:
                     rejected_self_endpoints.add((item.host, item.port))
                     continue
@@ -401,7 +475,7 @@ class Scanner:
                         if self.cancelled.is_set() or time.monotonic()-started > 4.5: break
                         if (host, port) in rejected_self_endpoints: continue
                         try:
-                            with self._socket(socket.socket()) as tcp:
+                            with self._socket(socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET)) as tcp:
                                 tcp.settimeout(.25); tcp.connect((host, port)); banner = b""
                                 if not self.allow_self_connection_for_testing: reject_local_socket(tcp)
                                 while len(banner) < 4:
@@ -414,4 +488,6 @@ class Scanner:
         except OSError:
             if self.cancelled.is_set(): return []
             raise
-        finally: self.close()
+        finally:
+            if 'selector' in locals(): selector.close()
+            self.close()

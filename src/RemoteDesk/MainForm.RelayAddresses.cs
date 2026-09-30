@@ -46,7 +46,7 @@ public sealed partial class MainForm
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         var note = new Label { Dock = DockStyle.Top, AutoSize = true, UseMnemonic = false,
             Margin = new Padding(0, 0, 0, 10),
-            Text = $"设备 ID：{device.DeviceId}\n同一局域网 / 可路由网络可使用下列地址；跨网仍用中继。" };
+            Text = $"设备 ID：{device.DeviceId}\nIPv4 / IPv6 地址可达且防火墙允许时可直连；不可达时仍可中继。" };
         var list = new ListBox { Dock = DockStyle.Fill, Height = 150, MinimumSize = new Size(0, 100),
             HorizontalScrollbar = true, IntegralHeight = false, AccessibleName = "设备最新地址" };
         list.Items.AddRange(device.DirectAddresses.Select(address => address.Contains(':')

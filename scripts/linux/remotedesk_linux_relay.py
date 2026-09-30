@@ -62,25 +62,35 @@ def normalize_address_report(message):
         return dict(directAddresses=[], directPort=0)
     addresses = []
     for value in values[:32]:
-        if not isinstance(value, str) or len(value) > 15:
+        if not isinstance(value, str) or len(value) > 39 or "%" in value:
             continue
         try:
-            address = ipaddress.IPv4Address(value)
+            address = ipaddress.ip_address(value)
         except ValueError:
             continue
-        if (address.is_loopback or address.is_link_local or address.is_multicast
-                or int(address) >> 24 == 0 or int(address) >> 24 >= 224):
+        if (address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified
+                or (address.version == 4 and (int(address) >> 24 == 0 or int(address) >> 24 >= 224))
+                or (address.version == 6 and (address.ipv4_mapped or address.is_site_local or int(address) < 2**32))):
             continue
         if str(address) not in addresses:
             addresses.append(str(address))
-        if len(addresses) == MAX_DIRECT_ADDRESSES:
-            break
-    return dict(directAddresses=addresses, directPort=port if addresses else 0)
+    bounded = addresses[:MAX_DIRECT_ADDRESSES]
+    if len(bounded) == MAX_DIRECT_ADDRESSES and all((":" in value) == (":" in bounded[0]) for value in bounded):
+        alternate = next((value for value in addresses if (":" in value) != (":" in bounded[0])), None)
+        if alternate is not None: bounded[-1] = alternate
+    return dict(directAddresses=bounded, directPort=port if bounded else 0)
 
 
 def local_direct_addresses():
-    """Read interface IPv4 addresses without DNS, subprocesses or route changes."""
+    """Read active interface addresses without DNS, subprocesses or route changes."""
     addresses = []
+    try:
+        from remotedesk_linux_devices import local_ip_addresses
+        addresses = [str(value) for value in local_ip_addresses(active_only=True)]
+        return normalize_address_report(dict(directAddresses=sorted(set(addresses)), directPort=56565))["directAddresses"]
+    except (OSError, ImportError, AttributeError):
+        pass
+    # Older/nonstandard libc builds retain the IPv4 ioctl fallback.
     try:
         import fcntl
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as control:
@@ -102,7 +112,8 @@ def local_direct_addresses():
 
 def direct_address_display(device):
     report = normalize_address_report(device)
-    return " / ".join(f"{ip}:{report['directPort']}" for ip in report["directAddresses"]) or "未上报（仍可中转连接）"
+    return " / ".join(f"[{ip}]:{report['directPort']}" if ":" in ip else f"{ip}:{report['directPort']}"
+                      for ip in report["directAddresses"]) or "未上报（仍可中转连接）"
 
 
 class RelayIdentityError(PermissionError):
@@ -663,7 +674,8 @@ async def _connect_tls_path(options, path):
     try:
         if path is None:
             reader, writer = await asyncio.open_connection(options.server_address, options.port,
-                ssl=context, ssl_handshake_timeout=10, limit=128 * 1024)
+                ssl=context, ssl_handshake_timeout=10, limit=128 * 1024,
+                happy_eyeballs_delay=0.25, interleave=1)
         else:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             # A permission error rejects only this candidate. Never silently

@@ -69,7 +69,7 @@ internal sealed record RelayOnlineDevice(
     public bool CanRename { get; init; }
     public string NamingUnavailableReason { get; init; } = RelayDeviceName.UnsupportedMessage;
     public string AddressDisplay => DirectAddresses.Count > 0
-        ? string.Join(" / ", DirectAddresses.Select(address => $"{address}:{DirectPort}"))
+        ? string.Join(" / ", DirectAddresses.Select(address => NetworkUtils.FormatEndpoint(address, DirectPort)))
         : "未上报（仍可中继连接）";
 
     public string StatusText => Busy ? "使用中（可挤下线）" : "在线";

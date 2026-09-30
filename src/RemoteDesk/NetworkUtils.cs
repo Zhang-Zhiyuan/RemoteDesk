@@ -10,7 +10,9 @@ internal static class NetworkUtils
     private const int TcpKeepAliveTimeMilliseconds = 12_000;
     private const int TcpKeepAliveIntervalMilliseconds = 3_000;
 
-    public static IReadOnlyList<string> GetLocalIPv4Addresses()
+    public static IReadOnlyList<string> GetLocalIPv4Addresses() => GetLocalAddresses(ipv4Only: true);
+
+    public static IReadOnlyList<string> GetLocalAddresses(bool ipv4Only = false)
     {
         NetworkInterface[] adapters;
         try
@@ -36,7 +38,7 @@ internal static class NetworkUtils
                 addresses.AddRange(adapter.GetIPProperties()
                     .UnicastAddresses
                     .Where(address =>
-                        address.Address.AddressFamily == AddressFamily.InterNetwork &&
+                        (!ipv4Only || address.Address.AddressFamily == AddressFamily.InterNetwork) &&
                         !IPAddress.IsLoopback(address.Address))
                     .Select(address => address.Address.ToString()));
             }
@@ -49,6 +51,34 @@ internal static class NetworkUtils
             .Distinct()
             .OrderBy(address => address)
             .ToArray();
+    }
+
+    internal static string FormatEndpoint(string address, int port) =>
+        address.Contains(':') ? $"[{address.Trim('[', ']')}]:{port}" : $"{address}:{port}";
+
+    internal static TcpListener StartDualStackListener(int port)
+    {
+        TcpListener? listener = null;
+        if (Socket.OSSupportsIPv6)
+        {
+            try
+            {
+                listener = new TcpListener(IPAddress.IPv6Any, port);
+                listener.Server.DualMode = true;
+                listener.Start();
+                return listener;
+            }
+            catch (SocketException ex) when (ex.SocketErrorCode is SocketError.AddressFamilyNotSupported or
+                SocketError.ProtocolNotSupported or SocketError.ProtocolOption or SocketError.AddressNotAvailable)
+            {
+                listener?.Stop();
+            }
+            catch { listener?.Stop(); throw; }
+        }
+        // IPv6 disabled by the OS must not prevent existing IPv4 users from hosting.
+        listener = new TcpListener(IPAddress.Any, port);
+        try { listener.Start(); return listener; }
+        catch { listener.Stop(); throw; }
     }
 
     public static bool IsLikelyLocalEndpoint(

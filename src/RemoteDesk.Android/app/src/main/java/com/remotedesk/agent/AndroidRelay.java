@@ -364,7 +364,7 @@ final class AndroidRelay {
         }
         String addressDisplay() {
             List<String> values = new ArrayList<>();
-            if (directPort > 0) for (String address : directAddresses) values.add(address + ":" + directPort);
+            if (directPort > 0) for (String address : directAddresses) values.add(AndroidRelayAddresses.endpoint(address, directPort));
             return values.isEmpty() ? "未上报 IP（仍可中转连接）" : String.join(" / ", values);
         }
     }

@@ -102,7 +102,7 @@ class SelfConnectionTests(unittest.TestCase):
         sock.getpeername.return_value = ("127.0.0.1", 56565)
         sock.getsockname.return_value = ("127.0.0.1", 49152)
         with mock.patch.object(app, "find_ffmpeg", return_value=None), \
-                mock.patch.object(app.socket, "create_connection", return_value=sock) as direct, \
+                mock.patch.object(app.device_model, "connect_tcp", return_value=sock) as direct, \
                 mock.patch.object(app.relay, "connect_viewer", return_value=sock) as relayed, \
                 mock.patch.object(app, "authenticate", side_effect=PermissionError("fixture auth stop")) as auth:
             viewer._run()
@@ -230,7 +230,7 @@ class SelfConnectionTests(unittest.TestCase):
     def test_dns_failure_is_not_a_terminal_self_rejection(self):
         viewer = app.ViewerConnection("owned.invalid", 56565, "fixture", queue.Queue(), 4)
         with mock.patch.object(app, "find_ffmpeg", return_value=None), \
-                mock.patch.object(app.socket, "create_connection", side_effect=socket.gaierror("fixture DNS failure")), \
+                mock.patch.object(app.device_model, "connect_tcp", side_effect=socket.gaierror("fixture DNS failure")), \
                 mock.patch.object(app, "authenticate") as auth:
             viewer._run()
         auth.assert_not_called()

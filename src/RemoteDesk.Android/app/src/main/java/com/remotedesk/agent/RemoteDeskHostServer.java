@@ -102,9 +102,7 @@ final class RemoteDeskHostServer {
         try {
             password = hostPassword;
             socket = listenerFactory.create();
-            socket.setReuseAddress(true);
-            socket.bind(new InetSocketAddress(
-                InetAddress.getByName("0.0.0.0"), RemoteDeskProtocol.HOST_PORT), 8);
+            bindListener(socket, RemoteDeskProtocol.HOST_PORT);
             long listenerGeneration = clientGate.start();
             gateStarted = true;
             serverSocket = socket;
@@ -1402,6 +1400,12 @@ final class RemoteDeskHostServer {
         RemoteDeskTransport.writeMessage(output, RemoteDeskProtocol.MESSAGE_CONTROL,
             transferId == null ? RemoteDeskTransport.encodeFileTransferStatus(success, message)
                 : RemoteDeskTransport.encodeFileTransferReceipt(transferId, success, message), session, writeLock);
+    }
+
+    static void bindListener(ServerSocket socket, int port) throws IOException {
+        socket.setReuseAddress(true);
+        // An unspecified wildcard lets Android's dual-stack socket accept both families.
+        socket.bind(new InetSocketAddress(port), 8);
     }
 
     private static void closeQuietly(ServerSocket socket) {

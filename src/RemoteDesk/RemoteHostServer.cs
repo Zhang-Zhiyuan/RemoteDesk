@@ -108,8 +108,7 @@ internal sealed partial class RemoteHostServer : IDisposable
             int clampedJpegQuality = Math.Clamp(jpegQuality, 30, 90);
             int clampedScalePercent = Math.Clamp(scalePercent, 25, 100);
             _cancellationTokenSource = new CancellationTokenSource();
-            _listener = new TcpListener(IPAddress.Any, port);
-            _listener.Start();
+            _listener = NetworkUtils.StartDualStackListener(port);
             Volatile.Write(ref _listeningPort, ((IPEndPoint)_listener.LocalEndpoint).Port);
             _acceptLoopTask = AcceptLoopAsync(
                 password,

@@ -5,6 +5,24 @@ internal readonly record struct ResponsiveWindowMetrics(
     Size PreferredSize,
     Point CenteredLocation);
 
+// WinForms Button clamps its preferred width but does not always remeasure
+// the text height. Use the same bounded text layout for painting and AutoSize.
+internal sealed class WrappingActionButton : Button
+{
+    public override Size GetPreferredSize(Size proposedSize)
+    {
+        Size preferred = base.GetPreferredSize(proposedSize);
+        if (MaximumSize.Width <= 0) return preferred;
+        int border = ResponsiveWindowLayout.ScaleLogical(8, DeviceDpi);
+        Size naturalText = TextRenderer.MeasureText(Text, Font, Size.Empty, TextFormatFlags.SingleLine);
+        int width = Math.Min(MaximumSize.Width, Math.Max(MinimumSize.Width, naturalText.Width + Padding.Horizontal + border));
+        int textWidth = Math.Max(1, width - Padding.Horizontal - border);
+        int textHeight = TextRenderer.MeasureText(Text, Font, new Size(textWidth, int.MaxValue),
+            TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl).Height;
+        return new Size(width, Math.Max(MinimumSize.Height, textHeight + Padding.Vertical + border));
+    }
+}
+
 internal static class ResponsiveWindowLayout
 {
     internal const int DesignDpi = 96;
@@ -25,6 +43,32 @@ internal static class ResponsiveWindowLayout
             availablePhysicalPixels < ScaleLogical(logicalBreakpoint, dpi);
     }
 
+    internal static int WrappedCheckBoxHeight(CheckBox checkBox, int width)
+    {
+        int glyphSpace = ScaleLogical(24, checkBox.DeviceDpi);
+        int textWidth = Math.Max(1, width - checkBox.Padding.Horizontal - glyphSpace);
+        int textHeight = TextRenderer.MeasureText(checkBox.Text, checkBox.Font, new Size(textWidth, int.MaxValue),
+            TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl).Height;
+        return Math.Max(glyphSpace, textHeight + ScaleLogical(4, checkBox.DeviceDpi)) + checkBox.Padding.Vertical;
+    }
+
+    internal static void ConfigureWrappedCheckBox(CheckBox checkBox)
+    {
+        checkBox.AutoSize = false;
+        checkBox.Dock = DockStyle.Top;
+        void ResizeText()
+        {
+            if (checkBox.IsDisposed || checkBox.Width <= 0) return;
+            int height = WrappedCheckBoxHeight(checkBox, checkBox.Width);
+            if (checkBox.Height != height) checkBox.Height = height;
+        }
+        checkBox.SizeChanged += (_, _) => ResizeText();
+        checkBox.FontChanged += (_, _) => ResizeText();
+        checkBox.TextChanged += (_, _) => ResizeText();
+        checkBox.DpiChangedAfterParent += (_, _) => ResizeText();
+        ResizeText();
+    }
+
     // Match FlowLayoutPanel: fixed-size children use their assigned bounds;
     // only AutoSize children are measured from their content. Width includes
     // padding/margins, and an explicit FlowBreak starts the next row.
@@ -37,7 +81,11 @@ internal static class ResponsiveWindowLayout
         foreach (Control control in panel.Controls)
         {
             if (!control.Visible) continue;
-            Size size = control.AutoSize ? control.GetPreferredSize(Size.Empty) : control.Size;
+            // A capped button needs a width-constrained measurement to account
+            // for wrapped text. Size.Empty only clamps width after measuring a
+            // single line, which underestimates the action row's height.
+            Size constraint = control.MaximumSize.Width > 0 ? new Size(control.MaximumSize.Width, 0) : Size.Empty;
+            Size size = control.AutoSize ? control.GetPreferredSize(constraint) : control.Size;
             int width = Math.Max(control.MinimumSize.Width, size.Width) + control.Margin.Horizontal;
             int height = Math.Max(control.MinimumSize.Height, size.Height) + control.Margin.Vertical;
             if (rowWidth > 0 && rowWidth + width > contentWidth)

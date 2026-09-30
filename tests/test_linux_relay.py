@@ -375,6 +375,34 @@ class LinuxRelayTlsTests(unittest.IsolatedAsyncioTestCase):
         finally:
             viewer.close()
 
+    async def test_native_ipv6_pinned_directory_and_tunnel(self):
+        async def tracked(reader, writer):
+            self.tasks.add(asyncio.current_task()); self.writers.add(writer)
+            try: await self.relay.handle_connection(reader, writer)
+            finally: self.tasks.discard(asyncio.current_task()); self.writers.discard(writer)
+        listener = await asyncio.start_server(tracked, "::1", 0, ssl=self.tls)
+        self.extra_servers.append(listener)
+        self.options = replace(self.options, server_address="::1", port=listener.sockets[0].getsockname()[1])
+        with mock.patch.object(client, "local_direct_addresses", return_value=["192.0.2.3", "2001:db8::3"]):
+            await self.start_host()
+        devices = await client.list_devices_async(self.options)
+        self.assertEqual(["192.0.2.3", "2001:db8::3"], devices[0]["directAddresses"])
+        viewer = await asyncio.to_thread(client.connect_viewer, self.options)
+        try:
+            payload = "双栈中继".encode() + bytes(range(256)) * 256
+            def exchange():
+                viewer.settimeout(3)
+                viewer.sendall(payload)
+                received = bytearray()
+                while len(received) < len(payload):
+                    block = viewer.recv(len(payload) - len(received))
+                    if not block: raise EOFError("IPv6 relay closed during echo")
+                    received.extend(block)
+                return received
+            self.assertEqual(payload, await asyncio.wait_for(asyncio.to_thread(exchange), 4))
+        finally:
+            viewer.close()
+
     async def test_stopping_host_closes_active_tunnel_and_allows_new_registration(self):
         await self.start_host()
         viewer = await asyncio.to_thread(client.connect_viewer, self.options)

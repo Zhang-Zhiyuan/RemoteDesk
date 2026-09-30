@@ -482,9 +482,9 @@ final class AndroidRelayPanel extends LinearLayout {
                 if (target == null || target.directAddresses.isEmpty() || target.directPort == 0) {
                     setStatus("无法取得最新地址；请刷新列表，或使用中转连接。"); return;
                 }
-                setStatus("已取得最新地址；仅可达的内网地址能直连。跨网仍用中转。");
+                setStatus("已取得 IPv4 / IPv6 地址；可达且防火墙允许时可直连，不可达时仍可中转。");
                 String[] addresses = new String[target.directAddresses.size()];
-                for (int i = 0; i < addresses.length; i++) addresses[i] = target.directAddresses.get(i) + ":" + target.directPort;
+                for (int i = 0; i < addresses.length; i++) addresses[i] = AndroidRelayAddresses.endpoint(target.directAddresses.get(i), target.directPort);
                 new AlertDialog.Builder(getContext()).setTitle(target.name + " · 选择地址填入直连")
                     .setItems(addresses, (dialog, index) -> {
                         if (!closed && active && epoch == generation && saved == options) useDirectAddress.accept(addresses[index]);

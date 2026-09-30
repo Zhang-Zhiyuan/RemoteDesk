@@ -264,6 +264,40 @@ public sealed class MainFormViewerWindowTests
         Assert.Equal(narrowHeight, actions.Height);
     }
 
+    [Fact]
+    public void RelayActionButtonWrapsAndRecoversItsWidth()
+    {
+        using var actions = new FlowLayoutPanel { WrapContents = true };
+        using var font = new Font("Microsoft YaHei UI", 18);
+        var button = new WrappingActionButton { AutoSize = true, Font = font, Text = "部署 / 更新服务器", FlatStyle = FlatStyle.Flat,
+            Padding = new Padding(13, 5, 13, 5), Margin = new Padding(0, 0, 8, 8) };
+        actions.Controls.Add(button);
+        MainForm.ConstrainWrappedActionRow(actions, 180);
+        int narrowHeight = actions.Height;
+        Assert.True(button.GetPreferredSize(Size.Empty).Width <= 172);
+        MainForm.ConstrainWrappedActionRow(actions, 640);
+        Assert.True(button.GetPreferredSize(Size.Empty).Width > 172);
+        Assert.True(narrowHeight > actions.Height, $"narrow={narrowHeight}, wide={actions.Height}, preferred={button.GetPreferredSize(new Size(172, 0))}, font={font.Size}");
+    }
+
+    [Theory]
+    [InlineData(9.25f)]
+    [InlineData(18f)]
+    [InlineData(24f)]
+    public void SettingsCheckBoxWrapsLongTextWithoutTruncation(float points)
+    {
+        using var font = new Font("Microsoft YaHei UI", points);
+        using var checkBox = new CheckBox { Font = font, Text = "发布本机到在线列表，并自动更新 IP / 端口", Width = 200 };
+        ResponsiveWindowLayout.ConfigureWrappedCheckBox(checkBox);
+        int narrowHeight = checkBox.Height;
+        checkBox.Width = 900;
+        Assert.True(narrowHeight > checkBox.Height);
+        checkBox.Width = 200;
+        Assert.Equal(narrowHeight, checkBox.Height);
+        checkBox.Text = "启用";
+        Assert.True(narrowHeight > checkBox.Height);
+    }
+
     private static int MeasureWrappedViewerToolbarSection(
         int availableWidth)
     {

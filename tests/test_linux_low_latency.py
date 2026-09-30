@@ -2370,7 +2370,7 @@ Available hardware decoders:
 
         with (
             mock.patch.object(app, "find_ffmpeg", return_value=None),
-            mock.patch.object(app.socket, "create_connection", return_value=sock),
+            mock.patch.object(app.device_model, "connect_tcp", return_value=sock),
             mock.patch.object(app, "configure_low_latency_socket"),
             mock.patch.object(app, "authenticate", return_value=object()),
             mock.patch.object(app, "write_message"),
@@ -2536,7 +2536,7 @@ Available hardware decoders:
 
         with (
             mock.patch.object(app, "find_ffmpeg", return_value=None),
-            mock.patch.object(app.socket, "create_connection", return_value=sock),
+            mock.patch.object(app.device_model, "connect_tcp", return_value=sock),
             mock.patch.object(app, "configure_low_latency_socket"),
             mock.patch.object(
                 app,
@@ -2990,7 +2990,7 @@ Available hardware decoders:
                 sock = mock.MagicMock()
                 sock.__enter__.return_value = sock
                 with (mock.patch.object(app, "find_ffmpeg", return_value=None),
-                      mock.patch.object(app.socket, "create_connection", return_value=sock),
+                      mock.patch.object(app.device_model, "connect_tcp", return_value=sock),
                       mock.patch.object(app, "authenticate", return_value=object()),
                       mock.patch.object(app, "configure_low_latency_socket"),
                       mock.patch.object(app, "read_message", side_effect=reads),

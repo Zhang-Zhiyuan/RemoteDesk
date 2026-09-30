@@ -4882,7 +4882,7 @@ class ViewerConnection:
                 device_model.reject_local_identity(target_id, self.local_device_id)
             connection = (relay.connect_viewer(self.relay_options, self.stop_event)
                           if self.relay_options is not None
-                          else socket.create_connection((self.host, self.port), timeout=6.0))
+                          else device_model.connect_tcp(self.host, self.port, timeout=6.0, stop_event=self.stop_event))
             with connection as sock:
                 configure_low_latency_socket(sock, SOCKET_RECEIVE_BUFFER_BYTES, SOCKET_SEND_BUFFER_BYTES)
                 self.sock = sock

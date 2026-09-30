@@ -63,24 +63,22 @@ internal static class RelayTls
         RelayConnectionOptions options, RelayNetworkPath? path,
         CancellationToken cancellationToken, bool dataTunnel)
     {
-        var client = path is null ? new TcpClient() : new TcpClient(AddressFamily.InterNetwork);
+        TcpClient? client = null;
         SslStream? stream = null;
         bool certificateRejected = false;
-        ConfigureTcpClient(client, dataTunnel);
 
         try
         {
             if (path is not null)
             {
+                client = new TcpClient(AddressFamily.InterNetwork);
+                ConfigureTcpClient(client, dataTunnel);
                 path.Bind(client.Client);
                 await client.ConnectAsync(path.RemoteAddress, options.Port, cancellationToken)
                     .ConfigureAwait(false);
             }
-            else await client.ConnectAsync(
-                    options.ServerAddress,
-                    options.Port,
-                    cancellationToken)
-                .ConfigureAwait(false);
+            else client = await DualStackConnector.ConnectAsync(options.ServerAddress, options.Port,
+                candidate => ConfigureTcpClient(candidate, dataTunnel), cancellationToken).ConfigureAwait(false);
 
             string expectedFingerprint = options.TlsCertificateSha256;
             stream = new SslStream(
@@ -109,7 +107,7 @@ internal static class RelayTls
         catch (AuthenticationException ex) when (!certificateRejected)
         {
             stream?.Dispose();
-            client.Dispose();
+            client?.Dispose();
             // Schannel also uses AuthenticationException for a peer's fatal
             // alert before certificate exchange. Only an actual pin rejection
             // is an identity failure; interrupted negotiation must be retryable.
@@ -118,7 +116,7 @@ internal static class RelayTls
         catch
         {
             stream?.Dispose();
-            client.Dispose();
+            client?.Dispose();
             throw;
         }
     }

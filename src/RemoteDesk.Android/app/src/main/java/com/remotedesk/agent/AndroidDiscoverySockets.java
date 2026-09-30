@@ -5,8 +5,12 @@ import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketException;
+import java.net.MulticastSocket;
+import java.net.NetworkInterface;
+import java.util.Collections;
 
 final class AndroidDiscoverySockets {
+    static final String IPV6_GROUP = "ff12::5244:4b31";
     private static final int BIND_ATTEMPTS = 6;
     private static final long BIND_RETRY_DELAY_MILLIS = 120;
 
@@ -18,9 +22,18 @@ final class AndroidDiscoverySockets {
         for (int attempt = 1; attempt <= BIND_ATTEMPTS; attempt++) {
             DatagramSocket socket = null;
             try {
-                socket = new DatagramSocket(null);
+                socket = new MulticastSocket(null);
                 socket.setReuseAddress(true);
-                socket.bind(new InetSocketAddress(InetAddress.getByName("0.0.0.0"), RemoteDeskProtocol.DISCOVERY_PORT));
+                socket.bind(new InetSocketAddress(RemoteDeskProtocol.DISCOVERY_PORT));
+                try {
+                    java.util.Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+                    if (interfaces != null) for (NetworkInterface network : Collections.list(interfaces)) {
+                        try {
+                            if (network.isUp() && !network.isLoopback() && network.supportsMulticast())
+                                ((MulticastSocket)socket).joinGroup(new InetSocketAddress(IPV6_GROUP, RemoteDeskProtocol.DISCOVERY_PORT), network);
+                        } catch (IOException ignored) { }
+                    }
+                } catch (SocketException ignored) { }
                 return socket;
             } catch (IOException ex) {
                 closeQuietly(socket);

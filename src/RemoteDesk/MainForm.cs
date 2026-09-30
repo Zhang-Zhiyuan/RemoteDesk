@@ -848,8 +848,23 @@ public sealed partial class MainForm : Form
         _localIpsBox = new TextBox
         {
             ReadOnly = true,
-            Dock = DockStyle.Fill
+            Dock = DockStyle.Fill,
+            Multiline = true,
+            WordWrap = false,
+            ScrollBars = ScrollBars.Both,
+            MinimumSize = new Size(0, 64),
+            Height = 64,
+            AccessibleName = "本机 IPv4 / IPv6 地址，可选中复制"
         };
+        void SizeAddressBox()
+        {
+            int height = Math.Max(64, _localIpsBox.Font.Height * 2 + SystemInformation.HorizontalScrollBarHeight + 10);
+            _localIpsBox.MinimumSize = new Size(0, height);
+            _localIpsBox.Height = height;
+        }
+        _localIpsBox.FontChanged += (_, _) => SizeAddressBox();
+        _localIpsBox.DpiChangedAfterParent += (_, _) => SizeAddressBox();
+        SizeAddressBox();
         _hostPortBox = CreatePortInput();
         _hostPasswordBox = CreatePasswordInput();
         _hostPasswordBox.PlaceholderText = "设备密钥";
@@ -1401,6 +1416,7 @@ public sealed partial class MainForm : Form
         networkOptions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         networkOptions.Controls.Add(_relayOptimizeNetworkBox, 0, 0);
         networkOptions.Controls.Add(_relayRouteStatusLabel, 0, 1);
+        ResponsiveWindowLayout.ConfigureWrappedCheckBox(_relayOptimizeNetworkBox);
         _relayViewerPasswordBox = CreatePasswordInput();
         _relayViewerPasswordBox.PlaceholderText = "所选远端电脑的设备密钥";
         _relayVideoModeBox = new ComboBox
@@ -1598,7 +1614,7 @@ public sealed partial class MainForm : Form
 
     private void ConfigureToolTips()
     {
-        SetToolTip(_localIpsBox, "本机可用于局域网连接的 IPv4 地址。");
+        SetToolTip(_localIpsBox, "本机 IPv4 / IPv6 地址，每行一个，可选中复制。IPv6 跨网直连需要双方网络可达且防火墙允许。");
         SetToolTip(
             _hostPortBox,
             "被控端监听端口，默认 56565；若 Windows 保留该端口，" +
@@ -1828,22 +1844,41 @@ public sealed partial class MainForm : Form
         actions.AutoSize = false;
         actions.Dock = DockStyle.Top;
         bool applying = false;
+        bool queued = false;
         void Apply()
         {
+            queued = false;
             if (applying || actions.IsDisposed || !actions.Visible || actions.ClientSize.Width <= 0) return;
+            int previousHeight = actions.Height;
             applying = true;
             try { ConstrainWrappedActionRow(actions, actions.ClientSize.Width); }
             finally { applying = false; }
+            // A child's height can change during the parent's measurement.
+            // Notify the table after that layout has completed, not within it.
+            if (actions.Height != previousHeight) actions.Parent?.PerformLayout();
         }
-        actions.ClientSizeChanged += (_, _) => Apply();
-        actions.VisibleChanged += (_, _) => Apply();
-        actions.DpiChangedAfterParent += (_, _) => Apply();
+        void QueueApply()
+        {
+            if (queued || applying || actions.IsDisposed) return;
+            if (!actions.IsHandleCreated) { Apply(); return; }
+            queued = true;
+            actions.BeginInvoke((Action)Apply);
+        }
+        actions.ClientSizeChanged += (_, _) => QueueApply();
+        actions.VisibleChanged += (_, _) => QueueApply();
+        actions.DpiChangedAfterParent += (_, _) => QueueApply();
+        actions.Layout += (_, _) => QueueApply();
         Apply();
     }
 
     internal static void ConstrainWrappedActionRow(FlowLayoutPanel actions, int availableWidth)
     {
         ArgumentNullException.ThrowIfNull(actions);
+        foreach (Button button in actions.Controls.OfType<Button>().Where(button => button.AutoSize))
+        {
+            var limit = new Size(Math.Max(1, availableWidth - actions.Padding.Horizontal - button.Margin.Horizontal), 0);
+            if (button.MaximumSize != limit) button.MaximumSize = limit;
+        }
         int height = CalculateWrappedToolbarHeight(actions, availableWidth);
         actions.AutoSize = false;
         actions.Dock = DockStyle.Top;
@@ -5279,7 +5314,7 @@ public sealed partial class MainForm : Form
                 port,
                 GetSelectedViewerVideoMode(),
                 FfmpegH264Decoder.AvailablePath,
-                NetworkUtils.GetLocalIPv4Addresses(),
+                NetworkUtils.GetLocalAddresses(),
                 hosts,
                 tcpProbeResults,
                 hasNativeHardwareDecoder:
@@ -5296,7 +5331,7 @@ public sealed partial class MainForm : Form
                 port,
                 GetSelectedViewerVideoMode(),
                 FfmpegH264Decoder.AvailablePath,
-                NetworkUtils.GetLocalIPv4Addresses(),
+                NetworkUtils.GetLocalAddresses(),
                 Array.Empty<DiscoveredHost>(),
                 tcpProbeResults,
                 hasNativeHardwareDecoder:
@@ -5582,7 +5617,7 @@ public sealed partial class MainForm : Form
         IReadOnlyList<DiscoveredHost> hosts,
         out int ignoredLocalHosts)
     {
-        var localAddresses = NetworkUtils.GetLocalIPv4Addresses()
+        var localAddresses = NetworkUtils.GetLocalAddresses()
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var remoteHosts = new List<DiscoveredHost>(hosts.Count);
         ignoredLocalHosts = 0;
@@ -5629,7 +5664,7 @@ public sealed partial class MainForm : Form
 
     private IReadOnlyList<DiscoveryProbeTarget> GetDiscoveryProbeTargets()
     {
-        var localAddresses = NetworkUtils.GetLocalIPv4Addresses()
+        var localAddresses = NetworkUtils.GetLocalAddresses()
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         return BuildDiscoveryProbeTargets(
             _viewerHostBox.Text,
@@ -6200,7 +6235,7 @@ public sealed partial class MainForm : Form
 
     private IReadOnlyList<RemoteDeviceListItem> BuildRemoteDeviceList(IReadOnlyList<DiscoveredHost> hosts)
     {
-        return BuildRemoteDeviceList(hosts, GetRecentDevices(), NetworkUtils.GetLocalIPv4Addresses()
+        return BuildRemoteDeviceList(hosts, GetRecentDevices(), NetworkUtils.GetLocalAddresses()
             .ToHashSet(StringComparer.OrdinalIgnoreCase));
     }
 
@@ -6503,8 +6538,9 @@ public sealed partial class MainForm : Form
 
     private void RefreshLocalIps()
     {
-        IReadOnlyList<string> addresses = NetworkUtils.GetLocalIPv4Addresses();
-        _localIpsBox.Text = addresses.Count == 0 ? "未发现活动 IPv4 地址" : string.Join(", ", addresses);
+        IReadOnlyList<string> addresses = RelayAddressReport.LocalAddresses();
+        string display = addresses.Count == 0 ? "未发现活动 IPv4 / IPv6 地址" : string.Join(Environment.NewLine, addresses);
+        if (_localIpsBox.Text != display) _localIpsBox.Text = display;
     }
 
     private void RefreshCaptureTargets()
@@ -8352,6 +8388,42 @@ public sealed partial class MainForm : Form
         content.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104));
         content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
+        int desiredLabelWidth = 104;
+        bool sizingLabels = false;
+        void FitLabelColumn(bool measure)
+        {
+            if (sizingLabels || content.IsDisposed) return;
+            sizingLabels = true;
+            try
+            {
+                if (measure)
+                    desiredLabelWidth = Math.Max(ResponsiveWindowLayout.ScaleLogical(104, content.DeviceDpi),
+                        content.Controls.OfType<Label>().Where(label => content.GetColumn(label) == 0 && content.GetColumnSpan(label) == 1)
+                            .Select(label => TextRenderer.MeasureText(label.Text, label.Font, Size.Empty,
+                                TextFormatFlags.SingleLine).Width + label.Margin.Horizontal + label.Padding.Horizontal + 4)
+                            .DefaultIfEmpty(0).Max());
+                int available = content.ClientSize.Width - content.Padding.Horizontal;
+                if (available <= 0) return;
+                int width = Math.Min(desiredLabelWidth, Math.Max(40, (int)(available * .45)));
+                if (Math.Abs(content.ColumnStyles[0].Width - width) >= 1) content.ColumnStyles[0].Width = width;
+            }
+            finally { sizingLabels = false; }
+        }
+        content.ControlAdded += (_, args) =>
+        {
+            if (args.Control is Label label)
+            {
+                // An inherited font reaches the child after the parent's
+                // FontChanged event. Re-measure using the final child font.
+                label.FontChanged += (_, _) => FitLabelColumn(measure: true);
+                label.TextChanged += (_, _) => FitLabelColumn(measure: true);
+            }
+            FitLabelColumn(measure: true);
+        };
+        content.FontChanged += (_, _) => FitLabelColumn(measure: true);
+        content.DpiChangedAfterParent += (_, _) => FitLabelColumn(measure: true);
+        content.ClientSizeChanged += (_, _) => FitLabelColumn(measure: false);
+
         shell.Controls.Add(header, 0, 0);
         shell.Controls.Add(content, 0, 1);
         return content;
@@ -8483,7 +8555,7 @@ public sealed partial class MainForm : Form
 
     private static Button CreateButton(string text, Color backColor, Color foreColor, Color borderColor)
     {
-        var button = new Button
+        var button = new WrappingActionButton
         {
             Text = text,
             AutoSize = true,
@@ -8560,7 +8632,7 @@ public sealed partial class MainForm : Form
                 textBox.BorderStyle = BorderStyle.FixedSingle;
                 textBox.BackColor = SurfaceBackColor;
                 textBox.ForeColor = TextColor;
-                textBox.MinimumSize = new Size(0, 30);
+                textBox.MinimumSize = new Size(0, Math.Max(30, textBox.MinimumSize.Height));
                 break;
             case ComboBox comboBox:
                 comboBox.FlatStyle = FlatStyle.Flat;
@@ -8606,6 +8678,7 @@ public sealed partial class MainForm : Form
         }
         table.Controls.Add(CreateFieldLabel(label), 0, row);
         table.Controls.Add(control, 1, row);
+        if (control is CheckBox checkBox) ResponsiveWindowLayout.ConfigureWrappedCheckBox(checkBox);
     }
 
     private sealed class BufferedTabControl : TabControl

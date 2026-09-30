@@ -100,6 +100,21 @@ class DevicePanelUiTests(unittest.TestCase):
         self.panel.render(); self.root.update()
         self.assertEqual("typed-new-address", self.app.viewer_host.get()); self.assertEqual("45679", self.app.viewer_port.get())
 
+    def test_unchanged_refresh_keeps_widgets_focus_selection_and_scroll(self):
+        self.panel.book.remember("2001:db8::1", 56565, "fixture", remark="IPv6 测试设备")
+        self.panel.render(); self.root.update()
+        item = self.panel.tree.get_children()[0]
+        self.panel.tree.selection_set(item); self.panel.tree.focus(item)
+        tree = self.panel.tree
+        with mock.patch.object(tree, "delete", wraps=tree.delete) as delete, \
+                mock.patch.object(tree, "insert", wraps=tree.insert) as insert, \
+                mock.patch.object(tree, "move", wraps=tree.move) as move, \
+                mock.patch.object(tree, "item", wraps=tree.item) as update:
+            for _ in range(50): self.panel.render()
+            delete.assert_not_called(); insert.assert_not_called(); move.assert_not_called()
+            self.assertTrue(all(not call.kwargs for call in update.call_args_list))
+        self.assertEqual((item,), tree.selection()); self.assertEqual(item, tree.focus())
+
     def test_reused_endpoint_renders_separate_rows_and_preserves_each_credential(self):
         first_id = "00112233-4455-6677-8899-aabbccddeeff"
         second_id = "00112233-4455-6677-8899-aabbccddeeaa"

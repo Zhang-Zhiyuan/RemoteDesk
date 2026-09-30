@@ -47,6 +47,9 @@ final class AndroidLanDiscovery implements AutoCloseable {
         while (interfaces != null && interfaces.hasMoreElements()) {
             NetworkInterface network = interfaces.nextElement();
             if (!network.isUp()) continue;
+            if (!network.isLoopback() && network.supportsMulticast() && network.getIndex() > 0)
+                try { destinations.add(InetAddress.getByName(AndroidDiscoverySockets.IPV6_GROUP + "%" + network.getIndex())); }
+                catch (IOException ignored) { }
             for (InterfaceAddress address : network.getInterfaceAddresses()) {
                 if (!network.isLoopback() && address.getAddress() instanceof Inet4Address && address.getBroadcast() != null)
                     destinations.add(address.getBroadcast());
@@ -67,7 +70,7 @@ final class AndroidLanDiscovery implements AutoCloseable {
             destinations.add(InetAddress.getByAddress(new byte[]{-1,-1,-1,-1}));
             for (AndroidConnectionHistory.Node node : history) {
                 if (node.relay()) continue;
-                InetAddress address = literalIpv4(node.host);
+                InetAddress address = literalAddress(node.host);
                 if (address != null && !AndroidSelfConnectionGuard.isSelf(address, localAddresses) &&
                         !AndroidSelfConnectionGuard.knownSelf(node, false, localDeviceId)) destinations.add(address);
             }
@@ -187,6 +190,16 @@ final class AndroidLanDiscovery implements AutoCloseable {
         // JSONObject has no nesting limit on older Android releases. Reject a
         // tiny but deeply nested hostile datagram before it can overflow a stack.
         return depth == 0 && !quoted;
+    }
+
+    static InetAddress literalAddress(String host) {
+        InetAddress ipv4 = literalIpv4(host);
+        if (ipv4 != null) return ipv4;
+        if (host == null || !host.matches("[0-9a-fA-F:]+(%[a-zA-Z0-9_.-]+)?") || !host.contains(":")) return null;
+        try {
+            InetAddress address = InetAddress.getByName(host);
+            return address.isAnyLocalAddress() || address.isMulticastAddress() ? null : address;
+        } catch (IOException ignored) { return null; }
     }
 
     static InetAddress literalIpv4(String host) {

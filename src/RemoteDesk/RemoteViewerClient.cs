@@ -592,11 +592,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
                     videoMode,
                     ffmpegPath,
                     hasNativeHardwareDecoder);
-            var tcpClient = new TcpClient();
-            NetworkUtils.ConfigureLowLatencyTcpClient(
-                tcpClient,
-                FrameReceiveBufferBytes,
-                InputSendBufferBytes);
+            TcpClient? tcpClient = null;
             var cancellationTokenSource = new CancellationTokenSource();
             SecureSession? session = null;
             Task? receiveLoopTask = null;
@@ -617,6 +613,18 @@ internal sealed partial class RemoteViewerClient : IDisposable
                         cancellationTokenSource.Token);
                 CancellationToken connectionAttemptToken =
                     connectionAttemptCancellation.Token;
+                // Publish cancellation before DNS/TCP racing, not a single socket
+                // that leaves alternate connection attempts alive after Cancel.
+                PublishPendingConnection(null, cancellationTokenSource);
+                if (relayRoute is null)
+                    tcpClient = await DualStackConnector.ConnectAsync(host, port,
+                        client => NetworkUtils.ConfigureLowLatencyTcpClient(client, FrameReceiveBufferBytes, InputSendBufferBytes),
+                        connectionAttemptToken).ConfigureAwait(false);
+                else
+                {
+                    tcpClient = new TcpClient();
+                    NetworkUtils.ConfigureLowLatencyTcpClient(tcpClient, FrameReceiveBufferBytes, InputSendBufferBytes);
+                }
                 closeOnCancellation =
                     connectionAttemptToken.UnsafeRegister(
                         static state =>
@@ -625,13 +633,10 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 PublishPendingConnection(
                     tcpClient,
                     cancellationTokenSource);
+                connectionAttemptToken.ThrowIfCancellationRequested();
 
                 if (relayRoute is null)
                 {
-                    await tcpClient.ConnectAsync(
-                        host,
-                        port,
-                        connectionAttemptToken);
                     // Check the connected endpoint, not just the typed name:
                     // DNS aliases, reconnects and adapter changes are covered
                     // before any password proof can take over the host session.
@@ -778,7 +783,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 ClearConnectionState(cancellationTokenSource);
                 _allowVideoFallback = true;
                 TryCancel(cancellationTokenSource);
-                tcpClient.Close();
+                tcpClient?.Close();
                 if (receiveLoopTask is not null)
                 {
                     await IgnoreDisconnectExceptionAsync(receiveLoopTask).ConfigureAwait(false);
@@ -786,7 +791,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 RemoteSessionRejectedException? sessionRejection =
                     GetSessionRejection(remoteCapabilitiesReady);
                 session?.Dispose();
-                tcpClient.Dispose();
+                tcpClient?.Dispose();
                 cancellationTokenSource.Dispose();
                 if (sessionRejection is not null)
                 {
@@ -815,7 +820,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 ClearConnectionState(cancellationTokenSource);
                 _allowVideoFallback = true;
                 TryCancel(cancellationTokenSource);
-                tcpClient.Close();
+                tcpClient?.Close();
                 if (receiveLoopTask is not null)
                 {
                     await IgnoreDisconnectExceptionAsync(receiveLoopTask).ConfigureAwait(false);
@@ -823,7 +828,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 RemoteSessionRejectedException? sessionRejection =
                     GetSessionRejection(remoteCapabilitiesReady);
                 session?.Dispose();
-                tcpClient.Dispose();
+                tcpClient?.Dispose();
                 cancellationTokenSource.Dispose();
                 if (sessionRejection is not null)
                 {
@@ -1090,7 +1095,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
     }
 
     private void PublishPendingConnection(
-        TcpClient tcpClient,
+        TcpClient? tcpClient,
         CancellationTokenSource cancellationTokenSource)
     {
         lock (_connectionStateLock)
@@ -1102,7 +1107,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
     }
 
     private void ClearPendingConnection(
-        TcpClient tcpClient,
+        TcpClient? tcpClient,
         CancellationTokenSource cancellationTokenSource)
     {
         lock (_connectionStateLock)

@@ -10,8 +10,10 @@ namespace RemoteDesk.Tests;
 
 public sealed class RelayTunnelIntegrationTests
 {
-    [Fact]
-    public async Task PinnedTlsDirectoryAndOpaqueTunnelRoundTrip()
+    [Theory]
+    [InlineData("127.0.0.1")]
+    [InlineData("::1")]
+    public async Task PinnedTlsDirectoryAndOpaqueTunnelRoundTrip(string relayAddress)
     {
         string? serverScript = FindWorkspaceFile(
             Path.Combine(
@@ -56,7 +58,7 @@ public sealed class RelayTunnelIntegrationTests
                     new Dictionary<string, object>
                     {
                         ["access_token"] = token,
-                        ["bind"] = "127.0.0.1",
+                        ["bind"] = relayAddress,
                         // The test launcher replaces only the listening port
                         // with 0 and reports the OS-assigned, still-owned port.
                         // Production config validation remains unchanged.
@@ -71,11 +73,11 @@ public sealed class RelayTunnelIntegrationTests
             int relayPort = await ReadBoundPortAsync(serverProcess, timeout.Token);
             // The readiness message must describe a socket which is ALREADY
             // owned, not a candidate another parallel test could take over.
-            using (var competingListener = new TcpListener(IPAddress.Loopback, relayPort) { ExclusiveAddressUse = true })
+            using (var competingListener = new TcpListener(IPAddress.Parse(relayAddress), relayPort) { ExclusiveAddressUse = true })
                 Assert.Throws<SocketException>(() => competingListener.Start());
             string deviceId = Guid.NewGuid().ToString("D");
             var options = new RelayConnectionOptions(
-                "127.0.0.1",
+                relayAddress,
                 relayPort,
                 token,
                 RelayTls.GetSha256Fingerprint(certificateBytes),
@@ -365,7 +367,7 @@ public sealed class RelayTunnelIntegrationTests
             relay = runpy.run_path(sys.argv[1], run_name="remotedesk_relay_test")
             real_start_server = asyncio.start_server
             async def start_owned_listener(callback, host=None, port=None, **kwargs):
-                if host != "127.0.0.1":
+                if host not in ("127.0.0.1", "::1"):
                     raise RuntimeError("Relay fixture must bind loopback only")
                 server = await real_start_server(callback, host, 0, **kwargs)
                 print(json.dumps({"port": server.sockets[0].getsockname()[1]}), flush=True)

@@ -952,18 +952,20 @@ public sealed class LowLatencyVideoTransportTests
         }
     }
 
-    [Fact]
-    public async Task Ipv4MappedTcpEndpointsNegotiateAnIpv4UdpRoute()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Ipv4MappedAndNativeIpv6EndpointsNegotiateUdpRoutes(bool ipv6)
     {
         using var timeout =
             new CancellationTokenSource(TimeSpan.FromSeconds(5));
         var logs = new ConcurrentQueue<string>();
-        IPAddress mappedLoopback = IPAddress.Loopback.MapToIPv6();
+        IPAddress peerAddress = ipv6 ? IPAddress.IPv6Loopback : IPAddress.Loopback.MapToIPv6();
         await using var host = new LowLatencyVideoHostTransport(
             logs.Enqueue,
             timeout.Token);
         LowLatencyVideoOffer offer = Assert.IsType<LowLatencyVideoOffer>(
-            host.TryCreateOffer(mappedLoopback));
+            host.TryCreateOffer(peerAddress));
         byte[] offerPayload =
             RemoteMessageCodec.EncodeLowLatencyVideoOffer(offer);
         LowLatencyVideoOffer viewerOffer =
@@ -977,7 +979,7 @@ public sealed class LowLatencyVideoTransportTests
             TaskCreationOptions.RunContinuationsAsynchronously);
         await using var viewer = new LowLatencyVideoViewerTransport(
             viewerOffer,
-            mappedLoopback,
+            peerAddress,
             payload =>
             {
                 RemoteControlMessage control =
@@ -996,11 +998,11 @@ public sealed class LowLatencyVideoTransportTests
                 CloneBorrowedFrame(frame)),
             logs.Enqueue,
             timeout.Token,
-            localAddress: mappedLoopback);
+            localAddress: peerAddress);
 
         await WaitUntilAsync(() => host.IsRouteActive, timeout.Token);
         Assert.Equal(
-            new IPEndPoint(IPAddress.Loopback, viewer.LocalEndpoint.Port),
+            new IPEndPoint(ipv6 ? IPAddress.IPv6Loopback : IPAddress.Loopback, viewer.LocalEndpoint.Port),
             viewer.LocalEndpoint);
         Assert.True(host.TryQueueJpegFrame(
             320,

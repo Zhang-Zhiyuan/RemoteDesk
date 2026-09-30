@@ -1110,7 +1110,14 @@ public final class RemoteDeskViewerActivity extends Activity {
         ViewerConnectionOwner owner = null;
         Socket connectedSocket = null;
         try {
-            if (relayOptions == null) connectedSocket = new Socket();
+            if (relayOptions == null) {
+                try (AndroidRelayNetworkSelector.Dial dial = new AndroidRelayNetworkSelector.Dial()) {
+                    pendingConnectionSocket = dial;
+                    if (!running.get()) throw new IOException("连接已取消。");
+                    connectedSocket = AndroidTcpConnector.connect(host, port, CONNECT_TIMEOUT_MILLIS, dial,
+                        RemoteDeskViewerActivity::configureViewerSocket);
+                }
+            }
             else {
                 try (AndroidRelayNetworkSelector.Dial dial = new AndroidRelayNetworkSelector.Dial()) {
                     pendingConnectionSocket = dial;
@@ -1124,9 +1131,7 @@ public final class RemoteDeskViewerActivity extends Activity {
             configureViewerSocket(connectedSocket);
             connectedSocket.setSoTimeout(AUTHENTICATION_TIMEOUT_MILLIS);
             if (relayOptions == null) {
-                InetSocketAddress endpoint = new InetSocketAddress(host, port);
-                AndroidSelfConnectionGuard.requireResolvedRemote(endpoint.getAddress(), BuildConfig.ALLOW_LOOPBACK_FIXTURES);
-                connectedSocket.connect(endpoint, CONNECT_TIMEOUT_MILLIS);
+                AndroidSelfConnectionGuard.requireResolvedRemote(connectedSocket.getInetAddress(), BuildConfig.ALLOW_LOOPBACK_FIXTURES);
                 // Check the actual DNS-selected peer before writing authentication bytes.
                 AndroidSelfConnectionGuard.requireRemote(connectedSocket, BuildConfig.ALLOW_LOOPBACK_FIXTURES);
             }

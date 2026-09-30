@@ -35,7 +35,7 @@ internal static class ConnectionDiagnostics
         builder.AppendLine($"本机 IP：{FormatLocalAddresses(localAddresses)}");
         builder.AppendLine(string.IsNullOrWhiteSpace(normalizedHost)
             ? "目标：未填写"
-            : $"目标：{normalizedHost}:{port}");
+            : $"目标：{NetworkUtils.FormatEndpoint(normalizedHost, port)}");
         builder.AppendLine($"视频模式：{FormatVideoMode(videoMode)}");
         builder.AppendLine(
             FormatH264DecoderLine(
@@ -149,7 +149,7 @@ internal static class ConnectionDiagnostics
             .Select(address => address.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        return addresses.Length == 0 ? "未读取到可用 IPv4" : string.Join(", ", addresses);
+        return addresses.Length == 0 ? "未读取到可用 IP 地址" : string.Join(", ", addresses);
     }
 
     private static string FormatH264DecoderLine(

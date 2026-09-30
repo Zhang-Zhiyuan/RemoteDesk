@@ -98,26 +98,29 @@ def save_device_names(path, names):
 
 
 def normalize_address_report(message):
-    """Optional IPv4 hints only: never resolve DNS or dial a reported address."""
+    """Optional literal unicast hints: never resolve DNS or dial a reported address."""
     port, values = message.get("directPort"), message.get("directAddresses")
     if type(port) is not int or not 1 <= port <= 65535 or not isinstance(values, list):
         return [], 0
     addresses = []
     for value in values[:32]:
-        if not isinstance(value, str) or len(value) > 15:
+        if not isinstance(value, str) or len(value) > 39 or "%" in value:
             continue
         try:
-            address = ipaddress.IPv4Address(value)
+            address = ipaddress.ip_address(value)
         except ValueError:
             continue
-        if (address.is_loopback or address.is_link_local or address.is_multicast
-                or int(address) >> 24 == 0 or int(address) >> 24 >= 224):
+        if (address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified
+                or (address.version == 4 and (int(address) >> 24 == 0 or int(address) >> 24 >= 224))
+                or (address.version == 6 and (address.ipv4_mapped or address.is_site_local or int(address) < 2**32))):
             continue
         if str(address) not in addresses:
             addresses.append(str(address))
-        if len(addresses) == MAX_DIRECT_ADDRESSES:
-            break
-    return addresses, port if addresses else 0
+    bounded = addresses[:MAX_DIRECT_ADDRESSES]
+    if len(bounded) == MAX_DIRECT_ADDRESSES and all((":" in value) == (":" in bounded[0]) for value in bounded):
+        alternate = next((value for value in addresses if (":" in value) != (":" in bounded[0])), None)
+        if alternate is not None: bounded[-1] = alternate
+    return bounded, port if bounded else 0
 
 
 @dataclass
@@ -707,7 +710,8 @@ async def run(config_path: str) -> None:
     tls_context.load_cert_chain(relay.cert_file, relay.key_file)
     server = await asyncio.start_server(
         relay.handle_connection,
-        relay.bind,
+        # asyncio owns separate sockets, preserving IPv4 if IPv6 is unavailable.
+        None if relay.bind == "0.0.0.0" and config.get("enable_ipv6", True) else relay.bind,
         relay.port,
         ssl=tls_context,
         ssl_handshake_timeout=10,

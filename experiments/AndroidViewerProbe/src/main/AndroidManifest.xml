@@ -19,6 +19,7 @@
         </activity>
         <activity android:name="com.remotedesk.agent.LayoutProbeActivity" android:exported="true"
             android:windowSoftInputMode="stateAlwaysHidden|adjustNothing" />
+        <activity android:name="com.remotedesk.agent.Ipv6ProbeActivity" android:exported="true" />
         <activity android:name="com.remotedesk.agent.RemoteDeskViewerActivity" android:exported="false"
             android:windowSoftInputMode="adjustResize"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode" />

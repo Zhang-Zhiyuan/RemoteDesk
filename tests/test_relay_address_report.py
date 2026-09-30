@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "scripts/linux"))
 sys.path.insert(0, str(ROOT / "scripts/relay"))
 import remotedesk_linux_relay as client
 import remotedesk_relay_server as server
+import remotedesk_linux_devices as devices
 
 
 class RelayAddressReportTests(unittest.TestCase):
@@ -39,7 +40,8 @@ class RelayAddressReportTests(unittest.TestCase):
 
     def test_local_enumeration_has_no_dns_dependency_and_tolerates_missing_platform_api(self):
         with mock.patch.object(client.socket, "getaddrinfo", side_effect=AssertionError("must not use DNS")), \
-                mock.patch.object(client.socket, "if_nameindex", side_effect=OSError("network changed"), create=True):
+                mock.patch.object(client.socket, "if_nameindex", side_effect=OSError("network changed"), create=True), \
+                mock.patch.object(devices, "local_ip_addresses", side_effect=OSError("network changed")):
             self.assertEqual([], client.local_direct_addresses())
 
     def test_display_never_treats_nat_source_as_host_port(self):

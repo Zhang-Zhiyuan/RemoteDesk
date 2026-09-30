@@ -81,7 +81,7 @@ class DevicePanel(ttk.LabelFrame):
                 self.status.config(text="发现超时；可以手动填写地址和端口。")
                 if callback: callback([])
         if visible and not self.busy and self.app.viewer is None and time.monotonic()-self.refreshed >= 30: self.scan()
-        self.after_id = self.after(100, self.poll)
+        self.after_id = self.after(100 if self.busy or self.storage_callbacks or not self.ready else 250 if visible else 750, self.poll)
 
     def cancel_scan(self):
         self.epoch += 1; self.busy = False; self.scan_callback = None
@@ -108,7 +108,7 @@ class DevicePanel(ttk.LabelFrame):
         threading.Thread(target=run, name="RemoteDeskDiscovery", daemon=True).start()
 
     def render(self):
-        selected = self.tree.selection(); self.tree.delete(*self.tree.get_children()); self.rows = {}; seen = set()
+        selected = self.tree.selection(); self.rows = {}; seen = set(); desired = []
         for device in self.nearby:
             key = device.device_id or device.address
             if key in seen: continue
@@ -118,14 +118,24 @@ class DevicePanel(ttk.LabelFrame):
             row_id = "saved:"+saved.id if saved else "found:"+device.address
             if row_id in self.rows: continue
             self.rows[row_id] = (saved, device)
-            self.tree.insert("", tk.END, iid=row_id, text=saved.title if saved else device.name or device.host,
-                             values=(device.address, "可连接" if device.listening else "被控未启动"))
+            desired.append((row_id, saved.title if saved else device.name or device.host,
+                            (device.address, "可连接" if device.listening else "被控未启动")))
         for node in self.book.nodes:
             key = "saved:"+node.id
             if key in self.rows: continue
             self.rows[key] = (node, None)
-            self.tree.insert("", tk.END, iid=key, text=node.title, values=(node.address, "已保存 · 可自动探测" if node.auto_port else "已保存"))
-        if selected and selected[0] in self.rows: self.tree.selection_set(selected[0])
+            desired.append((key, node.title, (node.address, "已保存 · 可自动探测" if node.auto_port else "已保存")))
+        # Keep live rows, focus, and scroll position; unchanged refreshes need no
+        # native widget writes and do not interrupt the user's selected device.
+        for stale in set(self.tree.get_children()) - self.rows.keys(): self.tree.delete(stale)
+        for index, (key, title, values) in enumerate(desired):
+            if not self.tree.exists(key): self.tree.insert("", index, iid=key, text=title, values=values)
+            else:
+                current = self.tree.item(key)
+                if current['text'] != title or tuple(current['values']) != values:
+                    self.tree.item(key, text=title, values=values)
+                if self.tree.index(key) != index: self.tree.move(key, "", index)
+        if selected and selected[0] in self.rows and self.tree.selection() != selected: self.tree.selection_set(selected[0])
 
     def selection(self):
         selection = self.tree.selection()

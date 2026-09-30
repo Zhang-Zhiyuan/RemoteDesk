@@ -10,8 +10,31 @@ internal static class RelayAddressReport
 {
     internal const int MaxAddresses = 8;
 
-    internal static IReadOnlyList<string> Normalize(IEnumerable<string?> values) => values.Take(32)
-        .Where(IsUsableIPv4).Select(value => value!).Distinct(StringComparer.Ordinal).Take(MaxAddresses).ToArray();
+    internal static IReadOnlyList<string> Normalize(IEnumerable<string?> values)
+    {
+        string[] normalized = values.Take(32).Select(NormalizeAddress).Where(value => value is not null)
+            .Select(value => value!).Distinct(StringComparer.Ordinal).ToArray();
+        var result = normalized.Take(MaxAddresses).ToList();
+        if (result.Count == MaxAddresses && result.All(value => value.Contains(':') == result[0].Contains(':')))
+        {
+            string? alternate = normalized.FirstOrDefault(value => value.Contains(':') != result[0].Contains(':'));
+            if (alternate is not null) result[^1] = alternate;
+        }
+        return result;
+    }
+
+    internal static string? NormalizeAddress(string? value)
+    {
+        if (IsUsableIPv4(value)) return value;
+        // Hints are numeric addresses, never DNS names or foreign interface scopes.
+        if (value is null || value.Length is < 2 or > 39 || value.Contains('%') ||
+            value.Any(c => c != ':' && !Uri.IsHexDigit(c)) ||
+            !IPAddress.TryParse(value, out IPAddress? ip) || ip.AddressFamily != AddressFamily.InterNetworkV6 ||
+            IPAddress.IsLoopback(ip) || ip.Equals(IPAddress.IPv6Any) || ip.IsIPv6LinkLocal ||
+            ip.IsIPv6Multicast || ip.IsIPv6SiteLocal || ip.IsIPv4MappedToIPv6 ||
+            ip.GetAddressBytes().Take(12).All(b => b == 0)) return null;
+        return ip.ToString();
+    }
 
     internal static bool IsUsableIPv4(string? value)
     {
@@ -22,7 +45,7 @@ internal static class RelayAddressReport
         return bytes[0] is > 0 and < 224 && bytes[0] != 127 && !(bytes[0] == 169 && bytes[1] == 254);
     }
 
-    internal static IReadOnlyList<string> LocalAddresses() => Normalize(NetworkUtils.GetLocalIPv4Addresses());
+    internal static IReadOnlyList<string> LocalAddresses() => Normalize(NetworkUtils.GetLocalAddresses());
 
     internal static (IReadOnlyList<string> Addresses, int Port) Parse(JsonElement value)
     {
