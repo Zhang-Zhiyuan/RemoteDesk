@@ -191,8 +191,8 @@ internal static class RemoteUpdater
             [Parameter(Mandatory=$true)][string]$TargetPath,
             [Parameter(Mandatory=$true)][string]$BackupPath,
             [Parameter(Mandatory=$true)][string]$LogPath,
-            [Parameter(Mandatory=$true)][ValidatePattern('^[0-9A-Fa-f]{64}$')][string]$ExpectedPackageSha256,
-            [Parameter(Mandatory=$true)][ValidatePattern('^[0-9A-Fa-f]{64}$')][string]$ExpectedSignerCertificateSha256,
+            [Parameter(Mandatory=$true)][Alias('PackageSha256')][ValidatePattern('^[0-9A-Fa-f]{64}$')][string]$ExpectedPackageSha256,
+            [Parameter(Mandatory=$true)][Alias('SignerSha256')][ValidatePattern('^[0-9A-Fa-f]{64}$')][string]$ExpectedSignerCertificateSha256,
             [Parameter(Mandatory=$true)][ValidateRange(1, 65535)][int]$HealthPort,
             [ValidateRange(5, 120)][int]$HealthTimeoutSeconds = 35,
             [switch]$AllowUnsignedPersonalUpdate,
@@ -522,6 +522,7 @@ internal static class RemoteUpdater
         }
 
         try {
+            Write-RemoteDeskUpdateLog "updater ready: PID=$PID"
             Write-RemoteDeskUpdateLog "waiting for process $ProcessId to exit"
             for ($i = 0; $i -lt 120; $i++) {
                 $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
@@ -709,8 +710,65 @@ internal static class RemoteUpdater
         string expectedSignerCertificateSha256,
         bool authenticodeRequired)
     {
+        ProcessStartInfo startInfo = CreateUpdaterProcessStartInfo(
+            scriptPath, processId, packagePath, targetPath, backupPath, logPath,
+            targetDirectory, healthPort, expectedPackageSha256,
+            expectedSignerCertificateSha256, authenticodeRequired);
+        Process process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("启动远程更新脚本失败，现有程序保持运行。");
+        try
+        {
+            WaitForUpdaterReady(process, logPath, TimeSpan.FromSeconds(10));
+            return process;
+        }
+        catch
+        {
+            // Until the ready acknowledgement the parent has not scheduled its
+            // exit, so this owned child cannot have begun replacing the EXE.
+            try { if (!process.HasExited) process.Kill(); }
+            catch (InvalidOperationException) { }
+            catch (System.ComponentModel.Win32Exception) { }
+            process.Dispose();
+            throw;
+        }
+    }
+
+    internal static void WaitForUpdaterReady(Process process, string logPath, TimeSpan timeout)
+    {
+        string acknowledgement = $"updater ready: PID={process.Id}";
+        var watch = Stopwatch.StartNew();
+        while (watch.Elapsed < timeout)
+        {
+            if (process.HasExited)
+                throw new InvalidOperationException(
+                    $"远程更新脚本启动失败（退出代码 {process.ExitCode}），现有程序保持运行。日志：{logPath}");
+            try
+            {
+                if (File.Exists(logPath) && File.ReadAllLines(logPath).Any(line => line.EndsWith(acknowledgement, StringComparison.Ordinal)))
+                    return;
+            }
+            catch (IOException) { /* The child may still be writing its first line. */ }
+            Thread.Sleep(50);
+        }
+        throw new TimeoutException($"远程更新脚本未及时准备就绪，现有程序保持运行。日志：{logPath}");
+    }
+
+    internal static ProcessStartInfo CreateUpdaterProcessStartInfo(
+        string scriptPath,
+        int processId,
+        string packagePath,
+        string targetPath,
+        string backupPath,
+        string logPath,
+        string targetDirectory,
+        int healthPort,
+        string expectedPackageSha256,
+        string expectedSignerCertificateSha256,
+        bool authenticodeRequired)
+    {
         var startInfo = CreateWindowsPowerShellStartInfo(targetDirectory);
         startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-NonInteractive");
         startInfo.ArgumentList.Add("-ExecutionPolicy");
         startInfo.ArgumentList.Add("Bypass");
         startInfo.ArgumentList.Add("-File");
@@ -725,9 +783,12 @@ internal static class RemoteUpdater
         startInfo.ArgumentList.Add(backupPath);
         startInfo.ArgumentList.Add("-LogPath");
         startInfo.ArgumentList.Add(logPath);
-        startInfo.ArgumentList.Add("-ExpectedPackageSha256");
+        // Avoid the -E... script parameter spellings: some Windows PowerShell
+        // builds fail before entering -File scripts with those arguments.
+        // Aliases bind to the same mandatory, validated SHA-256 parameters.
+        startInfo.ArgumentList.Add("-PackageSha256");
         startInfo.ArgumentList.Add(expectedPackageSha256);
-        startInfo.ArgumentList.Add("-ExpectedSignerCertificateSha256");
+        startInfo.ArgumentList.Add("-SignerSha256");
         startInfo.ArgumentList.Add(expectedSignerCertificateSha256);
         startInfo.ArgumentList.Add("-HealthPort");
         startInfo.ArgumentList.Add(healthPort.ToString());
@@ -742,8 +803,7 @@ internal static class RemoteUpdater
         startInfo.ArgumentList.Add("-RestartArgument");
         startInfo.ArgumentList.Add("--tray");
 
-        return Process.Start(startInfo)
-            ?? throw new InvalidOperationException("启动远程更新脚本失败。");
+        return startInfo;
     }
 
     internal static ProcessStartInfo CreateWindowsPowerShellStartInfo(string workingDirectory)
