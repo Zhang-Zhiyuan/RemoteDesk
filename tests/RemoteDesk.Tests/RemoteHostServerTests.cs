@@ -210,9 +210,9 @@ public sealed class RemoteHostServerTests
         object first = new();
         object second = new();
 
-        Assert.Null(gate.Activate(first));
+        Assert.Empty(gate.Activate(first));
         Assert.Same(first, gate.Current);
-        Assert.Same(first, gate.Activate(second));
+        Assert.Same(first, Assert.Single(gate.Activate(second)));
         Assert.Same(second, gate.Current);
 
         Assert.False(gate.Release(first));

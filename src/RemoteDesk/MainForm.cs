@@ -32,7 +32,7 @@ public sealed partial class MainForm : Form
     private readonly AppSettingsService _settingsService = new();
     private readonly RemoteDeskSettings _settings;
     private readonly RemoteHostServer _hostServer = new();
-    private RemoteControlNotice? _remoteControlNotice;
+    private RemoteControlNoticeManager? _remoteControlNotices;
     private readonly RemoteViewerClient _viewerClient = new();
     private readonly RelayHostConnector _relayHostConnector;
     private readonly WindowsRelayNetworkOptimizer _relayNetworkOptimizer = new();
@@ -386,7 +386,8 @@ public sealed partial class MainForm : Form
         if (disposing && _layoutPreview)
         {
             _isClosing = true;
-            _remoteControlNotice?.Dispose();
+            CloseViewerWindowFromDisconnect();
+            _remoteControlNotices?.Dispose();
             _presenceResponder.Dispose();
             _hostServer.Dispose();
             _viewerClient.Dispose();
@@ -404,7 +405,7 @@ public sealed partial class MainForm : Form
         if (disposing)
         {
             _isClosing = true;
-            TryShutdown(() => _remoteControlNotice?.Dispose());
+            TryShutdown(() => _remoteControlNotices?.Dispose());
             TryShutdown(() => CancelViewerReconnectIntent());
             TryShutdown(CancelDiscoveryScan);
             TryShutdown(() => _relayOperationCancellation.Cancel());
@@ -557,6 +558,7 @@ public sealed partial class MainForm : Form
             {
                 Interlocked.Exchange(ref _responsiveRefreshPending, 0);
                 RefreshResponsiveWindowBounds();
+                UpdateRemoteControlNotice();
             }));
         }
         catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
@@ -2638,6 +2640,7 @@ public sealed partial class MainForm : Form
 
         if (!connected)
         {
+            CloseAdditionalScreens();
             SetRemoteFilePullPending(false);
             _pendingViewerCaptureTargetRestore = false;
             _lastConnectedDeviceInfo = null;
@@ -5375,11 +5378,12 @@ public sealed partial class MainForm : Form
 
     private void ShowViewerWindow()
     {
+        _ = _viewerClient.SetScreenStreamPausedAsync(false);
         string title = GetViewerWindowTitle();
         if (_viewerWindow is not null && !_viewerWindow.IsDisposed)
         {
-            _viewerWindow.Text = title;
-            _viewerWindow.Activate();
+            _viewerWindow.ConfigureScreenWindows(title, OpenAdditionalScreenAsync, TryActivateAdditionalScreen);
+            _viewerWindow.ShowIndependentWindow();
             return;
         }
 
@@ -5397,6 +5401,7 @@ public sealed partial class MainForm : Form
                 remotePlatform,
                 RemoteDevicePlatforms.Android,
                 StringComparison.OrdinalIgnoreCase));
+        viewerWindow.ConfigureScreenWindows(title, OpenAdditionalScreenAsync, TryActivateAdditionalScreen);
         viewerWindow.SetRemotePlatform(
             remotePlatform);
         viewerWindow.SetCaptureTargets(
@@ -5415,7 +5420,9 @@ public sealed partial class MainForm : Form
                 ref _lastAcceptedViewerConnectionGeneration),
             GetCurrentViewerTelemetryIntentGeneration());
         viewerWindow.FormClosed += async (_, _) => await ViewerWindowClosedAsync(viewerWindow);
-        viewerWindow.Show(this);
+        // A remote desktop is a workspace, not a dialog owned by the launcher.
+        // MainForm.Dispose explicitly closes it when the application exits.
+        viewerWindow.ShowIndependentWindow();
     }
 
     private string GetViewerWindowTitle()
@@ -5445,6 +5452,14 @@ public sealed partial class MainForm : Form
 
         CaptureViewerTelemetrySnapshot(closedWindow);
         _viewerWindow = null;
+
+        // Keep the controller connection (and its ephemeral screen group) alive
+        // until the last independent screen window closes.
+        if (!closedWindow.ClosedFromDisconnect && !_isClosing && _additionalScreens.Count > 0)
+        {
+            await _viewerClient.SetScreenStreamPausedAsync(true);
+            return;
+        }
 
         if (!closedWindow.ClosedFromDisconnect &&
             !_isClosing &&
@@ -5511,6 +5526,7 @@ public sealed partial class MainForm : Form
 
     private void CloseViewerWindowFromDisconnect()
     {
+        CloseAdditionalScreens();
         RemoteViewerWindow? window = _viewerWindow;
         if (window is null || window.IsDisposed)
         {
@@ -6909,25 +6925,25 @@ public sealed partial class MainForm : Form
 
     private void UpdateRemoteControlNotice()
     {
-        if (_isClosing) return;
+        if (_isClosing || IsDisposed) return;
         // Read live state on the UI thread, not an old queued event payload.
         if (!_hostServer.HasActiveRemoteControl)
         {
-            _remoteControlNotice?.Hide();
+            _remoteControlNotices?.SetActive(false);
             return;
         }
-        if (_remoteControlNotice is null || _remoteControlNotice.IsDisposed)
+        if (_remoteControlNotices is null)
         {
-            _remoteControlNotice = new RemoteControlNotice();
-            _remoteControlNotice.DisconnectRequested += async () =>
+            var notices = new RemoteControlNoticeManager();
+            _remoteControlNotices = notices;
+            notices.DisconnectRequested += async () =>
             {
-                _remoteControlNotice.SetDisconnecting();
                 try { await _hostServer.DisconnectRemoteControlAsync(); }
                 catch (Exception error) { AppendHostLog($"断开远程控制失败：{error.Message}"); }
-                finally { UpdateRemoteControlNotice(); }
+                finally { notices.SetDisconnecting(false); UpdateRemoteControlNotice(); }
             };
         }
-        _remoteControlNotice.ShowActive();
+        _remoteControlNotices.SetActive(true);
     }
 
     private void SetViewerStatus(string status, Color foreColor)
@@ -7310,6 +7326,15 @@ public sealed partial class MainForm : Form
             !_viewerClient.IsConnected ||
             _viewerCaptureTargetBox.SelectedItem is not CaptureTargetInfo target)
         {
+            return;
+        }
+
+        if (TryActivateAdditionalScreen(target))
+        {
+            CaptureTargetInfo? current = _viewerWindow?.SelectedCaptureTarget ??
+                _viewerCaptureTargetBox.Items.OfType<CaptureTargetInfo>().FirstOrDefault(item =>
+                    string.Equals(item.Id, _settings.Viewer.CaptureTargetId, StringComparison.OrdinalIgnoreCase));
+            if (current is not null) SelectViewerCaptureTarget(current);
             return;
         }
 
@@ -7758,6 +7783,12 @@ public sealed partial class MainForm : Form
     private bool ConfirmRemoteClipboardFileTransfer(
         IReadOnlyList<FileTransferConfirmationItem> items,
         string? note)
+        => ConfirmRemoteClipboardFileTransfer(items, note, null);
+
+    private bool ConfirmRemoteClipboardFileTransfer(
+        IReadOnlyList<FileTransferConfirmationItem> items,
+        string? note,
+        RemoteViewerWindow? requestedWindow)
     {
         if (_isClosing || IsDisposed || !IsHandleCreated || items.Count == 0)
         {
@@ -7775,7 +7806,7 @@ public sealed partial class MainForm : Form
 
             SetViewerStatus($"远端准备取回 {items.Count} 项文件，等待确认。", MutedTextColor);
             confirmed = FileTransferConfirmation.Confirm(
-                GetRemoteFileConfirmationOwner(),
+                requestedWindow is { IsDisposed: false, Visible: true } ? requestedWindow : GetRemoteFileConfirmationOwner(),
                 "确认取回远端文件",
                 "被控端准备把以下文件传回本机。确认后会保存到本机接收目录，并自动放入本机文件剪贴板，可在资源管理器按 Ctrl+V。",
                 items,

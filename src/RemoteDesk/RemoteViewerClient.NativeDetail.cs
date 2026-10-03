@@ -28,7 +28,8 @@ internal sealed partial class RemoteViewerClient
 
     private RemoteDeviceCapabilities NegotiatedViewerCapabilities(bool relay)
     {
-        var capabilities = relay ? RelayViewerCapabilities : LocalViewerCapabilities;
+        var capabilities = (relay ? RelayViewerCapabilities : LocalViewerCapabilities) |
+            RemoteDeviceCapabilities.IndependentScreenSessions;
         if (!EnableNativeDetailReception) return capabilities;
         return capabilities | RemoteDeviceCapabilities.NativeDetailV1;
     }

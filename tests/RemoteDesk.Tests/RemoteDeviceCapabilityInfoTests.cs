@@ -14,6 +14,8 @@ public sealed class RemoteDeviceCapabilityInfoTests
         Assert.True(capabilities.HasFlag(RemoteDeviceCapabilities.FileChecksum));
         Assert.True(capabilities.HasFlag(RemoteDeviceCapabilities.FileTransferCancel));
         Assert.True(capabilities.HasFlag(RemoteDeviceCapabilities.FileTransferPreview));
+        Assert.True(capabilities.HasFlag(RemoteDeviceCapabilities.IndependentScreenSessions));
+        Assert.Contains("多屏分窗", RemoteDeviceCapabilityInfo.Format(capabilities), StringComparison.Ordinal);
         Assert.Equal(
             RemoteUpdater.CanApplyRemoteUpdate,
             capabilities.HasFlag(RemoteDeviceCapabilities.RemoteUpdate));
@@ -64,6 +66,8 @@ public sealed class RemoteDeviceCapabilityInfoTests
         Assert.False(capabilities.HasFlag(RemoteDeviceCapabilities.FileChecksum));
         Assert.False(capabilities.HasFlag(RemoteDeviceCapabilities.FileTransferCancel));
         Assert.False(capabilities.HasFlag(RemoteDeviceCapabilities.FileTransferPreview));
+        Assert.False(capabilities.HasFlag(RemoteDeviceCapabilities.IndependentScreenSessions));
+        Assert.DoesNotContain("多屏分窗", RemoteDeviceCapabilityInfo.Format(capabilities), StringComparison.Ordinal);
         Assert.False(capabilities.HasFlag(RemoteDeviceCapabilities.RemoteUpdate));
         Assert.False(capabilities.HasFlag(RemoteDeviceCapabilities.ClipboardSequenceTracking));
         Assert.False(capabilities.HasFlag(RemoteDeviceCapabilities.LowLatencyUdpVideo));

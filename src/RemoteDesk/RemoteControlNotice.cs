@@ -20,6 +20,7 @@ internal sealed class RemoteControlNotice : Form
     private Point? _dragOrigin;
     private bool _userPositioned;
     private bool _arranging;
+    private Rectangle? _displayWorkingArea;
 
     public event Action? DisconnectRequested;
 
@@ -38,7 +39,7 @@ internal sealed class RemoteControlNotice : Form
         Font = SystemFonts.MessageBoxFont!;
         DoubleBuffered = true;
         _disconnect.FlatAppearance.BorderColor = Color.FromArgb(252, 165, 165);
-        _disconnect.AccessibleDescription = "断开当前远程控制，保留被控端监听。";
+        _disconnect.AccessibleDescription = "断开这台电脑上的所有远程控制连接，保留被控端监听。";
         _message.AccessibleDescription = "当前有人通过 RemoteDesk 查看或控制这台电脑；可拖动此提示。";
         Controls.AddRange([_message, _disconnect]);
         _disconnect.Click += (_, _) => DisconnectRequested?.Invoke();
@@ -53,9 +54,7 @@ internal sealed class RemoteControlNotice : Form
         _message.MouseMove += (_, _) =>
         {
             if (_dragOrigin is not { } origin) return;
-            _userPositioned = true;
-            var proposed = new Rectangle(Cursor.Position.X - origin.X, Cursor.Position.Y - origin.Y, Width, Height);
-            Bounds = PlaceWithin(Screen.FromRectangle(proposed).WorkingArea, Size, proposed.Location);
+            MoveWithinDisplay(new Point(Cursor.Position.X - origin.X, Cursor.Position.Y - origin.Y));
         };
         _message.MouseUp += (_, _) => { _dragOrigin = null; _message.Capture = false; };
         _message.MouseCaptureChanged += (_, _) => { if (!_message.Capture) _dragOrigin = null; };
@@ -74,19 +73,35 @@ internal sealed class RemoteControlNotice : Form
         }
     }
 
-    public void ShowActive()
+    public void ShowActive(bool disconnecting = false)
     {
-        _disconnect.Enabled = true;
-        _disconnect.Text = "断开";
+        SetDisconnecting(disconnecting);
         ArrangeOnScreen();
         if (!Visible) Show(); // Deliberately no owner, Activate or BringToFront.
+        // Creating a window on a different-DPI monitor can change DeviceDpi.
+        ArrangeOnScreen();
         SetWindowPos(Handle, (nint)(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0200);
     }
 
-    public void SetDisconnecting()
+    public void SetDisconnecting(bool disconnecting = true)
     {
-        _disconnect.Enabled = false;
-        _disconnect.Text = "断开中";
+        _disconnect.Enabled = !disconnecting;
+        _disconnect.Text = disconnecting ? "断开中" : "断开";
+    }
+
+    internal void SetDisplayWorkingArea(Rectangle workingArea)
+    {
+        if (workingArea.Width <= 0 || workingArea.Height <= 0) throw new ArgumentOutOfRangeException(nameof(workingArea));
+        _displayWorkingArea = workingArea;
+        ArrangeOnScreen();
+    }
+
+    internal void MoveWithinDisplay(Point position)
+    {
+        _userPositioned = true;
+        // Keep one visible indicator on each display even when a user drags it.
+        Rectangle area = _displayWorkingArea ?? Screen.FromRectangle(new Rectangle(position, Size)).WorkingArea;
+        Bounds = PlaceWithin(area, Size, position);
     }
 
     internal void ArrangeOnScreen(Rectangle? workingArea = null)
@@ -95,7 +110,7 @@ internal sealed class RemoteControlNotice : Form
         _arranging = true;
         try
         {
-            Rectangle area = workingArea ?? (_userPositioned
+            Rectangle area = workingArea ?? _displayWorkingArea ?? (_userPositioned
                 ? Screen.FromRectangle(Bounds).WorkingArea
                 : (Screen.PrimaryScreen ?? Screen.AllScreens[0]).WorkingArea);
             int padding = ResponsiveWindowLayout.ScaleLogical(10, DeviceDpi);

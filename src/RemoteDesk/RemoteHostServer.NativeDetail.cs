@@ -73,7 +73,7 @@ internal sealed partial class RemoteHostServer
         long checkedDesktopAt = 0, loggedAt = Environment.TickCount64;
         int frames = 0, chunks = 0;
         log($"原生补清已接入：GPU 同源采集 / 硬编 {profile.OutputSize.Width}×{profile.OutputSize.Height}，接收反馈限速。");
-        while (!token.IsCancellationRequested && ReferenceEquals(native.Worker, worker) && worker.IsReady &&
+        while (!token.IsCancellationRequested && !viewer.ScreenStreamPaused && ReferenceEquals(native.Worker, worker) && worker.IsReady &&
             native.Request is { Enabled: true } && capture.TargetVersion == profile.TargetGeneration &&
             viewer.SupportedVideoCodecs.HasFlag(RemoteVideoCodecs.H264AnnexB))
         {

@@ -14,6 +14,8 @@ internal static class Program
     {
         Console.InputEncoding = System.Text.Encoding.UTF8;
         if (args.Length > 0 && args[0] == "control-notice-isolated") return RemoteControlNoticeProbe.Run();
+        if (args.Length > 0 && args[0] == "viewer-lifetime-isolated") return AdaptiveLayoutProbe.Run(viewerLifetime: true);
+        if (args.Length > 0 && args[0] == "multi-screen-ui-isolated") return AdaptiveLayoutProbe.Run(multiScreen: true);
         if (args.Length > 0 && args[0] == "keyboard-modifiers-isolated") return ClipboardSystemProbe.Run(keyboardModifiers: true);
         if (args.Length > 0 && args[0] == "main-layout-isolated") return MainFormClippingProbe.Run();
         if (args.Length > 0 && args[0] == "layout-isolated") return AdaptiveLayoutProbe.Run();
@@ -32,6 +34,7 @@ internal static class Program
         var c = config.RootElement;
         var output = Path.GetFullPath(c.GetProperty("output").GetString()!);
         Directory.CreateDirectory(output);
+        if (args[0] == "multi-screen-loopback") return MultiScreenLoopbackProbe.RunAsync(output).GetAwaiter().GetResult();
         if (args[0] == "background-fault") return BackgroundFaultProbe.Run(output);
         if (args[0] == "slow-file-transfer") return SlowFileTransferProbe.RunAsync(output).GetAwaiter().GetResult();
         if (args[0] == "slow-file-transfer-legacy") return SlowFileTransferProbe.RunAsync(output, legacyPeer: true).GetAwaiter().GetResult();

@@ -41,7 +41,8 @@ internal enum RemoteDeviceCapabilities
     // native capture/request/render path is enabled and qualified.
     NativeDetailV1 = 1 << 26,
     FileReceiveLocation = 1 << 27,
-    ClipboardSnapshotV1 = 1 << 28
+    ClipboardSnapshotV1 = 1 << 28,
+    IndependentScreenSessions = 1 << 29
 }
 
 internal static class RemoteDevicePlatforms
@@ -111,6 +112,7 @@ internal static class RemoteDeviceCapabilityInfo
             RemoteDeviceCapabilities.ClipboardSnapshotV1 |
             RemoteDeviceCapabilities.FileReceive |
             RemoteDeviceCapabilities.CaptureTargetSelection |
+            RemoteDeviceCapabilities.IndependentScreenSessions |
             RemoteDeviceCapabilities.FileDropPaste |
             RemoteDeviceCapabilities.FileSend |
             RemoteDeviceCapabilities.FileChecksum |
@@ -275,6 +277,7 @@ internal static class RemoteDeviceCapabilityInfo
 
         if (capabilities.HasFlag(RemoteDeviceCapabilities.NativeDetailV1)) names.Add("原生文字补清");
         if (capabilities.HasFlag(RemoteDeviceCapabilities.FileReceiveLocation)) names.Add("接收目录确认");
+        if (capabilities.HasFlag(RemoteDeviceCapabilities.IndependentScreenSessions)) names.Add("多屏分窗");
 
         return names.Count == 0 ? "能力未知" : string.Join("/", names);
     }

@@ -971,16 +971,43 @@ internal sealed partial class RemoteHostServer : IDisposable
                         session,
                         writePriority,
                         clientCancellation);
-                    ActiveClientConnection? replacedOwner =
-                        activeClientGate.Activate(candidateOwner);
+                    ScreenCaptureTarget sessionCaptureTarget = captureTarget;
+                    IReadOnlyList<ActiveClientConnection> replacedOwners;
+                    if (authentication.IsScreenAttachment)
+                    {
+                        // AUT2 never takes ownership on its own. Its first encrypted
+                        // message must attach to the still-live authenticated group.
+                        ProtocolMessage joinMessage = await Protocol.ReadMessageAsync(stream, session, authenticationTimeout.Token);
+                        RemoteControlMessage join = joinMessage.Type == MessageType.Control
+                            ? RemoteMessageCodec.DecodeControl(joinMessage.PayloadMemory)
+                            : throw new InvalidDataException("多屏会话缺少加入请求。");
+                        ScreenCaptureTarget? requestedScreen = join.Kind == RemoteControlKind.ScreenAttachmentJoin
+                            ? ScreenCaptureService.GetAvailableTargets().FirstOrDefault(target => !target.IsAllScreens &&
+                                string.Equals(target.Id, join.TargetId, StringComparison.OrdinalIgnoreCase)) : null;
+                        if (requestedScreen is null || !activeClientGate.TryAttach(candidateOwner, join.ScreenSessionToken))
+                        {
+                            await Protocol.WriteMessageAsync(stream, MessageType.Control,
+                                RemoteMessageCodec.EncodeSessionRejected("无法打开独立屏幕：屏幕已移除、主会话已结束或多屏窗口数已达上限。请从当前远控窗口重新打开。"),
+                                session, writePriority.Lock, authenticationTimeout.Token);
+                            return;
+                        }
+                        sessionCaptureTarget = requestedScreen;
+                        replacedOwners = [];
+                    }
+                    else
+                    {
+                        replacedOwners = activeClientGate.Activate(candidateOwner);
+                    }
                     activeClientOwner = candidateOwner;
                     remoteControlLease = _remoteControlActivity.Begin(candidateOwner.DisconnectByHostAsync);
-                    if (replacedOwner is not null)
+                    if (authentication.IsScreenAttachment)
+                        await Protocol.WriteMessageAsync(stream, MessageType.Control,
+                            RemoteMessageCodec.EncodeScreenAttachmentAccepted(), session, writePriority.Lock, authenticationTimeout.Token);
+                    if (replacedOwners.Count != 0)
                     {
                         Log?.Invoke(
                             $"新的已认证查看端 {remoteEndpoint} 正在接管当前会话。");
-                        await replacedOwner
-                            .DisconnectForReplacementAsync()
+                        await Task.WhenAll(replacedOwners.Select(owner => owner.DisconnectForReplacementAsync()))
                             .ConfigureAwait(false);
                     }
 
@@ -991,10 +1018,11 @@ internal sealed partial class RemoteHostServer : IDisposable
                     using var captureTargetPublicationCoordinator =
                         new CaptureTargetPublicationCoordinator();
                     using var captureState = new CaptureSessionState(
-                        captureTarget,
+                        sessionCaptureTarget,
                         scalePercent,
                         captureTargetPublicationCoordinator
-                            .AdvanceGeneration);
+                            .AdvanceGeneration,
+                        allowAutomaticFallback: !authentication.IsScreenAttachment);
                     using var sessionPower = WindowsRemoteSessionPowerRequest.TryAcquire(message => Log?.Invoke(message));
                     using var inputInjectionDispatcher =
                         new InputInjectionDispatcher();
@@ -1003,7 +1031,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                         FileTransferReceiver.GetReceiveDirectory,
                         sendPasteShortcut:
                             inputInjectionDispatcher.SendPasteShortcut);
-                    var viewerState = new ViewerSessionState();
+                    var viewerState = new ViewerSessionState { ScreenSessionToken = activeClientGate.GetAttachmentToken(candidateOwner) };
                     var interactionActivity =
                         new RemoteInteractionActivity();
                     await using var nativeDetails = new NativeDetailHostSession(
@@ -1272,15 +1300,19 @@ internal sealed partial class RemoteHostServer : IDisposable
         where T : class
     {
         private readonly object _sync = new();
-        private T? _activeClient;
+        internal const int MaximumScreens = 4;
+        private readonly List<T> _activeClients = [];
+        private string? _attachmentToken;
 
-        public T? Activate(T client)
+        public IReadOnlyList<T> Activate(T client)
         {
             ArgumentNullException.ThrowIfNull(client);
             lock (_sync)
             {
-                T? replaced = _activeClient;
-                _activeClient = client;
+                T[] replaced = _activeClients.ToArray();
+                _activeClients.Clear();
+                _activeClients.Add(client);
+                _attachmentToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
                 return replaced;
             }
         }
@@ -1290,12 +1322,35 @@ internal sealed partial class RemoteHostServer : IDisposable
             ArgumentNullException.ThrowIfNull(client);
             lock (_sync)
             {
-                if (!ReferenceEquals(_activeClient, client))
+                int index = _activeClients.FindIndex(candidate => ReferenceEquals(candidate, client));
+                if (index < 0)
                 {
                     return false;
                 }
 
-                _activeClient = null;
+                _activeClients.RemoveAt(index);
+                if (_activeClients.Count != 0) return false;
+                _attachmentToken = null;
+                return true;
+            }
+        }
+
+        internal string? GetAttachmentToken(T client)
+        {
+            lock (_sync) return _activeClients.Any(candidate => ReferenceEquals(candidate, client)) ? _attachmentToken : null;
+        }
+
+        internal bool TryAttach(T client, string? token)
+        {
+            ArgumentNullException.ThrowIfNull(client);
+            lock (_sync)
+            {
+                if (_attachmentToken is null || token is not { Length: 64 } ||
+                    _activeClients.Count >= MaximumScreens ||
+                    _activeClients.Any(candidate => ReferenceEquals(candidate, client)) ||
+                    !CryptographicOperations.FixedTimeEquals(System.Text.Encoding.ASCII.GetBytes(_attachmentToken),
+                        System.Text.Encoding.ASCII.GetBytes(token))) return false;
+                _activeClients.Add(client);
                 return true;
             }
         }
@@ -1306,7 +1361,7 @@ internal sealed partial class RemoteHostServer : IDisposable
             {
                 lock (_sync)
                 {
-                    return _activeClient;
+                    return _activeClients.FirstOrDefault();
                 }
             }
         }
@@ -1686,6 +1741,17 @@ internal sealed partial class RemoteHostServer : IDisposable
 
     internal sealed class ViewerSessionState
     {
+        internal string? ScreenSessionToken { get; init; }
+        internal bool ScreenSessionOfferSent { get; set; }
+        private int _screenStreamPaused;
+        internal bool ScreenStreamPaused => Volatile.Read(ref _screenStreamPaused) != 0;
+        internal bool SetScreenStreamPaused(bool paused)
+        {
+            int value = paused ? 1 : 0;
+            if (Interlocked.Exchange(ref _screenStreamPaused, value) == value) return false;
+            NotifyCaptureBackendChanged();
+            return true;
+        }
         internal NativeDetailHostSession? NativeDetails { get; set; }
         internal NativeDetailOffer? LastNativeOffer { get; set; }
         internal HostVideoDiagnostics VideoDiagnostics { get; } = new();
@@ -2301,6 +2367,11 @@ internal sealed partial class RemoteHostServer : IDisposable
         while (!cancellationToken.IsCancellationRequested)
         {
             // The capture service already rate-limits topology enumeration.
+            if (viewerState.ScreenStreamPaused)
+            {
+                await Task.Delay(100, cancellationToken);
+                continue;
+            }
             // Do not force Screen.AllScreens onto the 60 FPS hot path; a
             // missing target is still rechecked within the 500 ms cache bound.
             captureState.RefreshCaptureBounds();
@@ -5894,6 +5965,13 @@ internal sealed partial class RemoteHostServer : IDisposable
                     control.SupportedVideoCodecs);
                 clipboardLog($"查看端支持编码：{FormatVideoCodecs(control.SupportedVideoCodecs)}");
                 break;
+            case RemoteControlKind.ScreenStreamPause:
+                if (viewerState.ScreenSessionOfferSent && viewerState.SetScreenStreamPaused(control.Success) && control.Success)
+                {
+                    viewerState.NativeDetails?.Configure(null);
+                    await lowLatencyVideo.StopVideoForCaptureTargetChangeAsync().ConfigureAwait(false);
+                }
+                break;
             case RemoteControlKind.DeviceIdentityRequest:
                 // Sent only on request from a client that saw the capability bit;
                 // old clients with strict control decoders never receive this.
@@ -5919,6 +5997,13 @@ internal sealed partial class RemoteHostServer : IDisposable
                 viewerState.Capabilities = control.Capabilities;
                 fileTransferReceiver.RequireChecksum = control.Capabilities.HasFlag(RemoteDeviceCapabilities.FileChecksum);
                 clipboardLog($"查看端能力：{RemoteDeviceCapabilityInfo.Format(control.Capabilities)}");
+                if (!viewerState.ScreenSessionOfferSent && viewerState.ScreenSessionToken is { } screenToken &&
+                    control.Capabilities.HasFlag(RemoteDeviceCapabilities.IndependentScreenSessions))
+                {
+                    viewerState.ScreenSessionOfferSent = true;
+                    await Protocol.WriteMessageAsync(stream, MessageType.Control,
+                        RemoteMessageCodec.EncodeScreenAttachmentOffer(screenToken), session, writeLock, cancellationToken);
+                }
                 if (control.Capabilities.HasFlag(RemoteDeviceCapabilities.LowLatencyUdpVideo))
                 {
                     LowLatencyVideoOffer? offer;
@@ -7543,12 +7628,15 @@ internal sealed partial class RemoteHostServer : IDisposable
         private int _targetVersion;
         private readonly Action<int>?
             _targetGenerationChanged;
+        private readonly bool _allowAutomaticFallback;
 
         public CaptureSessionState(
             ScreenCaptureTarget target,
             int scalePercent,
-            Action<int>? targetGenerationChanged = null)
+            Action<int>? targetGenerationChanged = null,
+            bool allowAutomaticFallback = true)
         {
+            _allowAutomaticFallback = allowAutomaticFallback;
             _targetGenerationChanged =
                 targetGenerationChanged;
             _target = target;
@@ -7799,7 +7887,7 @@ internal sealed partial class RemoteHostServer : IDisposable
         {
             CaptureTargetStateSnapshot snapshot =
                 RefreshCaptureTopology(availableTargets);
-            if (snapshot.IsAvailable)
+            if (snapshot.IsAvailable || !_allowAutomaticFallback)
             {
                 return snapshot;
             }

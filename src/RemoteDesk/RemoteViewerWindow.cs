@@ -293,7 +293,7 @@ internal sealed partial class RemoteViewerWindow : Form
         SuspendLayout();
         Text = string.IsNullOrWhiteSpace(title) ? "RemoteDesk 远程桌面" : title;
         MinimumSize = Size.Empty;
-        StartPosition = FormStartPosition.CenterParent;
+        StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoScaleDimensions = new SizeF(ResponsiveWindowLayout.DesignDpi, ResponsiveWindowLayout.DesignDpi);
         KeyPreview = true;
@@ -336,6 +336,9 @@ internal sealed partial class RemoteViewerWindow : Form
         _switchCaptureTargetButton =
             CreateStatusActionButton("切换屏幕");
         _switchCaptureTargetButton.Visible = false;
+        _additionalScreenButton = CreateStatusActionButton("多屏分窗");
+        _additionalScreenButton.AccessibleName = "在独立窗口打开另一块远程屏幕";
+        _additionalScreenButton.Visible = false;
         _displayScaleButton =
             CreateStatusActionButton("允许放大");
         _experimentalUpscaleButton = CreateStatusActionButton("新版放大：关");
@@ -362,6 +365,7 @@ internal sealed partial class RemoteViewerWindow : Form
             _remoteInputMethodButton);
         _fileTransferActionsPanel.Controls.Add(
             _switchCaptureTargetButton);
+        _fileTransferActionsPanel.Controls.Add(_additionalScreenButton);
         _fileTransferActionsPanel.Controls.Add(
             _displayScaleButton);
         _fileTransferActionsPanel.Controls.Add(_experimentalUpscaleButton);
@@ -446,6 +450,7 @@ internal sealed partial class RemoteViewerWindow : Form
         Controls.Add(_statusFooterPanel);
 
         _client.FrameReceived += OnFrameReceived;
+        _client.ScreenAttachmentAvailable += OnScreenAttachmentAvailable;
         _client.NativeDetailRequested += ScheduleNativeDetailPreparation;
         _client.Log += OnClientLog;
         _client.RoundTripUpdated += OnRoundTripUpdated;
@@ -492,6 +497,7 @@ internal sealed partial class RemoteViewerWindow : Form
         _switchCaptureTargetButton.Click +=
             async (_, _) =>
                 await SwitchCaptureTargetAsync();
+        _additionalScreenButton.Click += async (_, _) => await OpenAdditionalScreenAsync();
         _displayScaleButton.Click +=
             (_, _) => ToggleDisplayScaleMode();
         _fullScreenButton.Click += (_, _) => ToggleFullScreen();
@@ -1654,6 +1660,7 @@ internal sealed partial class RemoteViewerWindow : Form
 
         bool visible =
             _captureTargetSelectionEnabled;
+        UpdateAdditionalScreenControls();
         CaptureTargetInfo? nextTarget =
             FindNextCaptureTarget(
                 _captureTargets,
@@ -1700,8 +1707,11 @@ internal sealed partial class RemoteViewerWindow : Form
             return;
         }
 
-        _captureTargetSwitchInProgress = true;
         ReleaseAllRemoteInputs();
+        // Keep one stream per screen. Do not change this window to a screen
+        // that already has its own window, or reclaim focus in the finally block.
+        if (_activateAdditionalScreen?.Invoke(nextTarget) == true) return;
+        _captureTargetSwitchInProgress = true;
         UpdateCaptureTargetSwitchControls();
         SetStatus(
             $"正在切换到 {nextTarget.DisplayName}...",
@@ -2133,6 +2143,20 @@ internal sealed partial class RemoteViewerWindow : Form
         ConfigureFilePullToolTips();
     }
 
+    internal void ShowIndependentWindow()
+    {
+        if (_isClosing || IsDisposed) return;
+        Owner = null;
+        ShowInTaskbar = true;
+        Show();
+        if (WindowState == FormWindowState.Minimized)
+        {
+            // SW_RESTORE retains the previous maximized/windowed placement.
+            ShowWindow(Handle, 9);
+        }
+        Activate();
+    }
+
     public void SetCaptureTargets(
         IReadOnlyList<CaptureTargetInfo> targets,
         string? selectedTargetId)
@@ -2199,6 +2223,8 @@ internal sealed partial class RemoteViewerWindow : Form
             CancelRemoteDragOut(status: null, cancelTransfer: true);
             CancelPendingClipboardPull();
             _client.FrameReceived -= OnFrameReceived;
+            _client.ScreenAttachmentAvailable -= OnScreenAttachmentAvailable;
+            _additionalScreenMenu.Dispose();
             _client.NativeDetailRequested -= ScheduleNativeDetailPreparation;
             DisposeNativeDetailControls();
             _client.Log -= OnClientLog;
@@ -8695,6 +8721,10 @@ internal sealed partial class RemoteViewerWindow : Form
 
     [DllImport("user32.dll")]
     private static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindow(nint window, int command);
 
     [DllImport("user32.dll")]
     private static extern nint CallNextHookEx(

@@ -16,12 +16,37 @@ This document captures the RemoteDesk protocol surface that Windows, Android, an
   - server-to-client: `HMAC(master, "server->client")`
 - Each encrypted record is length-prefixed with a little-endian `Int32`, then AES-GCM ciphertext plus tag.
 - AES-GCM nonce is four zero bytes plus an `Int64` little-endian sequence number.
-- Hosts admit only one authenticated viewer at a time and use latest-authenticated
-  viewer wins. After a replacement viewer authenticates, the host atomically
+- Hosts admit only one authenticated controller at a time and use latest-authenticated
+  controller wins. After a replacement viewer authenticates, the host atomically
   transfers ownership, sends encrypted control kind `32` (`SessionRejected`)
   with one bounded UTF-8 takeover reason to the previous viewer, and closes the
   previous socket. A current viewer treats that reason as terminal and disables
   automatic reconnect so two viewers cannot continuously replace each other.
+
+### Independent Windows screen windows
+
+Windows peers can negotiate `IndependentScreenSessions` (capability bit 29).
+The host then sends encrypted control kind `42` (`ScreenAttachmentOffer`) with
+a fresh 64-hex-character group ticket. This is an in-memory session credential,
+not a saved device key. Ordinary `AUTH` handshakes remain byte-compatible with
+older clients and Linux/Android.
+
+An additional screen transport authenticates the device password using `AUT2`
+and `HMACSHA256(passwordKey, "AUT2" + nonce)`. Binding the marker to the proof
+prevents changing an attachment into a takeover by rewriting plaintext bytes.
+Its first encrypted message must be kind `43` (`ScreenAttachmentJoin`), followed
+by the ticket and a physical target ID, encoded as bounded strings. The host
+requires a live matching group, an available physical screen and fewer than
+four current screen transports. It confirms admission with kind `45`
+(`ScreenAttachmentAccepted`) before normal session traffic; rejection never
+evicts the existing group.
+
+A new ordinary controller replaces all previous screen transports and rotates
+the ticket. The final transport closing invalidates the ticket. Kind `44`
+(`ScreenStreamPause`, followed by a Boolean) pauses a hidden screen's capture
+without ending the controller transport; resuming does not change codec or
+quality. A missing secondary monitor stays unavailable rather than silently
+capturing a different monitor. These messages are sent only after negotiation.
 
 ## Message Envelope
 

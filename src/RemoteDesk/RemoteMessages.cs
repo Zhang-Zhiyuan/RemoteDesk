@@ -141,7 +141,11 @@ internal enum RemoteControlKind : byte
     FileReceiveLocationRequest = 38,
     FileReceiveLocation = 39,
     ClipboardSnapshotRequest = 40,
-    ClipboardSnapshot = 41
+    ClipboardSnapshot = 41,
+    ScreenAttachmentOffer = 42,
+    ScreenAttachmentJoin = 43,
+    ScreenStreamPause = 44,
+    ScreenAttachmentAccepted = 45
 }
 
 internal sealed record LowLatencyVideoOffer(
@@ -188,7 +192,8 @@ internal sealed record RemoteControlMessage(
     byte LowLatencyVideoStopReason = 0,
     string? ClipboardRevision = null,
     bool ClipboardHasText = false,
-    bool ClipboardChanged = false);
+    bool ClipboardChanged = false,
+    string? ScreenSessionToken = null);
 
 internal readonly record struct RemoteInputCommand(
     RemoteInputKind Kind,
@@ -540,6 +545,31 @@ internal static class RemoteMessageCodec
     public static byte[] EncodeDeviceIdentityRequest() => [(byte)RemoteControlKind.DeviceIdentityRequest];
 
     public static byte[] EncodeHostVideoDiagnosticsRequest() => [(byte)RemoteControlKind.HostVideoDiagnosticsRequest];
+
+    internal static byte[] EncodeScreenAttachmentOffer(string token) => EncodeScreenAttachment(token, null);
+    internal static byte[] EncodeScreenStreamPause(bool paused) => [(byte)RemoteControlKind.ScreenStreamPause, paused ? (byte)1 : (byte)0];
+    internal static byte[] EncodeScreenAttachmentAccepted() => [(byte)RemoteControlKind.ScreenAttachmentAccepted];
+
+    internal static byte[] EncodeScreenAttachmentJoin(RemoteScreenAttachment attachment) =>
+        EncodeScreenAttachment(attachment.Token, RemoteScreenAttachment.ValidateTarget(attachment.TargetId));
+
+    private static byte[] EncodeScreenAttachment(string token, string? target)
+    {
+        using var output = new MemoryStream();
+        using var writer = new BinaryWriter(output, Encoding.UTF8);
+        writer.Write((byte)(target is null ? RemoteControlKind.ScreenAttachmentOffer : RemoteControlKind.ScreenAttachmentJoin));
+        writer.Write(RemoteScreenAttachment.ValidateToken(token));
+        if (target is not null) writer.Write(target);
+        return output.ToArray();
+    }
+
+    private static RemoteControlMessage DecodeScreenAttachment(BinaryReader reader, RemoteControlKind kind)
+    {
+        string token = RemoteScreenAttachment.ValidateToken(ReadBoundedString(reader));
+        string? target = kind == RemoteControlKind.ScreenAttachmentJoin
+            ? RemoteScreenAttachment.ValidateTarget(ReadBoundedString(reader)) : null;
+        return new RemoteControlMessage(kind, [], target, null, ScreenSessionToken: token);
+    }
 
     public static byte[] EncodeHostVideoDiagnostics(string text)
     {
@@ -1014,6 +1044,9 @@ internal static class RemoteMessageCodec
 
         RemoteControlMessage control = kind switch
         {
+            RemoteControlKind.ScreenAttachmentOffer or RemoteControlKind.ScreenAttachmentJoin => DecodeScreenAttachment(reader, kind),
+            RemoteControlKind.ScreenStreamPause => new RemoteControlMessage(kind, [], null, null, Success: reader.ReadBoolean()),
+            RemoteControlKind.ScreenAttachmentAccepted => new RemoteControlMessage(kind, [], null, null),
             RemoteControlKind.CaptureTargetList => DecodeCaptureTargetList(reader),
             RemoteControlKind.SelectCaptureTarget => new RemoteControlMessage(
                 kind,

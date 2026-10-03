@@ -465,6 +465,29 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
     public bool AllowVideoFallback => _allowVideoFallback;
 
+    private RemoteScreenAttachment? _screenAttachment;
+    private string? _screenSessionToken;
+    internal event Action? ScreenAttachmentAvailable;
+    internal bool CanOpenAdditionalScreen => IsConnected &&
+        _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.IndependentScreenSessions) &&
+        Volatile.Read(ref _screenSessionToken) is not null;
+
+    internal Task SetScreenStreamPausedAsync(bool paused) => CanOpenAdditionalScreen
+        ? SendControlAsync(RemoteMessageCodec.EncodeScreenStreamPause(paused), _cancellationTokenSource)
+        : Task.CompletedTask;
+
+    internal RemoteViewerClient CreateAdditionalScreenClient(string targetId)
+    {
+        string target = RemoteScreenAttachment.ValidateTarget(targetId);
+        lock (_connectionStateLock)
+        {
+            if (!CanOpenAdditionalScreen || _screenSessionToken is not { } token)
+                throw new InvalidOperationException("当前连接不支持多屏分窗，请更新被控端并重新连接。");
+            return new RemoteViewerClient(_allowLocalConnectionsForTesting)
+                { _screenAttachment = new RemoteScreenAttachment(token, target) };
+        }
+    }
+
     public async Task ConnectAsync(
         string host,
         int port,
@@ -656,8 +679,25 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 session = await Protocol.AuthenticateClientAsync(
                     stream,
                     password,
-                    connectionAttemptToken);
+                    connectionAttemptToken,
+                    screenAttachment: _screenAttachment is not null);
                 connectionAttemptToken.ThrowIfCancellationRequested();
+
+                if (_screenAttachment is { } attachment)
+                {
+                    await Protocol.WriteMessageAsync(stream, MessageType.Control,
+                        RemoteMessageCodec.EncodeScreenAttachmentJoin(attachment), session, _writeLock, connectionAttemptToken);
+                    // Do not pipeline normal session traffic before admission.
+                    // Otherwise a rejected join closes with unread bytes and TCP
+                    // may reset the socket before its useful terminal reason arrives.
+                    ProtocolMessage admission = await Protocol.ReadMessageAsync(stream, session, connectionAttemptToken);
+                    if (admission.Type != MessageType.Control) throw new InvalidDataException("独立屏幕握手响应无效。");
+                    RemoteControlMessage response = RemoteMessageCodec.DecodeControl(admission.PayloadMemory);
+                    if (response.Kind == RemoteControlKind.SessionRejected)
+                        throw new RemoteSessionRejectedException(response.StatusMessage ?? "无法加入当前多屏会话。");
+                    if (response.Kind != RemoteControlKind.ScreenAttachmentAccepted)
+                        throw new InvalidDataException("被控端未确认独立屏幕连接。");
+                }
 
                 long inputConnectionGeneration;
                 lock (_connectionStateLock)
@@ -1196,6 +1236,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
     private void ResetRemotePeerState()
     {
+        Volatile.Write(ref _screenSessionToken, null);
         ResetNativeConnection();
         Interlocked.Exchange(ref _remoteCapabilitiesReady, null)?.TrySetResult(false);
         Volatile.Write(ref _remoteCapabilitiesInitialized, 0);
@@ -2939,6 +2980,14 @@ internal sealed partial class RemoteViewerClient : IDisposable
         TouchReturnedClipboardFileRequestForControl(control.Kind);
         switch (control.Kind)
         {
+            case RemoteControlKind.ScreenAttachmentOffer:
+                if (IsCurrentConnection(ownerConnection) && IsCurrentInputConnectionGeneration(inputConnectionGeneration) &&
+                    _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.IndependentScreenSessions))
+                {
+                    Volatile.Write(ref _screenSessionToken, control.ScreenSessionToken);
+                    ScreenAttachmentAvailable?.Invoke();
+                }
+                break;
             case RemoteControlKind.FileReceiveLocation:
                 if (IsCurrentConnection(ownerConnection) &&
                     _fileLocationRequests.TryGetValue(control.TransferId ?? string.Empty, out var locationRequest))

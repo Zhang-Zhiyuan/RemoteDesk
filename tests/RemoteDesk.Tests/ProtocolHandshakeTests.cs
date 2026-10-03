@@ -6,6 +6,76 @@ namespace RemoteDesk.Tests;
 
 public sealed class ProtocolHandshakeTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ChangingAuthenticationModeOnTheWireCannotAuthenticate(bool screenAttachment)
+    {
+        using var hostLink = await LoopbackConnection.CreateAsync();
+        using var viewerLink = await LoopbackConnection.CreateAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        Task<ServerAuthenticationResult> serverTask = Protocol.AuthenticateServerDetailedAsync(
+            hostLink.ServerStream, "mode-binding-test", timeout.Token);
+        Task<SecureSession> clientTask = Protocol.AuthenticateClientAsync(
+            viewerLink.ClientStream, "mode-binding-test", timeout.Token, screenAttachment);
+
+        // Relay an otherwise unmodified handshake, changing only AUTH <-> AUT2.
+        // In particular, an attached screen must never become a new controller
+        // (evicting the existing windows) when its plaintext marker is altered.
+        byte[] challenge = new byte[4 + 32];
+        await hostLink.ClientStream.ReadExactlyAsync(challenge, timeout.Token);
+        await viewerLink.ServerStream.WriteAsync(challenge, timeout.Token);
+        byte[] response = new byte[4 + 32];
+        await viewerLink.ServerStream.ReadExactlyAsync(response, timeout.Token);
+        System.Text.Encoding.ASCII.GetBytes(screenAttachment ? "AUTH" : "AUT2").CopyTo(response, 0);
+        await hostLink.ClientStream.WriteAsync(response, timeout.Token);
+        byte[] acknowledgement = new byte[1];
+        await hostLink.ClientStream.ReadExactlyAsync(acknowledgement, timeout.Token);
+        await viewerLink.ServerStream.WriteAsync(acknowledgement, timeout.Token);
+
+        ServerAuthenticationResult result = await serverTask;
+        using SecureSession? serverSession = result.Session;
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(async () =>
+        {
+            using SecureSession unexpectedSession = await clientTask;
+        });
+        Assert.False(result.IsAuthenticated);
+        Assert.False(result.IsIncomplete);
+        Assert.False(result.IsScreenAttachment);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ScreenAttachmentMarkerStillRequiresDeviceAuthentication(bool correctPassword)
+    {
+        using var fixture = await LoopbackConnection.CreateAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        Task<ServerAuthenticationResult> serverTask = Protocol.AuthenticateServerDetailedAsync(fixture.ServerStream, "screen-test", timeout.Token);
+        Task<SecureSession> clientTask = Protocol.AuthenticateClientAsync(fixture.ClientStream,
+            correctPassword ? "screen-test" : "wrong", timeout.Token, screenAttachment: true);
+        if (!correctPassword)
+        {
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(() => clientTask);
+            ServerAuthenticationResult rejected = await serverTask;
+            Assert.False(rejected.IsAuthenticated);
+            Assert.False(rejected.IsScreenAttachment);
+            return;
+        }
+        using SecureSession client = await clientTask;
+        ServerAuthenticationResult authenticated = await serverTask;
+        using SecureSession host = authenticated.Session!;
+        Assert.True(authenticated.IsScreenAttachment);
+        using var writeLock = new SemaphoreSlim(1, 1);
+        var attachment = new RemoteScreenAttachment(new string('A', 64), "DISPLAY2");
+        await Protocol.WriteMessageAsync(fixture.ClientStream, MessageType.Control,
+            RemoteMessageCodec.EncodeScreenAttachmentJoin(attachment), client, writeLock, timeout.Token);
+        ProtocolMessage message = await Protocol.ReadMessageAsync(fixture.ServerStream, host, timeout.Token);
+        var join = RemoteMessageCodec.DecodeControl(message.PayloadMemory);
+        Assert.Equal(attachment.Token, join.ScreenSessionToken);
+        Assert.Equal(attachment.TargetId, join.TargetId);
+    }
+
     [Fact]
     public async Task MatchingPasswordsAuthenticateAndExchangeEncryptedMessages()
     {

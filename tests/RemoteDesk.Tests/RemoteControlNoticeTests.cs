@@ -98,4 +98,78 @@ public sealed class RemoteControlNoticeTests
         Assert.True(area.Contains(result));
         Assert.Equal(new Point(0, 670), result.Location);
     }
+
+    [Fact]
+    public void DraggingAndFontChangesCannotMoveANoticeOffItsAssignedDisplay()
+    {
+        using var notice = new RemoteControlNotice();
+        var portrait = new Rectangle(-1440, -480, 1440, 2400);
+        notice.SetDisplayWorkingArea(portrait);
+        Assert.True(portrait.Contains(notice.Bounds));
+        notice.MoveWithinDisplay(new Point(3000, 2000));
+        Assert.True(portrait.Contains(notice.Bounds));
+        notice.MoveWithinDisplay(new Point(-9000, -9000));
+        using var font = new Font("Microsoft YaHei UI", 18f);
+        notice.Font = font;
+        notice.ArrangeOnScreen();
+        Assert.True(portrait.Contains(notice.Bounds));
+    }
+
+    [Fact]
+    public void ChangedWorkAreaClampsTheSameNoticeWithoutMovingToAnotherScreen()
+    {
+        using var notice = new RemoteControlNotice();
+        notice.SetDisplayWorkingArea(new Rectangle(-2160, -1164, 2160, 3768));
+        notice.MoveWithinDisplay(new Point(-700, 2300));
+        var resized = new Rectangle(-800, -100, 800, 1200);
+        notice.SetDisplayWorkingArea(resized);
+        Assert.True(resized.Contains(notice.Bounds));
+    }
+
+    [Theory]
+    [InlineData(0, 1080)]
+    [InlineData(1920, 0)]
+    [InlineData(-1, 1080)]
+    public void NoticeRejectsInvalidAssignedArea(int width, int height)
+    {
+        using var notice = new RemoteControlNotice();
+        Assert.Throws<ArgumentOutOfRangeException>(() => notice.SetDisplayWorkingArea(new Rectangle(0, 0, width, height)));
+    }
+
+    [Fact]
+    public void DisplayInventoryHasOneEntryPerEnabledDevice()
+    {
+        var first = new RemoteControlNoticeDisplay("DISPLAY1", new Rectangle(0, 0, 1920, 1040));
+        var second = new RemoteControlNoticeDisplay("DISPLAY2", new Rectangle(-1080, -400, 1080, 1880));
+        var normalized = RemoteControlNoticeManager.NormalizeDisplays([
+            first, first with { Id = "display1" }, second,
+            new("", first.WorkingArea), new("off", Rectangle.Empty)]);
+        Assert.Equal(new[] { first, second }, normalized);
+    }
+
+    [Fact]
+    public void InactiveOrDisposedManagerNeverCreatesNoticeWindows()
+    {
+        using var manager = new RemoteControlNoticeManager(() => throw new InvalidOperationException("Unexpected display enumeration."));
+        manager.SetActive(false);
+        manager.RefreshDisplays();
+        Assert.Empty(manager.Notices);
+        manager.Dispose();
+        manager.SetActive(true);
+        manager.RefreshDisplays();
+        Assert.Empty(manager.Notices);
+    }
+
+    [Fact]
+    public void DisconnectButtonCanRecoverAfterAFailedDisconnect()
+    {
+        using var notice = new RemoteControlNotice();
+        var button = notice.Controls.OfType<Button>().Single();
+        notice.SetDisconnecting();
+        Assert.False(button.Enabled);
+        Assert.Equal("断开中", button.Text);
+        notice.SetDisconnecting(false);
+        Assert.True(button.Enabled);
+        Assert.Equal("断开", button.Text);
+    }
 }

@@ -20,12 +20,13 @@ internal sealed partial class RemoteViewerWindow
              (_openReceivedFilesButton, OpenReceivedFilesDirectory),
              (_remoteInputMethodButton, async () => await SwitchRemoteInputMethodAsync()),
              (_switchCaptureTargetButton, async () => await SwitchCaptureTargetAsync()),
+             (_additionalScreenButton, async () => await OpenAdditionalScreenAsync()),
              (_displayScaleButton, ToggleDisplayScaleMode),
              (_experimentalUpscaleButton, ToggleExperimentalUpscaling),
              (_nativeDetailButton, async () => await ToggleNativeDetailsAsync()),
              (_fullScreenButton, ToggleFullScreen)],
             [[_androidBackButton], [_androidHomeButton], [_androidRecentsButton],
-             [_displayScaleButton, _experimentalUpscaleButton], [_fullScreenButton], [_switchCaptureTargetButton],
+             [_displayScaleButton, _experimentalUpscaleButton], [_fullScreenButton], [_switchCaptureTargetButton, _additionalScreenButton],
              [_pullRemoteFilesButton, _openReceivedFilesButton], [_remoteInputMethodButton], [_nativeDetailButton]],
             ReleaseAllRemoteInputs);
         FontChanged += (_, _) => QueueStatusFooterLayout(refreshMetrics: true);

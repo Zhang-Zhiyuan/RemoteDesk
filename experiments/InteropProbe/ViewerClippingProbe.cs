@@ -18,7 +18,7 @@ internal static class ViewerClippingProbe
         var expectedActions = new[] {
             "_androidBackButton", "_androidHomeButton", "_androidRecentsButton",
             "_pullRemoteFilesButton", "_openReceivedFilesButton", "_remoteInputMethodButton",
-            "_switchCaptureTargetButton", "_displayScaleButton", "_experimentalUpscaleButton",
+            "_switchCaptureTargetButton", "_additionalScreenButton", "_displayScaleButton", "_experimentalUpscaleButton",
             "_nativeDetailButton", "_fullScreenButton"
         }.Select(name => Get<Button>(viewer, name)).ToHashSet();
         viewer.Show();
@@ -63,7 +63,7 @@ internal static class ViewerClippingProbe
                     problems.Add($"Status text height {lineHeight} (measured {RemoteViewerWindow.MeasureStatusTextHeight(status.Font)}) > rows {bounds.StatusBounds.Height}/{bounds.DetailsBounds.Height}");
                 var inline = actions.Controls.OfType<Button>().Where(b => b.Visible && b != overflow.MoreButton).ToArray();
                 if (!expectedActions.SetEquals(inline.Concat(overflow.OverflowButtons)))
-                    problems.Add("Inline + overflow actions do not cover the exact expected commands, including Android navigation");
+                    problems.Add("Inline + overflow actions do not cover the exact expected commands, including Android navigation and independent screens");
                 var scale = Get<Button>(viewer, "_displayScaleButton");
                 var upscale = Get<Button>(viewer, "_experimentalUpscaleButton");
                 if (scale.Parent != upscale.Parent) problems.Add("Scaling controls split across menu and toolbar");

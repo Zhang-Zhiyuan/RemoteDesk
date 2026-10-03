@@ -34,7 +34,7 @@ internal readonly record struct ProtocolMessage(MessageType Type, byte[] Buffer,
     public ReadOnlySpan<byte> PayloadSpan => Buffer.AsSpan(PayloadOffset, PayloadLength);
 }
 
-internal readonly record struct ServerAuthenticationResult(SecureSession? Session, bool IsIncomplete)
+internal readonly record struct ServerAuthenticationResult(SecureSession? Session, bool IsIncomplete, bool IsScreenAttachment = false)
 {
     public bool IsAuthenticated => Session is not null;
 }
@@ -53,6 +53,7 @@ internal static class Protocol
 
     private static readonly byte[] Magic = Encoding.ASCII.GetBytes("RDK1");
     private static readonly byte[] AuthMarker = Encoding.ASCII.GetBytes("AUTH");
+    private static readonly byte[] ScreenAttachmentAuthMarker = Encoding.ASCII.GetBytes("AUT2");
     private static readonly byte[] SessionInfo = Encoding.ASCII.GetBytes("RemoteDesk session v1");
     private static readonly byte[] ClientToServerInfo = Encoding.ASCII.GetBytes("client->server");
     private static readonly byte[] ServerToClientInfo = Encoding.ASCII.GetBytes("server->client");
@@ -79,7 +80,8 @@ internal static class Protocol
             return new ServerAuthenticationResult(null, IsIncomplete: true);
         }
 
-        if (!marker.SequenceEqual(AuthMarker))
+        bool screenAttachment = marker.SequenceEqual(ScreenAttachmentAuthMarker);
+        if (!screenAttachment && !marker.SequenceEqual(AuthMarker))
         {
             return new ServerAuthenticationResult(null, IsIncomplete: false);
         }
@@ -94,7 +96,7 @@ internal static class Protocol
             return new ServerAuthenticationResult(null, IsIncomplete: true);
         }
 
-        byte[] expectedProof = ComputePasswordProof(password, nonce);
+        byte[] expectedProof = ComputePasswordProof(password, nonce, screenAttachment);
         bool authenticated = CryptographicOperations.FixedTimeEquals(proof, expectedProof);
 
         try
@@ -108,10 +110,12 @@ internal static class Protocol
 
         return new ServerAuthenticationResult(
             authenticated ? CreateSession(password, nonce, isServer: true) : null,
-            IsIncomplete: false);
+            IsIncomplete: false,
+            IsScreenAttachment: authenticated && screenAttachment);
     }
 
-    public static async Task<SecureSession> AuthenticateClientAsync(NetworkStream stream, string password, CancellationToken cancellationToken)
+    public static async Task<SecureSession> AuthenticateClientAsync(NetworkStream stream, string password, CancellationToken cancellationToken,
+        bool screenAttachment = false)
     {
         byte[] magic = await ReadExactAsync(stream, Magic.Length, cancellationToken);
         if (!magic.SequenceEqual(Magic))
@@ -120,9 +124,9 @@ internal static class Protocol
         }
 
         byte[] nonce = await ReadExactAsync(stream, NonceLength, cancellationToken);
-        byte[] proof = ComputePasswordProof(password, nonce);
+        byte[] proof = ComputePasswordProof(password, nonce, screenAttachment);
 
-        await stream.WriteAsync(AuthMarker, cancellationToken);
+        await stream.WriteAsync(screenAttachment ? ScreenAttachmentAuthMarker : AuthMarker, cancellationToken);
         await stream.WriteAsync(proof, cancellationToken);
 
         byte[] result = await ReadExactAsync(stream, 1, cancellationToken);
@@ -573,11 +577,14 @@ internal static class Protocol
             ex is EndOfStreamException or IOException or ObjectDisposedException;
     }
 
-    private static byte[] ComputePasswordProof(string password, byte[] nonce)
+    private static byte[] ComputePasswordProof(string password, byte[] nonce, bool screenAttachment)
     {
         byte[] key = SHA256.HashData(Encoding.UTF8.GetBytes(password));
         using var hmac = new HMACSHA256(key);
-        return hmac.ComputeHash(nonce);
+        // Bind the opt-in mode to the password proof: rewriting an attachment's
+        // plaintext AUT2 marker to AUTH must not turn it into a takeover. Keep
+        // the ordinary AUTH proof unchanged for existing Windows/Linux/Android.
+        return hmac.ComputeHash(screenAttachment ? Join(ScreenAttachmentAuthMarker, nonce) : nonce);
     }
 
     private static SecureSession CreateSession(string password, byte[] nonce, bool isServer)

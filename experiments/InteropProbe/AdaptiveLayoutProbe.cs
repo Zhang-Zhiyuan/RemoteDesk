@@ -7,7 +7,7 @@ using RemoteDesk;
 // the user's desktop, and no networking/services/settings are started.
 internal static class AdaptiveLayoutProbe
 {
-    internal static int Run(bool softwarePaint = false, bool viewerClipping = false)
+    internal static int Run(bool softwarePaint = false, bool viewerClipping = false, bool viewerLifetime = false, bool multiScreen = false)
     {
         using var config = JsonDocument.Parse(Console.ReadLine()!);
         string output = Path.GetFullPath(config.RootElement.GetProperty("output").GetString()!);
@@ -24,7 +24,9 @@ internal static class AdaptiveLayoutProbe
                 if (!SetThreadDesktop(desktop)) throw new Win32Exception();
                 Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
                 Application.EnableVisualStyles();
-                if (viewerClipping) ViewerClippingProbe.Verify(output);
+                if (multiScreen) MultiScreenUiProbe.Verify(output);
+                else if (viewerLifetime) ViewerWindowLifetimeProbe.Verify(output);
+                else if (viewerClipping) ViewerClippingProbe.Verify(output);
                 else if (softwarePaint) SoftwarePaintProbe.Verify(output);
                 else Verify(output);
             }

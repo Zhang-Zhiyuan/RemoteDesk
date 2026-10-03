@@ -6,6 +6,58 @@ namespace RemoteDesk.Tests;
 public sealed class MainFormViewerWindowTests
 {
     [Fact]
+    public void ViewerStartsAsIndependentTaskbarWindow()
+    {
+        using var client = new RemoteViewerClient();
+        using var viewer = new RemoteViewerWindow(client, "independent window", false, false, false, false, false, false);
+        Assert.Null(viewer.Owner);
+        Assert.True(viewer.ShowInTaskbar);
+        Assert.Equal(FormStartPosition.CenterScreen, viewer.StartPosition);
+    }
+
+    [Fact]
+    public void IndependentWindowRetainsScreenIdentityWhenItsDisplayTemporarilyDisappears()
+    {
+        using var client = new RemoteViewerClient();
+        using var viewer = new RemoteViewerWindow(client, "remote host", false, false, false, false, false, false);
+        var first = new CaptureTargetInfo("screen-1", "横屏");
+        var second = new CaptureTargetInfo("screen-2", "竖屏");
+        viewer.ConfigureScreenWindows("remote host", null);
+        viewer.SetCaptureTargets([first, second], second.Id);
+        viewer.SetCaptureTargets([first], second.Id);
+
+        Assert.Equal(second, viewer.SelectedCaptureTarget);
+        Assert.Equal("竖屏 — remote host", viewer.Text);
+    }
+
+    [Fact]
+    public void IndependentWindowRefreshesItsScreenNameWhenTheDisplayReturns()
+    {
+        using var client = new RemoteViewerClient();
+        using var viewer = new RemoteViewerWindow(client, "remote host", false, false, false, false, false, false);
+        viewer.ConfigureScreenWindows("remote host", null);
+        viewer.SetCaptureTargets([new("screen-2", "原屏幕名称")], "screen-2");
+        viewer.SetCaptureTargets([], "screen-2");
+        viewer.SetCaptureTargets([new("screen-2", "新屏幕名称")], "SCREEN-2");
+
+        Assert.Equal("新屏幕名称", viewer.SelectedCaptureTarget?.DisplayName);
+        Assert.Equal("新屏幕名称 — remote host", viewer.Text);
+    }
+
+    [Fact]
+    public void IndependentWindowNeverLabelsAnUnknownScreenWithADifferentScreensName()
+    {
+        using var client = new RemoteViewerClient();
+        using var viewer = new RemoteViewerWindow(client, "remote host", false, false, false, false, false, false);
+        viewer.ConfigureScreenWindows("remote host", null);
+        viewer.SetCaptureTargets([new("screen-2", "竖屏")], "screen-2");
+        viewer.SetCaptureTargets([], "unknown-screen");
+
+        Assert.Null(viewer.SelectedCaptureTarget);
+        Assert.Equal("remote host", viewer.Text);
+    }
+
+    [Fact]
     public void BusySessionRejectionDoesNotTriggerRemoteStartRetry()
     {
         Assert.False(
