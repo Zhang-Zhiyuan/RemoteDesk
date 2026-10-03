@@ -22,6 +22,7 @@ class HostControlNotice:
         self.changed = threading.Event()
         self.sessions: dict[object, Callable[[], None]] = {}
         self.revision = 0
+        self.disconnect_revision: int | None = None
         self.closed = False
         self.process: subprocess.Popen[str] | None = None
         self.worker: threading.Thread | None = None
@@ -59,14 +60,27 @@ class HostControlNotice:
 
     def disconnect(self, revision: int) -> bool:
         with self.lock:
-            if self.closed or revision != self.revision or not self.sessions:
+            if (self.closed or revision != self.revision or not self.sessions
+                    or self.disconnect_revision == revision):
                 return False
+            # Consume a displayed request before invoking callbacks: socket
+            # cleanup may re-enter this object or another click may arrive.
+            self.disconnect_revision = revision
             callbacks = tuple(self.sessions.values())
+        failed = False
         for callback in callbacks:
             try:
                 callback()
             except Exception as error:
+                failed = True
                 self.log(f"断开远程控制失败：{type(error).__name__}")
+        if failed:
+            with self.lock:
+                # A fresh revision re-enables the child's button. Never reset
+                # a replacement session's newer state during delayed cleanup.
+                if not self.closed and self.sessions and self.revision == revision:
+                    self.revision += 1
+                    self.changed.set()
         return True
 
     def close(self) -> None:

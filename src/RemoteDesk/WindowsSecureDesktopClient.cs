@@ -64,6 +64,15 @@ internal sealed class WindowsSecureDesktopClient : IDisposable
         if (!_shortcuts.TryConsumeRelease(pressed)) ReleaseKeyCore(pressed);
     }
 
+    // Even when another screen owns the native key now, this transport must
+    // forget its old Win/Shift/Ctrl state so a later key is not a false chord.
+    internal void ForgetSuppressedRelease(RemoteInputCommand command)
+    {
+        if (command.Kind != RemoteInputKind.KeyUp) return;
+        _shortcuts.Observe(command);
+        _shortcuts.TryConsumeRelease(command);
+    }
+
     private void ReleaseKeyCore(RemoteInputCommand pressed)
     {
         if (!Route(new("release-key", pressed))) InputInjector.ReleaseKey(pressed);

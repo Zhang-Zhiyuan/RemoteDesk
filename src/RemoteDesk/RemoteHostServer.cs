@@ -1025,7 +1025,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                         allowAutomaticFallback: !authentication.IsScreenAttachment);
                     using var sessionPower = WindowsRemoteSessionPowerRequest.TryAcquire(message => Log?.Invoke(message));
                     using var inputInjectionDispatcher =
-                        new InputInjectionDispatcher();
+                        new InputInjectionDispatcher(activeClientGate.InputOwnership);
                     using var fileTransferReceiver = new FileTransferReceiver(
                         message => Log?.Invoke(message),
                         FileTransferReceiver.GetReceiveDirectory,
@@ -1303,6 +1303,7 @@ internal sealed partial class RemoteHostServer : IDisposable
         internal const int MaximumScreens = 4;
         private readonly List<T> _activeClients = [];
         private string? _attachmentToken;
+        internal SharedRemoteInputOwnership InputOwnership { get; } = new();
 
         public IReadOnlyList<T> Activate(T client)
         {

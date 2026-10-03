@@ -5,6 +5,35 @@ namespace RemoteDesk.Tests;
 public sealed class UiClarityTests
 {
     [Fact]
+    public void DisabledViewerActionsRemainReadableWithoutBecomingClickable()
+    {
+        using var button = new ViewerActionButton
+        {
+            Text = "Unavailable", Size = new Size(180, 44), Enabled = false,
+            FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(23, 32, 51),
+            ForeColor = Color.FromArgb(226, 232, 240)
+        };
+        button.FlatAppearance.BorderColor = Color.FromArgb(51, 65, 85);
+        int clicks = 0;
+        button.Click += (_, _) => clicks++;
+        button.PerformClick();
+        Assert.Equal(0, clicks);
+        using var bitmap = new Bitmap(button.Width, button.Height);
+        button.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+        int readablePixels = 0;
+        for (int y = 5; y < bitmap.Height - 5; y++)
+            for (int x = 5; x < bitmap.Width - 5; x++)
+            {
+                Color pixel = bitmap.GetPixel(x, y);
+                if (pixel.R > 110 && pixel.G > 110 && pixel.B > 110) readablePixels++;
+            }
+        Assert.True(readablePixels > 30, "Disabled labels disappeared into the dark toolbar.");
+        button.Enabled = true;
+        button.PerformClick();
+        Assert.Equal(1, clicks);
+    }
+
+    [Fact]
     public void VideoModeLabelsFitCompactFieldsAndDescribeOnlyAvailableModes()
     {
         using var combo = new ComboBox();

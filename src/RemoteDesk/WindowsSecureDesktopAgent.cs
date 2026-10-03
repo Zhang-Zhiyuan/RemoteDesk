@@ -16,6 +16,10 @@ internal static class WindowsSecureDesktopAgent
     // The last right allows querying the fixed Shift-state diagnostic; no
     // hooks, journal recording, ACL changes or desktop activation are used.
     internal const uint DesktopAccess = 0x0001 | 0x0080 | 0x0020 | 0x0010;
+    // Each screen can hold one capture pipe and one input pipe. Leave two
+    // health/transition slots and one listener, while keeping SYSTEM work bounded.
+    internal const int MaximumActiveConnections = RemoteHostServer.ActiveClientGate<object>.MaximumScreens * 2 + 2;
+    internal const int MaximumPipeInstances = MaximumActiveConnections + 1;
     internal static void Run(string ownerSid, uint session, string stopEvent, int parentId)
     {
         SetProcessDpiAwarenessContext(-4); // Headless worker does not run WinForms initialization.
@@ -32,14 +36,15 @@ internal static class WindowsSecureDesktopAgent
             catch (InvalidOperationException) { cancellation.Cancel(); }
         }, null, 0, 250);
         var connections = new ConcurrentDictionary<NamedPipeServerStream, Thread>();
+        var inputOwnership = new SharedRemoteInputOwnership();
         try
         {
             while (!cancellation.IsCancellationRequested)
             {
                 // Reserve an instance for the listener and bound privileged workers.
-                if (connections.Count >= 3) { cancellation.Token.WaitHandle.WaitOne(100); continue; }
+                if (connections.Count >= MaximumActiveConnections) { cancellation.Token.WaitHandle.WaitOne(100); continue; }
                 var pipe = NamedPipeServerStreamAcl.Create(WindowsSecureDesktopProtocol.PipeName(ownerSid, session),
-                    PipeDirection.InOut, 4, PipeTransmissionMode.Byte, PipeOptions.Asynchronous,
+                    PipeDirection.InOut, MaximumPipeInstances, PipeTransmissionMode.Byte, PipeOptions.Asynchronous,
                     65536, 65536, WindowsSecureDesktopProtocol.PipeSecurity(), HandleInheritability.None, (PipeAccessRights)0);
                 try
                 {
@@ -49,7 +54,7 @@ internal static class WindowsSecureDesktopAgent
                     { pipe.Dispose(); continue; }
                     var thread = new Thread(() =>
                     {
-                        try { Serve(pipe, ownerSid, session, cancellation.Token); }
+                        try { Serve(pipe, ownerSid, session, cancellation.Token, inputOwnership); }
                         finally { pipe.Dispose(); connections.TryRemove(pipe, out _); }
                     }) { IsBackground = true, Name = "RemoteDesk protected desktop IPC" };
                     connections.TryAdd(pipe, thread);
@@ -71,18 +76,21 @@ internal static class WindowsSecureDesktopAgent
         }
     }
 
-    private static void Serve(NamedPipeServerStream pipe, string ownerSid, uint session, CancellationToken stop)
+    private static void Serve(NamedPipeServerStream pipe, string ownerSid, uint session, CancellationToken stop,
+        SharedRemoteInputOwnership inputOwnership)
     {
         var native = WindowsInputDesktopNativeApi.Instance;
         nint original = native.GetThreadDesktop(native.GetCurrentThreadId()).Handle;
         nint owned = 0;
         var keys = new WindowsSecureDesktopKeyState();
         var buttons = new HashSet<RemoteMouseButton>();
+        var inputOwner = new object();
         long failureLoggedAt = 0;
         void ReleaseOwnedInput()
         {
-            keys.ReleaseAll(InputInjector.ReleaseKey);
-            foreach (var button in buttons) InputInjector.TryReleaseMouseButton(button);
+            keys.ReleaseAll(key => inputOwnership.ReleaseKey(inputOwner, key, InputInjector.ReleaseKey));
+            foreach (var button in buttons)
+                inputOwnership.ReleaseMouseButton(inputOwner, button, () => InputInjector.TryReleaseMouseButton(button));
             buttons.Clear();
         }
         bool AttachInputDesktop(bool releaseOnly = false)
@@ -158,17 +166,22 @@ internal static class WindowsSecureDesktopAgent
                                 // is compensated when the pipe/session closes.
                                 if (command.Kind == RemoteInputKind.KeyDown) keys.Press(command);
                                 if (command.Kind == RemoteInputKind.MouseDown) buttons.Add(command.Button);
-                                InputInjector.Apply(command, bounds, new Size(request.FrameWidth, request.FrameHeight));
+                                inputOwnership.Apply(inputOwner, command,
+                                    input => InputInjector.Apply(input, bounds, new Size(request.FrameWidth, request.FrameHeight)));
                                 if (command.Kind == RemoteInputKind.KeyUp) keys.ForgetReleased(command);
                                 if (command.Kind == RemoteInputKind.MouseUp) buttons.Remove(command.Button);
                                 reply = new("active");
                                 break;
                             case "release-key":
-                                keys.Release(request.Command, InputInjector.ReleaseKey);
+                                keys.Release(request.Command, key => inputOwnership.ReleaseKey(inputOwner, key, InputInjector.ReleaseKey));
                                 reply = new("active"); break;
                             case "release-mouse":
                                 if (buttons.Contains(request.Command.Button))
-                                { InputInjector.ReleaseMouseButton(request.Command.Button); buttons.Remove(request.Command.Button); }
+                                {
+                                    inputOwnership.ReleaseMouseButton(inputOwner, request.Command.Button,
+                                        () => InputInjector.ReleaseMouseButton(request.Command.Button));
+                                    buttons.Remove(request.Command.Button);
+                                }
                                 reply = new("active"); break;
                             case "paste":
                                 InputInjector.SendPasteShortcut(); reply = new("active"); break;
@@ -200,6 +213,7 @@ internal static class WindowsSecureDesktopAgent
         {
             try { AttachInputDesktop(releaseOnly: true); } catch { }
             try { ReleaseOwnedInput(); } catch { }
+            inputOwnership.ForgetOwner(inputOwner);
             if (original != 0 && native.SetThreadDesktop(original).Succeeded && owned != 0) native.CloseDesktop(owned);
         }
     }

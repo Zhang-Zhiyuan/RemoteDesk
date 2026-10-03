@@ -552,6 +552,53 @@ public sealed class InputInjectionDispatcherTests
             command => { },
             button => { });
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TwoScreenWorkersDoNotReleaseTheNewOwnersHeldKey(bool expectedDesktop)
+    {
+        var ownership = new SharedRemoteInputOwnership();
+        var calls = new ConcurrentQueue<string>();
+        InputInjectionDispatcher Create() => new(new FakeInputDesktopNativeApi(),
+            (command, _, _) => calls.Enqueue(command.Kind.ToString()), () => { },
+            _ => calls.Enqueue("CleanupKey"), _ => calls.Enqueue("CleanupMouse"), sharedOwnership: ownership);
+        using var first = Create();
+        using var second = Create();
+        void Apply(InputInjectionDispatcher dispatcher, RemoteInputCommand command)
+        {
+            if (expectedDesktop) dispatcher.Apply(command, Rectangle.Empty, Size.Empty, false);
+            else dispatcher.Apply(command, Rectangle.Empty, Size.Empty);
+        }
+        var down = RemoteInputCommand.KeyDown((int)Keys.RShiftKey, 0x36, RemoteKeyboardFlags.HasScanCode);
+        var up = RemoteInputCommand.KeyUp((int)Keys.RShiftKey, 0x36, RemoteKeyboardFlags.HasScanCode);
+        Apply(first, down);
+        Apply(second, down);
+        Apply(first, up);
+        first.ReleaseKey(down);
+        Assert.Equal(new[] { "KeyDown", "KeyDown" }, calls.ToArray());
+        second.ReleaseKey(down);
+        Assert.Equal(new[] { "KeyDown", "KeyDown", "CleanupKey" }, calls.ToArray());
+    }
+
+    [Fact]
+    public void TwoScreenWorkersDoNotReleaseTheNewOwnersMouseDrag()
+    {
+        var ownership = new SharedRemoteInputOwnership();
+        var calls = new ConcurrentQueue<string>();
+        InputInjectionDispatcher Create() => new(new FakeInputDesktopNativeApi(),
+            (command, _, _) => calls.Enqueue(command.Kind.ToString()), () => { },
+            _ => { }, _ => calls.Enqueue("CleanupMouse"), sharedOwnership: ownership);
+        using var first = Create();
+        using var second = Create();
+        var down = RemoteInputCommand.MouseDown(RemoteMouseButton.Left, 1, 1);
+        first.Apply(down, Rectangle.Empty, Size.Empty);
+        second.Apply(down, Rectangle.Empty, Size.Empty);
+        first.TryReleaseMouseButton(RemoteMouseButton.Left);
+        Assert.Equal(new[] { "MouseDown", "MouseDown" }, calls.ToArray());
+        second.ReleaseMouseButton(RemoteMouseButton.Left);
+        Assert.Equal(new[] { "MouseDown", "MouseDown", "CleanupMouse" }, calls.ToArray());
+    }
+
     private sealed class FakeInputDesktopNativeApi : IInputDesktopNativeApi
     {
         public const nint InputDesktopHandle = 1234;

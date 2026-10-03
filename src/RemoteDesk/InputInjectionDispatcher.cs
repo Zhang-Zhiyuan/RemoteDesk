@@ -150,20 +150,28 @@ internal sealed class InputInjectionDispatcher : IDisposable
     private int _workerManagedThreadId;
     private nint _ownedInputDesktop;
     private readonly WindowsSecureDesktopClient? _secureDesktop;
+    private readonly SharedRemoteInputOwnership? _sharedOwnership;
+    private readonly object _inputOwner = new();
 
     public InputInjectionDispatcher()
-        : this(new WindowsSecureDesktopClient())
+        : this(new WindowsSecureDesktopClient(), null)
     {
     }
 
-    private InputInjectionDispatcher(WindowsSecureDesktopClient secureDesktop)
+    public InputInjectionDispatcher(SharedRemoteInputOwnership sharedOwnership)
+        : this(new WindowsSecureDesktopClient(), sharedOwnership)
+    {
+    }
+
+    private InputInjectionDispatcher(WindowsSecureDesktopClient secureDesktop, SharedRemoteInputOwnership? sharedOwnership)
         : this(
             WindowsInputDesktopNativeApi.Instance,
             secureDesktop.Apply,
             secureDesktop.SendPasteShortcut,
             secureDesktop.ReleaseKey,
             secureDesktop.ReleaseMouseButton,
-            CursorRetryLimit)
+            CursorRetryLimit,
+            sharedOwnership)
     {
         _secureDesktop = secureDesktop;
     }
@@ -174,7 +182,8 @@ internal sealed class InputInjectionDispatcher : IDisposable
         Action sendPasteShortcut,
         Action<RemoteInputCommand> releaseKey,
         Action<RemoteMouseButton> releaseMouseButton,
-        int cursorRetryLimit = CursorRetryLimit)
+        int cursorRetryLimit = CursorRetryLimit,
+        SharedRemoteInputOwnership? sharedOwnership = null)
     {
         ArgumentNullException.ThrowIfNull(nativeApi);
         ArgumentNullException.ThrowIfNull(applyInput);
@@ -192,6 +201,7 @@ internal sealed class InputInjectionDispatcher : IDisposable
         _releaseKey = releaseKey;
         _releaseMouseButton = releaseMouseButton;
         _cursorRetryLimit = cursorRetryLimit;
+        _sharedOwnership = sharedOwnership;
         _worker = new Thread(Run)
         {
             IsBackground = true,
@@ -206,7 +216,7 @@ internal sealed class InputInjectionDispatcher : IDisposable
         RemoteInputCommand command,
         Rectangle captureBounds,
         Size frameSize) =>
-        Dispatch(() => _applyInput(command, captureBounds, frameSize));
+        Dispatch(() => ApplyOwned(command, input => _applyInput(input, captureBounds, frameSize)));
 
     public void Apply(RemoteInputCommand command, Rectangle captureBounds, Size frameSize, bool? expectedSecureDesktop) =>
         Dispatch(() =>
@@ -218,28 +228,51 @@ internal sealed class InputInjectionDispatcher : IDisposable
                 bool actualSecureDesktop = !WindowsInteractiveDesktopProbe.Inspect(_nativeApi).IsAvailable;
                 if (expected != actualSecureDesktop) throw new SecureDesktopTargetException(true);
             }
-            if (_secureDesktop is not null) _secureDesktop.Apply(command, captureBounds, frameSize, expectedSecureDesktop);
-            else _applyInput(command, captureBounds, frameSize);
+            ApplyOwned(command, input =>
+            {
+                if (_secureDesktop is not null) _secureDesktop.Apply(input, captureBounds, frameSize, expectedSecureDesktop);
+                else _applyInput(input, captureBounds, frameSize);
+            });
         });
 
     public void SendPasteShortcut() =>
         Dispatch(_sendPasteShortcut);
 
     public void ReleaseKey(RemoteInputCommand pressedCommand) =>
-        Dispatch(() => _releaseKey(pressedCommand));
+        Dispatch(() => ReleaseOwnedKey(pressedCommand));
 
     public void ReleaseMouseButton(RemoteMouseButton button) =>
-        Dispatch(() => _releaseMouseButton(button));
+        Dispatch(() => ReleaseOwnedMouseButton(button));
 
     public void TryReleaseKey(RemoteInputCommand pressedCommand) =>
         Dispatch(
             () => TryRelease(
-                () => _releaseKey(pressedCommand)));
+                () => ReleaseOwnedKey(pressedCommand)));
 
     public void TryReleaseMouseButton(RemoteMouseButton button) =>
         Dispatch(
             () => TryRelease(
-                () => _releaseMouseButton(button)));
+                () => ReleaseOwnedMouseButton(button)));
+
+    private void ApplyOwned(RemoteInputCommand command, Action<RemoteInputCommand> inject)
+    {
+        if (_sharedOwnership is null) inject(command);
+        else if (!_sharedOwnership.Apply(_inputOwner, command, inject))
+            _secureDesktop?.ForgetSuppressedRelease(command);
+    }
+
+    private void ReleaseOwnedKey(RemoteInputCommand command)
+    {
+        if (_sharedOwnership is null) _releaseKey(command);
+        else if (!_sharedOwnership.ReleaseKey(_inputOwner, command, _releaseKey))
+            _secureDesktop?.ForgetSuppressedRelease(command with { Kind = RemoteInputKind.KeyUp });
+    }
+
+    private void ReleaseOwnedMouseButton(RemoteMouseButton button)
+    {
+        if (_sharedOwnership is null) _releaseMouseButton(button);
+        else _sharedOwnership.ReleaseMouseButton(_inputOwner, button, () => _releaseMouseButton(button));
+    }
 
     public void Dispose()
     {
@@ -261,6 +294,7 @@ internal sealed class InputInjectionDispatcher : IDisposable
         }
 
         _worker.Join();
+        _sharedOwnership?.ForgetOwner(_inputOwner);
         _secureDesktop?.Dispose();
         nint ownedDesktop = _ownedInputDesktop;
         _ownedInputDesktop = 0;

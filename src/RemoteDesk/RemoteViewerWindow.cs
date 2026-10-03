@@ -8742,7 +8742,7 @@ internal sealed partial class RemoteViewerWindow : Form
 
     private static Button CreateStatusActionButton(string text)
     {
-        var button = new Button
+        var button = new ViewerActionButton
         {
             Text = text,
             AutoSize = true,

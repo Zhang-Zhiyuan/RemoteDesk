@@ -65,6 +65,40 @@ class ControlNoticeTests(unittest.TestCase):
         other.assert_called_once()
         log.assert_called_once()
 
+    def test_failed_disconnect_publishes_fresh_revision_for_button_retry(self):
+        notice = HostControlNotice(enabled=False, log=mock.Mock())
+        callback = mock.Mock(side_effect=[OSError(), None])
+        notice.begin(callback)
+        revision = notice.snapshot()[1]
+        notice.changed.clear()
+        self.assertTrue(notice.disconnect(revision))
+        self.assertTrue(notice.changed.is_set())
+        self.assertGreater(notice.snapshot()[1], revision)
+        self.assertFalse(notice.disconnect(revision))
+        self.assertTrue(notice.disconnect(notice.snapshot()[1]))
+        self.assertEqual(2, callback.call_count)
+
+    def test_same_revision_disconnect_is_consumed_once_even_during_callback(self):
+        notice = HostControlNotice(enabled=False)
+        calls = []
+        notice.begin(lambda: calls.append(notice.disconnect(revision)))
+        revision = notice.snapshot()[1]
+        self.assertTrue(notice.disconnect(revision))
+        self.assertEqual([False], calls)
+        self.assertFalse(notice.disconnect(revision))
+
+    def test_failed_old_disconnect_does_not_reset_new_session_revision(self):
+        notice = HostControlNotice(enabled=False, log=mock.Mock())
+        observations = []
+        def replace_then_fail():
+            notice.end(token)
+            notice.begin(mock.Mock())
+            observations.append(notice.snapshot()[1])
+            raise OSError()
+        token = notice.begin(replace_then_fail)
+        notice.disconnect(notice.snapshot()[1])
+        self.assertEqual(observations[0], notice.snapshot()[1])
+
     def _run_admitted(self, authentication):
         client = mock.Mock()
         gate = host.ClientAdmissionGate()
