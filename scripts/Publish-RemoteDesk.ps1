@@ -1250,6 +1250,7 @@ function New-LinuxSelfContainedRuntime {
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_startup.py") -Destination (Join-Path $Staging "app\remotedesk_linux_startup.py") -Force
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_devices.py") -Destination (Join-Path $Staging "app\remotedesk_linux_devices.py") -Force
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_device_panel.py") -Destination (Join-Path $Staging "app\remotedesk_linux_device_panel.py") -Force
+    Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_control_notice.py") -Destination (Join-Path $Staging "app\remotedesk_linux_control_notice.py") -Force
     Copy-Item -LiteralPath (Join-Path $Root "src\RemoteDesk\Assets\RemoteDesk.png") -Destination (Join-Path $Staging "app\RemoteDesk.png") -Force
     Copy-Item -LiteralPath (Join-Path $Root "docs\Linux-Sandbox.md") -Destination (Join-Path $Staging "docs\Linux-Sandbox.md") -Force
     Copy-Item -LiteralPath (Join-Path $Root "docs\RemoteDesk-Protocol.md") -Destination (Join-Path $Staging "docs\RemoteDesk-Protocol.md") -Force

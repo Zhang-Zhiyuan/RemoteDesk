@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
+from remotedesk_linux_control_notice import HostControlNotice
 
 # CLI help must not probe the desktop, prompt for installation or require sudo.
 if (__name__ == "__main__" and sys.platform.startswith("linux")
@@ -5283,9 +5284,8 @@ def replace_authenticated_client(
     write_lock: Any,
     session_stop: threading.Event | None = None,
     session_closed: threading.Event | None = None,
+    message: str = SESSION_REPLACED_MESSAGE,
 ) -> None:
-    if session_stop is not None:
-        session_stop.set()
     acquired = False
     try:
         acquired = write_lock.acquire(
@@ -5299,11 +5299,16 @@ def replace_authenticated_client(
                 client,
                 session,
                 MESSAGE_CONTROL,
-                encode_session_rejected(SESSION_REPLACED_MESSAGE),
+                encode_session_rejected(message),
             )
     except Exception:
         pass
     finally:
+        # Publish the terminal reason before waking run()'s socket-closing
+        # cleanup; otherwise it can win the race and the viewer only sees EOF,
+        # triggering automatic reconnect after a deliberate local disconnect.
+        if session_stop is not None:
+            session_stop.set()
         if acquired:
             write_lock.release()
         close_client_socket(client)
@@ -5319,9 +5324,11 @@ def run_admitted_client(
     args: argparse.Namespace,
     stop_event: threading.Event,
     client_gate: ClientAdmissionGate,
+    control_notice: HostControlNotice | None = None,
 ) -> None:
     active_owner = False
     session_closed = threading.Event()
+    notice_token = None
     try:
         configure_low_latency_socket(client, SOCKET_RECEIVE_BUFFER_BYTES, host_send_buffer_bytes(address[0]))
         client.settimeout(args.auth_timeout)
@@ -5346,6 +5353,10 @@ def run_admitted_client(
         if activation != "activated":
             return
         active_owner = True
+        if control_notice is not None:
+            notice_token = control_notice.begin(lambda: replace_authenticated_client(
+                client, session, write_lock, session_stop, session_closed,
+                "被控端已主动断开远程控制；已停止自动重连。"))
         if replace_previous is not None:
             log(
                 "new authenticated viewer is replacing the active session: "
@@ -5375,6 +5386,8 @@ def run_admitted_client(
         if active_owner:
             client_gate.release_active(client)
         close_client_socket(client)
+        if control_notice is not None and notice_token is not None:
+            control_notice.end(notice_token)
         session_closed.set()
 
 
@@ -5398,7 +5411,8 @@ def serve(args: argparse.Namespace) -> int:
         discovery_thread = threading.Thread(target=discovery_loop, args=(args, stop_event), daemon=True)
         discovery_thread.start()
 
-    with create_host_listener(args.host, args.port) as server:
+    with HostControlNotice(enabled=args.capture == "x11", log=log) as control_notice, \
+            create_host_listener(args.host, args.port) as server:
         server.settimeout(0.5)
         log(f"RemoteDesk Linux host listening on {args.host}:{args.port}")
         deadline = time.monotonic() + args.serve_seconds if args.serve_seconds > 0 else None
@@ -5430,6 +5444,7 @@ def serve(args: argparse.Namespace) -> int:
                             args,
                             stop_event,
                             client_gate,
+                            control_notice,
                         )
                     finally:
                         with client_threads_lock:

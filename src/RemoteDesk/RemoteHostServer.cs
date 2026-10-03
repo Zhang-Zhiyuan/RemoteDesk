@@ -71,12 +71,21 @@ internal sealed partial class RemoteHostServer : IDisposable
     private readonly object _clientStateLock = new();
     private readonly HashSet<Task> _clientTasks = new();
     private readonly HashSet<TcpClient> _activeClients = new();
+    private readonly RemoteControlActivity _remoteControlActivity = new();
     private readonly DesktopDuplicationCircuitBreaker
         _desktopDuplicationCircuitBreaker = new();
 
     public event Action<string>? Log;
     public event Action<bool>? RunningChanged;
     public event Action<string>? ClientStatusChanged;
+    public event Action RemoteControlChanged
+    {
+        add => _remoteControlActivity.Changed += value;
+        remove => _remoteControlActivity.Changed -= value;
+    }
+
+    public bool HasActiveRemoteControl => _remoteControlActivity.IsActive;
+    public Task DisconnectRemoteControlAsync() => _remoteControlActivity.DisconnectAsync();
 
     public bool IsRunning => _listener is not null;
 
@@ -910,6 +919,7 @@ internal sealed partial class RemoteHostServer : IDisposable
     {
         string remoteEndpoint = client.Client.RemoteEndPoint?.ToString() ?? "未知地址";
         ActiveClientConnection? activeClientOwner = null;
+        IDisposable? remoteControlLease = null;
 
         using (client)
         await using (NetworkStream stream = client.GetStream())
@@ -964,6 +974,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                     ActiveClientConnection? replacedOwner =
                         activeClientGate.Activate(candidateOwner);
                     activeClientOwner = candidateOwner;
+                    remoteControlLease = _remoteControlActivity.Begin(candidateOwner.DisconnectByHostAsync);
                     if (replacedOwner is not null)
                     {
                         Log?.Invoke(
@@ -1232,6 +1243,8 @@ internal sealed partial class RemoteHostServer : IDisposable
             }
             finally
             {
+                client.Close();
+                remoteControlLease?.Dispose();
                 activeClientOwner?.MarkClosed();
                 if (activeClientOwner is not null &&
                     activeClientGate.Release(activeClientOwner))
@@ -1309,6 +1322,7 @@ internal sealed partial class RemoteHostServer : IDisposable
         private readonly TaskCompletionSource _closed =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _replacementRequested;
+        private int _disconnectRequested;
 
         public ActiveClientConnection(
             TcpClient client,
@@ -1332,14 +1346,18 @@ internal sealed partial class RemoteHostServer : IDisposable
             _closed.TrySetResult();
         }
 
-        public async Task DisconnectForReplacementAsync()
+        public Task DisconnectForReplacementAsync()
         {
-            if (Interlocked.Exchange(
-                    ref _replacementRequested,
-                    1) != 0)
-            {
-                return;
-            }
+            Interlocked.Exchange(ref _replacementRequested, 1);
+            return DisconnectAsync(SessionReplacedMessage);
+        }
+
+        public Task DisconnectByHostAsync() => DisconnectAsync(
+            "被控端已主动断开远程控制；已停止自动重连。");
+
+        private async Task DisconnectAsync(string reason)
+        {
+            if (Interlocked.Exchange(ref _disconnectRequested, 1) != 0) return;
 
             try
             {
@@ -1352,7 +1370,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                             _stream,
                             MessageType.Control,
                             RemoteMessageCodec.EncodeSessionRejected(
-                                SessionReplacedMessage),
+                                reason),
                             _session,
                             _writePriority.Lock,
                             timeout.Token)

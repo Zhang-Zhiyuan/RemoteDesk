@@ -32,6 +32,7 @@ public sealed partial class MainForm : Form
     private readonly AppSettingsService _settingsService = new();
     private readonly RemoteDeskSettings _settings;
     private readonly RemoteHostServer _hostServer = new();
+    private RemoteControlNotice? _remoteControlNotice;
     private readonly RemoteViewerClient _viewerClient = new();
     private readonly RelayHostConnector _relayHostConnector;
     private readonly WindowsRelayNetworkOptimizer _relayNetworkOptimizer = new();
@@ -273,6 +274,7 @@ public sealed partial class MainForm : Form
         ApplyDpiMetrics(GetInitialSystemDpi());
         long interfaceBuiltAt = Stopwatch.GetTimestamp();
         ConfigureToolTips();
+        _hostServer.RemoteControlChanged += () => OnUi(UpdateRemoteControlNotice);
         if (_layoutPreview)
         {
             ResumeLayout(performLayout: true);
@@ -384,6 +386,7 @@ public sealed partial class MainForm : Form
         if (disposing && _layoutPreview)
         {
             _isClosing = true;
+            _remoteControlNotice?.Dispose();
             _presenceResponder.Dispose();
             _hostServer.Dispose();
             _viewerClient.Dispose();
@@ -401,6 +404,7 @@ public sealed partial class MainForm : Form
         if (disposing)
         {
             _isClosing = true;
+            TryShutdown(() => _remoteControlNotice?.Dispose());
             TryShutdown(() => CancelViewerReconnectIntent());
             TryShutdown(CancelDiscoveryScan);
             TryShutdown(() => _relayOperationCancellation.Cancel());
@@ -6901,6 +6905,29 @@ public sealed partial class MainForm : Form
             status,
             active ? SuccessBackColor : NeutralBadgeBackColor,
             active ? SuccessTextColor : NeutralBadgeTextColor);
+    }
+
+    private void UpdateRemoteControlNotice()
+    {
+        if (_isClosing) return;
+        // Read live state on the UI thread, not an old queued event payload.
+        if (!_hostServer.HasActiveRemoteControl)
+        {
+            _remoteControlNotice?.Hide();
+            return;
+        }
+        if (_remoteControlNotice is null || _remoteControlNotice.IsDisposed)
+        {
+            _remoteControlNotice = new RemoteControlNotice();
+            _remoteControlNotice.DisconnectRequested += async () =>
+            {
+                _remoteControlNotice.SetDisconnecting();
+                try { await _hostServer.DisconnectRemoteControlAsync(); }
+                catch (Exception error) { AppendHostLog($"断开远程控制失败：{error.Message}"); }
+                finally { UpdateRemoteControlNotice(); }
+            };
+        }
+        _remoteControlNotice.ShowActive();
     }
 
     private void SetViewerStatus(string status, Color foreColor)
