@@ -94,12 +94,14 @@ internal static class MultiScreenLoopbackProbe
             int liveSecondH264 = Volatile.Read(ref secondH264);
             // WGC intentionally sends no repeated frames on a static desktop.
             // Request real fresh output rather than assuming a minimum idle FPS.
+            long recoveryRequestedAt = Stopwatch.GetTimestamp();
             await secondary.RequestVideoKeyFrameAsync();
             await Wait(() => Volatile.Read(ref secondH264) > liveSecondH264, deadline.Token, 20);
             Program.Save(Path.Combine(output, "h264-pause-observation.json"), new {
                 pausedFirst, firstFrames = Volatile.Read(ref firstFrames), liveSecondH264,
                 secondH264 = Volatile.Read(ref secondH264), primary.IsConnected,
-                secondaryConnected = secondary.IsConnected });
+                secondaryConnected = secondary.IsConnected,
+                requestedFrameArrivalMilliseconds = Stopwatch.GetElapsedTime(recoveryRequestedAt).TotalMilliseconds });
             Check("pausing an H264 screen stops its frames while the other serves a fresh keyframe",
                 Volatile.Read(ref firstFrames) == pausedFirst && Volatile.Read(ref secondH264) > liveSecondH264 && primary.IsConnected);
             int pausedFirstH264 = Volatile.Read(ref firstH264);
@@ -127,7 +129,13 @@ internal static class MultiScreenLoopbackProbe
                 firstFrames, secondFrames, firstH264, secondH264, firstSizes = firstSizes.Keys, secondSizes = secondSizes.Keys,
                 scope = "Actual landscape+portrait extended-display capture and encrypted loopback; no input/clipboard operations or persisted desktop images" });
         }
-        finally { await host.StopAsync(); }
+        finally
+        {
+            Program.Save(Path.Combine(output, "final-observation.json"), new {
+                checks, firstFrames, secondFrames, firstH264, secondH264,
+                logs = logs.ToArray().TakeLast(100) });
+            await host.StopAsync();
+        }
         return 0;
     }
 

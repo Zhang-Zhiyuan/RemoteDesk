@@ -548,6 +548,8 @@ internal sealed class FfmpegDesktopH264Capture : IDisposable
         Volatile.Read(
             ref _rawFallbackParserGeneration);
 
+    internal long LastFrameProducedAtTimestamp => Volatile.Read(ref _lastFrameAt);
+
     public bool IsStalled
     {
         get

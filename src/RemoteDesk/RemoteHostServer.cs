@@ -2992,13 +2992,19 @@ internal sealed partial class RemoteHostServer : IDisposable
         }
     }
 
+    internal static bool ShouldRecoverStaticH264KeyFrame(
+        int requestedVersion, int deliveredVersion, long lastFrameAt, long now) =>
+        requestedVersion != deliveredVersion && lastFrameAt > 0 && now >= lastFrameAt &&
+        Stopwatch.GetElapsedTime(lastFrameAt, now) >= TimeSpan.FromMilliseconds(750);
+
     internal static async Task MonitorStaticH264CaptureTargetAsync(
         Func<bool> refreshCaptureBounds,
         Func<bool> isSelectionCurrent,
         Action cancelSelection,
         Action<string> log,
         CancellationToken cancellationToken,
-        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
+        Func<bool>? needsKeyFrameRecovery = null)
     {
         ArgumentNullException.ThrowIfNull(refreshCaptureBounds);
         ArgumentNullException.ThrowIfNull(isSelectionCurrent);
@@ -3027,6 +3033,13 @@ internal sealed partial class RemoteHostServer : IDisposable
                 {
                     if (refreshCaptureBounds())
                     {
+                        return;
+                    }
+
+                    if (needsKeyFrameRecovery?.Invoke() == true)
+                    {
+                        CancelStaticH264CaptureSelection(cancelSelection, log,
+                            "静态 WGC 收到恢复帧请求，重新采集当前屏幕以提供独立关键帧。");
                         return;
                     }
 
@@ -3633,6 +3646,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                         sourceTargetVersion),
                     viewerState.GetVideoSelectionChangeToken(
                         sourceCodecVersion));
+            int deliveredKeyFrameRequestVersion = viewerState.KeyFrameRequestVersion;
             if (options.AllowStaticFrameSilence)
             {
                 staticCaptureTargetMonitor =
@@ -3643,7 +3657,12 @@ internal sealed partial class RemoteHostServer : IDisposable
                             sourceTargetVersion,
                         captureSelectionCancellation.Cancel,
                         captureLog,
-                        captureSelectionCancellation.Token);
+                        captureSelectionCancellation.Token,
+                        needsKeyFrameRecovery: () => ShouldRecoverStaticH264KeyFrame(
+                            viewerState.KeyFrameRequestVersion,
+                            Volatile.Read(ref deliveredKeyFrameRequestVersion),
+                            activeCapture.LastFrameProducedAtTimestamp,
+                            Stopwatch.GetTimestamp()));
             }
             int observedKeyFrameRequestVersion =
                 viewerState.KeyFrameRequestVersion;
@@ -4192,6 +4211,8 @@ internal sealed partial class RemoteHostServer : IDisposable
                     tcpDependentFrameAllowed = false;
                 }
 
+                if (recoveryFrame)
+                    Volatile.Write(ref deliveredKeyFrameRequestVersion, viewerState.KeyFrameRequestVersion);
                 awaitingRecoveryHandoff = false;
 
                 double sendMilliseconds =
