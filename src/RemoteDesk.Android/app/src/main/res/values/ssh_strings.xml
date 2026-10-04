@@ -1,0 +1,8 @@
+<resources>
+    <string name="ssh_password_mode">将使用目标 SSH 账号密码登录。</string>
+    <string name="ssh_credentials_required">请填写有效的设备密钥、目标 SSH 用户名及密码，或选择 SSH 私钥。</string>
+    <string name="ssh_key_reading">正在读取所选 SSH 私钥……</string>
+    <string name="ssh_key_read_failed">私钥读取失败或文件超过 128 KiB；仍未连接 SSH。</string>
+    <string name="ssh_key_selected">已选择 SSH 私钥，仅用于本次连接，不复制到持久存储。请输入对应的目标 SSH 用户名。</string>
+    <string name="ssh_paste_too_long">一次最多粘贴 8 KiB 文字，请分段粘贴。</string>
+</resources>

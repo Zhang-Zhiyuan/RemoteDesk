@@ -346,6 +346,8 @@ final class AndroidRelay {
         final String sharedName, originalName, namingUnavailableReason;
         final boolean canRename;
         final boolean busy;
+        final boolean sshAvailable;
+        final boolean desktopAvailable;
         final List<String> directAddresses;
         final int directPort;
         Device(String id, String name, String platform, boolean busy) {
@@ -356,9 +358,20 @@ final class AndroidRelay {
         }
         Device(String id, String name, String platform, boolean busy, List<String> addresses, int port,
                String sharedName, String originalName, boolean canRename, String namingUnavailableReason) {
+            this(id, name, platform, busy, addresses, port, sharedName, originalName, canRename, namingUnavailableReason, false);
+        }
+        Device(String id, String name, String platform, boolean busy, List<String> addresses, int port,
+               String sharedName, String originalName, boolean canRename, String namingUnavailableReason, boolean sshAvailable) {
+            this(id, name, platform, busy, addresses, port, sharedName, originalName, canRename, namingUnavailableReason, sshAvailable, true);
+        }
+        Device(String id, String name, String platform, boolean busy, List<String> addresses, int port,
+               String sharedName, String originalName, boolean canRename, String namingUnavailableReason,
+               boolean sshAvailable, boolean desktopAvailable) {
             this.deviceId = id; this.name = name; this.platform = platform; this.busy = busy;
             this.sharedName = sharedName; this.originalName = originalName; this.canRename = canRename;
             this.namingUnavailableReason = namingUnavailableReason;
+            this.sshAvailable = sshAvailable;
+            this.desktopAvailable = desktopAvailable;
             this.directAddresses = AndroidRelayAddresses.normalize(addresses);
             this.directPort = port > 0 && port <= 65535 ? port : 0;
         }
@@ -407,7 +420,8 @@ final class AndroidRelay {
                                 bounded(item.optString("originalMachineName", item.optString("machineName", "")), 120),
                                 Boolean.TRUE.equals(response.opt("deviceNaming")),
                                 response.optString("deviceNamingError", "").isEmpty() ? AndroidRelayDeviceName.UNSUPPORTED :
-                                    AndroidRelayDeviceName.errorMessage(response.optString("deviceNamingError"))));
+                                    AndroidRelayDeviceName.errorMessage(response.optString("deviceNamingError")),
+                                AndroidSshProtocol.available(response, item), AndroidSshProtocol.desktopAvailable(item)));
                         } catch (IllegalArgumentException ignored) { }
                     }
                     dial.checkOpen();

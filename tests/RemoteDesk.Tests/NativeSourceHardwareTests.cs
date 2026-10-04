@@ -49,7 +49,14 @@ public sealed class NativeSourceHardwareTests
             return pixels.Count == 4;
         });
         foreach (var block in pixels) AssertPattern(block, 257, bgra);
-        Assert.Equal(new long[] { 1, 1, 2, 2 }, pixels.Select(value => value.SourceTime100Nanoseconds));
+        // A nonblocking Map may skip a still-drawing slot and return a later
+        // completion first. Verify every source/region identity, not a GPU
+        // completion order that the opportunistic readback does not promise.
+        var expectedRegions = new[] { (Time: 1L, Bounds: edge), (Time: 1L, Bounds: new Rectangle(0, 0, 128, 128)),
+            (Time: 2L, Bounds: edge), (Time: 2L, Bounds: new Rectangle(128, 128, 128, 128)) };
+        Assert.Equal(expectedRegions.OrderBy(value => value.Time).ThenBy(value => value.Bounds.X),
+            pixels.Select(value => (Time: value.SourceTime100Nanoseconds, value.Bounds))
+                .OrderBy(value => value.Time).ThenBy(value => value.Bounds.X));
         Assert.Equal(0, readback.PendingCount);
         Assert.True(readback.TryEnqueue(texture, 3, edge, Budget()));
         Assert.True(readback.TryEnqueue(texture, 3, edge, Budget()));

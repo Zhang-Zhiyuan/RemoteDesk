@@ -238,6 +238,8 @@ internal static class RelayTunnelClient
                     SharedName = GetString(device, "sharedName") ?? "",
                     OriginalMachineName = GetString(device, "originalMachineName") ?? GetString(device, "machineName") ?? "",
                     CanRename = GetBoolean(root, "deviceNaming"),
+                    SupportsSsh = GetBoolean(root, "sshTunneling") && HasService(device, "ssh", false),
+                    SupportsDesktop = HasService(device, "desktop", true),
                     NamingUnavailableReason = string.IsNullOrEmpty(GetString(root, "deviceNamingError"))
                         ? RelayDeviceName.UnsupportedMessage : RelayDeviceName.ErrorMessage(GetString(root, "deviceNamingError")!)
                 });
@@ -253,6 +255,11 @@ internal static class RelayTunnelClient
             return (result, next);
         }
     }
+
+    internal static bool HasService(JsonElement device, string service, bool legacyDefault) =>
+        !device.TryGetProperty("services", out var services) ? legacyDefault :
+        services.ValueKind == JsonValueKind.Array && services.GetArrayLength() <= 2 &&
+        services.EnumerateArray().Any(value => value.ValueKind == JsonValueKind.String && value.GetString() == service);
 
     private static string? GetString(JsonElement element, string property) =>
         element.TryGetProperty(property, out JsonElement value) &&

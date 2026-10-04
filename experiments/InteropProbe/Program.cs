@@ -13,6 +13,7 @@ internal static class Program
     static int Main(string[] args)
     {
         Console.InputEncoding = System.Text.Encoding.UTF8;
+        if (args.Length > 0 && args[0] == "ssh-ui-isolated") return SshUiProbe.Run();
         if (args.Length > 0 && args[0] == "dpi-dialogs-isolated") return AdaptiveLayoutProbe.Run(dpiDialogs: true);
         if (args.Length > 0 && args[0] == "dpi-main-viewer-isolated") return AdaptiveLayoutProbe.Run(mainViewerDpi: true);
         if (args.Length > 0 && args[0] == "control-notice-isolated") return RemoteControlNoticeProbe.Run();
@@ -36,6 +37,8 @@ internal static class Program
         var c = config.RootElement;
         var output = Path.GetFullPath(c.GetProperty("output").GetString()!);
         Directory.CreateDirectory(output);
+        if (args[0] == "ssh-alias-fixture") return SshAliasFixtureProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
+        if (args[0] == "ssh-relay-fixture") return SshRelayFixtureProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "multi-screen-loopback") return MultiScreenLoopbackProbe.RunAsync(output).GetAwaiter().GetResult();
         if (args[0] == "background-fault") return BackgroundFaultProbe.Run(output);
         if (args[0] == "slow-file-transfer") return SlowFileTransferProbe.RunAsync(output).GetAwaiter().GetResult();

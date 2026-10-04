@@ -121,6 +121,7 @@ public final class ViewerProbeApplication extends Application implements Applica
         handler.postDelayed(this::snapshot,300);
     }
     public void onActivityCreated(Activity activity,Bundle state) {
+        if (activity instanceof AndroidSshTerminalActivity ssh) SshUiProbe.created(ssh);
         if (activity instanceof MainActivity main && activity.getIntent().getBooleanExtra("receivedFilesProbe", false))
             handler.postDelayed(() -> ReceivedFilesUiProbe.start(main), 600);
         if(activity instanceof RemoteDeskViewerActivity){

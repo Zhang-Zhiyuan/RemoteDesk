@@ -253,7 +253,8 @@ public sealed partial class MainForm : Form
         _resumeHostAfterUpdate = resumeHostAfterUpdate;
         _settings = previewSettings ?? _settingsService.Load();
         _relayHostConnector = new RelayHostConnector(prepareConnection: (options, token) =>
-            _relayNetworkOptimizer.OptimizeAsync(options, _settings.Relay.OptimizeNetworkRoute, token));
+            _relayNetworkOptimizer.OptimizeAsync(options, _settings.Relay.OptimizeNetworkRoute, token),
+            sshOptionsProvider: () => Volatile.Read(ref _sshHostOptions));
         _settings.Relay.DeviceId = RemoteDeviceIdentity.Normalize(_settings.Relay.DeviceId) ?? Guid.NewGuid().ToString("D");
         RemoteDeviceIdentity.LocalId = _settings.Relay.DeviceId;
         long settingsLoadedAt = Stopwatch.GetTimestamp();
@@ -330,6 +331,7 @@ public sealed partial class MainForm : Form
 
             await StartHostAutomaticallyAsync(
                 _resumeHostAfterUpdate);
+            await ApplyRelayHostRegistrationAsync();
             await RecoverLockScreenAfterUpdateAsync();
             await MigrateLegacyStartupAsync();
             await DiscoverHostsAsync(silent: true);
@@ -386,6 +388,7 @@ public sealed partial class MainForm : Form
         if (disposing && _layoutPreview)
         {
             _isClosing = true;
+            CloseSshTerminals();
             CloseViewerWindowFromDisconnect();
             _remoteControlNotices?.Dispose();
             _presenceResponder.Dispose();
@@ -405,6 +408,7 @@ public sealed partial class MainForm : Form
         if (disposing)
         {
             _isClosing = true;
+            TryShutdown(CloseSshTerminals);
             TryShutdown(() => _remoteControlNotices?.Dispose());
             TryShutdown(() => CancelViewerReconnectIntent());
             TryShutdown(CancelDiscoveryScan);
@@ -1470,6 +1474,7 @@ public sealed partial class MainForm : Form
         AddSettingRow(configuration, 3, "画面模式", _relayVideoModeBox);
         AddSettingRow(configuration, 4, "网络", networkOptions);
         AddSettingRow(configuration, 5, "管理", configurationActions);
+        AddSettingRow(configuration, 6, "本机 SSH", CreateSshHostSettings());
         ConfigureWrappedActionRow(configurationActions);
 
         _relayDevicesList = new ListView
@@ -1507,10 +1512,11 @@ public sealed partial class MainForm : Form
         _relayRenameButton = CreateSecondaryButton("共享名称");
         _relayRenameButton.Click += async (_, _) => await RenameRelayDeviceAsync();
         deviceActions.Controls.Add(_relayRenameButton);
+        AddSshDeviceActions(deviceActions);
 
         var online = CreateSection(
             "在线设备",
-            "双击设备或选择后点击连接；已有会话时，新连接会替换旧连接");
+            "桌面连接会替换已有桌面会话；SSH 终端独立连接，不挤占桌面");
         if (online.Parent is TableLayoutPanel onlineShell)
         {
             onlineShell.AutoSize = false;
@@ -1533,6 +1539,7 @@ public sealed partial class MainForm : Form
         online.Controls.Add(_relayDevicesList, 0, 2);
         online.SetColumnSpan(_relayDevicesList, 2);
         ConfigureWrappedActionRow(deviceActions);
+        ConfigureRelayDeviceSectionMinimum(online, deviceActions, _relayStatusLabel);
 
         root.Controls.Add(configuration.Parent!, 0, 0);
         root.Controls.Add(online.Parent!, 0, 1);
@@ -1897,6 +1904,54 @@ public sealed partial class MainForm : Form
         actions.AutoSize = false;
         actions.Dock = DockStyle.Top;
         actions.Height = height;
+    }
+
+    private static void ConfigureRelayDeviceSectionMinimum(
+        TableLayoutPanel content, FlowLayoutPanel actions, Label status)
+    {
+        bool queued = false;
+        void Apply()
+        {
+            queued = false;
+            if (content.IsDisposed || !content.Visible) return;
+            UpdateRelayDeviceSectionMinimum(content, actions, status);
+        }
+        void QueueApply()
+        {
+            if (queued || content.IsDisposed || !content.IsHandleCreated) return;
+            queued = true;
+            content.BeginInvoke((Action)Apply);
+        }
+        actions.SizeChanged += (_, _) => QueueApply();
+        content.ClientSizeChanged += (_, _) => QueueApply();
+        content.VisibleChanged += (_, _) => QueueApply();
+        content.DpiChangedAfterParent += (_, _) => QueueApply();
+        status.TextChanged += (_, _) => QueueApply();
+        status.FontChanged += (_, _) => QueueApply();
+        if (content.Parent is TableLayoutPanel shell && shell.GetControlFromPosition(0, 0) is Control header)
+            header.SizeChanged += (_, _) => QueueApply();
+        QueueApply();
+    }
+
+    internal static void UpdateRelayDeviceSectionMinimum(
+        TableLayoutPanel content, FlowLayoutPanel actions, Label status)
+    {
+        if (content.Parent is not TableLayoutPanel shell ||
+            shell.GetControlFromPosition(0, 0) is not Control header) return;
+        int width = content.ClientSize.Width - content.Padding.Horizontal;
+        if (width <= 0) return;
+        // The list is the flexible row, but its shell cannot shrink below the
+        // wrapped actions and status. Recompute from the current width, so a
+        // narrow/large-font layout can scroll and a wider layout shrinks back.
+        int actionsHeight = CalculateWrappedToolbarHeight(actions, Math.Max(1, width - actions.Margin.Horizontal));
+        int statusHeight = status.GetPreferredSize(new Size(Math.Max(1, width - status.Margin.Horizontal), 0)).Height;
+        int headerHeight = header.GetPreferredSize(new Size(Math.Max(1,
+            shell.ClientSize.Width - shell.Padding.Horizontal - header.Margin.Horizontal), 0)).Height;
+        int height = shell.Padding.Vertical + headerHeight + header.Margin.Vertical + content.Margin.Vertical +
+            content.Padding.Vertical + actionsHeight + actions.Margin.Vertical + statusHeight + status.Margin.Vertical +
+            ResponsiveWindowLayout.ScaleLogical(96, content.DeviceDpi);
+        var minimum = new Size(0, Math.Max(ResponsiveWindowLayout.ScaleLogical(260, content.DeviceDpi), height));
+        if (shell.MinimumSize != minimum) shell.MinimumSize = minimum;
     }
 
     internal static int ConstrainWrappedToolbarSection(
@@ -2459,7 +2514,7 @@ public sealed partial class MainForm : Form
         _relayReportAddressButton.Click += (_, _) => SetRelayStatus(
             _relayHostConnector.RequestAddressRefresh()
                 ? "已请求上报本机 IP / 端口；稍后刷新在线设备即可查看。"
-                : "请先启动被控端，并启用本机上线。", MutedTextColor);
+                : "请启用本机上线，并启动桌面被控端或允许 SSH。", MutedTextColor);
         _relayAddressButton.Click += async (_, _) => await ShowRelayAddressesAsync();
         _relayConnectButton.Click += async (_, _) =>
             await ToggleRelayViewerAsync();
@@ -2499,7 +2554,7 @@ public sealed partial class MainForm : Form
         {
             if (!running)
             {
-                _ = _relayHostConnector.StopAsync();
+                _ = ApplyRelayHostRegistrationAsync();
             }
 
             _hostToggleButton.Text = running ? "停止被控端" : "启动被控端";
@@ -3770,7 +3825,6 @@ public sealed partial class MainForm : Form
                 // Closing the window or updating the app does not pass through this branch.
                 _autoStartHostBox.Checked = false;
                 SaveSettingsFromUi();
-                await _relayHostConnector.StopAsync();
                 await _hostServer.StopAsync();
             }
             else
@@ -4180,9 +4234,9 @@ public sealed partial class MainForm : Form
 
     private async Task ApplyRelayHostRegistrationAsync()
     {
+        if (_isClosing || IsDisposed || _layoutPreview) return;
         if (!_relayRegisterHostBox.Checked ||
-            !_hostServer.IsRunning ||
-            _hostServer.ListeningPort <= 0)
+            ((!_hostServer.IsRunning || _hostServer.ListeningPort <= 0) && !Volatile.Read(ref _sshHostOptions).IsAvailable))
         {
             await _relayHostConnector.StopAsync();
             if (!_relayRegisterHostBox.Checked)
@@ -4195,7 +4249,7 @@ public sealed partial class MainForm : Form
         }
 
         await EnsureRelayHostConnectorAsync(
-            _hostServer.ListeningPort);
+            _hostServer.IsRunning ? _hostServer.ListeningPort : 0);
     }
 
     private async Task EnsureRelayHostConnectorAsync(
@@ -4217,8 +4271,9 @@ public sealed partial class MainForm : Form
             RelayConnectionOptions options =
                 CreateRelayOptions(
                     _settings.Relay.DeviceId);
+            long generation = _relayConfigurationGeneration;
             await OptimizeRelayNetworkAsync(options);
-            if (_isClosing || IsDisposed) return;
+            if (!TryGetCurrentRelayHostRegistration(options, generation, out localHostPort)) return;
             await _relayHostConnector.StartAsync(
                 options,
                 localHostPort,
@@ -4262,6 +4317,7 @@ public sealed partial class MainForm : Form
         RelayOnlineDevice? selected = GetSelectedRelayDevice();
         string? blockedReason = RelayDeviceSelectionPolicy.GetConnectionBlockReason(
             selected, _settings.Relay.DeviceId);
+        if (selected is { SupportsDesktop: false }) blockedReason = "此设备只提供 SSH，未启用桌面控制。";
         if (!disconnecting && blockedReason is not null)
         {
             SetRelayStatus(blockedReason, DangerColor);
@@ -6590,6 +6646,7 @@ public sealed partial class MainForm : Form
             _relayRegisterHostBox.Checked =
                 _settings.Relay.RegisterThisDevice;
             _relayOptimizeNetworkBox.Checked = _settings.Relay.OptimizeNetworkRoute;
+            ApplySshSettingsToUi();
             _relayViewerPasswordBox.Text = ""; // Filled only for the selected device, never a global fallback.
             SetSelectedViewerVideoMode(
                 _relayVideoModeBox,
@@ -6679,7 +6736,7 @@ public sealed partial class MainForm : Form
             // Legacy global relay keys are retained for old settings compatibility,
             // but new keys are saved per authenticated device after connection.
 
-            TrySaveSettings();
+            if (TrySaveSettings()) PublishSshHostOptions();
             UpdateDiscoveryPresence();
         }
         catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
@@ -7036,6 +7093,7 @@ public sealed partial class MainForm : Form
             _relayViewerPasswordBox.Enabled;
         _relayDevicesList.Enabled =
             !_viewerActionInProgress;
+        UpdateSshActionState();
 
         if (IsViewerReconnecting())
         {
@@ -7079,6 +7137,7 @@ public sealed partial class MainForm : Form
         _relayConnectButton.Enabled =
             configured &&
             !_relayOperationInProgress &&
+            GetSelectedRelayDevice() is { SupportsDesktop: true } &&
             RelayDeviceSelectionPolicy.GetConnectionBlockReason(
                 GetSelectedRelayDevice(), _settings.Relay.DeviceId) is null;
         ApplyButtonStyle(

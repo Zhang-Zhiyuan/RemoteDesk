@@ -245,7 +245,7 @@ public sealed class RelayTunnelIntegrationTests
                 "not-a-device").Validate());
     }
 
-    private static byte[] CreateCertificate(
+    internal static byte[] CreateCertificate(
         string certificatePath,
         string keyPath)
     {
@@ -344,7 +344,7 @@ public sealed class RelayTunnelIntegrationTests
         await release.WaitAsync(cancellationToken);
     }
 
-    private static Process StartPythonServer(
+    internal static Process StartPythonServer(
         string serverScript,
         string configPath)
     {
@@ -382,7 +382,7 @@ public sealed class RelayTunnelIntegrationTests
                 "无法启动本地中继测试服务。");
     }
 
-    private static async Task<int> ReadBoundPortAsync(Process process, CancellationToken cancellationToken)
+    internal static async Task<int> ReadBoundPortAsync(Process process, CancellationToken cancellationToken)
     {
         string? ready = await process.StandardOutput.ReadLineAsync(cancellationToken);
         if (ready is null)
@@ -478,7 +478,7 @@ public sealed class RelayTunnelIntegrationTests
         }
     }
 
-    private static string? FindWorkspaceFile(
+    internal static string? FindWorkspaceFile(
         string relativePath)
     {
         DirectoryInfo? directory =
@@ -499,7 +499,7 @@ public sealed class RelayTunnelIntegrationTests
         return null;
     }
 
-    private static void TryStopProcess(Process process)
+    internal static void TryStopProcess(Process process)
     {
         try
         {

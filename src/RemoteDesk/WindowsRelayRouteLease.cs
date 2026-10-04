@@ -19,7 +19,7 @@ internal interface IRelayRouteBackend
 }
 
 /// <summary>Owns only newly created, expiring /32 routes. Never edits an existing route.</summary>
-internal sealed class WindowsRelayRouteBackend : IRelayRouteBackend
+internal sealed partial class WindowsRelayRouteBackend : IRelayRouteBackend
 {
     public bool Available => OperatingSystem.IsWindows() && WindowsProcessElevation.IsCurrentProcessElevated();
 
@@ -115,32 +115,6 @@ internal sealed class WindowsRelayRouteBackend : IRelayRouteBackend
         catch { /* The finite kernel lifetime also covers loss of privilege or a process crash. */ }
     }
 
-    internal static bool IsPhysicalInterface(uint index)
-    {
-        try
-        {
-            var row = new NativeInterface { Index = index };
-            return GetIfEntry2(ref row) == 0 && row.IsPhysical;
-        }
-        catch { return false; }
-    }
-
-    // MIB_IF_ROW2 includes 257-WCHAR alias/description arrays, two 32-byte
-    // hardware addresses and 20 UInt64 counters. Explicit offsets retain the
-    // full native buffer while exposing only the read-only policy fields.
-    [StructLayout(LayoutKind.Explicit, Size = 1352)]
-    internal struct NativeInterface
-    {
-        [FieldOffset(8)] internal uint Index;
-        [FieldOffset(12)] internal Guid Id;
-        [FieldOffset(1128)] internal uint Type;
-        [FieldOffset(1132)] internal uint Tunnel;
-        [FieldOffset(1152)] internal byte Flags;
-        [FieldOffset(1156)] internal uint OperationalStatus;
-        internal bool IsPhysical => Type is 6 or 71 && Tunnel == 0 && OperationalStatus == 1 &&
-            (Flags & 1) != 0 && (Flags & (2 | 8 | 16 | 32)) == 0;
-    }
-
     internal static bool OwnedBy(NativeRoute created, NativeRoute current, uint lifetime) =>
         current.Destination.Length == 32 && current.Destination.Address.Family == 2 &&
         current.Destination.Address.IPv4 == created.Destination.Address.IPv4 &&
@@ -229,5 +203,4 @@ internal sealed class WindowsRelayRouteBackend : IRelayRouteBackend
     [DllImport("iphlpapi.dll")] private static extern uint DeleteIpForwardEntry2(ref NativeRoute row);
     [DllImport("iphlpapi.dll")] private static extern uint GetIpForwardTable2(ushort family, out nint table);
     [DllImport("iphlpapi.dll")] private static extern void FreeMibTable(nint memory);
-    [DllImport("iphlpapi.dll")] private static extern uint GetIfEntry2(ref NativeInterface row);
 }

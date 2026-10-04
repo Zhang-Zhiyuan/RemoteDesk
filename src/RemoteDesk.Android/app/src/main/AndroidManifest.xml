@@ -41,6 +41,11 @@
             android:excludeFromRecents="true" android:taskAffinity="com.remotedesk.agent.wake"
             android:theme="@android:style/Theme.Material.Light.NoActionBar" />
 
+        <activity android:name=".AndroidSshTerminalActivity" android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:theme="@style/ViewerTheme" />
+
         <service
             android:name=".RemoteDeskForegroundService"
             android:exported="false"

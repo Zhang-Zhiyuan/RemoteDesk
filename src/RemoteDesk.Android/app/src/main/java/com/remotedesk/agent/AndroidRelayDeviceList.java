@@ -12,7 +12,8 @@ final class AndroidRelayDeviceList {
         for (int i = 0; i < previous.size(); i++) {
             AndroidRelay.Device a = previous.get(i), b = next.get(i);
             if (!Objects.equals(a.deviceId, b.deviceId) || !Objects.equals(a.name, b.name) ||
-                !Objects.equals(a.platform, b.platform) || a.busy != b.busy ||
+                !Objects.equals(a.platform, b.platform) || a.busy != b.busy || a.sshAvailable != b.sshAvailable ||
+                a.desktopAvailable != b.desktopAvailable ||
                 !a.directAddresses.equals(b.directAddresses) || a.directPort != b.directPort ||
                 !Objects.equals(a.sharedName, b.sharedName) || !Objects.equals(a.originalName, b.originalName) ||
                 a.canRename != b.canRename || !Objects.equals(a.namingUnavailableReason, b.namingUnavailableReason)) return false;

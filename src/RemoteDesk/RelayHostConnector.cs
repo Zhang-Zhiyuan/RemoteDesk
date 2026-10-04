@@ -23,19 +23,32 @@ internal sealed class RelayHostConnector : IDisposable
     private readonly SemaphoreSlim _addressRefresh = new(0, 1);
     private readonly Func<IReadOnlyList<string>> _addressProvider;
     private readonly Func<RelayConnectionOptions, CancellationToken, Task>? _prepareConnection;
+    private readonly Func<RelaySshHostOptions> _sshOptionsProvider;
     private readonly ConcurrentDictionary<Guid, Task> _dataBridges = new();
+    private readonly ConcurrentDictionary<Guid, SshBridgeState> _sshBridges = new();
+    private readonly SemaphoreSlim _sshSlots = new(4, 4);
+    private sealed class SshBridgeState(RelaySshHostOptions options, CancellationTokenSource cancellation)
+    {
+        internal RelaySshHostOptions Options { get; } = options;
+        internal CancellationTokenSource Cancellation { get; } = cancellation;
+        internal Task Task { get; set; } = Task.CompletedTask;
+    }
     private readonly TimeSpan _handshakeTimeout;
     private readonly TimeSpan _heartbeatTimeout;
     private CancellationTokenSource? _runCancellation;
     private Task? _runTask;
+    private RelayConnectionOptions? _activeOptions;
+    private int _localHostPort;
     private bool _disposed;
 
     public RelayHostConnector(TimeSpan? handshakeTimeout = null, TimeSpan? heartbeatTimeout = null,
         Func<IReadOnlyList<string>>? addressProvider = null,
-        Func<RelayConnectionOptions, CancellationToken, Task>? prepareConnection = null)
+        Func<RelayConnectionOptions, CancellationToken, Task>? prepareConnection = null,
+        Func<RelaySshHostOptions>? sshOptionsProvider = null)
     {
         _addressProvider = addressProvider ?? RelayAddressReport.LocalAddresses;
         _prepareConnection = prepareConnection;
+        _sshOptionsProvider = sshOptionsProvider ?? (() => RelaySshHostOptions.Disabled);
         _handshakeTimeout = handshakeTimeout ?? TimeSpan.FromSeconds(10);
         _heartbeatTimeout = heartbeatTimeout ?? TimeSpan.FromSeconds(45);
     }
@@ -47,6 +60,7 @@ internal sealed class RelayHostConnector : IDisposable
     public bool RequestAddressRefresh()
     {
         if (_disposed || !IsRunning) return false;
+        RefreshSshConfiguration();
         try { _addressRefresh.Release(); } catch (SemaphoreFullException) { }
         return true;
     }
@@ -57,7 +71,7 @@ internal sealed class RelayHostConnector : IDisposable
         CancellationToken cancellationToken = default)
     {
         options = options.Validate();
-        if (localHostPort is <= 0 or > 65535)
+        if (localHostPort is < 0 or > 65535 || (localHostPort == 0 && !_sshOptionsProvider().IsAvailable))
         {
             throw new ArgumentOutOfRangeException(
                 nameof(localHostPort));
@@ -68,7 +82,17 @@ internal sealed class RelayHostConnector : IDisposable
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            if (IsRunning && _runCancellation?.IsCancellationRequested != true && _activeOptions == options)
+            {
+                // Switching desktop availability must not end an independent
+                // authenticated SSH shell on the same registered device.
+                Volatile.Write(ref _localHostPort, localHostPort);
+                RequestAddressRefresh();
+                return;
+            }
             await StopCoreAsync().ConfigureAwait(false);
+            _activeOptions = options;
+            Volatile.Write(ref _localHostPort, localHostPort);
             _runCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             _runTask = RunAsync(
                 options,
@@ -186,6 +210,7 @@ internal sealed class RelayHostConnector : IDisposable
             CancellationToken connectionToken = connectionStop.Token;
             using var writeLock = new SemaphoreSlim(1, 1);
             IReadOnlyList<string> registeredAddresses = RelayAddressReport.Normalize(_addressProvider());
+            localHostPort = Volatile.Read(ref _localHostPort);
 
             await WriteControlJsonAsync(
                 relayStream,
@@ -200,12 +225,14 @@ internal sealed class RelayHostConnector : IDisposable
                     platform = "Windows",
                     buildStamp = RemoteDeskBuildInfo.BuildStamp,
                     directAddresses = registeredAddresses,
-                    directPort = localHostPort
+                    directPort = localHostPort,
+                    services = Services(localHostPort)
                 },
                 cancellationToken)
             .ConfigureAwait(false);
             bool heartbeatAcknowledged;
             bool addressReporting;
+            bool sshTunneling;
             using (JsonDocument response = await RelayTls.ReadJsonWithTimeoutAsync(
                    relayStream,
                    _handshakeTimeout,
@@ -217,13 +244,16 @@ internal sealed class RelayHostConnector : IDisposable
                     ack.ValueKind == JsonValueKind.True;
                 addressReporting = response.RootElement.TryGetProperty("addressReporting", out var reportAck) &&
                     reportAck.ValueKind == JsonValueKind.True;
+                sshTunneling = response.RootElement.TryGetProperty("sshTunneling", out var sshAck) &&
+                    sshAck.ValueKind == JsonValueKind.True;
             }
 
             registered();
             PublishStatus(
                 $"已上线到中继 {options.ServerAddress}:{options.Port} · 本地端点 " +
                 RelayNetworkPathSelector.DescribeLocalEndpoint(relayClient.Client.LocalEndPoint) +
-                (addressReporting ? " · IP / 端口自动更新已启用" : " · 服务器需更新才能显示 IP"));
+                (addressReporting ? " · IP / 端口自动更新已启用" : " · 服务器需更新才能显示 IP") +
+                (_sshOptionsProvider().IsAvailable && !sshTunneling ? " · 中继服务器需更新才能使用 SSH" : ""));
             Task heartbeat = RunHeartbeatAsync(
                 relayStream,
                 writeLock,
@@ -254,10 +284,7 @@ internal sealed class RelayHostConnector : IDisposable
                         typeValue.ValueKind == JsonValueKind.String
                             ? typeValue.GetString()
                             : null;
-                    if (!string.Equals(
-                            type,
-                            "open",
-                            StringComparison.Ordinal))
+                    if (type is not ("open" or "open-ssh"))
                     {
                         continue;
                     }
@@ -273,9 +300,16 @@ internal sealed class RelayHostConnector : IDisposable
                         continue;
                     }
 
+                    if (type == "open-ssh")
+                    {
+                        if (sshTunneling) StartSshBridge(options, sessionId!, connectionToken);
+                        continue;
+                    }
+                    int desktopPort = Volatile.Read(ref _localHostPort);
+                    if (desktopPort == 0) continue;
                     StartDataBridge(
                         options,
-                        localHostPort,
+                        desktopPort,
                         sessionId!,
                         connectionToken);
                 }
@@ -334,6 +368,63 @@ internal sealed class RelayHostConnector : IDisposable
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
+    }
+
+    private string[] Services(int localHostPort)
+    {
+        RelaySshHostOptions ssh = RefreshSshConfiguration();
+        return localHostPort > 0 ? (ssh.IsAvailable ? ["desktop", "ssh"] : ["desktop"])
+            : (ssh.IsAvailable ? ["ssh"] : []);
+    }
+
+    private RelaySshHostOptions RefreshSshConfiguration()
+    {
+        RelaySshHostOptions current = _sshOptionsProvider();
+        foreach (SshBridgeState bridge in _sshBridges.Values)
+        {
+            if (bridge.Options == current && current.IsAvailable) continue;
+            try { bridge.Cancellation.Cancel(); } catch (ObjectDisposedException) { }
+        }
+        return current;
+    }
+
+    private void StartSshBridge(RelayConnectionOptions options, string sessionId, CancellationToken token)
+    {
+        RelaySshHostOptions ssh = RefreshSshConfiguration();
+        if (!ssh.IsAvailable || token.IsCancellationRequested || !_sshSlots.Wait(0)) return;
+        Guid id = Guid.NewGuid();
+        var state = new SshBridgeState(ssh, CancellationTokenSource.CreateLinkedTokenSource(token));
+        _sshBridges[id] = state;
+        // A UI revocation can occur after the first options snapshot but before
+        // this state becomes visible. Revalidate after publication so that it
+        // cannot miss this bridge; subsequent refreshes can always cancel it.
+        RefreshSshConfiguration();
+        state.Task = RunSshBridgeAsync(options, sessionId, ssh, state.Cancellation.Token);
+        _ = state.Task.ContinueWith(completed =>
+        {
+            _sshBridges.TryRemove(id, out _);
+            state.Cancellation.Dispose();
+            _sshSlots.Release();
+            if (completed.IsFaulted) _ = completed.Exception;
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
+
+    private async Task RunSshBridgeAsync(RelayConnectionOptions options, string sessionId,
+        RelaySshHostOptions ssh, CancellationToken token)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(TimeSpan.FromSeconds(15));
+        var (client, stream) = await RelayTls.ConnectAsync(options, deadline.Token, dataTunnel: true).ConfigureAwait(false);
+        using (client)
+        using (stream)
+        {
+            await RelayTls.WriteJsonAsync(stream, new { version = 1, role = "host-data", service = "ssh",
+                token = options.AccessToken, deviceId = options.DeviceId, sessionId }, deadline.Token).ConfigureAwait(false);
+            using (JsonDocument response = await RelayTls.ReadJsonAsync(stream, deadline.Token).ConfigureAwait(false))
+                SshRelayClient.EnsureSshPair(response.RootElement);
+            deadline.CancelAfter(Timeout.InfiniteTimeSpan);
+            await SshHostBridge.RunAsync(stream, client, ssh, options.DeviceId, token).ConfigureAwait(false);
+        }
     }
 
     private async Task RunDataBridgeAsync(
@@ -426,9 +517,10 @@ internal sealed class RelayHostConnector : IDisposable
         {
             await _addressRefresh.WaitAsync(HeartbeatInterval, cancellationToken)
                 .ConfigureAwait(false);
+            localHostPort = Volatile.Read(ref _localHostPort);
             IReadOnlyList<string> currentAddresses = RelayAddressReport.Normalize(_addressProvider());
             if (_prepareConnection is not null && ShouldRefreshNetwork(registeredAddresses,
-                currentAddresses, _dataBridges.Values.Any(task => !task.IsCompleted)))
+                currentAddresses, _dataBridges.Values.Any(task => !task.IsCompleted) || !_sshBridges.IsEmpty))
             {
                 // Wait until the real session finishes; changing another NIC
                 // must not terminate an otherwise healthy active desktop.
@@ -443,7 +535,8 @@ internal sealed class RelayHostConnector : IDisposable
                         type = "heartbeat",
                         timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                         directAddresses = currentAddresses,
-                        directPort = localHostPort
+                        directPort = localHostPort,
+                        services = Services(localHostPort)
                     },
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -483,6 +576,7 @@ internal sealed class RelayHostConnector : IDisposable
         Task? runTask = _runTask;
         _runCancellation = null;
         _runTask = null;
+        _activeOptions = null;
         if (cancellation is null)
         {
             return;
@@ -497,6 +591,8 @@ internal sealed class RelayHostConnector : IDisposable
                     .ConfigureAwait(false);
             }
             await Task.WhenAll(_dataBridges.Values.ToArray())
+                .WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            await Task.WhenAll(_sshBridges.Values.Select(state => state.Task).ToArray())
                 .WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
         }
         catch (Exception ex) when (

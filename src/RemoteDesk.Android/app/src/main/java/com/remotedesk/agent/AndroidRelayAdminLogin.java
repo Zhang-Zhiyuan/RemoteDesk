@@ -141,6 +141,9 @@ final class AndroidRelayAdminLogin {
                     public HostKey[] getHostKey(String host, String type) { return new HostKey[0]; }
                 });
                 session = client.getSession(admin, host, sshPort);
+                // Fingerprint-only stored identities do not encode key type.
+                // Keep first-use and pinned-login selection stable after adding BC.
+                AndroidRelaySshAlgorithmPolicy.configureAdministratorSession(session);
                 session.setConfig("StrictHostKeyChecking", "yes");
                 session.setConfig("PreferredAuthentications", "password");
                 session.setConfig("NumberOfPasswordPrompts", "1");

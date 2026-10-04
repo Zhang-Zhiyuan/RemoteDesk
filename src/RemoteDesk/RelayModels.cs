@@ -2,58 +2,6 @@ using System.Globalization;
 
 namespace RemoteDesk;
 
-internal sealed record RelayConnectionOptions(
-    string ServerAddress,
-    int Port,
-    string AccessToken,
-    string TlsCertificateSha256,
-    string DeviceId)
-{
-    public override string ToString() => $"RelayConnectionOptions({ServerAddress}:{Port}, <redacted>)";
-
-    public RelayConnectionOptions Validate()
-    {
-        string address = ServerAddress.Trim();
-        string token = AccessToken.Trim();
-        string certificateFingerprint = RelayTls.NormalizeFingerprint(
-            TlsCertificateSha256);
-        string deviceId = DeviceId.Trim();
-
-        if (address.Length == 0)
-        {
-            throw new InvalidOperationException("请先配置公网中继服务器地址。");
-        }
-
-        if (Port is <= 0 or > 65535)
-        {
-            throw new InvalidOperationException("中继端口无效。");
-        }
-
-        if (token.Length is < 32 or > 4096)
-        {
-            throw new InvalidOperationException("服务器登录配置无效，请用 root 密码重新登录服务器。");
-        }
-
-        if (certificateFingerprint.Length != 64)
-        {
-            throw new InvalidOperationException("服务器身份配置无效，请用 root 密码重新登录服务器。");
-        }
-
-        if (!Guid.TryParse(deviceId, out Guid parsedDeviceId))
-        {
-            throw new InvalidOperationException("中继设备标识无效，请重新保存配置。");
-        }
-
-        return this with
-        {
-            ServerAddress = address,
-            AccessToken = token,
-            TlsCertificateSha256 = certificateFingerprint,
-            DeviceId = parsedDeviceId.ToString("D")
-        };
-    }
-}
-
 internal sealed record RelayOnlineDevice(
     string DeviceId,
     string MachineName,
@@ -67,12 +15,15 @@ internal sealed record RelayOnlineDevice(
     public string SharedName { get; init; } = "";
     public string OriginalMachineName { get; init; } = "";
     public bool CanRename { get; init; }
+    public bool SupportsSsh { get; init; }
+    public bool SupportsDesktop { get; init; } = true;
     public string NamingUnavailableReason { get; init; } = RelayDeviceName.UnsupportedMessage;
     public string AddressDisplay => DirectAddresses.Count > 0
         ? string.Join(" / ", DirectAddresses.Select(address => NetworkUtils.FormatEndpoint(address, DirectPort)))
         : "未上报（仍可中继连接）";
 
-    public string StatusText => Busy ? "使用中（可挤下线）" : "在线";
+    public string StatusText => !SupportsDesktop && SupportsSsh ? "仅 SSH"
+        : Busy ? "使用中（可挤下线）" : "在线";
 
     public string BuildDisplay =>
         RemoteDeskBuildInfo.FormatShortBuildStamp(BuildStamp);
@@ -164,20 +115,4 @@ internal sealed record RelayProvisionResult(
     bool Installed)
 {
     public override string ToString() => $"RelayProvisionResult({ServerAddress}:{RelayPort}, <redacted>)";
-}
-
-internal sealed class RelayProtocolException : IOException
-{
-    public RelayProtocolException(string message)
-        : base(message)
-    {
-    }
-}
-
-internal sealed class RelayAccessDeniedException : IOException
-{
-    public RelayAccessDeniedException(string message)
-        : base(message)
-    {
-    }
 }

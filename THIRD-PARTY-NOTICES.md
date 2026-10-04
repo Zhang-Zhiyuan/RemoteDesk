@@ -33,6 +33,13 @@ MIT-licensed packages:
   Copyright (c) .NET Foundation and Contributors,
   <https://github.com/dotnet/runtime>
 
+The embedded Windows `RemoteDesk.SshProxy` console helper uses
+System.Security.Cryptography.ProtectedData 8.0.0 (MIT), Copyright (c) .NET
+Foundation and Contributors, <https://github.com/dotnet/runtime>.
+The MIT permission and warranty terms below apply to this component as well.
+Its self-contained .NET runtime is covered by the runtime notices distributed
+with the Windows package.
+
 RemoteDesk's self-contained Linux packages additionally bundle components from
 the Ubuntu build environment:
 
@@ -53,12 +60,28 @@ The Linux packaging script copies the exact distribution copyright and license
 files for these bundled runtime packages into `third-party-licenses/` alongside
 this notice.
 
-RemoteDesk Android uses JSch 2.28.6 (mwiede fork) for one-time SSH server login,
+RemoteDesk Android uses JSch 2.28.6 (mwiede fork) for one-time SSH server login and
+independent interactive target-device SSH sessions,
 under its BSD-style license: <https://github.com/mwiede/jsch>.
 Copyright (c) 2002-2015 Atsuhiko Yamanaka, JCraft,Inc.
 The full notice is included in the APK at
 `assets/third-party-licenses/JSch-LICENSE.txt` and in the source tree at
 `src/RemoteDesk.Android/app/src/main/assets/third-party-licenses/JSch-LICENSE.txt`.
+
+The Android interactive terminal embeds xterm.js 6.0.0 and @xterm/addon-fit 0.11.0,
+distributed under the MIT license: <https://github.com/xtermjs/xterm.js>.
+The fixed JavaScript/CSS assets are loaded locally, without a CDN or remote web
+page. Their complete license notices are shipped inside the APK at
+`assets/ssh/LICENSE-xterm.txt` and `assets/ssh/LICENSE-addon-fit.txt`; package
+versions and npm SHA-512 integrity values are recorded at `assets/ssh/NOTICE.txt`.
+The bundled JavaScript is syntax-transpiled using pinned esbuild 0.25.12 to target
+Chromium 80; esbuild is a development-time tool and is not bundled in the APK.
+
+Android also includes Bouncy Castle `bcprov-jdk18on` 1.86 under the Bouncy Castle
+license (MIT-style): <https://www.bouncycastle.org/licence.html>. JSch directly
+uses its lightweight crypto classes for Ed25519 and other modern SSH algorithms
+on Android; RemoteDesk does not replace or register a global Android security
+provider. The full license is in `assets/third-party-licenses/BouncyCastle-LICENSE.txt`.
 
 The Windows package includes a companion installer for the Gyan
 FFmpeg 8.1.2 release essentials build. The FFmpeg binary is not bundled with

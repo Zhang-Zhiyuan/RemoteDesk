@@ -41,11 +41,14 @@ public final class SafDocumentsProbeProvider extends DocumentsProvider {
         if (!"root".equals(parentId)) throw new FileNotFoundException("Unknown synthetic directory");
         MatrixCursor cursor = new MatrixCursor(projection == null ? DOCUMENT_COLUMNS : projection);
         for (String id : IDS) add(cursor, id);
+        if (new File(getContext().getFilesDir(), "ssh-key.pem").isFile()) {
+            add(cursor, "ssh-key"); add(cursor, "ssh-key-slow");
+        }
         return cursor;
     }
 
     private void add(MatrixCursor cursor, String id) throws FileNotFoundException {
-        if (!"root".equals(id) && !java.util.Arrays.asList(IDS).contains(id))
+        if (!"root".equals(id) && !id.startsWith("ssh-key") && !java.util.Arrays.asList(IDS).contains(id))
             throw new FileNotFoundException("Unknown synthetic document");
         MatrixCursor.RowBuilder row = cursor.newRow();
         row.add(Document.COLUMN_DOCUMENT_ID, id).add(Document.COLUMN_DISPLAY_NAME,
@@ -59,6 +62,11 @@ public final class SafDocumentsProbeProvider extends DocumentsProvider {
         if (!"r".equals(mode)) throw new FileNotFoundException("Read-only synthetic provider");
         if ("unreadable".equals(id)) throw new FileNotFoundException("Synthetic provider cannot open this document");
         try {
+            if ("ssh-key".equals(id) || "ssh-key-slow".equals(id)) {
+                if ("ssh-key-slow".equals(id)) try { Thread.sleep(3500); }
+                    catch (InterruptedException ex) { Thread.currentThread().interrupt(); throw new IOException(ex); }
+                return ParcelFileDescriptor.open(new File(getContext().getFilesDir(), "ssh-key.pem"), ParcelFileDescriptor.MODE_READ_ONLY);
+            }
             if ("unknown-size".equals(id)) {
                 ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe();
                 pipe[1].close();

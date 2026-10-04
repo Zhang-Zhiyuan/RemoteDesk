@@ -87,7 +87,7 @@ public sealed partial class MainForm
         SetCell(0, isLocal ? $"{device.MachineName}（本机）" : device.MachineName);
         SetCell(1, device.Platform);
         SetCell(2, device.BuildDisplay);
-        SetCell(3, isLocal ? "本机（不可自连）" : device.StatusText);
+        SetCell(3, isLocal ? (device.SupportsSsh ? "本机（SSH 可用）" : "本机（不可远控桌面）") : device.StatusText);
         SetCell(4, device.LastSeenDisplay);
         SetCell(5, address);
         Color color = isLocal ? MutedTextColor : TextColor;

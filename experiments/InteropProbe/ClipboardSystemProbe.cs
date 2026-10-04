@@ -13,6 +13,10 @@ internal static class ClipboardSystemProbe
     {
         using var config = JsonDocument.Parse(Console.ReadLine()!);
         string output = config.RootElement.GetProperty("output").GetString()!;
+        RelayConnectionOptions? ownedRelay = Program.RelayOptions(config.RootElement);
+        if (ownedRelay is not null && (!config.RootElement.TryGetProperty("owned", out var owned) || !owned.GetBoolean() ||
+            !IPAddress.TryParse(ownedRelay.ServerAddress, out var address) || !IPAddress.IsLoopback(address)))
+            throw new InvalidOperationException("Explicit fixture relay must be owned loopback.");
         Directory.CreateDirectory(output);
         nint station = CreateWindowStation(null, 0, 0x000F037F, 0);
         if (station == 0 || !SetProcessWindowStation(station)) throw new Win32Exception();
@@ -28,7 +32,10 @@ internal static class ClipboardSystemProbe
             try {
                 if (!SetThreadDesktop(desktop)) throw new Win32Exception();
                 result = (keyboardModifiers ? KeyboardModifierProbe.RunAsync(output, desktop) : shortcuts || contextMenus ? ClipboardShortcutProbe.RunAsync(output, desktop, contextMenus) : relayFiles ? FileClipboardRelayProbe.RunAsync(output,
-                    config.RootElement.GetProperty("expectedServer").GetString()!) : RunAsync(output)).GetAwaiter().GetResult();
+                    config.RootElement.GetProperty("expectedServer").GetString()!,
+                    interactiveFileUi: config.RootElement.TryGetProperty("interactiveFileUi", out var fileUi) && fileUi.GetBoolean(),
+                    ownedRelay: ownedRelay, privateDesktop: desktop,
+                    sshFixture: config.RootElement.TryGetProperty("sshFixture", out var ssh) ? ssh.Clone() : null) : RunAsync(output)).GetAwaiter().GetResult();
             } catch (Exception error) { failure = error; }
         });
         worker.Start();

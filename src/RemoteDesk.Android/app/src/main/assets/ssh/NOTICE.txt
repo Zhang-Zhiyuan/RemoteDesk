@@ -1,0 +1,20 @@
+Embedded terminal: xterm.js 6.0.0 and @xterm/addon-fit 0.11.0, MIT licensed.
+Official project: https://github.com/xtermjs/xterm.js
+Only packaged JS/CSS and their licenses are vendored. No runtime network/CDN, npm,
+native process launcher, clipboard addon, link addon, or remote web content is used.
+Original npm package integrity (SHA-512):
+@xterm/xterm 6.0.0: TQwDdQGtwwDt+2cgKDLn0IRaSxYu1tSUjgKarSDkUM0ZNiSRXFpjxEsvc/Zgc5kq5omJ+V0a8/kIM2WD3sMOYg==
+@xterm/addon-fit 0.11.0: jYcgT6xtVYhnhgxh3QgYDnnNMYTcf8ElbxxFzX0IZo+vabQqSPAjC3c1wJrKB5E19VwQei89QCiZZP86DCPF7g==
+The adjacent terminal.html, terminal.css and terminal.js implement RemoteDesk's
+restricted Android bridge. xterm.css is unmodified apart from newline normalization.
+The JS bundles are syntax-transpiled at development time using esbuild 0.25.12 to
+support Chromium 80+ (including the tested Android System WebView 83). No esbuild,
+node_modules, npm, polyfill CDN or downloaded runtime code ships in the app.
+Reproduce from each original npm package lib/*.js with:
+  npx --yes --package=esbuild@0.25.12 esbuild INPUT.js --target=chrome80 --minify --outfile=OUTPUT.js
+esbuild npm SHA-512:
+bbPBYYrtZbkt6Os6FiTLCTFxvq4tt3JKall1vRwshA3fdVztsLAatFaZobhkBC8/BrPetoa0oksYoKXoG4ryJg==
+Required WebView APIs are checked before enabling SSH connection. API26 alone
+does not guarantee a sufficiently updated WebView; unsupported installations
+receive a clear update/enable-WebView error instead of a blank connected shell.
+See LICENSE-xterm.txt and LICENSE-addon-fit.txt.

@@ -9,7 +9,7 @@
     <ApplicationIcon>Assets\RemoteDesk.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.0.39</Version>
+    <Version>1.0.40</Version>
     <RemoteDeskBuildStamp Condition="'$(RemoteDeskBuildStamp)' == ''">$([System.DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))</RemoteDeskBuildStamp>
     <InformationalVersion>$(Version)+remotedesk.$(RemoteDeskBuildStamp)</InformationalVersion>
   </PropertyGroup>
@@ -42,6 +42,15 @@
   <ItemGroup>
     <ProjectReference Include="..\RemoteDesk.NativeDetail\RemoteDesk.NativeDetail.csproj" />
   </ItemGroup>
+
+  <!-- The independent asInvoker console helper must be published first. Keeping
+       it inside the GUI EXE preserves the existing one-file remote update contract. -->
+  <ItemGroup Condition="'$(RemoteDeskSshProxyPath)' != ''">
+    <EmbeddedResource Include="$(RemoteDeskSshProxyPath)" LogicalName="RemoteDesk.SshProxy.exe" />
+  </ItemGroup>
+  <Target Name="ValidateSshProxyResource" BeforeTargets="PrepareForBuild" Condition="'$(RemoteDeskSshProxyPath)' != ''">
+    <Error Condition="!Exists('$(RemoteDeskSshProxyPath)')" Text="The pre-published SSH proxy resource is missing." />
+  </Target>
 
   <ItemGroup>
     <EmbeddedResource Include="ThirdParty\NIS\NIS_*.h*"

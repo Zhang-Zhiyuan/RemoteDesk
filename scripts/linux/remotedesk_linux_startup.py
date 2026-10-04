@@ -18,7 +18,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 MARKER = "X-RemoteDesk-Managed=host-startup-v1"
 AAD = b"RemoteDesk/Linux/HostPassword/v1"
-FIELDS = ("port", "receive_dir", "capture", "fps", "size", "machine_name", "remember", "armed", "login_start")
+FIELDS = ("port", "receive_dir", "capture", "fps", "size", "machine_name", "remember", "armed", "login_start",
+          "ssh_enabled", "ssh_port")
 
 
 def config_home() -> Path:
@@ -80,7 +81,7 @@ class HostPreferences:
         if not isinstance(data, dict) or data.get("version") != 1:
             raise ValueError("无法识别保存的被控设置。")
         values = {key: data[key] for key in FIELDS if key in data}
-        for key in ("remember", "armed", "login_start"):
+        for key in ("remember", "armed", "login_start", "ssh_enabled"):
             if key in values and type(values[key]) is not bool:
                 raise ValueError("保存的被控状态无效。")
         values["password"] = ""
@@ -90,6 +91,7 @@ class HostPreferences:
             payload = base64.b64decode(encrypted, validate=True)
             values["password"] = AESGCM(key).decrypt(payload[:12], payload[12:], AAD).decode("utf-8")
         values["armed"] = bool(values.get("armed") and values["password"])
+        values["ssh_enabled"] = bool(values.get("ssh_enabled") and values["password"])
         return values
 
     def save(self, values: dict, password: str) -> None:
@@ -97,6 +99,7 @@ class HostPreferences:
         data = {key: values[key] for key in FIELDS if key in values}
         data["version"] = 1
         data["armed"] = bool(data.get("remember") and data.get("armed") and password)
+        data["ssh_enabled"] = bool(data.get("remember") and data.get("ssh_enabled") and password)
         data["encrypted_password"] = ""
         if data.get("remember") and password:
             try:

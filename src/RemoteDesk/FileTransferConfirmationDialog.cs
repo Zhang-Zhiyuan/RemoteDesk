@@ -439,6 +439,11 @@ internal sealed class FileTransferConfirmationDialog : Form
             Name = "Size",
             AutoSizeMode = DataGridViewAutoSizeColumnMode.DisplayedCells
         });
+        // These two columns size themselves from their content. Wrapping their
+        // two-character headers lets autosizing choose a needlessly narrow,
+        // two-line result at larger fonts. Fill/path headers still may wrap.
+        grid.Columns[0].HeaderCell.Style.WrapMode = DataGridViewTriState.False;
+        grid.Columns[1].HeaderCell.Style.WrapMode = DataGridViewTriState.False;
         grid.Columns.Add(new DataGridViewTextBoxColumn
         {
             HeaderText = "文件名",

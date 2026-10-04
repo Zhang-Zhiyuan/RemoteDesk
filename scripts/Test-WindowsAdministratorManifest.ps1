@@ -1,6 +1,9 @@
 # Read the actual EXE resource without launching it or requesting elevation.
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$Path)
+param(
+    [Parameter(Mandatory)][string]$Path,
+    [ValidateSet('requireAdministrator','asInvoker')][string]$ExpectedExecutionLevel = 'requireAdministrator'
+)
 $ErrorActionPreference = 'Stop'
 $executable = (Resolve-Path -LiteralPath $Path).Path
 if (-not ('RemoteDeskBuild.ManifestReader' -as [type])) {
@@ -51,10 +54,10 @@ try {
     $namespaces = [Xml.XmlNamespaceManager]::new($document.NameTable)
     $namespaces.AddNamespace('a', 'urn:schemas-microsoft-com:asm.v3')
     $levels = $document.SelectNodes('//a:requestedExecutionLevel', $namespaces)
-    if ($levels.Count -ne 1 -or $levels[0].GetAttribute('level') -cne 'requireAdministrator' -or
+    if ($levels.Count -ne 1 -or $levels[0].GetAttribute('level') -cne $ExpectedExecutionLevel -or
         $levels[0].GetAttribute('uiAccess') -cne 'false' -or
         $document.SelectNodes('//*[local-name()="autoElevate"]').Count -ne 0) {
-        throw 'Windows package must request requireAdministrator with uiAccess=false and keep normal UAC consent.'
+        throw "Windows package must request $ExpectedExecutionLevel with uiAccess=false and no auto-elevation."
     }
-    Write-Output 'Verified embedded EXE manifest: requireAdministrator; uiAccess=false; normal UAC consent.'
+    Write-Output "Verified embedded EXE manifest: $ExpectedExecutionLevel; uiAccess=false; no auto-elevation."
 } finally { $reader.Dispose(); $text.Dispose() }

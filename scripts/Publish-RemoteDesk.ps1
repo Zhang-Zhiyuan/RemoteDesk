@@ -669,7 +669,8 @@ function Write-ArtifactManifest {
         [bool]$InternalCandidate,
         [object]$SourceFingerprint,
         [object]$Toolchain,
-        [object]$WindowsAuthenticode
+        [object]$WindowsAuthenticode,
+        [object]$WindowsSshProxy
     )
 
     $entries = @($ArtifactPaths | ForEach-Object {
@@ -690,6 +691,7 @@ function Write-ArtifactManifest {
         sourceFileCount = $SourceFingerprint.FileCount
         toolchain = $Toolchain
         windowsAuthenticode = $WindowsAuthenticode
+        windowsSshProxy = $WindowsSshProxy
         artifacts = $entries
     }
 
@@ -1242,6 +1244,7 @@ function New-LinuxSelfContainedRuntime {
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_protocol_probe.py") -Destination (Join-Path $Staging "app\remotedesk_protocol_probe.py") -Force
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_app.py") -Destination (Join-Path $Staging "app\remotedesk_linux_app.py") -Force
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_transfers.py") -Destination (Join-Path $Staging "app\remotedesk_linux_transfers.py") -Force
+    Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_ssh.py") -Destination (Join-Path $Staging "app\remotedesk_linux_ssh.py") -Force
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_dependencies.py") -Destination (Join-Path $Staging "app\remotedesk_linux_dependencies.py") -Force
     Get-Content -LiteralPath (Join-Path $Root "scripts/linux/remotedesk_linux_runtime.sh") -Raw |
         Write-Utf8NoBomContent -Path (Join-Path $Staging "app/remotedesk_linux_runtime.sh")
@@ -2041,11 +2044,44 @@ $transaction = Start-PublishArtifactTransaction `
     -Artifacts $artifacts `
     -Paths @($transactionPaths)
 $transactionCommitted = $false
+$sshProxyStaging = $null
+$windowsSshProxy = $null
 
 try {
 
 if (-not $LinuxOnly) {
     Assert-UnderRoot -Path $windowsOutput -Root $root
+
+    # Publish an independent console app before the GUI. It deliberately has no
+    # project reference to RemoteDesk, so embedding cannot create a build cycle.
+    $sshProxyStaging = Join-Path $artifacts (".ssh-proxy-build-" + [Guid]::NewGuid().ToString("N"))
+    Assert-UnderRoot -Path $sshProxyStaging -Root $artifacts
+    New-Item -ItemType Directory -Path $sshProxyStaging -ErrorAction Stop | Out-Null
+    Write-Step "Publishing non-elevated SSH stdio proxy"
+    dotnet publish .\src\RemoteDesk.SshProxy\RemoteDesk.SshProxy.csproj `
+        -c Release -r win-x64 --self-contained true `
+        -p:PublishSingleFile=true -p:PublishReadyToRun=true `
+        -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true `
+        -p:DebugType=None -p:DebugSymbols=false `
+        -p:RemoteDeskBuildStamp=$buildStamp -o $sshProxyStaging
+    if ($LASTEXITCODE -ne 0) { throw "Publishing the required SSH proxy failed with exit code $LASTEXITCODE." }
+    $sshProxyExecutable = Join-Path $sshProxyStaging "RemoteDesk.SshProxy.exe"
+    $proxyEntries = @(Get-ChildItem -LiteralPath $sshProxyStaging -Force)
+    if ($proxyEntries.Count -ne 1 -or $proxyEntries[0].PSIsContainer -or $proxyEntries[0].Name -cne "RemoteDesk.SshProxy.exe") {
+        throw "SSH proxy must publish as one self-contained executable with no external dependency files."
+    }
+    & (Join-Path $PSScriptRoot "Test-WindowsAdministratorManifest.ps1") -Path $sshProxyExecutable -ExpectedExecutionLevel asInvoker
+    if (-not [string]::IsNullOrWhiteSpace($WindowsSigningCertificateThumbprint)) {
+        $null = Set-RemoteDeskWindowsAuthenticodeSignature -Path $sshProxyExecutable `
+            -CertificateThumbprint $WindowsSigningCertificateThumbprint -TimestampServer $WindowsTimestampServer
+    }
+    $windowsSshProxy = [pscustomobject]@{
+        resourceName = "RemoteDesk.SshProxy.exe"
+        sha256 = (Get-FileHash -LiteralPath $sshProxyExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
+        length = (Get-Item -LiteralPath $sshProxyExecutable).Length
+        executionLevel = "asInvoker"
+        authenticode = Get-RemoteDeskWindowsAuthenticodeMetadata -Path $sshProxyExecutable
+    }
 
     Write-Step "Publishing Windows win-x64 single-file package"
     dotnet publish .\src\RemoteDesk\RemoteDesk.csproj `
@@ -2059,6 +2095,7 @@ if (-not $LinuxOnly) {
         -p:DebugType=None `
         -p:DebugSymbols=false `
         -p:RemoteDeskBuildStamp=$buildStamp `
+        -p:RemoteDeskSshProxyPath=$sshProxyExecutable `
         -o $windowsOutput
     if ($LASTEXITCODE -ne 0) {
         throw "Publishing the required self-contained win-x64 single-file package failed with exit code $LASTEXITCODE. Remote update replaces only RemoteDesk.exe, so a framework-dependent fallback cannot be released safely."
@@ -2263,7 +2300,8 @@ $manifestEntries = Write-ArtifactManifest `
     -InternalCandidate:$internalCandidate `
     -SourceFingerprint $sourceState.Fingerprint `
     -Toolchain $toolchain `
-    -WindowsAuthenticode $windowsAuthenticode
+    -WindowsAuthenticode $windowsAuthenticode `
+    -WindowsSshProxy $windowsSshProxy
 
     # The complete canonical set and manifest have passed validation. A
     # cleanup failure must not roll back an otherwise valid publication.
@@ -2297,4 +2335,20 @@ catch {
     }
 
     throw $publishFailure
+}
+finally {
+    if (-not [string]::IsNullOrEmpty($sshProxyStaging) -and (Test-Path -LiteralPath $sshProxyStaging)) {
+        try {
+            $resolvedProxyStaging = (Resolve-Path -LiteralPath $sshProxyStaging).Path
+            Assert-UnderRoot -Path $resolvedProxyStaging -Root $artifacts
+            if (((Get-Item -LiteralPath $resolvedProxyStaging -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "SSH proxy staging is a reparse point; retained for inspection."
+            }
+            if ([IO.Path]::GetFileName($resolvedProxyStaging) -cnotmatch '^\.ssh-proxy-build-[0-9a-f]{32}$') {
+                throw "Unexpected SSH proxy staging directory; retained for inspection."
+            }
+            Remove-Item -LiteralPath $resolvedProxyStaging -Recurse -Force
+        }
+        catch { Write-Warning "SSH proxy staging retained: $($_.Exception.Message)" }
+    }
 }

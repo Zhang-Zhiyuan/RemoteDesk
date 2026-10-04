@@ -184,8 +184,18 @@ def main():
             shell("wm", "size", "1600x2560")
         shell("wm", "density", args.density)
         shell("settings", "put", "system", "font_scale", args.font)
-        shell("settings", "put", "system", "accelerometer_rotation", 0)
-        shell("settings", "put", "system", "user_rotation", 1 if args.landscape else 0)
+        time.sleep(1) # Let density/font configuration broadcasts finish before locking orientation.
+        # Set rotation mode+value atomically. Separate Settings writes can be
+        # overwritten by WindowManager's outstanding sensor-to-user transition.
+        shell("wm", "set-user-rotation", "lock", 1 if args.landscape else 0)
+        wanted_rotation = str(1 if args.landscape else 0)
+        for attempt in range(6):
+            time.sleep(.5)
+            if shell("settings", "get", "system", "user_rotation") == wanted_rotation:
+                break
+            shell("wm", "set-user-rotation", "lock", wanted_rotation)
+        else:
+            raise AssertionError("Owned emulator did not accept the requested rotation lock")
         report["system"] = {"size": shell("wm", "size"), "density": shell("wm", "density"),
             "fontScale": shell("settings", "get", "system", "font_scale"),
             "rotation": shell("settings", "get", "system", "user_rotation")}
@@ -197,6 +207,8 @@ def main():
             wait(lambda: read_state().get("runId") == "ready")
             time.sleep(2)
             state = capture("viewer-toolbar")
+            bounds = state["windows"][0]["bounds"]
+            check("actual viewer window matches requested orientation", (bounds[2]-bounds[0] > bounds[3]-bounds[1]) == args.landscape)
             check("actual viewer resources match system density and font", state["densityDpi"] == args.density and state["fontScale"] == args.font)
             for label in ("仅观看：关", "更多", "键盘"):
                 views = [view for window in state["windows"] for view in window["views"] if view.get("text") == label]
@@ -237,6 +249,8 @@ def main():
         shell("am", "start", "-W", "-n", PACKAGE + "/com.remotedesk.agent.MainActivity", "--ez", "dpiProbe", "true")
         wait(lambda: read_state().get("runId") == "ready")
         state = capture("main-devices")
+        bounds = state["windows"][0]["bounds"]
+        check("actual main window matches requested orientation", (bounds[2]-bounds[0] > bounds[3]-bounds[1]) == args.landscape)
         check("actual main resources match system density and font", state["densityDpi"] == args.density and state["fontScale"] == args.font)
         if args.rename_only:
             capture("relay-name", "relay-name")

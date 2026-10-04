@@ -7,14 +7,27 @@ using RemoteDesk;
 // interactive user's clipboard is neither read nor changed.
 internal static class FileClipboardUiProbe
 {
-    internal static Task<IReadOnlyList<object>> RunAsync(RemoteViewerClient client, string source, string received)
+    internal static Task<IReadOnlyList<object>> RunAsync(RemoteViewerClient client, string source, string received, nint privateDesktop = default)
     {
         var done = new TaskCompletionSource<IReadOnlyList<object>>(TaskCreationOptions.RunContinuationsAsynchronously);
         var thread = new Thread(() =>
         {
+            FieldInfo? interactiveCache = null;
             try
             {
-                if (GetForegroundWindow() == 0) throw new InvalidOperationException("Interactive desktop unavailable for confirmation test");
+                if (privateDesktop != 0)
+                {
+                    if (!SetThreadDesktop(privateDesktop)) throw new System.ComponentModel.Win32Exception();
+                    // Test harness only: WinForms disallows ShowDialog on any
+                    // non-visible station even with a real private message loop.
+                    // Permit that loop without making the station interactive,
+                    // switching WinSta0 or changing OS permissions/clipboard.
+                    if (SystemInformation.UserInteractive) throw new InvalidOperationException("Expected an isolated non-visible station.");
+                    interactiveCache = typeof(SystemInformation).GetField("s_isUserInteractive", BindingFlags.Static | BindingFlags.NonPublic)
+                        ?? throw new MissingFieldException("WinForms private-station probe no longer supported.");
+                    interactiveCache.SetValue(null, true);
+                }
+                else if (GetForegroundWindow() == 0) throw new InvalidOperationException("Interactive desktop unavailable for confirmation test");
                 using var window = new RemoteViewerWindow(client, "Isolated file clipboard fixture", true, true, true, false, false, false)
                     { ShowInTaskbar = false };
                 window.Shown += async (_, _) =>
@@ -26,6 +39,7 @@ internal static class FileClipboardUiProbe
                 Application.Run(window);
             }
             catch (Exception error) { done.TrySetException(error); }
+            finally { interactiveCache?.SetValue(null, false); }
         }) { IsBackground = true };
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
@@ -75,7 +89,7 @@ internal static class FileClipboardUiProbe
             bool passed = sawConfirmation && exactPreview && !transferredBeforeConfirmation && (accept
                 ? exactResult && added.Length == 1 && File.ReadAllBytes(added[0]).SequenceEqual(File.ReadAllBytes(source))
                 : added.Length == 0);
-            results.Add(new { name = accept ? "public relay file-paste confirmation saves exact bytes" : "cancelled file-paste confirmation sends nothing",
+            results.Add(new { name = accept ? "relay file-paste confirmation saves exact bytes" : "cancelled file-paste confirmation sends nothing",
                 passed, sawConfirmation, transferredBeforeConfirmation, exactPreview, exactResult });
             if (!passed)
             {
@@ -106,4 +120,5 @@ internal static class FileClipboardUiProbe
         bitmap.Save(path, System.Drawing.Imaging.ImageFormat.Png);
     }
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool SetThreadDesktop(nint desktop);
 }

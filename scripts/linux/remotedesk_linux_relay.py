@@ -870,6 +870,10 @@ async def _list_devices_pages(options):
                                sharedName=str(item.get("sharedName", ""))[:80],
                                originalMachineName=str(item.get("originalMachineName", item.get("machineName", "")))[:120],
                                canRename=response.get("deviceNaming") is True,
+                               sshTunneling=response.get("sshTunneling") is True,
+                               services=[name for name in ("desktop", "ssh") if name in
+                                         (item.get("services") if isinstance(item.get("services"), list)
+                                          else ([] if "services" in item else ["desktop"]))],
                                namingUnavailableReason=(naming_error_message(response['deviceNamingError'])
                                                         if response.get('deviceNamingError') else NAMING_UNAVAILABLE),
                                **normalize_address_report(item)))
@@ -970,7 +974,8 @@ def connect_viewer(options, stop_event=None):
 
 
 class RelayHostConnector:
-    def __init__(self, options, local_port, machine_name="Linux", status=lambda value: None):
+    def __init__(self, options, local_port, machine_name="Linux", status=lambda value: None,
+                 *, ssh_enabled=False, ssh_port=22, device_key="", desktop_enabled=True):
         self.options = options.validate()
         self.local_port = int(local_port)
         if not 1 <= self.local_port <= 65535:
@@ -980,6 +985,45 @@ class RelayHostConnector:
         self.thread = None
         self.loop = self.task = None
         self.address_refresh = asyncio.Event()
+        self.service_lock = threading.Lock()
+        self.desktop_enabled = bool(desktop_enabled)
+        self.ssh_settings = (False, 22, "")
+        self.ssh_generation = 0
+        self.ssh_tasks = set()
+        self.ssh_task_generations = {}
+        self.desktop_tasks = set()
+        self.configure_services(desktop_enabled=desktop_enabled, ssh_enabled=ssh_enabled,
+                                ssh_port=ssh_port, device_key=device_key)
+
+    def configure_services(self, *, desktop_enabled, ssh_enabled, ssh_port, device_key):
+        if type(ssh_port) is not int or not 1 <= ssh_port <= 65535:
+            raise ValueError("本机 SSH 端口无效。")
+        if ssh_enabled and (not device_key or len(device_key.encode("utf-8")) > 16384):
+            raise ValueError("启用 SSH 中继需要非空设备密钥。")
+        settings = (bool(ssh_enabled), ssh_port, device_key if ssh_enabled else "")
+        with self.service_lock:
+            changed = settings != self.ssh_settings
+            self.ssh_settings = settings
+            self.desktop_enabled = bool(desktop_enabled)
+            if changed:
+                self.ssh_generation += 1
+        if self.loop is not None:
+            def apply():
+                with self.service_lock:
+                    current_generation, current_desktop = self.ssh_generation, self.desktop_enabled
+                for task in tuple(self.ssh_tasks):
+                    if self.ssh_task_generations.get(task) != current_generation:
+                        task.cancel()
+                if not current_desktop:
+                    for task in tuple(self.desktop_tasks):
+                        task.cancel()
+                self.address_refresh.set()
+            with contextlib.suppress(RuntimeError):
+                self.loop.call_soon_threadsafe(apply)
+
+    def _services(self):
+        with self.service_lock:
+            return (["desktop"] if self.desktop_enabled else []) + (["ssh"] if self.ssh_settings[0] else [])
 
     def request_address_refresh(self):
         if self.stop_event.is_set() or self.loop is None or not self.online.is_set():
@@ -991,7 +1035,10 @@ class RelayHostConnector:
             return False
 
     def _address_report(self):
-        return normalize_address_report(dict(directAddresses=local_direct_addresses(), directPort=self.local_port))
+        services = self._services()
+        report = normalize_address_report(dict(directAddresses=local_direct_addresses() if "desktop" in services else [],
+                                              directPort=self.local_port if "desktop" in services else 0))
+        return dict(report, services=services)
 
     def _status(self, value):
         with contextlib.suppress(Exception):
@@ -1068,15 +1115,28 @@ class RelayHostConnector:
                 finally:
                     reading.cancel()
                     await asyncio.gather(reading, return_exceptions=True)
-                if message.get("type") != "open" or len(pending) >= 16:
+                kind = message.get("type")
+                ssh = kind == "open-ssh"
+                if (kind not in ("open", "open-ssh") or
+                        (ssh and (registered.get("sshTunneling") is not True or "ssh" not in self._services()
+                                  or len(self.ssh_tasks) >= 4)) or
+                        (not ssh and ("desktop" not in self._services() or len(self.desktop_tasks) >= 16))):
                     continue
                 try:
                     session_id = str(uuid.UUID(message.get("sessionId", "")))
                 except (ValueError, AttributeError):
                     continue
-                task = asyncio.create_task(self._data(session_id))
+                with self.service_lock:
+                    generation = self.ssh_generation
+                task = asyncio.create_task(self._ssh_data(session_id, generation) if ssh else self._data(session_id))
                 pending.add(task)
                 task.add_done_callback(pending.discard)
+                service_tasks = self.ssh_tasks if ssh else self.desktop_tasks
+                service_tasks.add(task)
+                task.add_done_callback(service_tasks.discard)
+                if ssh:
+                    self.ssh_task_generations[task] = generation
+                    task.add_done_callback(lambda done: self.ssh_task_generations.pop(done, None))
         finally:
             self.online.clear()
             if heartbeat is not None:
@@ -1086,6 +1146,41 @@ class RelayHostConnector:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
             await close_writer(writer)
+
+    async def _ssh_data(self, session_id, expected_generation=None):
+        from remotedesk_linux_ssh import accept_gate
+        remote_writer = local_writer = None
+        with self.service_lock:
+            enabled, port, key = self.ssh_settings
+            generation = self.ssh_generation
+        if not enabled or (expected_generation is not None and generation != expected_generation):
+            return
+        try:
+            reader, remote_writer = await connect_tls(self.options)
+            paired = await hello(reader, remote_writer, self.options, "host-data",
+                                 deviceId=self.options.device_id, sessionId=session_id, service="ssh")
+            if paired.get("type") != "paired" or paired.get("service") != "ssh":
+                raise PermissionError("中继未确认独立 SSH 通道。")
+            with self.service_lock:
+                if generation != self.ssh_generation or not self.ssh_settings[0]:
+                    return
+            async def connect_current(address, local_port):
+                with self.service_lock:
+                    if generation != self.ssh_generation or not self.ssh_settings[0]:
+                        raise asyncio.CancelledError()
+                return await asyncio.open_connection(address, local_port)
+            local_reader, local_writer = await accept_gate(reader, remote_writer, self.options.device_id, key, port,
+                                                           connect=connect_current)
+            key = ""
+            with self.service_lock:
+                if generation != self.ssh_generation or not self.ssh_settings[0]:
+                    return
+            await bridge((local_reader, local_writer), (reader, remote_writer))
+        except (OSError, ValueError, asyncio.IncompleteReadError, TimeoutError, asyncio.TimeoutError):
+            self._status("SSH 门禁或本机 SSH 服务不可用；桌面会话不受影响。")
+        finally:
+            key = ""
+            await asyncio.gather(close_writer(local_writer, abort=True), close_writer(remote_writer, abort=True))
 
     async def _data(self, session_id):
         local_writer = remote_writer = None

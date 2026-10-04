@@ -1,22 +1,36 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using System.Text.Json;
 using RemoteDesk;
+using Renci.SshNet;
 
 // Owned synthetic peer + real FileTransferReceiver + real Windows clipboard on
-// a private window station. The public relay sees only encrypted test traffic.
+// a private window station. Relay transport can be public or an explicit owned fixture.
 internal static class FileClipboardRelayProbe
 {
-    internal static async Task<int> RunAsync(string output, string expectedServer, bool interactiveFileUi = false)
+    internal static async Task<int> RunAsync(string output, string expectedServer, bool interactiveFileUi = false,
+        RelayConnectionOptions? ownedRelay = null, nint privateDesktop = default, JsonElement? sshFixture = null)
     {
         // Receipts contain absolute OS paths; normalize the fixture path before
         // checking them, including when invoked with a relative output folder.
         output = Path.GetFullPath(output);
-        RelaySettings saved = new AppSettingsService().Load().Relay;
-        if (string.IsNullOrWhiteSpace(expectedServer) || saved.ServerAddress != expectedServer)
+        RelayConnectionOptions options;
+        if (ownedRelay is not null)
+        {
+            if (!IPAddress.TryParse(ownedRelay.ServerAddress, out var address) || !IPAddress.IsLoopback(address))
+                throw new InvalidOperationException("Explicit test relay must be loopback.");
+            options = (ownedRelay with { DeviceId = Guid.NewGuid().ToString("D") }).Validate();
+        }
+        else
+        {
+            RelaySettings saved = new AppSettingsService().Load().Relay;
+            options = new RelayConnectionOptions(saved.ServerAddress ?? "", saved.RelayPort,
+                AppSettingsService.UnprotectSecret(saved.ProtectedAccessToken), saved.TlsCertificateSha256!, Guid.NewGuid().ToString("D")).Validate();
+        }
+        if (string.IsNullOrWhiteSpace(expectedServer) || options.ServerAddress != expectedServer)
             throw new InvalidOperationException("Unexpected relay; no connection attempted");
-        var options = new RelayConnectionOptions(saved.ServerAddress, saved.RelayPort,
-            AppSettingsService.UnprotectSecret(saved.ProtectedAccessToken), saved.TlsCertificateSha256!, Guid.NewGuid().ToString("D")).Validate();
+        if (sshFixture is not null && ownedRelay is null) throw new InvalidOperationException("Concurrent SSH requires owned relay fixture.");
         // Several upload/download passes on a genuinely slow WAN can exceed
         // three minutes. Keep a test deadline without masking product watchdogs.
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
@@ -31,7 +45,13 @@ internal static class FileClipboardRelayProbe
         string empty = Path.Combine(source, "empty.txt"); await File.WriteAllBytesAsync(empty, [], timeout.Token);
         string rejected = Path.Combine(source, "reject.bin"); await File.WriteAllBytesAsync(rejected, [1], timeout.Token);
         using var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
-        using var connector = new RelayHostConnector();
+        var sshHostOptions = sshFixture is { } fixture
+            ? new RelaySshHostOptions(true, fixture.GetProperty("sshPort").GetInt32(), fixture.GetProperty("deviceKey").GetString()!)
+            : RelaySshHostOptions.Disabled;
+        using var connector = new RelayHostConnector(sshOptionsProvider: () => sshHostOptions);
+        SshRelayConnection? sshTunnel = null;
+        SshLocalForwarder? sshForwarder = null;
+        SshClient? sshClient = null;
         using var viewer = new RemoteViewerClient(() => returned, _ => Task.CompletedTask);
         var elapsed = System.Diagnostics.Stopwatch.StartNew();
         var transportLog = new System.Collections.Concurrent.ConcurrentQueue<string>();
@@ -56,6 +76,19 @@ internal static class FileClipboardRelayProbe
                 if ((await RelayTunnelClient.ListDevicesAsync(options, timeout.Token)).Any(d => d.DeviceId == options.DeviceId)) break;
                 if (i > 30) throw new TimeoutException("temporary relay node registration");
                 await Task.Delay(200, timeout.Token);
+            }
+            if (sshFixture is { } ssh)
+            {
+                sshTunnel = await SshRelayClient.OpenAsync(options, sshHostOptions.DeviceKey, timeout.Token);
+                sshForwarder = new SshLocalForwarder(sshTunnel.Stream, sshTunnel);
+                using var privateKey = new PrivateKeyFile(ssh.GetProperty("keyPath").GetString()!);
+                sshClient = new SshClient(new ConnectionInfo("127.0.0.1", sshForwarder.Port, ssh.GetProperty("sshUsername").GetString()!,
+                    new PrivateKeyAuthenticationMethod(ssh.GetProperty("sshUsername").GetString()!, privateKey)));
+                sshClient.HostKeyReceived += (_, receivedKey) => receivedKey.CanTrust =
+                    "SHA256:" + Convert.ToBase64String(SHA256.HashData(receivedKey.HostKey)).TrimEnd('=') == ssh.GetProperty("sshHostKeySha256").GetString();
+                await Task.Run(sshClient.Connect, timeout.Token);
+                using var command = sshClient.CreateCommand("printf OWNED-SSH-BEFORE");
+                Check("same registered Windows host real SSH login before desktop", command.Execute() == "OWNED-SSH-BEFORE");
             }
             host = Task.Run(async () => {
                 using var peer = await listener.AcceptTcpClientAsync(timeout.Token);
@@ -119,21 +152,21 @@ internal static class FileClipboardRelayProbe
                 } catch (Exception error) when (shutdown.Task.IsCompleted && error is IOException or SocketException or OperationCanceledException) { }
             }, timeout.Token);
             await viewer.ConnectViaRelayAsync(options, password, ViewerVideoMode.StableJpeg, timeout.Token);
-            Check("pinned public relay authenticated device handshake", await viewer.WaitForCurrentDeviceInfoAsync(TimeSpan.FromSeconds(10), timeout.Token));
+            Check("pinned relay authenticated device handshake", await viewer.WaitForCurrentDeviceInfoAsync(TimeSpan.FromSeconds(10), timeout.Token));
             const string clipboard = "公网剪贴板 中文😀\r\n第二行\t缩进";
-            Check("public relay clipboard send ACK", await viewer.SendClipboardTextToRemoteAsync(clipboard));
+            Check("relay clipboard send ACK", await viewer.SendClipboardTextToRemoteAsync(clipboard));
             Check("remote fixture exact clipboard text", remoteClipboard == clipboard);
-            if (!interactiveFileUi)
+            if (!interactiveFileUi || privateDesktop != 0)
             {
                 await ClipboardTextService.SetTextAsync("private station sentinel");
                 // WAN progress/status messages are not completion. Wait for
                 // the reply and the actual private Windows clipboard write.
-                Check("public relay clipboard read reply completed",
+                Check("relay clipboard read reply completed",
                     await viewer.ReadRemoteClipboardAndWaitAsync(notifyRequest: false).WaitAsync(timeout.Token));
-                Check("public relay text return to real isolated Windows clipboard", await ClipboardTextService.GetTextAsync() == clipboard);
+                Check("relay text return to real isolated Windows clipboard", await ClipboardTextService.GetTextAsync() == clipboard);
             }
             await viewer.SendFileToRemoteAsync(binary);
-            Check("public relay 1 MiB upload saved and SHA256 verified", File.ReadAllBytes(Directory.GetFiles(received).Single()).SequenceEqual(bytes));
+            Check("relay 1 MiB upload saved and SHA256 verified", File.ReadAllBytes(Directory.GetFiles(received).Single()).SequenceEqual(bytes));
             await viewer.SendFileToRemoteAsync(binary);
             Check("same-name upload preserves both files", Directory.GetFiles(received).Length == 2 && Directory.GetFiles(received).All(p => File.ReadAllBytes(p).SequenceEqual(bytes)));
             await viewer.SendFileToRemoteAsync(empty);
@@ -149,13 +182,24 @@ internal static class FileClipboardRelayProbe
             viewer.ConfirmRemoteClipboardFileTransfer = (items, _) => items.Count == 1 && items[0].TransferName == "return.bin" && items[0].SizeBytes == bytes.Length;
             var download = await viewer.RequestRemoteClipboardFilesForDragOutAsync(timeout.Token);
             Record($"reverse result: {download.Outcome}; {download.Message}; paths={download.LocalPaths.Count}");
-            Check("confirmed reverse file transfer over public relay", download.Success && download.LocalPaths.Count == 1 && File.ReadAllBytes(download.LocalPaths[0]).SequenceEqual(bytes));
+            Check("confirmed reverse file transfer over relay", download.Success && download.LocalPaths.Count == 1 && File.ReadAllBytes(download.LocalPaths[0]).SequenceEqual(bytes));
             if (interactiveFileUi)
-                checks.AddRange(await FileClipboardUiProbe.RunAsync(viewer, binary, received));
+                checks.AddRange(await FileClipboardUiProbe.RunAsync(viewer, binary, received, privateDesktop));
+            if (sshClient is not null)
+            {
+                using var command = sshClient.CreateCommand("printf OWNED-SSH-AFTER");
+                Check("same SSH connection survives desktop clipboard files and confirmation UI", sshClient.IsConnected && command.Execute() == "OWNED-SSH-AFTER");
+                await viewer.DisconnectAsync();
+                using var afterClose = sshClient.CreateCommand("printf DESKTOP-CLOSED-SSH-ALIVE");
+                Check("closing desktop does not close SSH", sshClient.IsConnected && afterClose.Execute() == "DESKTOP-CLOSED-SSH-ALIVE");
+            }
             Program.Save(Path.Combine(output, "public-relay.json"), new { passed = true, server = options.ServerAddress, checks,
-                scope = interactiveFileUi
+                scope = ownedRelay is not null
+                    ? "Owned loopback TLS relay; Windows product viewer/host SSH bridge, real WSL sshd, authenticated synthetic desktop peer and production file receiver. Private Windows station/clipboard and owned confirmation UI. No public or production service accessed."
+                    : interactiveFileUi
                     ? "Real public relay, production file receiver and owned file-paste confirmation dialogs. Explicit fixture paths replace clipboard reading; no user clipboard or files accessed."
                     : "Real pinned public relay; synthetic authenticated peer and production file receiver; private Windows clipboard. No production desktop or files touched.",
+                privateStationModalGuardOverride = interactiveFileUi && privateDesktop != 0,
                 elapsedSeconds = elapsed.Elapsed.TotalSeconds, peerFileBytes, peerPings,
                 transportLog = transportLog.ToArray() });
             return 0;
@@ -169,6 +213,7 @@ internal static class FileClipboardRelayProbe
         }
         finally {
             shutdown.TrySetResult();
+            sshClient?.Dispose(); sshForwarder?.Dispose(); sshTunnel?.Dispose();
             await viewer.DisconnectAsync(); await connector.StopAsync(); listener.Stop(); timeout.Cancel();
             if (host is not null) { try { await host.WaitAsync(TimeSpan.FromSeconds(5)); } catch (Exception) { } }
         }

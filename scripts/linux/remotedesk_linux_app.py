@@ -135,6 +135,7 @@ from remotedesk_protocol_probe import (
     write_message,
 )
 import remotedesk_linux_startup as host_startup
+import remotedesk_linux_ssh as ssh_terminal
 from remotedesk_linux_device_panel import DevicePanel, fit_table_columns
 from remotedesk_linux_transfers import ViewerTransferTasks, TransferStop, TransferTaskPanel
 import remotedesk_protocol_probe as file_protocol
@@ -5600,6 +5601,8 @@ class RemoteDeskLinuxApp:
         self.relay_setup_cancel = None
         self.relay_admin_operation = None
         self.relay_devices = {}
+        self.ssh_sessions = {}
+        self.ssh_alias_pending = None
         self.host_preferences = host_startup.HostPreferences()
         self.host_resume_after_id = None
         self.host_restart_attempt = 0
@@ -5613,6 +5616,8 @@ class RemoteDeskLinuxApp:
         self._build_viewer_tab(notebook)
         self._build_relay_tab(notebook)
         self._restore_host_preferences()
+        self.host_ssh_traces = [(variable, variable.trace_add("write", lambda *_: self._ssh_host_setting_changed()))
+                                for variable in (self.host_password, self.host_ssh_port)]
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.event_poll_after_id = self.root.after(EVENT_POLL_MS, self._poll_events)
         if self.relay_options is not None:
@@ -5705,7 +5710,7 @@ class RemoteDeskLinuxApp:
         self.relay_list.column("address", width=280)
         fit_table_columns(self.relay_list, {
             "#0": (240, 100, ()), "platform": (90, 70, ("Windows", "Android", "Linux")),
-            "status": (150, 100, ("本机（不可自连）", "使用中（可接管）", "在线")),
+            "status": (180, 100, ("本机（不可自连）", "使用中（可接管） · SSH", "仅 SSH", "在线 · SSH")),
             "address": (280, 180, ()),
         })
         self.relay_list.bind("<Double-1>", lambda _event: self._connect_relay())
@@ -5713,8 +5718,16 @@ class RemoteDeskLinuxApp:
         password_form = ttk.Frame(tab)
         password_form.pack(fill=tk.X)
         self._row_entry(password_form, 0, "目标设备密钥", self.relay_password, show="*")
-        ttk.Button(tab, text="连接选中设备", command=self._connect_relay, style="Accent.TButton").pack(anchor=tk.W, pady=10)
+        self.relay_connect_button = ttk.Button(tab, text="连接选中设备", command=self._connect_relay, style="Accent.TButton", state=tk.DISABLED)
+        self.relay_connect_button.pack(anchor=tk.W, pady=10)
         ttk.Button(tab, text="查看 / 使用 IP", command=self._request_relay_addresses).pack(anchor=tk.W)
+        self.relay_ssh_button = ttk.Button(tab, text="打开 SSH 终端", command=self._open_relay_ssh, state=tk.DISABLED)
+        self.relay_ssh_button.pack(anchor=tk.W, pady=(8, 0))
+        self.relay_ssh_alias_button = ttk.Button(tab, text="配置终端 SSH 别名", command=self._configure_terminal_ssh_alias, state=tk.DISABLED)
+        self.relay_ssh_alias_button.pack(anchor=tk.W, pady=(8, 0))
+        ttk.Button(tab, text="移除终端 SSH 别名", command=self._remove_terminal_ssh_alias).pack(anchor=tk.W, pady=(8, 0))
+        self._wrapping_label(tab, text="SSH 需要对方显式开启、本机 SSH 服务及独立 SSH 账号；不会接管桌面。",
+                             style="Status.TLabel").pack(fill=tk.X, pady=6)
         self._update_relay_form()
 
     def _toggle_relay_form(self):
@@ -5764,6 +5777,7 @@ class RemoteDeskLinuxApp:
         except (OSError, ValueError):
             self.relay_status.config(text='退出未保存，原配置保持不变，请重试。'); return
         self._cancel_relay_setup()
+        self._cancel_ssh_alias_verification()
         self.relay_refresh_generation += 1
         self.relay_refreshing = False
         self.relay_options = None
@@ -5775,6 +5789,8 @@ class RemoteDeskLinuxApp:
         self.relay_status.config(text='已退出服务器，设备记录和设备密钥保留。')
 
     def _select_relay_key(self):
+        if hasattr(self, "relay_connect_button"):
+            self._update_relay_device_actions()
         selected = self.relay_list.selection()
         target = replace(self.relay_options, device_id=selected[0]) if selected and self.relay_options else None
         key = (relay.device_key_scope(target), target.device_id) if target else None
@@ -5976,10 +5992,31 @@ class RemoteDeskLinuxApp:
         self.relay_devices = {device["deviceId"]: device for device in devices}
         for device in devices:
             local = device["deviceId"] == self.relay_device_id
+            services = device.get("services", ["desktop"])
+            ssh = device.get("sshTunneling") is True and "ssh" in services
+            status = ("本机（不可自连）" if local else "使用中（可接管）" if device["busy"] else "在线")
+            if "desktop" not in services:
+                status = "仅 SSH" if ssh else "无可用服务"
+            elif ssh:
+                status = "本机 · SSH" if local else status + " · SSH"
             self.relay_list.insert("", tk.END, iid=device["deviceId"], text=device["machineName"],
-                values=(device["platform"], "本机（不可自连）" if local else "使用中（可接管）" if device["busy"] else "在线",
-                        relay.direct_address_display(device)))
+                values=(device["platform"], status, relay.direct_address_display(device)))
         if selected and selected[0] in self.relay_devices: self.relay_list.selection_set(selected[0])
+        self._update_relay_device_actions()
+
+    def _update_relay_device_actions(self):
+        selected = self.relay_list.selection()
+        target = self.relay_devices.get(selected[0]) if selected else None
+        for attribute, enabled in (
+                ("relay_connect_button", target is not None and "desktop" in target.get("services", ["desktop"])
+                 and target["deviceId"] != self.relay_device_id),
+                ("relay_ssh_button", target is not None and target.get("sshTunneling") is True
+                 and "ssh" in target.get("services", [])),
+                ("relay_ssh_alias_button", getattr(self, "ssh_alias_pending", None) is not None or
+                 (target is not None and target.get("sshTunneling") is True and "ssh" in target.get("services", [])))):
+            button = getattr(self, attribute, None)
+            if button is not None:
+                button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
 
     def _stop_relay_registration(self):
         connector = getattr(self, "relay_host", None)
@@ -5988,16 +6025,296 @@ class RemoteDeskLinuxApp:
             connector.close(wait=False)
 
     def _sync_relay_registration(self):
-        self._stop_relay_registration()
         options = getattr(self, "relay_options", None)
         process = self.host_process
-        if options is None or not options.publish or process is None or process.poll() is not None:
+        desktop = process is not None and process.poll() is None and self.host_stopping_generation is None
+        enabled = getattr(self, "host_ssh_enabled", None)
+        ssh = bool(enabled is not None and enabled.get())
+        key = self.host_password.get().strip() if ssh else ""
+        invalid_settings = ""
+        try:
+            ssh_port = int(self.host_ssh_port.get()) if ssh else 22
+            if not 1 <= ssh_port <= 65535 or (ssh and not key):
+                raise ValueError()
+            if ssh and len(key.encode("utf-8")) > 16384:
+                invalid_settings = "SSH 设备密钥过长（UTF-8 最多 16384 字节）；旧 SSH 桥已关闭，桌面不受影响。"
+                raise ValueError()
+        except (ValueError, tk.TclError):
+            ssh, key, ssh_port = False, "", 22
+            invalid_settings = invalid_settings or "SSH 设备密钥或本机端口无效；旧 SSH 桥已关闭，桌面不受影响。"
+        if invalid_settings and getattr(self, "host_status", None) is not None:
+            self.host_status.config(text=invalid_settings)
+        if getattr(self, "closing", False) or options is None or not options.publish or not (desktop or ssh):
+            self._stop_relay_registration()
             return
+        local_port = self.host_running_port if desktop else 56565
+        previous = getattr(self, "relay_host", None)
+        if previous is not None and previous.options == options:
+            previous.local_port = local_port
+            previous.configure_services(desktop_enabled=desktop, ssh_enabled=ssh, ssh_port=ssh_port, device_key=key)
+            return
+        self._stop_relay_registration()
         events = self.events
-        connector = relay.RelayHostConnector(options, self.host_running_port,
-            self.host_machine_name.get(), status=lambda value: put_ui_event(events, "relay_status", (connector, value)))
+        connector = relay.RelayHostConnector(options, local_port,
+            self.host_machine_name.get(), status=lambda value: put_ui_event(events, "relay_status", (connector, value)),
+            desktop_enabled=desktop, ssh_enabled=ssh, ssh_port=ssh_port, device_key=key)
         self.relay_host = connector
         connector.start()
+
+    def _ssh_host_setting_changed(self):
+        if getattr(self, "closing", False):
+            return
+        # Invalidate old-key/old-port bridges immediately, including while the
+        # user temporarily clears an entry. Never restart the desktop here.
+        self._sync_relay_registration()
+
+    def _toggle_ssh_host(self):
+        if self.host_ssh_enabled.get():
+            try:
+                key = self.host_password.get().strip()
+                if not key or len(key.encode("utf-8")) > 16384 or not 1 <= int(self.host_ssh_port.get()) <= 65535:
+                    raise ValueError()
+            except ValueError:
+                self.host_ssh_enabled.set(False)
+                self._sync_relay_registration()
+                messagebox.showerror("SSH 中继", "请填写非空设备密钥（UTF-8 最多 16384 字节）和有效的本机 SSH 端口；旧 SSH 桥已关闭。", parent=self.root)
+                return
+        self._sync_relay_registration()
+        self._save_host_preferences()
+        self.host_status.config(text=("SSH 中继已开启：仅连接本机 SSH 服务；可不开启桌面被控。请在公网中继页上线。"
+                                     if self.host_ssh_enabled.get() else "SSH 中继已关闭；已有 SSH 桥已取消，桌面不受影响。"))
+
+    def _open_relay_ssh(self):
+        selected = self.relay_list.selection()
+        target = self.relay_devices.get(selected[0]) if selected else None
+        if (self.relay_options is None or target is None or target.get("sshTunneling") is not True
+                or "ssh" not in target.get("services", [])):
+            self.relay_status.config(text="请刷新并选择已开启 SSH 的设备；服务器与被控端均需支持独立 SSH 通道。")
+            return
+        if sum(not session.done.is_set() for session, _window, _label in self.ssh_sessions.values()) >= 4:
+            self.relay_status.config(text="本机最多同时打开 4 个 SSH 终端，请先关闭一个。")
+            return
+        options = replace(self.relay_options, device_id=target["deviceId"])
+        key = self.relay_password.get().strip()
+        if not key:
+            self.relay_status.config(text="请输入所选设备的设备密钥；不是 SSH 用户密码。")
+            return
+        try:
+            initial_username = ssh_terminal.load_username(options)
+        except (OSError, ValueError):
+            initial_username = ""
+            messagebox.showwarning("SSH 用户名未读取", "保存的 SSH 用户名无法读取，请重新填写；原记录不会被静默覆盖。", parent=self.root)
+        login = self._ask_ssh_login(initial_username)
+        if self.closing or not login or self.relay_options is None or self.relay_options != replace(options, device_id=self.relay_options.device_id):
+            return
+        username, identity_file = login
+        session_id, events = str(uuid4()), self.events
+        try:
+            session = ssh_terminal.TerminalSession(options, key, username.strip(),
+                status=lambda message: put_ui_event(events, "ssh_status", (session_id, message)), identity_file=identity_file or None)
+        except (ValueError, OSError) as error:
+            messagebox.showerror("SSH 终端未打开", str(error), parent=self.root)
+            return
+        window = tk.Toplevel(self.root, class_="RemoteDesk")
+        window.title("SSH：" + target["machineName"])
+        frame = ttk.Frame(window, padding=14)
+        frame.pack(fill=tk.BOTH, expand=True)
+        label = self._wrapping_label(frame, text="正在打开系统终端…")
+        label.pack(fill=tk.BOTH, expand=True)
+        def close_session():
+            session.close()
+            self.ssh_sessions.pop(session_id, None)
+            window.destroy()
+        ttk.Button(frame, text="断开此 SSH（不影响桌面）", command=close_session).pack(pady=8)
+        window.protocol("WM_DELETE_WINDOW", close_session)
+        self.ssh_sessions[session_id] = (session, window, label)
+        apply_adaptive_window_geometry(window, preferred_size=(560, 200), minimum_size=(360, 140), parent=self.root)
+        try:
+            session.start()
+        except (ValueError, OSError) as error:
+            close_session()
+            messagebox.showerror("SSH 终端未打开", str(error), parent=self.root)
+            return
+        try:
+            ssh_terminal.save_username(options, username.strip())
+        except (OSError, ValueError):
+            messagebox.showwarning("SSH 用户名未保存", "终端已打开，但用户名保存失败；下次需要重新填写。未保存私钥或口令。", parent=self.root)
+
+    def _ask_ssh_login(self, initial_username, *, for_alias=False):
+        ui = self
+        class LoginDialog(simpledialog.Dialog):
+            def body(dialog, parent):
+                dialog.username = tk.StringVar(value=initial_username)
+                dialog.identity = tk.StringVar(value="")
+                ttk.Label(parent, text="目标 SSH 用户名（非中继管理员）").pack(anchor=tk.W, pady=(4, 3))
+                entry = ttk.Entry(parent, textvariable=dialog.username, width=1)
+                entry.pack(fill=tk.X)
+                ttk.Label(parent, text="私钥文件（可选；别名仅记住路径）" if for_alias else "私钥文件（可选；不记住路径）").pack(anchor=tk.W, pady=(10, 3))
+                ttk.Entry(parent, textvariable=dialog.identity, width=1).pack(fill=tk.X)
+                def browse():
+                    selected = filedialog.askopenfilename(title="选择目标 SSH 私钥", parent=dialog)
+                    if selected:
+                        dialog.identity.set(selected)
+                ttk.Button(parent, text="选择私钥…", command=browse).pack(anchor=tk.W, pady=5)
+                ui._wrapping_label(parent, text="留空使用系统默认 SSH 身份或密码。密码/私钥口令只在系统终端输入，不保存。桌面仅观看不限制 SSH 权限。",
+                                   wraplength=360).pack(fill=tk.X, pady=6)
+                parent.pack_configure(fill=tk.BOTH, expand=True, padx=12)
+                # Dialog._place_window runs update_idletasks during construction;
+                # a timer fits after that final native placement, not before it.
+                dialog.after(10, lambda: apply_adaptive_window_geometry(dialog, preferred_size=(560, 380),
+                    minimum_size=(360, 300), parent=ui.root))
+                return entry
+
+            def buttonbox(dialog):
+                buttons = ttk.Frame(dialog, padding=8)
+                ttk.Button(buttons, text="继续配置" if for_alias else "打开终端", command=dialog.ok).pack(side=tk.LEFT, padx=5)
+                ttk.Button(buttons, text="取消", command=dialog.cancel).pack(side=tk.LEFT, padx=5)
+                buttons.pack()
+                dialog.bind("<Return>", dialog.ok)
+                dialog.bind("<Escape>", dialog.cancel)
+
+            def validate(dialog):
+                try:
+                    ssh_terminal.validate_username(dialog.username.get().strip())
+                    path = dialog.identity.get().strip()
+                    if path and not Path(path).expanduser().is_file():
+                        raise ValueError("请选择可读取的 SSH 私钥文件；文件内容不会保存到 RemoteDesk。")
+                    return True
+                except (ValueError, OSError) as error:
+                    messagebox.showerror("SSH 登录设置", str(error), parent=dialog)
+                    return False
+
+            def apply(dialog):
+                dialog.result = (dialog.username.get().strip(), dialog.identity.get().strip())
+        return LoginDialog(self.root, "目标 SSH 登录").result
+
+    def _ask_terminal_alias(self, *, remove=False, initial=""):
+        ui = self
+        class AliasDialog(simpledialog.Dialog):
+            def body(dialog, parent):
+                dialog.alias = tk.StringVar(value=initial)
+                ui._wrapping_label(parent, text="要移除的 RemoteDesk SSH 别名：" if remove else
+                    "终端 SSH 别名（例如 5090）：仅 1–64 个 ASCII 字母、数字、_、-，将统一为小写。", wraplength=400).pack(fill=tk.X, pady=(4, 8))
+                entry = ttk.Entry(parent, textvariable=dialog.alias, width=1)
+                entry.pack(fill=tk.X)
+                parent.pack_configure(fill=tk.BOTH, expand=True, padx=12)
+                dialog.after(10, lambda: apply_adaptive_window_geometry(dialog, preferred_size=(560, 240),
+                    minimum_size=(360, 180), parent=ui.root))
+                return entry
+
+            def buttonbox(dialog):
+                buttons = ttk.Frame(dialog, padding=8)
+                ttk.Button(buttons, text="继续", command=dialog.ok).pack(side=tk.LEFT, padx=5)
+                ttk.Button(buttons, text="取消", command=dialog.cancel).pack(side=tk.LEFT, padx=5)
+                buttons.pack()
+                dialog.bind("<Return>", dialog.ok); dialog.bind("<Escape>", dialog.cancel)
+
+            def validate(dialog):
+                try:
+                    ssh_terminal.validate_alias(dialog.alias.get())
+                    return True
+                except ValueError as error:
+                    messagebox.showerror("SSH 别名无效", str(error), parent=dialog)
+                    return False
+
+            def apply(dialog):
+                dialog.result = ssh_terminal.validate_alias(dialog.alias.get())
+        return AliasDialog(self.root, "移除终端 SSH 别名" if remove else "配置终端 SSH 别名").result
+
+    def _configure_terminal_ssh_alias(self):
+        if self.ssh_alias_pending is not None:
+            self._cancel_ssh_alias_verification()
+            self.relay_status.config(text="已取消 SSH 别名验证；未更改现有别名或设备密钥。")
+            return
+        selected = self.relay_list.selection()
+        target = self.relay_devices.get(selected[0]) if selected else None
+        current = self.relay_options
+        if current is None or target is None or target.get("sshTunneling") is not True or "ssh" not in target.get("services", []):
+            self.relay_status.config(text="请选择已开启 SSH 的在线设备。")
+            return
+        options = replace(current, device_id=target["deviceId"])
+        key = self.relay_password.get().strip()
+        if not key:
+            self.relay_status.config(text="请填写所选设备的设备密钥；别名仅引用本用户加密保存的设备密钥。")
+            return
+        suggested = target["machineName"] if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", target["machineName"]) else "rd-" + options.device_id[:8]
+        alias = self._ask_terminal_alias(initial=suggested)
+        if not alias or self.closing or current != self.relay_options:
+            return
+        try:
+            alias = ssh_terminal.validate_alias(alias)
+            initial_user = ssh_terminal.load_username(options)
+        except (OSError, ValueError) as error:
+            messagebox.showerror("SSH 别名未配置", str(error), parent=self.root)
+            return
+        login = self._ask_ssh_login(initial_user, for_alias=True)
+        if not login or self.closing or current != self.relay_options:
+            return
+        username, identity_file = login
+        if not messagebox.askokcancel("配置终端 SSH 别名", f"配置后可运行 ssh {alias}（GUI 可关闭）。\n将添加受管 SSH Include 并备份原配置，\n记住所选设备密钥及可选私钥路径，\n不保存 SSH 密码、私钥内容或口令。\n-L / -D 转发仍需目标 sshd 允许；\n退出中继或移除别名后新连接会被拒绝。", parent=self.root):
+            return
+        if self.closing or current != self.relay_options:
+            return
+        token, events = str(uuid4()), self.events
+        operation = ssh_terminal.GateVerification(options, key,
+            lambda verified: put_ui_event(events, "ssh_alias_verified", (token, verified)))
+        self.ssh_alias_pending = dict(token=token, current=current, generation=self.relay_setup_generation,
+            alias=alias, username=username.strip(), options=options, key=key, identity_file=identity_file or None, operation=operation)
+        self.relay_ssh_alias_button.configure(text="取消 SSH 别名验证", state=tk.NORMAL)
+        self.relay_status.config(text="正在验证中继与目标 SSH 设备门禁（最多 20 秒）；再次点击可取消，尚未保存配置。")
+        operation.start()
+
+    def _cancel_ssh_alias_verification(self):
+        pending = getattr(self, "ssh_alias_pending", None)
+        self.ssh_alias_pending = None
+        if pending is not None:
+            pending["operation"].close()
+            pending["key"] = ""
+        if not getattr(self, "closing", False) and hasattr(self, "relay_ssh_alias_button"):
+            self.relay_ssh_alias_button.configure(text="配置终端 SSH 别名")
+            self._update_relay_device_actions()
+
+    def _finish_ssh_alias_verification(self, value):
+        token, verified = value
+        pending = self.ssh_alias_pending
+        if pending is None or token != pending["token"]:
+            return
+        self.ssh_alias_pending = None
+        self.relay_ssh_alias_button.configure(text="配置终端 SSH 别名")
+        self._update_relay_device_actions()
+        if self.closing or pending["current"] != self.relay_options or pending["generation"] != self.relay_setup_generation:
+            pending["key"] = ""
+            return
+        if not verified:
+            pending["key"] = ""
+            messagebox.showerror("SSH 别名未配置", "SSH 设备门禁验证失败或超时；请检查当前中继、设备密钥及目标 SSH 服务。原设备密钥和 SSH 配置未修改。", parent=self.root)
+            return
+        try:
+            result = ssh_terminal.configure_terminal_alias(pending["alias"], pending["username"], pending["options"], pending["key"],
+                identity_file=pending["identity_file"])
+        except (OSError, ValueError) as error:
+            messagebox.showerror("SSH 别名未配置", str(error) + "\n请审阅冲突或选择其他别名后再试。", parent=self.root)
+            return
+        finally:
+            pending["key"] = ""
+        self.relay_status.config(text=f"已配置：ssh {pending['alias']}。系统 SSH 负责登录和主机身份验证；不需要 GUI 保持运行。" +
+                                 (" 原配置备份：" + result["backup"] if result["backup"] else ""))
+
+    def _remove_terminal_ssh_alias(self):
+        self._cancel_ssh_alias_verification()
+        alias = self._ask_terminal_alias(remove=True)
+        if not alias or self.closing:
+            return
+        if not messagebox.askokcancel("移除受管别名", f"移除 {alias} 的 RemoteDesk SSH 配置？\n不删除用户原配置、已保存设备密钥或主机身份记录。\n只阻止后续连接，不强制中断已经打开的原生 SSH。", parent=self.root):
+            return
+        if self.closing:
+            return
+        try:
+            ssh_terminal.configure_terminal_alias(alias, "", remove=True)
+        except (OSError, ValueError) as error:
+            messagebox.showerror("SSH 别名未移除", str(error), parent=self.root)
+            return
+        self.relay_status.config(text=f"已移除受管 SSH 别名 {alias}；用户原配置、设备密钥和主机身份记录保留。")
 
     def _refresh_relay(self):
         if self.relay_setup_busy or getattr(self, 'relay_renaming', False):
@@ -6081,6 +6398,9 @@ class RemoteDeskLinuxApp:
         device = self.relay_devices.get(selection[0]) if selection else None
         if device is None or self.relay_options is None:
             self.relay_status.config(text="请刷新并选择一台在线设备。")
+            return
+        if "desktop" not in device.get("services", ["desktop"]):
+            self.relay_status.config(text="此设备只开放 SSH，请使用“打开 SSH 终端”；未尝试桌面连接。")
             return
         if device["deviceId"] == self.relay_device_id:
             self.relay_status.config(text="这是本机，不能连接自己。")
@@ -6508,6 +6828,14 @@ class RemoteDeskLinuxApp:
                         command=self._save_host_preferences).grid(row=8, column=0, columnspan=3, sticky=tk.W, pady=6)
         ttk.Checkbutton(form, text="登录桌面后自动启动", variable=self.host_login_start,
                         command=self._save_host_preferences).grid(row=9, column=0, columnspan=3, sticky=tk.W, pady=6)
+        self.host_ssh_enabled = tk.BooleanVar(value=False)
+        self.host_ssh_port = tk.StringVar(value="22")
+        ttk.Checkbutton(form, text="允许本机 SSH 中继", variable=self.host_ssh_enabled,
+                        command=self._toggle_ssh_host).grid(row=10, column=0, columnspan=3, sticky=tk.W, pady=6)
+        self._row_entry(form, 11, "本机 SSH 端口", self.host_ssh_port)
+        ttk.Button(form, text="应用 / 保存 SSH 设置", command=self._toggle_ssh_host).grid(row=12, column=0, columnspan=3, sticky=tk.W, pady=6)
+        self._wrapping_label(form, text="仅转发本机回环地址（127.0.0.1 / ::1）的 SSH 服务；先验证设备密钥，再由 SSH 验证账号。关闭此项立即结束 SSH，不停止桌面。",
+                             style="PanelSubtitle.TLabel").grid(row=13, column=0, columnspan=3, sticky=tk.EW, pady=6)
 
         buttons = ttk.Frame(tab, style="App.TFrame")
         buttons.pack(fill=tk.X, pady=(10, 6))
@@ -6639,13 +6967,15 @@ class RemoteDeskLinuxApp:
     def _restore_host_preferences(self) -> None:
         try:
             values = self.host_preferences.load()
-            for name in ("password", "port", "receive_dir", "capture", "fps", "size", "machine_name", "remember", "login_start"):
+            for name in ("password", "port", "receive_dir", "capture", "fps", "size", "machine_name", "remember", "login_start", "ssh_enabled", "ssh_port"):
                 if name in values:
                     getattr(self, "host_" + name).set(values[name])
             self.host_armed = bool(values.get("armed"))
             if self.host_armed:
                 self.host_status.config(text="正在恢复上次开启的被控端…")
                 self.host_resume_after_id = self.root.after(350, self._resume_host)
+            if self.host_ssh_enabled.get():
+                self._sync_relay_registration()
         except Exception:
             self.host_armed = False
             self.host_status.config(text="保存的设备密钥或设置无法读取，未自动启动。请重新填写；不会使用默认设备密钥。")
@@ -6655,7 +6985,7 @@ class RemoteDeskLinuxApp:
             return
         try:
             values = {name: getattr(self, "host_" + name).get()
-                      for name in ("port", "receive_dir", "capture", "fps", "size", "machine_name", "remember", "login_start")}
+                      for name in ("port", "receive_dir", "capture", "fps", "size", "machine_name", "remember", "login_start", "ssh_enabled", "ssh_port")}
             values["armed"] = bool(self.host_armed)
             self.host_preferences.save(values, self.host_password.get().strip())
             host_startup.set_login_start(bool(values["login_start"] and values["remember"]),
@@ -6780,12 +7110,13 @@ class RemoteDeskLinuxApp:
         if pending is not None:
             self.root.after_cancel(pending)
             self.host_resume_after_id = None
-        self._stop_relay_registration()
         process = self.host_process
         if process is None or self.host_stopping_generation is not None:
+            self._sync_relay_registration()
             return
         generation = self.host_generation
         self.host_stopping_generation = generation
+        self._sync_relay_registration()
         try:
             self.host_status.config(text="正在停止被控端...")
             self.start_host_button.config(state=tk.DISABLED)
@@ -8450,6 +8781,16 @@ class RemoteDeskLinuxApp:
                 connector, message = value
                 if connector is self.relay_host and not self.relay_setup_busy:
                     self.relay_status.config(text=str(message))
+            elif event == "ssh_status":
+                session_id, message = value
+                row = self.ssh_sessions.get(session_id)
+                if row is not None:
+                    try:
+                        row[2].configure(text=message)
+                    except tk.TclError:
+                        pass
+            elif event == "ssh_alias_verified":
+                self._defer_ui_dialog(self._finish_ssh_alias_verification, value)
             elif event == "relay_addresses":
                 generation, options, target = value
                 if generation != self.relay_refresh_generation:
@@ -8484,7 +8825,7 @@ class RemoteDeskLinuxApp:
                     continue
                 self.host_process = None
                 self.host_reader_thread = None
-                self._stop_relay_registration()
+                self._sync_relay_registration()
                 self.host_status.config(text=f"Host exited with code {code}.")
                 self.start_host_button.config(state=tk.NORMAL)
                 self.stop_host_button.config(state=tk.DISABLED)
@@ -8795,6 +9136,7 @@ class RemoteDeskLinuxApp:
         if self.closing:
             return
         self.closing = True
+        self._cancel_ssh_alias_verification()
         pending_dialog = getattr(self, "ui_dialog_after_id", None)
         if pending_dialog is not None:
             self.root.after_cancel(pending_dialog)
@@ -8808,6 +9150,16 @@ class RemoteDeskLinuxApp:
             self.root.after_cancel(pending_poll)
             self.event_poll_after_id = None
         self.disconnect_viewer()
+        for variable, callback in getattr(self, "host_ssh_traces", ()):
+            try:
+                variable.trace_remove("write", callback)
+            except tk.TclError:
+                pass
+        self.host_ssh_traces = []
+        for session, _window, _label in getattr(self, "ssh_sessions", {}).values():
+            session.close()
+        if hasattr(self, "ssh_sessions"):
+            self.ssh_sessions.clear()
         self.stop_host()
         try:
             self.root.destroy()

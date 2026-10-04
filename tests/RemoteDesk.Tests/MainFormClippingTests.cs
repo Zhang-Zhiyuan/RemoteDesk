@@ -4,6 +4,34 @@ namespace RemoteDesk.Tests;
 
 public sealed class MainFormClippingTests
 {
+    [Fact]
+    public void RelaySectionReservesWrappedActionsStatusAndListThenShrinksWhenWidened()
+    {
+        using var font = new Font("Microsoft YaHei UI", 18);
+        using var shell = new TableLayoutPanel { Size = new Size(420, 390), Font = font, RowCount = 2 };
+        using var header = new Label { Text = "在线设备", AutoSize = true };
+        using var content = new TableLayoutPanel { Size = new Size(420, 300), Padding = new Padding(14) };
+        using var actions = new FlowLayoutPanel { Size = new Size(392, 60), Margin = new Padding(0, 10, 0, 0) };
+        using var status = new Label { Text = "在线设备状态\n第二行完整状态", AutoSize = true };
+        shell.Controls.Add(header, 0, 0);
+        shell.Controls.Add(content, 0, 1);
+        content.Controls.Add(actions);
+        content.Controls.Add(status);
+        foreach (string text in new[] { "连接所选设备", "查看 / 使用 IP", "共享名称", "SSH 终端", "配置终端 SSH", "管理终端别名", "关闭 SSH 终端" })
+            actions.Controls.Add(new Button { Text = text, AutoSize = true });
+        content.Size = new Size(420, 300);
+        MainForm.UpdateRelayDeviceSectionMinimum(content, actions, status);
+        int narrowHeight = shell.MinimumSize.Height;
+        Assert.True(narrowHeight > ResponsiveWindowLayout.ScaleLogical(260, content.DeviceDpi));
+        Assert.True(narrowHeight >= MainForm.CalculateWrappedToolbarHeight(actions, 392) +
+            status.PreferredSize.Height + ResponsiveWindowLayout.ScaleLogical(96, content.DeviceDpi));
+        shell.Width = 1500;
+        content.Width = 1500;
+        MainForm.UpdateRelayDeviceSectionMinimum(content, actions, status);
+        Assert.True(shell.MinimumSize.Height < narrowHeight);
+        Assert.Equal(0, shell.MinimumSize.Width);
+    }
+
     [Theory]
     [InlineData(9.25f)]
     [InlineData(18f)]

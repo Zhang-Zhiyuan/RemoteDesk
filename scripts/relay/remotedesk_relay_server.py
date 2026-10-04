@@ -28,7 +28,7 @@ from typing import Optional
 from pathlib import Path
 
 
-RELAY_RELEASE_VERSION = "1.0.34"
+RELAY_RELEASE_VERSION = "1.0.40"
 # Capture once when this process loads, not when an installer replaces the file.
 RELAY_SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
@@ -46,6 +46,14 @@ STREAM_CLOSE_TIMEOUT_SECONDS = 2
 MAX_DIRECT_ADDRESSES = 8
 MAX_DEVICE_NAMES = 4096
 MAX_DEVICE_NAMES_BYTES = 1024 * 1024
+MAX_SSH_SESSIONS_PER_HOST = 4
+
+
+def normalize_services(value):
+    if not isinstance(value, list) or len(value) > 2 or any(
+            not isinstance(item, str) or item not in ("desktop", "ssh") for item in value):
+        raise ValueError("主机服务列表无效。")
+    return frozenset(value)
 
 
 def normalize_shared_name(value):
@@ -137,6 +145,8 @@ class HostConnection:
     direct_addresses: list = field(default_factory=list)
     direct_port: int = 0
     address_reported_at: Optional[float] = None
+    services: frozenset = field(default_factory=lambda: frozenset(("desktop",)))
+    active_ssh_sessions: int = 0
 
     def update_addresses(self, message):
         # Missing fields mean a legacy heartbeat; an explicit empty/invalid
@@ -144,6 +154,10 @@ class HostConnection:
         if "directAddresses" in message or "directPort" in message:
             self.direct_addresses, self.direct_port = normalize_address_report(message)
             self.address_reported_at = time.monotonic()
+
+    def update_services(self, message):
+        if "services" in message:
+            self.services = normalize_services(message["services"])
 
 
 @dataclass
@@ -154,6 +168,7 @@ class PendingSession:
     data_connected: asyncio.Future
     completed: asyncio.Future
     created_at: float = field(default_factory=time.monotonic)
+    service: str = "desktop"
 
 
 class RelayServer:
@@ -244,13 +259,16 @@ class RelayServer:
                 await self.handle_rename_device(writer, hello)
             elif role == "viewer":
                 await self.handle_viewer(reader, writer, hello)
+            elif role == "ssh-viewer":
+                await self.handle_viewer(reader, writer, hello, service="ssh")
             elif role == "host-data":
                 await self.handle_host_data(reader, writer, hello)
             elif role == "health":
                 async with self.state_lock:
-                    busy = bool(self.pending) or any(host.active_sessions for host in self.hosts.values())
+                    busy = bool(self.pending) or any(host.active_sessions or host.active_ssh_sessions for host in self.hosts.values())
                 await write_json(writer, {"ok": True, "serverVersion": RELAY_RELEASE_VERSION,
-                                          "serverSourceSha256": RELAY_SOURCE_SHA256, "busy": busy})
+                                          "serverSourceSha256": RELAY_SOURCE_SHA256, "busy": busy,
+                                          "sshTunneling": True})
             else:
                 await write_error(writer, "未知的中继连接类型。")
         except (asyncio.IncompleteReadError, ConnectionError):
@@ -294,6 +312,7 @@ class RelayServer:
             writer,
         )
         host.update_addresses(hello)
+        host.update_services(hello)
 
         old_host = None
         async with self.state_lock:
@@ -303,7 +322,7 @@ class RelayServer:
             old_host.writer.close()
         try:
             await self._write_host(
-                host, {"ok": True, "type": "registered", "heartbeatAck": True, "addressReporting": True}
+                host, {"ok": True, "type": "registered", "heartbeatAck": True, "addressReporting": True, "sshTunneling": True}
             )
             while True:
                 message = await asyncio.wait_for(
@@ -314,6 +333,7 @@ class RelayServer:
                     raise ValueError("主机控制消息无效")
                 host.last_seen = time.monotonic()
                 host.update_addresses(message)
+                host.update_services(message)
                 await self._write_host(host, {"type": "heartbeat", "addressReporting": True})
         finally:
             async with self.state_lock:
@@ -352,9 +372,11 @@ class RelayServer:
                     "buildStamp": host.build_stamp,
                     "busy": host.active_sessions > 0
                     or any(
-                        item.device_id == host.device_id
+                        item.device_id == host.device_id and item.service == "desktop"
                         for item in self.pending.values()
                     ),
+                    "services": sorted(host.services),
+                    "sshSessions": host.active_ssh_sessions,
                     "lastSeenSeconds": max(
                         0, int(now - host.last_seen)
                     ),
@@ -374,6 +396,7 @@ class RelayServer:
             page = devices[offset:offset + page_size]
             next_offset = offset + page_size if offset + page_size < len(devices) else None
             await write_json(writer, {"ok": True, "devices": page, "nextOffset": next_offset,
+                                      "sshTunneling": True,
                                       "deviceNaming": self.names_error is None,
                                       "deviceNamingError": self.names_error or ""})
         else:
@@ -382,7 +405,7 @@ class RelayServer:
             for device in devices:
                 for key in ("directAddresses", "directPort", "addressAgeSeconds", "originalMachineName", "sharedName"):
                     device.pop(key, None)
-            await write_json(writer, {"ok": True, "devices": devices})
+            await write_json(writer, {"ok": True, "devices": devices, "sshTunneling": True})
 
     async def handle_rename_device(self, writer, request):
         device_id = normalize_device_id(request.get("deviceId"))
@@ -421,6 +444,7 @@ class RelayServer:
         _reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         hello: dict,
+        service: str = "desktop",
     ) -> None:
         device_id = normalize_device_id(hello.get("deviceId"))
         loop = asyncio.get_running_loop()
@@ -429,6 +453,13 @@ class RelayServer:
             if (host is None or host.writer.is_closing()
                     or time.monotonic() - host.last_seen >= HOST_IDLE_TIMEOUT_SECONDS):
                 raise ValueError("目标设备不在线。")
+            if service not in host.services:
+                raise ValueError("目标未开启 SSH 中继或版本不支持。" if service == "ssh" else "目标未开启远程桌面。")
+            # Pending includes paired sessions until their bridge finishes. Do not
+            # double-count active sessions or let SSH consume desktop ownership.
+            if service == "ssh" and sum(item.host_connection is host and item.service == "ssh"
+                    for item in self.pending.values()) >= MAX_SSH_SESSIONS_PER_HOST:
+                raise ValueError("目标 SSH 终端已达到 4 个，请关闭一个后重试。")
             if len(self.pending) >= MAX_PENDING_SESSIONS:
                 raise ValueError("中继当前连接过多，请稍后重试。")
             session_id = str(uuid.uuid4())
@@ -438,6 +469,7 @@ class RelayServer:
                 host,
                 loop.create_future(),
                 loop.create_future(),
+                service=service,
             )
             self.pending[session_id] = pending
 
@@ -445,16 +477,20 @@ class RelayServer:
         try:
             await self._write_host(
                 host,
-                {"type": "open", "sessionId": session_id},
+                {"type": "open-ssh" if service == "ssh" else "open", "sessionId": session_id},
             )
             host_reader, host_writer = await asyncio.wait_for(
                 asyncio.shield(pending.data_connected),
                 timeout=PAIR_TIMEOUT_SECONDS,
             )
-            await write_json(host_writer, {"ok": True, "type": "paired"})
-            await write_json(writer, {"ok": True, "type": "paired"})
+            reply = {"ok": True, "type": "paired"}
+            if service == "ssh":
+                reply["service"] = "ssh"
+            await write_json(host_writer, reply)
+            await write_json(writer, reply)
             paired = True
-            host.active_sessions += 1
+            counter = "active_ssh_sessions" if service == "ssh" else "active_sessions"
+            setattr(host, counter, getattr(host, counter) + 1)
             try:
                 await bridge_streams(
                     _reader,
@@ -463,7 +499,7 @@ class RelayServer:
                     host_writer,
                 )
             finally:
-                host.active_sessions = max(0, host.active_sessions - 1)
+                setattr(host, counter, max(0, getattr(host, counter) - 1))
                 if not pending.completed.done():
                     pending.completed.set_result(None)
         except asyncio.TimeoutError:
@@ -496,6 +532,10 @@ class RelayServer:
             pending = self.pending.get(session_id)
             if pending is None or pending.device_id != device_id:
                 raise ValueError("中继会话不存在或已经过期。")
+            if (hello.get("service", "desktop") != pending.service or
+                    self.hosts.get(device_id) is not pending.host_connection or
+                    pending.service not in pending.host_connection.services):
+                raise ValueError("中继服务不匹配、已禁用或主机注册已更换。")
             if pending.data_connected.done():
                 raise ValueError("中继会话已经建立。")
             pending.data_connected.set_result((reader, writer))

@@ -21,3 +21,7 @@ src/RemoteDesk/ThirdParty/NIS/* text eol=lf whitespace=-blank-at-eol
 *.deb binary
 *.tar.gz binary
 *.zip binary
+
+# The self-contained Windows app includes its independent SSH helper.
+# Keep the executable in release/ without exceeding GitHub's Git blob limit.
+release/windows-x64/RemoteDesk.exe filter=lfs diff=lfs merge=lfs -text

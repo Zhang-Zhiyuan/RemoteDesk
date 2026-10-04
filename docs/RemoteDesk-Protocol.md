@@ -677,6 +677,52 @@ An absent/false capability disables editing with an update/storage explanation. 
 are keyed by installation UUID, persist independently of registrations/addresses, and
 survive relay restarts. There is no push notification: clients reread the directory.
 
+## Independent SSH service (gate v1)
+
+SSH is a separate relay service, not a desktop control message. New host-control
+registrations and heartbeats may send `services: ["desktop", "ssh"]`; an absent
+field preserves the legacy desktop capability, whereas `[]` withdraws both.
+Registered, directory and health replies advertise `sshTunneling: true`. Directory
+devices include `services` and `sshSessions`. Desktop `busy` excludes SSH, but
+server health `busy` includes SSH so maintenance cannot interrupt an active shell.
+
+An enrolled client uses `role: "ssh-viewer"` with the normal relay token and target
+UUID. The relay sends `type: "open-ssh"` and a fresh `sessionId` to that exact host
+registration. The host replies via `role: "host-data", service: "ssh"`. Pairing
+requires the same service, device and live registration generation. Both paired
+responses include `service: "ssh"`; a missing/mismatched service is a hard error,
+never a fallback to desktop. There are at most four pending/paired SSH sessions per
+host, independently of desktop ownership. Older servers reject the new role.
+
+Before dialing sshd, the host performs a dedicated device gate over the paired
+stream. This does not invoke desktop authentication/session takeover. The host
+sends the following 104 bytes:
+
+`ASCII("RDS1") || random_nonce[32] || ASCII(canonical_lowercase_device_uuid)[36] || server_proof[32]`
+
+For either proof, `key = SHA256(UTF8(device_key))` and
+`proof = HMAC-SHA256(key, UTF8("RemoteDesk SSH gate v1\0" + role + "\0" + device_uuid) || nonce)`.
+The role is exactly `server` or `client`. The client verifies the UUID and server
+proof in constant time before sending its 32-byte client proof. Only after that
+proof succeeds does the host dial its explicitly configured loopback SSH port.
+It replies with one byte: `1` means ready for unmodified SSH bytes, `0` means
+device authentication denied, and `2` means the local SSH service is unreachable.
+Other statuses or premature EOF fail closed. The host gate/local-connect deadline
+is 10 seconds; the client relay/pair/gate deadline is 20 seconds.
+
+Only the device owner configures the SSH port; no viewer-supplied target address
+or port is accepted. Disabling SSH or changing its port/device key closes its
+channels, not desktop channels. Changing desktop availability on the same relay
+registration does not restart SSH. Disconnects never replay terminal commands.
+
+After the device gate, SSH itself verifies the target host key, authenticates the
+target OS account and encrypts terminal traffic end-to-end. Its credentials are
+distinct from both the device key and relay administrator credentials. Target
+SSH host identities are scoped by relay certificate pin, target device UUID and
+the SSH service, never by the ephemeral client loopback port. First trust requires
+confirmation; changed identities are rejected. SSH privileges are determined by
+sshd/the target OS; the desktop view-only switch is not a shell sandbox.
+
 ## Session capture diagnostics
 
 Windows hosts advertising `HostVideoDiagnostics` (capability bit 25) accept the

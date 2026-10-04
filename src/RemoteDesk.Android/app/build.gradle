@@ -37,14 +37,18 @@ android {
     namespace "com.remotedesk.agent"
     compileSdk 36
     buildFeatures { buildConfig true }
+    packaging {
+        // Both SSH libraries ship Java multi-release OSGI descriptors; Android does not use them.
+        resources.excludes += "META-INF/versions/*/OSGI-INF/MANIFEST.MF"
+    }
 
     defaultConfig {
         applicationId "com.remotedesk.agent"
         minSdk 26
         targetSdk 36
         buildConfigField "boolean", "ALLOW_LOOPBACK_FIXTURES", "false"
-        versionCode 42
-        versionName "1.0.39"
+        versionCode 43
+        versionName "1.0.40"
     }
 
     compileOptions {
@@ -83,6 +87,9 @@ android {
 
 dependencies {
     implementation "com.github.mwiede:jsch:2.28.6"
+    // JSch's lightweight BC implementations add Ed25519/Curve25519 on Android
+    // without replacing/registering the OS JCA provider or enabling weak SSH algorithms.
+    implementation "org.bouncycastle:bcprov-jdk18on:1.86"
     compileOnly "androidx.annotation:annotation:1.10.0"
     testImplementation "junit:junit:4.13.2"
     testImplementation "org.json:json:20240303"

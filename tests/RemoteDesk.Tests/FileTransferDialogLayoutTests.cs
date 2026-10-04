@@ -5,6 +5,23 @@ namespace RemoteDesk.Tests;
 public sealed class FileTransferDialogLayoutTests
 {
     [Fact]
+    public void AutosizedMetadataHeadersRemainSingleLineWhilePathHeadersCanWrap()
+    {
+        using var dialog = new FileTransferConfirmationDialog("确认", "发送",
+            [new("文件", @"C:\Owned\one.bin", "one.bin", 1048576, @"D:\Owned\one.bin")], null);
+        var scroll = Assert.IsType<Panel>(Assert.Single(dialog.Controls.Cast<Control>()));
+        var content = Assert.IsType<TableLayoutPanel>(Assert.Single(scroll.Controls.Cast<Control>()));
+        var grid = Assert.Single(content.Controls.OfType<DataGridView>());
+        Assert.All(grid.Columns.Cast<DataGridViewColumn>().Take(2), column =>
+        {
+            Assert.Equal(DataGridViewAutoSizeColumnMode.DisplayedCells, column.AutoSizeMode);
+            Assert.Equal(DataGridViewTriState.False, column.HeaderCell.InheritedStyle.WrapMode);
+        });
+        Assert.All(grid.Columns.Cast<DataGridViewColumn>().Skip(2), column =>
+            Assert.Equal(DataGridViewTriState.True, column.HeaderCell.InheritedStyle.WrapMode));
+    }
+
+    [Fact]
     public void ConfirmationConstrainsLongPathsAndKeepsActionsInScrollableContent()
     {
         using var dialog = new FileTransferConfirmationDialog("确认文件传输", "发送文件",

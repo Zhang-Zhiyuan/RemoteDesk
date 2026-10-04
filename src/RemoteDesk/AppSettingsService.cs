@@ -41,6 +41,10 @@ internal sealed class HostSettings
 
     public bool AllowRemoteStart { get; set; }
 
+    public bool AllowSsh { get; set; }
+
+    public int SshPort { get; set; } = 22;
+
     public string? CaptureTargetId { get; set; }
 
     public string? ProtectedPassword { get; set; }
@@ -62,6 +66,8 @@ internal sealed class ViewerSettings
     public string? ProtectedPassword { get; set; }
 
     public List<SavedRemoteDevice> RecentDevices { get; set; } = [];
+
+    public List<SshTerminalProfile> SshProfiles { get; set; } = [];
 }
 
 internal sealed class SavedRemoteDevice
@@ -322,6 +328,7 @@ internal sealed class AppSettingsService
             CurrentSettingsSchemaVersion);
 
         settings.Host.Port = NormalizePort(settings.Host.Port);
+        settings.Host.SshPort = settings.Host.SshPort is > 0 and <= IPEndPoint.MaxPort ? settings.Host.SshPort : 22;
         settings.Host.Fps = Math.Clamp(settings.Host.Fps, 1, 60);
         settings.Host.JpegQuality = Math.Clamp(settings.Host.JpegQuality, 30, 90);
         settings.Host.ScalePercent = NormalizeScalePercent(settings.Host.ScalePercent);
@@ -332,6 +339,7 @@ internal sealed class AppSettingsService
         settings.Viewer.CaptureTargetId = NormalizeOptionalText(settings.Viewer.CaptureTargetId);
         settings.Viewer.RecentDevices ??= [];
         settings.Viewer.RecentDevices = NormalizeRecentDevices(settings.Viewer.RecentDevices);
+        settings.Viewer.SshProfiles = SshTerminalProfile.Normalize(settings.Viewer.SshProfiles);
         settings.Viewer.VideoMode = NormalizeViewerVideoMode(settings.Viewer.VideoMode, settings.Viewer.PreferH264);
         settings.Viewer.PreferH264 = settings.Viewer.VideoMode != ViewerVideoMode.StableJpeg;
 

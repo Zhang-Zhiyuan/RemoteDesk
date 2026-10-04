@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>RemoteDesk.SshProxy</AssemblyName>
+    <Version>1.0.0</Version>
+    <RemoteDeskBuildStamp Condition="'$(RemoteDeskBuildStamp)' == ''">$([System.DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))</RemoteDeskBuildStamp>
+    <InformationalVersion>$(Version)+remotedesk.$(RemoteDeskBuildStamp)</InformationalVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+    <Compile Include="..\RemoteDesk\SshCommandProfiles.cs" Link="Core\SshCommandProfiles.cs" />
+    <Compile Include="..\RemoteDesk\SshCommandProxy.cs" Link="Core\SshCommandProxy.cs" />
+    <Compile Include="..\RemoteDesk\SshFileSafety.cs" Link="Core\SshFileSafety.cs" />
+    <Compile Include="..\RemoteDesk\SshRelayClient.cs" Link="Core\SshRelayClient.cs" />
+    <Compile Include="..\RemoteDesk\SshGateProtocol.cs" Link="Core\SshGateProtocol.cs" />
+    <Compile Include="..\RemoteDesk\RelayCoreModels.cs" Link="Core\RelayCoreModels.cs" />
+    <Compile Include="..\RemoteDesk\RelayProtocol.cs" Link="Core\RelayProtocol.cs" />
+    <Compile Include="..\RemoteDesk\RelayNetworkPathSelector.cs" Link="Core\RelayNetworkPathSelector.cs" />
+    <Compile Include="..\RemoteDesk\RelayPathStability.cs" Link="Core\RelayPathStability.cs" />
+    <Compile Include="..\RemoteDesk\RelayConnectionActivity.cs" Link="Core\RelayConnectionActivity.cs" />
+    <Compile Include="..\RemoteDesk\DualStackConnector.cs" Link="Core\DualStackConnector.cs" />
+    <Compile Include="..\RemoteDesk\NetworkUtils.cs" Link="Core\NetworkUtils.cs" />
+    <Compile Include="..\RemoteDesk\WindowsRelayInterfaceInfo.cs" Link="Core\WindowsRelayInterfaceInfo.cs" />
+  </ItemGroup>
+</Project>

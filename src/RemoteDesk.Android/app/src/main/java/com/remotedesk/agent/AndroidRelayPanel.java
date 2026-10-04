@@ -446,20 +446,29 @@ final class AndroidRelayPanel extends LinearLayout {
                 for (AndroidRelay.Device device : online) {
                     boolean local = device.deviceId.equals(deviceId);
                     Button item = button(device.name + " · " + device.platform + "\n" +
-                        (local ? "本机（不可自连）" : device.busy ? "使用中（可接管）" : "在线 · 点击中转连接") +
+                        (local ? "本机（不可自连）" : !device.desktopAvailable ? "未启用远程桌面服务" : device.busy ? "使用中（可接管）" : "在线 · 点击中转连接") +
                         "\n" + device.addressDisplay(), false);
                     AndroidUiTheme.styleDeviceButton(getContext(), item);
-                    item.setEnabled(!local);
+                    item.setEnabled(!local && device.desktopAvailable);
                     item.setOnClickListener(view -> {
-                        if (!closed && active && !setupBusy && epoch == generation && saved == options)
+                        if (!closed && active && !setupBusy && epoch == generation && saved == options && device.desktopAvailable)
                             connectTarget.connect(options.target(device.deviceId), device.name, false);
                     });
                     item.setOnLongClickListener(view -> {
-                        if (!closed && active && !setupBusy && epoch == generation && saved == options)
+                        if (!closed && active && !setupBusy && epoch == generation && saved == options && device.desktopAvailable)
                             connectTarget.connect(options.target(device.deviceId), device.name, true);
                         return true;
                     });
                     devices.addView(item, layout());
+                    Button ssh = button(device.sshAvailable ? "SSH 终端" : "SSH 不可用", false);
+                    ssh.setEnabled(!local && device.sshAvailable);
+                    ssh.setContentDescription("SSH 终端 · " + device.name +
+                        (device.sshAvailable ? "；独立通道，不接管桌面" : "；需要主机和中继启用 SSH"));
+                    ssh.setOnClickListener(view -> {
+                        if (!closed && active && !setupBusy && epoch == generation && saved == options && device.sshAvailable)
+                            AndroidSshTerminalActivity.launch(getContext(), options.target(device.deviceId), device.name);
+                    });
+                    devices.addView(ssh, layout());
                     Button rename = button("共享名称", false);
                     rename.setContentDescription("共享名称 · " + device.name);
                     rename.setOnClickListener(view -> {

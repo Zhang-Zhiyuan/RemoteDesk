@@ -77,7 +77,7 @@ public sealed class RelayDeviceListRefreshTests
         MainForm.UpdateRelayDeviceList(list, [changed], first.DeviceId);
         Assert.Same(item, list.Items[0]);
         Assert.EndsWith("（本机）", item.Text);
-        Assert.Equal("本机（不可自连）", item.SubItems[3].Text);
+        Assert.Equal("本机（不可远控桌面）", item.SubItems[3].Text);
     }
 
     [Fact]
