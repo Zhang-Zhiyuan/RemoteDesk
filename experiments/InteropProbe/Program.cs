@@ -13,6 +13,8 @@ internal static class Program
     static int Main(string[] args)
     {
         Console.InputEncoding = System.Text.Encoding.UTF8;
+        if (args.Length > 0 && args[0] == "dpi-dialogs-isolated") return AdaptiveLayoutProbe.Run(dpiDialogs: true);
+        if (args.Length > 0 && args[0] == "dpi-main-viewer-isolated") return AdaptiveLayoutProbe.Run(mainViewerDpi: true);
         if (args.Length > 0 && args[0] == "control-notice-isolated") return RemoteControlNoticeProbe.Run();
         if (args.Length > 0 && args[0] == "viewer-lifetime-isolated") return AdaptiveLayoutProbe.Run(viewerLifetime: true);
         if (args.Length > 0 && args[0] == "multi-screen-ui-isolated") return AdaptiveLayoutProbe.Run(multiScreen: true);
@@ -38,6 +40,7 @@ internal static class Program
         if (args[0] == "background-fault") return BackgroundFaultProbe.Run(output);
         if (args[0] == "slow-file-transfer") return SlowFileTransferProbe.RunAsync(output).GetAwaiter().GetResult();
         if (args[0] == "slow-file-transfer-legacy") return SlowFileTransferProbe.RunAsync(output, legacyPeer: true).GetAwaiter().GetResult();
+        if (args[0] == "windows-session-audit") return SessionLifecycleProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "keyboard-focus") return KeyboardFocusProbe.Run(output);
         if (args[0] == "file-relay-ui") return FileClipboardRelayProbe.RunAsync(output,
             c.GetProperty("expectedServer").GetString()!, interactiveFileUi: true).GetAwaiter().GetResult();

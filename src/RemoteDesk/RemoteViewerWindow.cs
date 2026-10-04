@@ -283,7 +283,8 @@ internal sealed partial class RemoteViewerWindow : Form
             LowLevelKeyboardCallback;
         _encodedFramePool =
             encodedFramePool ?? ArrayPool<byte>.Shared;
-        _inputEnabled = inputEnabled;
+        _remoteInputCapability = inputEnabled;
+        _inputEnabled = inputEnabled && !_client.IsLocalInputPaused;
         _clipboardTextEnabled = clipboardTextEnabled;
         _filePasteEnabled = filePasteEnabled;
         _fileDropPasteEnabled = fileDropPasteEnabled;
@@ -311,8 +312,8 @@ internal sealed partial class RemoteViewerWindow : Form
             BackColor = Color.Black,
             SizeMode = PictureBoxSizeMode.Zoom,
             TabStop = true,
-            Cursor = inputEnabled ? Cursors.Default : Cursors.No,
-            LocalImeEnabled = isAndroidRemote && inputEnabled,
+            Cursor = _inputEnabled ? Cursors.Default : Cursors.No,
+            LocalImeEnabled = isAndroidRemote && _inputEnabled,
             ReadInputGeneration = () => _client.InputConnectionGeneration,
             TextCommitted = SendCommittedAndroidText
         };
@@ -331,6 +332,11 @@ internal sealed partial class RemoteViewerWindow : Form
         _pullRemoteFilesButton = CreateStatusActionButton("取回文件");
         _pullRemoteFilesButton.Enabled = remoteFilePullEnabled;
         _openReceivedFilesButton = CreateStatusActionButton("接收目录");
+        _inputPauseButton = CreateStatusActionButton("仅观看：关");
+        _inputPauseButton.Click += (_, _) => ToggleLocalInputPause();
+        _transferTasksButton = CreateStatusActionButton("传输任务");
+        _transferTasksButton.AccessibleName = "查看文件传输进度和取消任务";
+        _transferTasksButton.Click += (_, _) => ShowTransferTasks();
         _remoteInputMethodButton =
             CreateStatusActionButton("远端输入法");
         _switchCaptureTargetButton =
@@ -359,6 +365,8 @@ internal sealed partial class RemoteViewerWindow : Form
             Padding = new Padding(0)
         };
         _fileTransferActionsPanel.Controls.AddRange([_androidBackButton, _androidHomeButton, _androidRecentsButton]);
+        _fileTransferActionsPanel.Controls.Add(_inputPauseButton);
+        _fileTransferActionsPanel.Controls.Add(_transferTasksButton);
         _fileTransferActionsPanel.Controls.Add(_pullRemoteFilesButton);
         _fileTransferActionsPanel.Controls.Add(_openReceivedFilesButton);
         _fileTransferActionsPanel.Controls.Add(
@@ -450,6 +458,7 @@ internal sealed partial class RemoteViewerWindow : Form
         Controls.Add(_statusFooterPanel);
 
         _client.FrameReceived += OnFrameReceived;
+        _client.LocalInputPausedChanged += OnLocalInputPausedChanged;
         _client.ScreenAttachmentAvailable += OnScreenAttachmentAvailable;
         _client.NativeDetailRequested += ScheduleNativeDetailPreparation;
         _client.Log += OnClientLog;
@@ -502,6 +511,7 @@ internal sealed partial class RemoteViewerWindow : Form
             (_, _) => ToggleDisplayScaleMode();
         _fullScreenButton.Click += (_, _) => ToggleFullScreen();
         InitializeStatusActionOverflow();
+        ApplyEffectiveInputState();
         UpdateRemoteInputMethodControls();
         ResumeLayout(performLayout: false);
         PerformLayout();
@@ -1567,25 +1577,8 @@ internal sealed partial class RemoteViewerWindow : Form
 
     public void SetInputEnabled(bool enabled)
     {
-        if (_inputEnabled && !enabled)
-        {
-            ReleaseAllRemoteInputs();
-        }
-
-        _inputEnabled = enabled;
-        if (!enabled)
-        {
-            CancelRemoteDragOut(status: null, cancelTransfer: true);
-        }
-
-        if (!_pictureBox.IsDisposed)
-        {
-            _pictureBox.Cursor = enabled ? Cursors.Default : Cursors.No;
-            _pictureBox.LocalImeEnabled = _isAndroidRemote && enabled;
-        }
-
-        UpdateRemoteInputMethodControls();
-        ConfigureFilePullToolTips();
+        _remoteInputCapability = enabled;
+        ApplyEffectiveInputState();
     }
 
     internal static bool ShouldShowRemoteInputMethodButton(
@@ -2045,6 +2038,7 @@ internal sealed partial class RemoteViewerWindow : Form
         _remoteFilePullStatusStage = RemoteFilePullStatusStage.Waiting;
         SetRemoteFilePullPending(true);
         SetStatus("正在请求远端剪贴板中的文件…", MutedTextColor);
+        ShowTransferTasks();
         try
         {
             bool requested = await _client.RequestRemoteClipboardFilesAsync();
@@ -2223,6 +2217,7 @@ internal sealed partial class RemoteViewerWindow : Form
             CancelRemoteDragOut(status: null, cancelTransfer: true);
             CancelPendingClipboardPull();
             _client.FrameReceived -= OnFrameReceived;
+            _client.LocalInputPausedChanged -= OnLocalInputPausedChanged;
             _client.ScreenAttachmentAvailable -= OnScreenAttachmentAvailable;
             _additionalScreenMenu.Dispose();
             _client.NativeDetailRequested -= ScheduleNativeDetailPreparation;
@@ -6364,7 +6359,9 @@ internal sealed partial class RemoteViewerWindow : Form
 
             await _client.FlushInputAsync(owner.Token);
 
+            if (!IsCurrentRemoteDragOut(owner, operationGeneration)) return;
             await Task.Delay(RemoteDragOutCancelSettleDelayMs, owner.Token);
+            if (!IsCurrentRemoteDragOut(owner, operationGeneration)) return;
             if (_client.InputConnectionGeneration != inputGeneration ||
                 !_client.TryQueueKeyboardChord(
                     CreateRemoteDragOutCopyCommands(CanSendRemoteDragOutKeyboard(inputGeneration)), inputGeneration))
@@ -6372,6 +6369,7 @@ internal sealed partial class RemoteViewerWindow : Form
 
             await _client.FlushInputAsync(owner.Token);
 
+            if (!IsCurrentRemoteDragOut(owner, operationGeneration)) return;
             SetStatus("正在复制并取回远端所选文件，请继续按住鼠标…", MutedTextColor);
             int clipboardSettleDelay = GetClipboardSynchronizationDelayMs(
                 _client.SupportsRemoteClipboardSequenceTracking,
@@ -6381,6 +6379,7 @@ internal sealed partial class RemoteViewerWindow : Form
                 await Task.Delay(clipboardSettleDelay, owner.Token);
             }
 
+            if (!IsCurrentRemoteDragOut(owner, operationGeneration)) return;
             ReturnedClipboardFileBatchResult result =
                 await _client.RequestRemoteClipboardFilesForDragOutAsync(owner.Token);
             if (!IsCurrentRemoteDragOut(owner, operationGeneration))
@@ -7306,6 +7305,7 @@ internal sealed partial class RemoteViewerWindow : Form
         bool remoteTargetPasteRequested = false;
         try
         {
+            EnsureFileTargetCurrent(fileGeneration);
             OnUi(() => SetStatus("正在读取拖放文件信息...", MutedTextColor));
             FileTransferConfirmationPreview preview = await _client.PrepareFileTransferPreviewAsync(
                 files,
@@ -7324,6 +7324,8 @@ internal sealed partial class RemoteViewerWindow : Form
                 return;
             }
 
+            pasteAtRemoteDropTarget &= _inputEnabled;
+            OnUi(ShowTransferTasks);
             if (_inputEnabled && remotePoint is { } point)
             {
                 await FocusRemoteDropTargetAsync(point, pasteAtRemoteDropTarget);
@@ -7358,6 +7360,14 @@ internal sealed partial class RemoteViewerWindow : Form
                     : MutedTextColor;
             OnUi(() => SetStatus(status, color));
             OnUi(() => { if (!_isClosing && !IsDisposed) FileTransferResultDialog.ShowResults(this, result, preview.Note, remoteTargetPasteRequested); });
+        }
+        catch (RemoteFileTransferCancelledException)
+        {
+            OnUi(() => { if (!_isClosing && !IsDisposed) SetStatus("文件任务已取消，已完成的文件保留。", MutedTextColor); });
+        }
+        catch (OperationCanceledException) when (_isClosing || IsDisposed || Disposing)
+        {
+            // Another screen may still own this connection after this viewer closes.
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or ObjectDisposedException)
         {
@@ -7397,6 +7407,7 @@ internal sealed partial class RemoteViewerWindow : Form
     {
         if (kind == RemoteInputKind.KeyUp) return _clipboardPasteKeys.Remove(args.KeyCode);
         if (kind != RemoteInputKind.KeyDown) return false;
+        if (_client.IsLocalInputPaused) return false;
         if (_clipboardPasteKeys.Contains(args.KeyCode)) return true; // Held-key repeat.
         if (!IsPasteShortcut(args) || (!_clipboardTextEnabled && !_filePasteEnabled && !_isAndroidRemote) ||
             IsRemoteWindowsKeyHeld()) return false;
@@ -7417,7 +7428,7 @@ internal sealed partial class RemoteViewerWindow : Form
     {
         long clipboardGeneration = _client.InputConnectionGeneration;
         DiagnosticLog.Append("CLIPBOARD", $"paste:start generation={clipboardGeneration} revision={revision}");
-        bool IsCurrentPaste() => !_isClosing && !IsDisposed && _client.IsConnected &&
+        bool IsCurrentPaste() => !_isClosing && !IsDisposed && !_client.IsLocalInputPaused && _client.IsConnected &&
             _client.InputConnectionGeneration == clipboardGeneration && _clipboardPasteRevision == revision;
         try
         {
@@ -7591,6 +7602,7 @@ internal sealed partial class RemoteViewerWindow : Form
 
         try
         {
+            EnsureFileTargetCurrent(fileGeneration);
             bool pasteAtRemoteTarget = _fileDropPasteEnabled && !_isAndroidRemote && _inputEnabled;
             OnUi(() => SetStatus("正在读取剪贴板文件信息...", MutedTextColor));
             FileTransferConfirmationPreview preview = await _client.PrepareFileTransferPreviewAsync(
@@ -7610,6 +7622,8 @@ internal sealed partial class RemoteViewerWindow : Form
                 return;
             }
 
+            pasteAtRemoteTarget &= _inputEnabled;
+            OnUi(ShowTransferTasks);
             OnUi(() => SetStatus(
                 pasteAtRemoteTarget
                     ? "正在发送剪贴板文件，完成后会请求远端当前位置粘贴..."
@@ -7639,6 +7653,14 @@ internal sealed partial class RemoteViewerWindow : Form
                     : MutedTextColor;
             OnUi(() => SetStatus(status, color));
             OnUi(() => { if (!_isClosing && !IsDisposed) FileTransferResultDialog.ShowResults(this, result, preview.Note, remoteTargetPasteRequested); });
+        }
+        catch (RemoteFileTransferCancelledException)
+        {
+            OnUi(() => { if (!_isClosing && !IsDisposed) SetStatus("文件任务已取消，已完成的文件保留。", MutedTextColor); });
+        }
+        catch (OperationCanceledException) when (_isClosing || IsDisposed || Disposing)
+        {
+            // A completed preview must not open a dialog owned by a closed viewer.
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or ObjectDisposedException)
         {
@@ -7671,6 +7693,8 @@ internal sealed partial class RemoteViewerWindow : Form
 
     private void EnsureFileTargetCurrent(long generation)
     {
+        if (_isClosing || IsDisposed || Disposing)
+            throw new OperationCanceledException("远程窗口已关闭，原文件确认已取消。");
         if (!_client.IsConnected || _client.InputConnectionGeneration != generation)
             throw new IOException("连接已改变，原文件确认已失效，请在当前连接重新选择文件。");
     }
@@ -7689,6 +7713,7 @@ internal sealed partial class RemoteViewerWindow : Form
         int maxFiles,
         bool requestedRemoteTargetPaste = false)
     {
+        if (result.Cancelled) return $"文件任务已取消；已发送 {result.SentFiles} 项，已完成的文件保留。";
         var parts = new List<string>();
         if (result.SentFiles > 0)
         {
@@ -7746,6 +7771,7 @@ internal sealed partial class RemoteViewerWindow : Form
         int maxFiles,
         bool requestedRemoteTargetPaste = false)
     {
+        if (result.Cancelled) return $"文件任务已取消；已发送 {result.SentFiles} 项，已完成的文件保留。";
         var parts = new List<string>();
         if (result.SentFiles > 0)
         {

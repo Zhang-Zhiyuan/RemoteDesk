@@ -21,6 +21,7 @@ internal static class ClipboardContextMenuProbe
         foreach (string platform in new[] { "Windows", "Linux" })
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+            var transportLog = new ConcurrentQueue<string>();
             using var listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
             string remoteText = "远端连接前旧内容";
@@ -47,6 +48,12 @@ internal static class ClipboardContextMenuProbe
                     while (true)
                     {
                         var message = await Protocol.ReadMessageAsync(stream, session, timeout.Token);
+                        if (message.Type == MessageType.Ping)
+                        {
+                            await Protocol.WriteMessageAsync(stream, MessageType.Pong, message.PayloadMemory,
+                                session, writeLock, timeout.Token);
+                            continue;
+                        }
                         if (message.Type == MessageType.Input)
                         {
                             var input = RemoteMessageCodec.DecodeInput(message.PayloadSpan);
@@ -104,6 +111,7 @@ internal static class ClipboardContextMenuProbe
             });
             await ClipboardTextService.SetTextAsync("本机连接前旧内容");
             using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
+            client.Log += text => transportLog.Enqueue(text);
             await client.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port, "context-fixture", ViewerVideoMode.StableJpeg);
             using var viewer = new RemoteViewerWindow(client, "Context menu " + platform, true, true, false, false, false, false)
                 { ShowInTaskbar = false, ClipboardForegroundForEntityTests = true };
@@ -240,6 +248,11 @@ internal static class ClipboardContextMenuProbe
                 finally { writeLock.Release(); uiTimer.Stop(); }
                 await WaitUntilAsync(() => !sendGate.HasPendingSend, timeout.Token);
                 var resumed = await client.GetClipboardSnapshotAsync("", client.InputConnectionGeneration, timeout.Token);
+                Program.Save(Path.Combine(output, "snapshot-recovery.json"), new {
+                    replied = resumed is not null, success = resumed?.Success, connected = client.IsConnected,
+                    imagePreserved = Clipboard.ContainsImage(), pendingSend = sendGate.HasPendingSend,
+                    elapsedSeconds = elapsed.Elapsed.TotalSeconds, uiTicks, log = transportLog.ToArray()
+                });
                 Check("late read-only send drains and snapshots recover without disconnect",
                     resumed is { Success: true } && client.IsConnected && Clipboard.ContainsImage());
             }

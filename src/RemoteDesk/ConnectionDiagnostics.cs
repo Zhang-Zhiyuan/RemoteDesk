@@ -93,7 +93,7 @@ internal static class ConnectionDiagnostics
             : "连接段";
         return
             "渲染遥测（最近完成查看会话；" +
-            $"目标={LimitDiagnosticDetail(report.Host)}:{report.Port}，" +
+            $"目标={NetworkUtils.FormatEndpoint(LimitDiagnosticDetail(report.Host), report.Port)}，" +
             $"模式={FormatVideoMode(report.VideoMode)}，" +
             $"intent={report.IntentGeneration}，" +
             $"连接代际={report.ConnectionGeneration}，" +
@@ -244,7 +244,7 @@ internal static class ConnectionDiagnostics
 
             if (tcpProbeResults.Count == 0)
             {
-                return "建议：确认目标名称能解析到内网 IPv4，或直接填写对方内网 IP。";
+                return "建议：确认目标名称能解析到可达的 IPv4 / IPv6 地址，或直接填写对方 IP。";
             }
 
             if (tcpProbeResults.Any(result => result.Status == RemoteDeskTcpProbeStatus.NotRemoteDesk))
@@ -285,7 +285,7 @@ internal static class ConnectionDiagnostics
 
         if (tcpProbeResults.Count == 0)
         {
-            return "TCP：目标未解析到 IPv4，未执行端口握手检查";
+            return "TCP：未获得可用于 TCP 探测的地址，尚未完成端口握手检查";
         }
 
         return "TCP：" + string.Join("；", tcpProbeResults.Select(FormatTcpProbeResult));
@@ -301,7 +301,7 @@ internal static class ConnectionDiagnostics
             _ => "连接失败"
         };
 
-        return $"{result.Address}:{result.Port} {status}（{result.Detail}）";
+        return $"{NetworkUtils.FormatEndpoint(result.Address, result.Port)} {status}（{result.Detail}）";
     }
 
     private static string FormatCaptureTarget(string captureTarget)

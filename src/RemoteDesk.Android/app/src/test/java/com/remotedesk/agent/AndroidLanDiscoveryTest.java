@@ -5,6 +5,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import org.junit.Test;
 import static org.junit.Assert.*;
 
@@ -71,6 +72,41 @@ public class AndroidLanDiscoveryTest {
         AndroidLanDevice device=device("10.0.0.8",12345,"PC\n\r\u202e\u0000Name");
         assertEquals("PCName",device.name);
         assertEquals(96,device("10.0.0.8",12345,"x".repeat(200)).name.length());
+    }
+    @Test public void repeatedDiscoveryHasTheSameSnapshotEvenWithNewDeviceInstances() {
+        assertTrue(AndroidLanDevice.sameSnapshot(
+            List.of(device("10.0.0.8", 40565, "PC")),
+            List.of(device("10.0.0.8", 40565, "PC"))));
+        assertTrue(AndroidLanDevice.sameSnapshot(List.of(), List.of()));
+    }
+    @Test public void discoverySnapshotChangesWhenLabelsOrConnectionActionsChange() {
+        String identity = "00000000-0000-0000-0000-000000000001";
+        List<AndroidLanDevice> before = List.of(new AndroidLanDevice(
+            "10.0.0.8", 40565, "PC", "Windows", true, true, identity));
+        for (AndroidLanDevice changed : List.of(
+            new AndroidLanDevice("10.0.0.9", 40565, "PC", "Windows", true, true, identity),
+            new AndroidLanDevice("10.0.0.8", 56565, "PC", "Windows", true, true, identity),
+            new AndroidLanDevice("10.0.0.8", 40565, "Renamed", "Windows", true, true, identity),
+            new AndroidLanDevice("10.0.0.8", 40565, "PC", "Linux", true, true, identity),
+            new AndroidLanDevice("10.0.0.8", 40565, "PC", "Windows", false, true, identity),
+            new AndroidLanDevice("10.0.0.8", 40565, "PC", "Windows", true, false, identity),
+            new AndroidLanDevice("10.0.0.8", 40565, "PC", "Windows", true, true,
+                "00000000-0000-0000-0000-000000000002"))) {
+            assertFalse(AndroidLanDevice.sameSnapshot(before, List.of(changed)));
+        }
+    }
+    @Test public void discoverySnapshotTracksRemovalInsertionOrderAndUnshownDevices() {
+        AndroidLanDevice a = device("10.0.0.8", 40565, "A");
+        AndroidLanDevice b = device("10.0.0.9", 40565, "B");
+        AndroidLanDevice c = device("10.0.0.10", 40565, "C");
+        List<AndroidLanDevice> before = List.of(a, b, c, device("10.0.0.11", 40565, "D"));
+        assertFalse(AndroidLanDevice.sameSnapshot(before, List.of()));
+        assertFalse(AndroidLanDevice.sameSnapshot(List.of(), before));
+        assertFalse(AndroidLanDevice.sameSnapshot(List.of(a, b), List.of(b, a)));
+        // The first three rows stay the same, but the "view all" action must
+        // receive a fresh snapshot when a later device changes.
+        assertFalse(AndroidLanDevice.sameSnapshot(before,
+            List.of(a, b, c, device("10.0.0.12", 40565, "D"))));
     }
     @Test public void bannerProbeReadsOnlyFourBytesAndCannotSendAuthentication() throws Exception {
         ByteArrayInputStream input=new ByteArrayInputStream("RDK1nonce-is-not-read".getBytes(StandardCharsets.US_ASCII));

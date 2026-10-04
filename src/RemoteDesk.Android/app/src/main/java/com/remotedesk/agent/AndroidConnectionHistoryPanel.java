@@ -3,7 +3,6 @@ package com.remotedesk.agent;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.text.InputFilter;
-import android.text.TextUtils;
 import android.view.Gravity;
 import android.widget.Button;
 import android.widget.EditText;
@@ -76,9 +75,7 @@ final class AndroidConnectionHistoryPanel extends LinearLayout implements AutoCl
                 (self ? "本机（不可自连） · " + node.address() :
                 node.relay() ? "中转 · " + node.address() + " · " + node.relayDeviceId.substring(0, 8) : "直连 · " + node.address()));
             entry.setEnabled(!self);
-            entry.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-            entry.setMaxLines(3); entry.setEllipsize(TextUtils.TruncateAt.END);
-            entry.setPadding(dp(12), dp(8), dp(12), dp(8));
+            AndroidUiTheme.styleDeviceButton(activity, entry);
             entry.setContentDescription("连接 " + node.title() + "，" + (node.relay() ? "中转 " : "直连 ") + node.address());
             entry.setOnClickListener(view -> connect.accept(node));
             row.addView(entry, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1));

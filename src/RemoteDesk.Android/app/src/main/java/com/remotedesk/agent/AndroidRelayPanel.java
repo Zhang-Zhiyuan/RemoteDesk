@@ -11,9 +11,9 @@ import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
-import java.net.Socket;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -38,7 +38,7 @@ final class AndroidRelayPanel extends LinearLayout {
     private AndroidRelay.Options saved;
     private String deviceId;
     private volatile boolean closed, active;
-    private volatile Socket pendingSocket;
+    private AndroidRelayPendingSocket pendingOperation; // Selected only on the UI thread.
     private boolean busy;
     private boolean nameDialogOpen;
     private AlertDialog nameDialog;
@@ -50,8 +50,9 @@ final class AndroidRelayPanel extends LinearLayout {
     private final Runnable ticker = new Runnable() {
         @Override public void run() {
             if (!active || closed) return;
-            hostStatus.setText(getContext().getString(R.string.relay_host_status,
-                RemoteDeskForegroundService.getRelayStatus()));
+            String hostText = getContext().getString(R.string.relay_host_status,
+                RemoteDeskForegroundService.getRelayStatus());
+            if (!hostText.contentEquals(hostStatus.getText())) hostStatus.setText(hostText);
             if (content.getVisibility() == VISIBLE && System.currentTimeMillis() - lastRefresh > 15000) refresh();
             ui.postDelayed(this, 1000);
         }
@@ -190,7 +191,7 @@ final class AndroidRelayPanel extends LinearLayout {
             AndroidRelay.Options next = AndroidRelayUiPolicy.publish(previous, enabled,
                 options -> AndroidRelaySettings.save(getContext(), options));
             saved = next;
-            epoch++; AndroidRelay.close(pendingSocket);
+            epoch++; closePendingOperation();
             panelStatus.beginSetup();
             applyHostSettings();
             setStatus(enabled ? "已允许本机上线；被控端开启后自动发布。" : "已停止本机中继发布，仍可连接其他设备。");
@@ -200,7 +201,8 @@ final class AndroidRelayPanel extends LinearLayout {
             restoringPublish = true;
             publish.setChecked(saved.publish);
             restoringPublish = false;
-            showSetupFailure(saved == previous ? "修改未保存，开关已恢复，请重试。" : "设置已保存，但服务更新失败；请重启本机被控端。");
+            showSetupFailure(saved == previous ? "修改未保存，开关已恢复，请重试。" : "设置已保存，但服务更新失败；请重启本机被控端。",
+                saved != previous);
         }
     }
 
@@ -255,7 +257,7 @@ final class AndroidRelayPanel extends LinearLayout {
                 return;
             }
             final int generation = ++epoch;
-            AndroidRelay.close(pendingSocket);
+            closePendingOperation();
             setSetupBusy(true);
             if (reuse) {
                 verifyAndSave(new AndroidRelay.Options(saved.serverAddress, saved.port, saved.accessToken,
@@ -268,11 +270,12 @@ final class AndroidRelayPanel extends LinearLayout {
             byte[] secret = adminPassword.getText().toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
             adminPassword.setText("");
             AndroidRelayAdminLogin.Operation operation = new AndroidRelayAdminLogin.Operation();
-            setupSocket(operation, generation);
+            beginPendingOperation().accept(operation);
             setStatus("正在登录服务器 SSH 并自动获取中继配置……");
             try {
                 worker.execute(() -> {
                     try {
+                        if (closed || !active || epoch != generation) return;
                         AndroidRelay.Options options = operation.login(getContext().getApplicationContext(), host,
                             loginPort, username, secret, expected, deviceId, publishDevice);
                         ui.post(() -> { if (setupCurrent(generation)) verifyAndSave(options, generation); });
@@ -304,9 +307,17 @@ final class AndroidRelayPanel extends LinearLayout {
 
     private boolean setupCurrent(int generation) { return !closed && active && setupBusy && epoch == generation; }
 
-    private void setupSocket(Socket socket, int generation) {
-        pendingSocket = socket;
-        if (socket != null && (closed || !active || epoch != generation)) AndroidRelay.close(socket);
+    private AndroidRelayPendingSocket beginPendingOperation() {
+        closePendingOperation();
+        pendingOperation = new AndroidRelayPendingSocket();
+        return pendingOperation;
+    }
+
+    private void closePendingOperation() {
+        if (pendingOperation != null) {
+            pendingOperation.close();
+            pendingOperation = null;
+        }
     }
 
     private void setupFailed(int generation, String message) {
@@ -320,7 +331,7 @@ final class AndroidRelayPanel extends LinearLayout {
     private void cancelSetup() {
         panelStatus.beginSetup();
         epoch++;
-        AndroidRelay.close(pendingSocket);
+        closePendingOperation();
         setSetupBusy(false);
         setStatus("已取消，原配置未更改。");
     }
@@ -328,11 +339,12 @@ final class AndroidRelayPanel extends LinearLayout {
     private void verifyAndSave(AndroidRelay.Options options, int generation) {
         if (!setupCurrent(generation)) return;
         setStatus("服务器配置已就绪，正在验证公网中继连接……");
+        final AndroidRelayPendingSocket pending = beginPendingOperation();
         worker.execute(() -> {
             try {
                 // Reconnect with the exact accepted identity. The observation
                 // socket is never reused to send credentials or directory data.
-                AndroidRelay.listDevices(getContext(), options, socket -> setupSocket(socket, generation));
+                AndroidRelay.listDevices(getContext(), options, pending);
                 ui.post(() -> {
                     if (!setupCurrent(generation)) return;
                     try {
@@ -347,7 +359,7 @@ final class AndroidRelayPanel extends LinearLayout {
                         updateServerUi();
                         try { applyHostSettings(); }
                         catch (Exception serviceFailure) {
-                            showSetupFailure("登录已保存，但服务更新失败；请重启本机被控端。");
+                            showSetupFailure("登录已保存，但服务更新失败；请重启本机被控端。", true);
                             refresh();
                             return;
                         }
@@ -370,11 +382,11 @@ final class AndroidRelayPanel extends LinearLayout {
             saved = null; epoch++; devices.removeAllViews();
             adminPassword.setText(""); server.setText("");
             sshPort.setText(R.string.relay_default_ssh_port); adminUser.setText(R.string.relay_default_admin);
-            AndroidRelay.close(pendingSocket);
+            closePendingOperation();
             updateServerUi();
             try { applyHostSettings(); }
             catch (Exception serviceFailure) {
-                showSetupFailure("已退出并清除登录，但服务更新失败；请重启本机被控端以停止旧连接。");
+                showSetupFailure("已退出并清除登录，但服务更新失败；请重启本机被控端以停止旧连接。", true);
                 return;
             }
             setStatus("已退出服务器，设备记录和设备密钥保留。");
@@ -382,8 +394,12 @@ final class AndroidRelayPanel extends LinearLayout {
     }
 
     private void showSetupFailure(String message) {
+        showSetupFailure(message, false);
+    }
+
+    private void showSetupFailure(String message, boolean persistenceCompleted) {
         setSetupBusy(false);
-        panelStatus.failed(message);
+        panelStatus.failed(message, persistenceCompleted);
         setStatus("");
     }
 
@@ -395,6 +411,7 @@ final class AndroidRelayPanel extends LinearLayout {
         busy = true; lastRefresh = System.currentTimeMillis();
         final int generation = epoch;
         final AndroidRelay.Options options = saved;
+        final AndroidRelayPendingSocket pending = beginPendingOperation();
         // Keep the current rows while the request is in flight. Clearing them
         // here shrinks the enclosing ScrollView, clamps its offset and moves the
         // device under the user's finger every time the timer refreshes.
@@ -403,10 +420,7 @@ final class AndroidRelayPanel extends LinearLayout {
             List<AndroidRelay.Device> result = null;
             String identityError = null;
             try {
-                result = AndroidRelay.listDevices(getContext(), options, socket -> {
-                    pendingSocket = socket;
-                    if (socket != null && (!active || closed || epoch != generation)) AndroidRelay.close(socket);
-                });
+                result = AndroidRelay.listDevices(getContext(), options, pending);
             } catch (AndroidRelay.IdentityFailure ex) { identityError = ex.getMessage(); }
             catch (Exception ignored) { }
             final List<AndroidRelay.Device> online = result;
@@ -466,14 +480,13 @@ final class AndroidRelayPanel extends LinearLayout {
         if (closed || !active || busy || setupBusy || saved != options) return;
         busy = true;
         final int generation = epoch;
+        final AndroidRelayPendingSocket pending = beginPendingOperation();
         setStatus("正在核对设备最新地址……");
         worker.execute(() -> {
             AndroidRelay.Device result = null;
             try {
-                for (AndroidRelay.Device device : AndroidRelay.listDevices(getContext(), options, socket -> {
-                    pendingSocket = socket;
-                    if (socket != null && (closed || !active || epoch != generation)) AndroidRelay.close(socket);
-                })) if (device.deviceId.equals(id)) result = device;
+                for (AndroidRelay.Device device : AndroidRelay.listDevices(getContext(), options, pending))
+                    if (device.deviceId.equals(id)) result = device;
             } catch (Exception ignored) { }
             final AndroidRelay.Device target = result;
             ui.post(() -> {
@@ -517,10 +530,12 @@ final class AndroidRelayPanel extends LinearLayout {
         int padding = Math.round(20 * getResources().getDisplayMetrics().density);
         body.setPadding(padding, 0, padding, 0);
         body.addView(AndroidUiTheme.createSectionSubtitle(getContext(),
-            "保存在中继服务器，使用同一服务器的所有设备可见。\n不更改系统名称或设备密钥；清空可恢复系统原名。\n系统原名：" + device.originalName), layout());
+            "设备：" + device.name + "\n保存在中继服务器，使用同一服务器的所有设备可见。\n不更改系统名称或设备密钥；清空可恢复系统原名。\n系统原名：" + device.originalName), layout());
         body.addView(input, layout());
-        AlertDialog dialog = new AlertDialog.Builder(getContext()).setTitle("共享名称 · " + device.name)
-            .setView(body).setNegativeButton("取消", null).setPositiveButton("保存并同步", null).create();
+        ScrollView form = new ScrollView(getContext());
+        form.addView(body);
+        AlertDialog dialog = new AlertDialog.Builder(getContext()).setTitle("共享名称")
+            .setView(form).setNegativeButton("取消", null).setPositiveButton("保存并同步", null).create();
         nameDialogOpen = true;
         nameDialog = dialog;
         dialog.setOnDismissListener(ignored -> { nameDialogOpen = false; if (nameDialog == dialog) nameDialog = null; });
@@ -531,14 +546,12 @@ final class AndroidRelayPanel extends LinearLayout {
             catch (IllegalArgumentException error) { input.setError(error.getMessage()); return; }
             dialog.dismiss();
             busy = true;
+            final AndroidRelayPendingSocket pending = beginPendingOperation();
             setStatus("正在保存共享名称……");
             worker.execute(() -> {
                 String error = null;
                 try {
-                    AndroidRelay.renameDevice(getContext(), options.target(device.deviceId), name, socket -> {
-                        pendingSocket = socket;
-                        if (socket != null && (closed || !active || epoch != generation)) AndroidRelay.close(socket);
-                    });
+                    AndroidRelay.renameDevice(getContext(), options.target(device.deviceId), name, pending);
                 } catch (Exception failure) {
                     error = failure instanceof java.net.SocketException || failure instanceof java.net.SocketTimeoutException
                         ? "保存名称的连接中断或超时，请刷新在线列表核对后重试。" : failure.getMessage();
@@ -566,7 +579,7 @@ final class AndroidRelayPanel extends LinearLayout {
         if (enabled) { lastRefresh = 0; ui.post(ticker); }
         else {
             if (nameDialog != null) nameDialog.dismiss();
-            AndroidRelay.close(pendingSocket);
+            closePendingOperation();
             if (setupBusy) { setSetupBusy(false); setStatus("配置已暂停，原配置未更改；可重新保存连接。"); }
         }
     }

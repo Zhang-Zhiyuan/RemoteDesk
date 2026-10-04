@@ -5,9 +5,15 @@ public sealed partial class MainForm
     private Button _relayLogoutButton = null!;
     private string? _relayKeySelection;
 
+    private void RelayDeviceSelectionChanged(object? sender, EventArgs e)
+    {
+        SelectRelayDeviceKey();
+        UpdateRelayActionState();
+    }
+
     private void SelectRelayDeviceKey()
     {
-        if (_relayRefreshInProgress || _viewerClient.IsConnected || _viewerActionInProgress || _isClosing) return;
+        if (_relayDeviceListUpdating || _viewerClient.IsConnected || _viewerActionInProgress || _isClosing) return;
         RelayOnlineDevice? selected = GetSelectedRelayDevice();
         string? selection = selected is null || !IsRelayConfigured() ? null :
             RelayDeviceKeys.Scope(CreateRelayOptions(selected.DeviceId)) + ":" + selected.DeviceId;

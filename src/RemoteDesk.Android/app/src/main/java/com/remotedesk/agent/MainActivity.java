@@ -759,9 +759,12 @@ public final class MainActivity extends Activity {
         AndroidUiTheme.styleInput(this, key);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL); content.setPadding(dp(20), dp(8), dp(20), dp(8));
-        content.addView(AndroidUiTheme.createSectionSubtitle(this, "连接成功后自动记住。在线列表长按此设备可更改密钥。"));
+        content.addView(AndroidUiTheme.createSectionSubtitle(this, name + "\n连接成功后自动记住。在线列表长按此设备可更改密钥。"));
         content.addView(key);
-        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("连接 " + name).setView(content)
+        // Let large text and landscape windows scroll the form instead of shrinking the key to zero height.
+        ScrollView form = new ScrollView(this);
+        form.addView(content);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("连接设备").setView(form)
             .setNegativeButton("取消", null).setPositiveButton("连接", null).create();
         dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
             String value = key.getText().toString().trim();
@@ -859,9 +862,11 @@ public final class MainActivity extends Activity {
         AndroidUiTheme.styleInput(this, password);
         LinearLayout content = new LinearLayout(this); content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(24), dp(8), dp(24), 0);
-        content.addView(AndroidUiTheme.createSectionSubtitle(this, device.address() + "\n首次连接需要对方的设备密钥，成功后自动记住。"));
+        content.addView(AndroidUiTheme.createSectionSubtitle(this, device.name + "\n" + device.address() + "\n首次连接需要对方的设备密钥，成功后自动记住。"));
         content.addView(password, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("连接 " + device.name).setView(content)
+        ScrollView form = new ScrollView(this);
+        form.addView(content);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("连接设备").setView(form)
             .setNegativeButton("取消", null).setPositiveButton("连接", null).create();
         dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
             String value = password.getText().toString().trim();

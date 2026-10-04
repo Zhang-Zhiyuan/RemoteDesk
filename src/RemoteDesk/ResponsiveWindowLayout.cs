@@ -267,6 +267,11 @@ internal static class ResponsiveWindowLayout
                 int height = Math.Max(page.ClientSize.Height,
                     content.GetPreferredSize(new Size(page.ClientSize.Width, 0)).Height);
                 if (content.Height != height) content.Height = height;
+                // Nested wrapping cards may change their height constraints
+                // during measurement. Finish the real docking pass even when
+                // the outer height was unchanged, instead of retaining a
+                // zero-width card measured while its tab was hidden.
+                content.PerformLayout();
                 var extent = new Size(0, height);
                 if (page.AutoScrollMinSize != extent) page.AutoScrollMinSize = extent;
             }
@@ -372,14 +377,24 @@ internal static class ResponsiveWindowLayout
         finally { form.ResumeLayout(performLayout: true); }
 
         form.Load += (_, _) => ApplyTo(form, logicalPreferredSize, logicalMinimumSize, applyPreferredBounds: true);
+        TrackDpiAndResizeBounds(form, logicalPreferredSize, logicalMinimumSize);
+    }
+
+    internal static void TrackDpiAndResizeBounds(Form form, Size logicalPreferredSize, Size logicalMinimumSize)
+    {
+        bool queued = false;
         form.ResizeEnd += (_, _) => ApplyTo(form, logicalPreferredSize, logicalMinimumSize, applyPreferredBounds: false);
         form.DpiChanged += (_, _) =>
         {
             // The public event precedes WinForms' automatic DPI scaling.
             // Clamp only after that pass has applied the new control sizes.
+            if (queued || form.IsDisposed || !form.IsHandleCreated) return;
+            queued = true;
             form.BeginInvoke((Action)(() =>
             {
-                if (!form.IsDisposed) ApplyTo(form, logicalPreferredSize, logicalMinimumSize, applyPreferredBounds: false);
+                queued = false;
+                if (!form.IsDisposed && !form.Disposing)
+                    ApplyTo(form, logicalPreferredSize, logicalMinimumSize, applyPreferredBounds: false);
             }));
         };
     }

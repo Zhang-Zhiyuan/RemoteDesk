@@ -19,6 +19,7 @@ public sealed class FileTransferDialogLayoutTests
         Assert.Equal(100, content.ColumnStyles[0].Width);
         var grid = Assert.Single(content.Controls.OfType<DataGridView>());
         Assert.True(grid.ReadOnly);
+        Assert.Equal(DataGridViewColumnHeadersHeightSizeMode.AutoSize, grid.ColumnHeadersHeightSizeMode);
         Assert.True(grid.MinimumSize.Height >= 120);
         Assert.All(grid.Columns.Cast<DataGridViewColumn>().Skip(2), column => Assert.True(column.MinimumWidth >= 140));
         var details = Assert.Single(content.Controls.OfType<TextBox>());

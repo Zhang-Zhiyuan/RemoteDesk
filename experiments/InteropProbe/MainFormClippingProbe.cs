@@ -73,7 +73,7 @@ internal static class MainFormClippingProbe
                     tabs.SelectedIndex = index; Pump();
                     TabPage page = tabs.SelectedTab!;
                     page.AutoScrollPosition = Point.Empty; Pump();
-                    string prefix = $"main-font{points}-width{logicalWidth}-tab{index}";
+                    string prefix = $"main-font{points}-width{logicalWidth}-tab{index}-case{cases.Count}";
                     Save(main, Path.Combine(output, prefix + ".png"));
                     int before = issues.Count;
                     foreach (Control control in Descendants(page).Where(c => c.Visible))
@@ -109,7 +109,14 @@ internal static class MainFormClippingProbe
                             issues.Add($"{prefix}: {control.GetType().Name} '{SafeCaption(control)}' {bounds} outside page {viewport}");
                         for (Control? parent = control.Parent; parent is not null && parent != page; parent = parent.Parent)
                             if (!parent.RectangleToScreen(parent.ClientRectangle).Contains(bounds))
+                            {
                                 issues.Add($"{prefix}: {control.GetType().Name} '{SafeCaption(control)}' clipped by {parent.GetType().Name}: {bounds} outside {parent.RectangleToScreen(parent.ClientRectangle)}");
+                                if (parent.Width == 0)
+                                {
+                                    Save(main, Path.Combine(output, prefix + "-collapsed.png"));
+                                    Console.WriteLine($"Collapsed: {parent.GetType().Name} dock={parent.Dock} bounds={parent.Bounds} min={parent.MinimumSize} max={parent.MaximumSize} autosize={parent.AutoSize} owner={parent.Parent?.Bounds} ownerScroll={(parent.Parent as ScrollableControl)?.AutoScrollPosition}");
+                                }
+                            }
                     }
                     if (page.HorizontalScroll.Visible) issues.Add($"{prefix}: unexpected whole-page horizontal scroll");
                     if (index == 1 && directList.ItemHeight < directList.Font.Height * 2 + ResponsiveWindowLayout.ScaleLogical(14, main.DeviceDpi))
@@ -166,7 +173,13 @@ internal static class MainFormClippingProbe
                 () => MainForm.CreateRelayDeviceKeyDialog(device.MachineName, font, out _),
                 () => MainForm.CreateRelayNameDialog(device, font, out _),
                 () => MainForm.CreateRelayAddressesDialog(device, "other-synthetic-device", font, out _),
-                () => MainForm.CreateAddDeviceDialog(font, out _, out _, out _)
+                () => MainForm.CreateAddDeviceDialog(font, out _, out _, out _),
+                () => MainForm.CreateDeviceEndpointDialog([
+                    new DiscoveredHost(device.OriginalMachineName, "2001:db8:1234:5678:abcd:ef12:3456:7890", 56565,
+                        "screen", true, false, "Windows", RemoteDeviceCapabilities.None),
+                    new DiscoveredHost(device.OriginalMachineName, "2001:db8:1234:5678:abcd:ef12:3456:7890", 56566,
+                        "screen", true, false, "Windows", RemoteDeviceCapabilities.None)
+                ], font, out _)
             ];
             for (int index = 0; index < factories.Length; index++)
             {

@@ -9,6 +9,25 @@ public sealed partial class MainForm
     private SavedRemoteDevice? _selectedHistoryDevice;
     private SavedRemoteDevice? _confirmedHistorySource;
     private long _rememberedViewerGeneration;
+    private RemoteDeviceListItem? _directKeyDevice;
+
+    private void SelectDirectDeviceKey(RemoteDeviceListItem device, SavedRemoteDevice? saved)
+    {
+        RemoteDeviceListItem? previous = _directKeyDevice;
+        bool sameSelection = previous is not null &&
+            previous.Port == (int)_viewerPortBox.Value &&
+            string.Equals(previous.Address, _viewerHostBox.Text.Trim(), StringComparison.OrdinalIgnoreCase) &&
+            (RemoteDeviceIdentity.Same(previous.DeviceId, device.DeviceId) ||
+             (!RemoteDeviceIdentity.Conflicts(previous.DeviceId, device.DeviceId) &&
+              previous.Port == device.Port &&
+              string.Equals(previous.Address, device.Address, StringComparison.OrdinalIgnoreCase)));
+        _directKeyDevice = device;
+        _viewerPasswordBox.PlaceholderText = $"{device.DisplayName} 的设备密钥";
+        // Do not decrypt/reload a saved key over an in-progress edit when the
+        // same device is refreshed. Another device must never inherit its key.
+        if (!sameSelection)
+            _viewerPasswordBox.Text = AppSettingsService.UnprotectSecret(saved?.ProtectedPassword);
+    }
 
     private void InitializeDeviceRefresh()
     {
@@ -149,7 +168,7 @@ public sealed partial class MainForm
     {
         SelfConnectionGuard.RejectLocalDevice(saved?.DeviceId);
         bool confirmed = saved is null || (string.Equals(saved.Address, host, StringComparison.OrdinalIgnoreCase) && saved.Port == port) ||
-            MessageBox.Show(this, $"{saved.Remark ?? saved.MachineName}\n原地址：{saved.Address}:{saved.Port}\n新地址：{host}:{port}\n\n请确认这是你的设备。连接成功后自动合并同一设备的记录。",
+            MessageBox.Show(this, $"{saved.Remark ?? saved.MachineName}\n原地址：{NetworkUtils.FormatEndpoint(saved.Address!, saved.Port)}\n新地址：{NetworkUtils.FormatEndpoint(host, port)}\n\n请确认这是你的设备。连接成功后自动合并同一设备的记录。",
                 "设备地址已变化", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) == DialogResult.OK;
         if (confirmed) _confirmedHistorySource = saved;
         return confirmed;
@@ -157,13 +176,39 @@ public sealed partial class MainForm
 
     private DiscoveredHost? ChooseDeviceEndpoint(IReadOnlyList<DiscoveredHost> options)
     {
-        using var dialog = new Form { Text = "选择设备 / 端口", StartPosition = FormStartPosition.CenterParent,
-            ClientSize = new Size(540, 270), Font = Font, MinimizeBox = false, MaximizeBox = false };
-        var list = new ListBox { Dock = DockStyle.Fill }; list.Items.AddRange(options.Cast<object>().ToArray()); list.SelectedIndex = 0;
-        var ok = new Button { Text = "选择", Dock = DockStyle.Bottom, Height = 40, DialogResult = DialogResult.OK };
-        dialog.Controls.Add(list); dialog.Controls.Add(ok); dialog.AcceptButton = ok;
-        ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(560, 340), new Size(360, 220));
+        using Form dialog = CreateDeviceEndpointDialog(options, Font, out ListBox list);
         return dialog.ShowDialog(this) == DialogResult.OK ? list.SelectedItem as DiscoveredHost : null;
+    }
+
+    internal static Form CreateDeviceEndpointDialog(IReadOnlyList<DiscoveredHost> options, Font font, out ListBox list)
+    {
+        var dialog = new Form { Text = "选择设备 / 端口", StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(540, 270), Font = font, MinimizeBox = false, MaximizeBox = false };
+        var content = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 1, RowCount = 3 };
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        content.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        content.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        content.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        content.Controls.Add(new Label { Text = "发现多个设备或监听端口。请核对设备名称、地址和端口后再连接。",
+            AutoSize = true, Dock = DockStyle.Top, UseMnemonic = false, Margin = new Padding(0, 0, 0, 10) });
+        var choices = new ListBox { Dock = DockStyle.Fill, Height = 150, MinimumSize = new Size(0, 100),
+            HorizontalScrollbar = true, IntegralHeight = false, AccessibleName = "候选设备和监听端口" };
+        choices.Items.AddRange(options.Cast<object>().ToArray());
+        if (choices.Items.Count > 0) choices.SelectedIndex = 0;
+        list = choices;
+        content.Controls.Add(choices);
+        var actions = new FlowLayoutPanel { Dock = DockStyle.Top, Margin = new Padding(0, 10, 0, 0) };
+        var connect = new WrappingActionButton { Text = "连接所选设备", AutoSize = true, DialogResult = DialogResult.OK,
+            Enabled = choices.SelectedIndex >= 0 };
+        choices.SelectedIndexChanged += (_, _) => connect.Enabled = choices.SelectedIndex >= 0;
+        var cancel = new WrappingActionButton { Text = "取消", AutoSize = true, DialogResult = DialogResult.Cancel };
+        actions.Controls.Add(connect); actions.Controls.Add(cancel);
+        ConfigureWrappingDialogActions(actions);
+        content.Controls.Add(actions);
+        dialog.Controls.Add(content); dialog.AcceptButton = connect; dialog.CancelButton = cancel;
+        dialog.Shown += (_, _) => choices.Focus();
+        ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(560, 340), new Size(360, 220));
+        return dialog;
     }
 
     private void AddDevice()
@@ -182,7 +227,9 @@ public sealed partial class MainForm
                     ProtectedPassword = AppSettingsService.ProtectSecret(password.Text), LastConnectedAt = DateTimeOffset.Now };
                 UpsertRecentDevice(GetRecentDevices(), node);
                 if (!TrySaveSettings()) { error.Text = "保存失败，请检查配置目录权限。"; return; }
-                UpdateDiscoveredHosts(_lastDiscoveredHosts, true); ApplyRemoteDevice(RemoteDeviceListItem.FromSaved(node));
+                UpdateDiscoveredHosts(_lastDiscoveredHosts, true);
+                _directKeyDevice = null; // Explicitly saved credentials replace an existing draft.
+                ApplyRemoteDevice(RemoteDeviceListItem.FromSaved(node));
                 dialog.DialogResult = DialogResult.OK;
             }
             catch (ArgumentException ex) { error.Text = ex.Message; }

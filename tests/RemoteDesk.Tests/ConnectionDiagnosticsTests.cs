@@ -5,6 +5,19 @@ namespace RemoteDesk.Tests;
 public sealed class ConnectionDiagnosticsTests
 {
     [Fact]
+    public void Ipv6ProbeUsesUnambiguousEndpointAndDoesNotRecommendIpv4Only()
+    {
+        string report = ConnectionDiagnostics.BuildReport("2001:db8::8", 56565,
+            ViewerVideoMode.Automatic, null, [], [],
+            [new RemoteDeskTcpProbeResult("2001:db8::8", 56565, RemoteDeskTcpProbeStatus.RemoteDesk, "OK")]);
+        Assert.Contains("TCP：[2001:db8::8]:56565", report);
+        string unresolved = ConnectionDiagnostics.BuildReport("device.invalid", 56565,
+            ViewerVideoMode.Automatic, null, [], []);
+        Assert.Contains("IPv4 / IPv6", unresolved);
+        Assert.DoesNotContain("目标未解析到 IPv4，", unresolved);
+    }
+
+    [Fact]
     public void BuildReportIncludesRenderTelemetryAndLegacyModeRecovery()
     {
         var telemetry = new RemoteViewerRenderTelemetrySnapshot(
@@ -360,7 +373,7 @@ public sealed class ConnectionDiagnosticsTests
             ["192.0.2.10"],
             []);
 
-        Assert.Contains("TCP：目标未解析到 IPv4", report);
-        Assert.Contains("直接填写对方内网 IP", report);
+        Assert.Contains("TCP：未获得可用于 TCP 探测的地址", report);
+        Assert.Contains("直接填写对方 IP", report);
     }
 }

@@ -2606,6 +2606,105 @@ Available hardware decoders:
         self.assertTrue(writer_done.is_set())
         self.assertFalse(viewer.liveness_thread.is_alive())
 
+    def test_idle_ui_polling_resumes_frame_cadence_during_viewing(self) -> None:
+        application = app.RemoteDeskLinuxApp.__new__(app.RemoteDeskLinuxApp)
+        application.root = mock.Mock()
+        application.events = queue.Queue()
+        application.viewer = None
+
+        application._poll_events()
+        application.viewer = object()
+        application._poll_events()
+        application.viewer = None
+        application._poll_events()
+
+        self.assertEqual(
+            [app.EVENT_IDLE_POLL_MS, app.EVENT_POLL_MS, app.EVENT_IDLE_POLL_MS],
+            [call.args[0] for call in application.root.after.call_args_list],
+        )
+
+    def test_idle_ui_drains_backlog_promptly(self) -> None:
+        application = app.RemoteDeskLinuxApp.__new__(app.RemoteDeskLinuxApp)
+        application.root = mock.Mock()
+        application.events = queue.Queue()
+        application.viewer = None
+        application._append_host_log = mock.Mock()
+        for index in range(app.UI_EVENT_POLL_MAX_EVENTS + 1):
+            application.events.put(("host_log", f"Host event {index}\n"))
+
+        application._poll_events()
+
+        self.assertFalse(application.events.empty())
+        self.assertEqual(app.EVENT_BACKLOG_POLL_MS, application.root.after.call_args.args[0])
+        self.assertGreater(application._append_host_log.call_count, 0)
+
+    @staticmethod
+    def _viewer_start_poll_fixture():
+        application = app.RemoteDeskLinuxApp.__new__(app.RemoteDeskLinuxApp)
+        application.root = mock.Mock()
+        pending = {}
+
+        def schedule(delay, callback):
+            timer_id = f"poll-{application.root.after.call_count}"
+            pending[timer_id] = (delay, callback)
+            return timer_id
+
+        application.root.after.side_effect = schedule
+        application.root.after_cancel.side_effect = pending.pop
+        application.event_poll_after_id = None
+        application.events = queue.Queue()
+        application.viewer = None
+        application.viewer_generation = 0
+        application.viewer_reconnect_policy = SimpleNamespace(cancelled=False)
+        application.closing = False
+        application.frame_label = None
+        application._open_viewer_window = mock.Mock()
+        application._viewer_capture_state = mock.Mock()
+        application._apply_viewer_capture_target_transition = mock.Mock()
+        application._set_viewer_status = mock.Mock()
+        application._set_viewer_file_action_state = mock.Mock()
+        application.connect_button = mock.Mock()
+        application.disconnect_button = mock.Mock()
+        return application, pending
+
+    def test_starting_viewer_replaces_idle_poll_before_first_frame(self) -> None:
+        application, pending = self._viewer_start_poll_fixture()
+        application._poll_events()
+        idle_timer = application.event_poll_after_id
+        self.assertEqual(app.EVENT_IDLE_POLL_MS, pending[idle_timer][0])
+
+        with mock.patch.object(app, "ViewerConnection") as viewer_type:
+            application._start_viewer_attempt("192.0.2.1", 56565, "fixture", reconnecting=False)
+
+        self.assertIs(viewer_type.return_value, application.viewer)
+        application.root.after_cancel.assert_called_once_with(idle_timer)
+        self.assertNotIn(idle_timer, pending)
+        self.assertEqual(1, len(pending))
+        self.assertEqual(app.EVENT_POLL_MS, pending[application.event_poll_after_id][0])
+        for _ in range(3):
+            _delay, callback = pending.pop(application.event_poll_after_id)
+            callback()
+            self.assertEqual(1, len(pending), "Only one timer may poll the viewer")
+
+    def test_starting_viewer_inside_poll_schedules_no_duplicate_timer(self) -> None:
+        application, pending = self._viewer_start_poll_fixture()
+        application._poll_events()
+        application.events.put(("host_log", "start viewer during event dispatch"))
+        application._append_host_log = mock.Mock(side_effect=lambda _text:
+            application._start_viewer_attempt("192.0.2.1", 56565, "fixture", reconnecting=False))
+
+        with mock.patch.object(app, "ViewerConnection"):
+            _delay, callback = pending.pop(application.event_poll_after_id)
+            callback()
+
+        application.root.after_cancel.assert_not_called()
+        self.assertEqual(
+            [app.EVENT_IDLE_POLL_MS, app.EVENT_POLL_MS],
+            [call.args[0] for call in application.root.after.call_args_list],
+        )
+        self.assertEqual(1, len(pending))
+        self.assertEqual(app.EVENT_POLL_MS, pending[application.event_poll_after_id][0])
+
     def test_scheduled_viewer_reconnect_is_fenced_by_generation(self) -> None:
         application = app.RemoteDeskLinuxApp.__new__(app.RemoteDeskLinuxApp)
         callback: list[object] = []
@@ -2670,7 +2769,7 @@ Available hardware decoders:
             [
                 int(app.VIEWER_RECONNECT_STABLE_SECONDS * 1000),
                 500,
-                app.EVENT_POLL_MS,
+                app.EVENT_IDLE_POLL_MS,
             ],
             [call.args[0] for call in application.root.after.call_args_list],
         )
@@ -2713,7 +2812,7 @@ Available hardware decoders:
         self.assertIsNone(application.viewer_reconnect_target)
         self.assertIsNone(application.viewer_reconnect_after_id)
         self.assertEqual(
-            [app.EVENT_POLL_MS],
+            [app.EVENT_IDLE_POLL_MS],
             [call.args[0] for call in application.root.after.call_args_list],
         )
         application._close_viewer_window.assert_called_once_with()

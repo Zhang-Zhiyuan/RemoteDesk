@@ -417,6 +417,7 @@ internal sealed class FileTransferConfirmationDialog : Form
             AllowUserToResizeRows = false,
             AutoGenerateColumns = false,
             AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells,
+            ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize,
             BackgroundColor = SystemColors.Window,
             BorderStyle = BorderStyle.FixedSingle,
             Dock = DockStyle.Fill,

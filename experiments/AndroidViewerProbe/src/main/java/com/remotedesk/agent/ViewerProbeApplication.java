@@ -45,6 +45,7 @@ public final class ViewerProbeApplication extends Application implements Applica
             android.graphics.Rect buffer=surface.getHolder().getSurfaceFrame();
             JSONObject data=new JSONObject().put("action",lastAction).put("failure",failure)
                 .put("status",chrome.status.getText()).put("health",chrome.health.getText())
+                .put("localInputPaused", field(viewer,"localInputPaused")).put("watchOnly",bounds(chrome.watchOnly))
                 .put("frame",new JSONArray().put(viewport.frameWidth).put(viewport.frameHeight))
                 .put("viewport",bounds(frame)).put("header",bounds(chrome.header)).put("dock",bounds(chrome.dock))
                 .put("keyboard",chrome.keyboardOpen).put("keyboardPanel",bounds(chrome.keyboardPanel))
@@ -69,6 +70,8 @@ public final class ViewerProbeApplication extends Application implements Applica
             if (owner != null) {
                 data.put("fileBusy", ((java.util.concurrent.atomic.AtomicBoolean) field(owner, "fileBusy")).get());
                 data.put("fileSenderActive", field(owner, "fileSender") != null);
+                Object batch = field(owner, "fileBatch");
+                if (batch != null) data.put("fileBatch", ((AndroidFileUploadQueue<?>)batch).summary());
                 Object uploadLease = field(field(owner, "fileLiveness"), "active");
                 // Explicit probe-only negative control. Production never receives
                 // this intent or callback; restore its former 18-second policy.
@@ -128,7 +131,7 @@ public final class ViewerProbeApplication extends Application implements Applica
         }
     }
     public void onActivityDestroyed(Activity activity){if(activity==viewer){viewer=null;handler.removeCallbacksAndMessages(null);}}
-    public void onActivityStarted(Activity a){} public void onActivityResumed(Activity a){}
+    public void onActivityStarted(Activity a){} public void onActivityResumed(Activity a){ DpiUiProbe.resume(a); }
     public void onActivityPaused(Activity a){} public void onActivityStopped(Activity a){}
     public void onActivitySaveInstanceState(Activity a,Bundle b){}
 }

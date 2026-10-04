@@ -5,6 +5,30 @@ namespace RemoteDesk.Tests;
 public sealed class MainFormClippingTests
 {
     [Theory]
+    [InlineData(9.25f)]
+    [InlineData(18f)]
+    [InlineData(24f)]
+    public void EndpointChooserKeepsFullIdentitiesAndLargeFontActionsAccessible(float points)
+    {
+        using var font = new Font("Microsoft YaHei UI", points);
+        var first = new DiscoveredHost(new string('W', 80), "2001:db8:1234:5678:abcd:ef12:3456:7890", 56565,
+            "screen", true, false, RemoteDevicePlatforms.Windows, RemoteDeviceCapabilities.None);
+        var second = first with { Port = 56566 };
+        using Form dialog = MainForm.CreateDeviceEndpointDialog([first, second], font, out ListBox choices);
+        dialog.ClientSize = new Size(340, 240);
+        dialog.PerformLayout();
+        var accept = Assert.IsAssignableFrom<Button>(dialog.AcceptButton);
+        int textHeight = TextRenderer.MeasureText(accept.Text, accept.Font, Size.Empty, TextFormatFlags.SingleLine).Height;
+        Assert.True(accept.Height >= textHeight + accept.Padding.Vertical,
+            $"Action height {accept.Height} clips text height {textHeight} at {points} pt.");
+        Assert.True(choices.HorizontalScrollbar, "Long device names and IPv6 endpoints need horizontal scrolling inside the list.");
+        Assert.Same(first, choices.SelectedItem);
+        choices.SelectedIndex = 1;
+        Assert.Same(second, choices.SelectedItem);
+        Assert.Equal(DialogResult.Cancel, Assert.IsAssignableFrom<Button>(dialog.CancelButton).DialogResult);
+    }
+
+    [Theory]
     [InlineData(96, 9.25f)]
     [InlineData(96, 14f)]
     [InlineData(96, 18f)]

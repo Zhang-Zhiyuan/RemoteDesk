@@ -9,6 +9,7 @@ import android.view.MotionEvent;
 import android.view.View;
 
 public final class ViewerProbeReceiver extends BroadcastReceiver {
+    private static java.util.concurrent.CountDownLatch writeGate;
     @Override public void onReceive(Context context,Intent intent) {
         RemoteDeskViewerActivity viewer=ViewerProbeApplication.viewer;
         if(viewer==null)return;
@@ -17,7 +18,49 @@ public final class ViewerProbeReceiver extends BroadcastReceiver {
         try {
             AndroidViewerChrome chrome=(AndroidViewerChrome)ViewerProbeApplication.field(viewer,"chrome");
             View frame=(View)ViewerProbeApplication.field(viewer,"viewerFrame");
-            if ("clipboard_seed".equals(action)) {
+            if ("block_writes".equals(action)) {
+                Object owner = ViewerProbeApplication.field(viewer,"connectionOwner");
+                Object lock = ViewerProbeApplication.field(owner,"writeLock");
+                java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+                writeGate = new java.util.concurrent.CountDownLatch(1);
+                new Thread(() -> { synchronized(lock) {
+                    entered.countDown();
+                    try { writeGate.await(10, java.util.concurrent.TimeUnit.SECONDS); }
+                    catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                } }, "SyntheticWriteGate").start();
+                if (!entered.await(1, java.util.concurrent.TimeUnit.SECONDS)) throw new IllegalStateException("Write gate busy");
+            } else if ("unblock_writes".equals(action)) { if (writeGate != null) writeGate.countDown(); }
+            else if ("pause_input".equals(action)) chrome.watchOnly.performClick();
+            else if ("recreate_viewer".equals(action)) viewer.recreate();
+            else if ("select_files".equals(action)) {
+                Object owner = ViewerProbeApplication.field(viewer, "connectionOwner");
+                ((java.util.concurrent.atomic.AtomicBoolean)ViewerProbeApplication.field(owner,"fileBusy")).set(true);
+                java.lang.reflect.Field picker = viewer.getClass().getDeclaredField("filePickerOwner");
+                picker.setAccessible(true); picker.set(viewer, owner);
+                android.content.Intent result = new android.content.Intent();
+                String indices = intent.getStringExtra("indices");
+                android.content.ClipData clip = null;
+                for (String index : indices.split(",")) {
+                    android.net.Uri uri = android.net.Uri.parse("content://com.remotedesk.viewerprobe.files/" + index);
+                    if (clip == null) { clip = android.content.ClipData.newRawUri("Synthetic files", uri); result.setData(uri); }
+                    else clip.addItem(new android.content.ClipData.Item(uri));
+                }
+                if (!intent.getBooleanExtra("single", false)) result.setClipData(clip);
+                viewer.onActivityResult(701, android.app.Activity.RESULT_OK, result);
+            } else if ("clipboard_paste".equals(action) || "clipboard_send".equals(action)) {
+                java.lang.reflect.Method request = viewer.getClass().getDeclaredMethod("requestClipboard", boolean.class, boolean.class, boolean.class);
+                request.setAccessible(true); request.invoke(viewer, false, "clipboard_paste".equals(action), false);
+            } else if ("key_down".equals(action)) {
+                Object owner = ViewerProbeApplication.field(viewer,"connectionOwner");
+                java.lang.reflect.Method send = viewer.getClass().getDeclaredMethod("sendInput", owner.getClass(), int.class,int.class,int.class,int.class,int.class);
+                send.setAccessible(true); send.invoke(viewer,owner,RemoteDeskProtocol.INPUT_KEY_DOWN,0,0,0,0x11);
+            } else if ("paused_keyboard".equals(action)) {
+                java.lang.reflect.Method send = viewer.getClass().getDeclaredMethod("sendKeyboard", String.class,int[].class);
+                send.setAccessible(true); send.invoke(viewer,"不应发送",new int[0]);
+                send.invoke(viewer,null,new int[]{0x11,0x56});
+                java.lang.reflect.Method nav = viewer.getClass().getDeclaredMethod("sendPhoneNavigation",int.class);
+                nav.setAccessible(true); nav.invoke(viewer,AndroidViewerNavigation.HOME);
+            } else if ("clipboard_seed".equals(action)) {
                 AndroidClipboardText.setText(viewer, "手机复制中文😀\r\n第二行\t缩进\n");
             } else if ("clipboard_snapshot".equals(action)) {
                 String text = AndroidClipboardText.getText(viewer);

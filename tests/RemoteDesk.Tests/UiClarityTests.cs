@@ -4,6 +4,18 @@ namespace RemoteDesk.Tests;
 
 public sealed class UiClarityTests
 {
+    [Theory]
+    [InlineData("192.0.2.8", "192.0.2.8:56565")]
+    [InlineData("2001:db8::8", "[2001:db8::8]:56565")]
+    [InlineData("fe80::8%12", "[fe80::8%12]:56565")]
+    public void DeviceRowsAndConnectingMessageShowUnambiguousEndpoints(string host, string endpoint)
+    {
+        var row = MainForm.RemoteDeviceListItem.FromSaved(new SavedRemoteDevice { Address = host, Port = 56565 });
+        Assert.Contains(endpoint, row.ToString());
+        Assert.Contains(endpoint, row.GetListSecondaryText("online"));
+        Assert.Contains(endpoint, MainForm.FormatViewerConnectingStatus(host, 56565));
+    }
+
     [Fact]
     public void DisabledViewerActionsRemainReadableWithoutBecomingClickable()
     {

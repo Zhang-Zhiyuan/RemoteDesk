@@ -113,7 +113,14 @@ def host(config, output):
     logs = []
     relay_host = None
     try:
-        children.append(start_xvfb(output))
+        bind_address = config.get("bindAddress", "0.0.0.0")
+        if bind_address not in ("0.0.0.0", "127.0.0.1"):
+            raise ValueError("Owned host bindAddress must be a local listener address")
+        if config.get("useOwnedDisplay") is True:
+            if os.environ.get("REMOTEDESK_ISOLATED_XVFB") != "1" or not os.environ.get("DISPLAY"):
+                raise ValueError("useOwnedDisplay requires an explicitly owned xvfb-run environment")
+        else:
+            children.append(start_xvfb(output))
         source_log = (output / "source.log").open("w"); logs.append(source_log)
         children.append(subprocess.Popen([sys.executable, __file__, "source", "--output", str(output)],
                                           stdout=source_log, stderr=source_log))
@@ -123,7 +130,7 @@ def host(config, output):
             time.sleep(.1)
         else: raise RuntimeError("Synthetic target failed")
         with socket.socket() as reservation:
-            reservation.bind(("0.0.0.0", 0))
+            reservation.bind((bind_address, 0))
             port = reservation.getsockname()[1]
         log = (output / "host.log").open("w"); logs.append(log)
         fixture_arguments = []
@@ -131,8 +138,13 @@ def host(config, output):
             returned_file = output / "return-fixture.txt"
             returned_file.write_text("RemoteDesk owned return fixture 中文😀\n", encoding="utf-8")
             fixture_arguments = ["--return-file", str(returned_file)]
+            if config.get("featureDirectoryFixture") is True:
+                returned_folder = output / "return-folder"
+                returned_folder.mkdir()
+                (returned_folder / "nested.txt").write_text("Owned folder fixture 中文😀\n", encoding="utf-8")
+                fixture_arguments.extend(("--return-file", str(returned_folder)))
         child = subprocess.Popen([sys.executable, "-u", str(ROOT / "scripts/linux/remotedesk_linux_host.py"),
-            "--host", "0.0.0.0", "--port", str(port), "--password-fd", "0", "--no-discovery",
+            "--host", bind_address, "--port", str(port), "--password-fd", "0", "--no-discovery",
             "--display", os.environ["DISPLAY"], "--width", "1920", "--height", "1080", "--fps", "30",
             "--serve-seconds", "1800", "--machine-name", "RemoteDesk-owned-interop-target",
             "--receive-dir", str(output / "receive"), *fixture_arguments], stdin=subprocess.PIPE, stdout=log, stderr=log,

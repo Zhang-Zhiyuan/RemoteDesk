@@ -135,7 +135,9 @@ from remotedesk_protocol_probe import (
     write_message,
 )
 import remotedesk_linux_startup as host_startup
-from remotedesk_linux_device_panel import DevicePanel
+from remotedesk_linux_device_panel import DevicePanel, fit_table_columns
+from remotedesk_linux_transfers import ViewerTransferTasks, TransferStop, TransferTaskPanel
+import remotedesk_protocol_probe as file_protocol
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -150,6 +152,7 @@ DISPLAY_LIMIT_HEIGHT = 2160
 WINDOW_MARGIN_PIXELS = 24
 TK_BASE_SCALING = 96.0 / 72.0
 EVENT_POLL_MS = 16
+EVENT_IDLE_POLL_MS = 100
 EVENT_BACKLOG_POLL_MS = 1
 UI_EVENT_POLL_MAX_EVENTS = 128
 UI_EVENT_POLL_BUDGET_SECONDS = 0.006
@@ -1120,6 +1123,7 @@ def linux_viewer_capabilities(has_native_h264_presenter: bool) -> int:
         CAPABILITY_FILE_CHECKSUM
         | CAPABILITY_FILE_TRANSFER_RECEIPT
         | CAPABILITY_FILE_TRANSFER_CANCEL
+        | file_protocol.CAPABILITY_FILE_TRANSFER_PREVIEW
         | CAPABILITY_SHORT_GOP_H264
         | CAPABILITY_HIGH_QUALITY_JPEG
         | CAPABILITY_CLIPBOARD_TEXT
@@ -1143,6 +1147,7 @@ CRITICAL_UI_EVENTS = frozenset(
         "viewer_reconnect_qualified",
         "viewer_closed",
         "viewer_file_preview_ready",
+        "viewer_return_preview",
     }
 )
 DISCARDABLE_UI_EVENTS = frozenset(
@@ -1198,6 +1203,9 @@ def _same_coalesced_ui_event(left: object, right: object) -> bool:
         )
     if left_event != right_event:
         return False
+    if left_event == "viewer_transfer_task":
+        return (_viewer_event_generation(left) == _viewer_event_generation(right)
+                and left[1][1][1].id == right[1][1][1].id)
     if left_event in COALESCED_VIEWER_EVENTS:
         return (
             _viewer_event_generation(left)
@@ -3255,6 +3263,7 @@ class ViewerClipboardRequest:
     text: str = ""
     automatic: bool = False
     paste_revision: int = 0
+    input_epoch: int = 0
 
 
 @dataclass(frozen=True)
@@ -3458,8 +3467,9 @@ class ViewerConnection:
         # Only synthetic fixtures may opt out. Product construction never does.
         self.allow_self_connection_for_testing = allow_self_connection_for_testing
         self.stop_event = threading.Event()
-        self.write_lock = threading.Lock()
+        self.write_lock = threading.RLock()
         self.file_transfer_lock = threading.Lock()
+        self.transfer_tasks = ViewerTransferTasks(self)
         self.file_receipt_lock = threading.Lock()
         self.file_receipt: ViewerFileReceipt | None = None
         self.file_receipt_timeout = 120.0
@@ -3518,6 +3528,10 @@ class ViewerConnection:
         self.input_pressed_keys: set[int] = set()
         self.clipboard_paste_revision = 0
         self.input_send_active = False
+        self.read_only = False
+        self.input_epoch = 0
+        self.input_inflight: tuple[int, bytes] | None = None
+        self.input_sent_state = ViewerPressedKeyState()
         self.capture_target_condition = threading.Condition()
         self.pending_capture_target_id: str | None = None
         self.active_capture_target_id: str | None = None
@@ -3738,11 +3752,11 @@ class ViewerConnection:
     def _push_auto_clipboard(self, local: LocalClipboardSnapshot, epoch: int) -> bool:
         payload = encode_clipboard_set_text(local.text)
         with self.clipboard_lock:
-            if (not self._auto_clipboard_active() or self.clipboard_manual_epoch != epoch
+            if (self.read_only or not self._auto_clipboard_active() or self.clipboard_manual_epoch != epoch
                     or self.clipboard_pending is not None or self.clipboard_manual_waiting):
                 return False
             request = ViewerClipboardRequest(False, local.text, deadline=time.monotonic() + 4,
-                                             automatic=True)
+                                             automatic=True, input_epoch=self.input_epoch)
             self.clipboard_pending = self.clipboard_latest = request
         self._exchange_clipboard(request, payload, False, False, False)
         if self._auto_clipboard_active() and not request.completed.is_set():
@@ -3772,6 +3786,9 @@ class ViewerConnection:
         while not self.clipboard_auto_stop.wait(min(5.0, .75 * (2 ** min(failures, 3)))):
             if not self._auto_clipboard_active():
                 return
+            if self.read_only:
+                state = ClipboardSyncState()
+                continue
             if self.sock is None or self.session is None or not self.remote_capabilities & CAPABILITY_CLIPBOARD_TEXT:
                 continue
             if not self.remote_capabilities & CAPABILITY_CLIPBOARD_SNAPSHOT_V1:
@@ -3848,12 +3865,43 @@ class ViewerConnection:
                 # healthy remote-control session or spam the status bar.
                 failures += 1
 
+    def set_read_only(self, enabled: bool) -> None:
+        with self.input_condition:
+            enabled = bool(enabled)
+            if self.read_only == enabled:
+                return
+            self.read_only = enabled
+            self.input_epoch += 1
+            self.clipboard_paste_revision += 1
+            self.pending_inputs.clear()
+            self.input_pressed_keys.clear()
+            # Include a write already in flight. Regenerate releases on both
+            # transitions so a quick resume cannot discard an unsent release.
+            if self.input_inflight is not None:
+                self._observe_sent_input(self.input_inflight[1])
+            for button, x, y in self.input_sent_state.mouse_buttons_in_release_order():
+                self.pending_inputs.append((INPUT_MOUSE_UP, encode_input(INPUT_MOUSE_UP, button, x, y)))
+            for key in self.input_sent_state.keys_in_release_order():
+                self.pending_inputs.append((INPUT_KEY_UP, encode_input(INPUT_KEY_UP, data=key)))
+            self.input_condition.notify_all()
+        with self.clipboard_lock:
+            self.clipboard_manual_epoch += 1
+
+    def _observe_sent_input(self, payload: bytes) -> None:
+        kind, button, x, y, data = struct.unpack("<BBiii", payload)
+        if kind == INPUT_KEY_DOWN:
+            self.input_sent_state.observe_down(data)
+        elif kind == INPUT_KEY_UP:
+            self.input_sent_state.observe_up(data)
+        else:
+            self.input_sent_state.observe_pointer(kind, button, x, y)
+
     def send_input(self, kind: int, button: int = MOUSE_NONE, x: int = 0, y: int = 0, data: int = 0) -> bool:
         if self.session is None or self.sock is None or self.stop_event.is_set():
             return False
         payload = encode_input(kind, button, x, y, data)
         with self.input_condition:
-            if self.stop_event.is_set():
+            if self.stop_event.is_set() or self.read_only:
                 return False
             queued = enqueue_input_payload(self.pending_inputs, (kind, payload), INPUT_QUEUE_LIMIT)
             if queued:
@@ -3869,7 +3917,7 @@ class ViewerConnection:
         if virtual_key not in (0x1B, 0x24, 0x7B):
             return False
         with self.input_condition:
-            if (self.stop_event.is_set() or self.session is None or self.sock is None or
+            if (getattr(self, "read_only", False) or self.stop_event.is_set() or self.session is None or self.sock is None or
                     str(getattr(self, "remote_device_info", {}).get("platform", "")).lower() != "android" or
                     not self.remote_capabilities & CAPABILITY_INPUT_CONTROL or self.input_pressed_keys or
                     len(self.pending_inputs) + 2 > INPUT_QUEUE_LIMIT):
@@ -3905,8 +3953,12 @@ class ViewerConnection:
     def request_clipboard(self, *, read: bool, text: str = "", baseline: str | None = None,
                           paste: bool = False, after_copy: bool = False, paste_shift: bool = False,
                           _queued_deadline: float | None = None,
-                          _paste_revision: int | None = None) -> bool:
+                          _paste_revision: int | None = None,
+                          _input_epoch: int | None = None) -> bool:
         if self.stop_event.is_set() or self.sock is None or self.session is None:
+            return False
+        if self.read_only and (not read or paste or after_copy):
+            self._put_event("viewer_status", "仅观看已开启，未向远端写入剪贴板或发送输入。")
             return False
         if not self.remote_capabilities & CAPABILITY_CLIPBOARD_TEXT:
             self._put_event("viewer_status", "远端未提供文本剪贴板功能。")
@@ -3925,6 +3977,9 @@ class ViewerConnection:
             return False
         with self.input_condition:
             paste_revision = self.clipboard_paste_revision if _paste_revision is None else _paste_revision
+            input_epoch = self.input_epoch if _input_epoch is None else _input_epoch
+            if input_epoch != self.input_epoch:
+                return False
         with self.clipboard_lock:
             self.clipboard_manual_epoch += 1
             if self.clipboard_manual_waiting and _queued_deadline is None:
@@ -3936,7 +3991,7 @@ class ViewerConnection:
                     threading.Thread(target=self._wait_manual_clipboard,
                         args=(dict(read=read, text=text, baseline=baseline, paste=paste,
                                    after_copy=after_copy, paste_shift=paste_shift, _queued_deadline=deadline,
-                                   _paste_revision=paste_revision),),
+                                   _paste_revision=paste_revision, _input_epoch=input_epoch),),
                         name="RemoteDeskManualClipboard", daemon=True).start()
                     return True
                 self._put_event("viewer_status", "上一项剪贴板操作仍在等待远端，请稍后重试；长时间无响应请重连。")
@@ -3944,7 +3999,8 @@ class ViewerConnection:
             # Manual relay transfers may wait across a slow in-flight frame.
             # Keep automatic paste short-lived so it cannot unexpectedly target
             # another input field much later. Read replies retain local fences.
-            request = ViewerClipboardRequest(read, baseline, deadline=deadline, paste_revision=paste_revision)
+            request = ViewerClipboardRequest(read, baseline, deadline=deadline, paste_revision=paste_revision,
+                                             input_epoch=input_epoch)
             self.clipboard_pending = self.clipboard_latest = request
         threading.Thread(target=self._exchange_clipboard,
                          args=(request, payload, paste, after_copy, paste_shift),
@@ -3979,7 +4035,8 @@ class ViewerConnection:
             if not request.automatic:
                 self._put_event("viewer_status", message)
         def cancelled() -> bool:
-            return self.stop_event.is_set() or (request.automatic and self.clipboard_auto_stop.is_set())
+            return (self.stop_event.is_set() or (request.automatic and self.clipboard_auto_stop.is_set())
+                    or (not request.read and (self.read_only or request.input_epoch != self.input_epoch)))
         try:
             if not self.flush_pending_inputs(1.5):
                 status("输入队列仍忙，未执行剪贴板操作，请重试。")
@@ -3989,8 +4046,11 @@ class ViewerConnection:
             if cancelled():
                 return
             # Mark before writing: an incomplete write may still reach the peer.
-            sent = True
-            self._send_control(payload)
+            with self.write_lock:
+                if cancelled() or self.sock is None or self.session is None:
+                    return
+                sent = True
+                self._send_control(payload)
             if not request.completed.is_set():
                 status("正在等待远端剪贴板确认…")
             while not request.completed.wait(0.1):
@@ -4016,7 +4076,7 @@ class ViewerConnection:
                     status("文字已写入远端剪贴板；此旧版 Android 请长按输入框粘贴，或更新远端后使用快捷粘贴。")
                     return
                 with self.input_condition:
-                    if request.paste_revision != self.clipboard_paste_revision:
+                    if self.read_only or request.paste_revision != self.clipboard_paste_revision:
                         status("剪贴板已写入，但控制焦点或输入状态已改变，已取消延迟粘贴。")
                         return
                     held = self.input_pressed_keys
@@ -4120,9 +4180,14 @@ class ViewerConnection:
         normalized_paths = [str(Path(item).expanduser()) for item in file_paths if item]
         if not normalized_paths:
             return False
-        if not self.file_transfer_lock.acquire(blocking=False):
-            self._put_event("viewer_status", "已有文件传输正在进行。")
-            return False
+        with self.transfer_tasks.lock:
+            if self.transfer_tasks.download is not None:
+                self._put_event("viewer_status", "取回任务尚未结束，请完成或取消后再发送文件。")
+                return False
+            if not self.file_transfer_lock.acquire(blocking=False):
+                self._put_event("viewer_status", "已有文件传输正在进行。")
+                return False
+            self.transfer_tasks.begin_upload(normalized_paths)
         thread = threading.Thread(
             target=self._send_files_locked,
             args=(normalized_paths,),
@@ -4133,17 +4198,21 @@ class ViewerConnection:
         return True
 
     def _send_files_locked(self, file_paths: list[str]) -> None:
+        task = self.transfer_tasks.begin_upload(file_paths)
         sent = 0
         failed = 0
         results: list[str] = []
         try:
             for file_path in file_paths:
-                if self.stop_event.is_set():
+                if self.stop_event.is_set() or task.cancel.is_set():
                     break
                 temporary_archive: Path | None = None
                 source_path = Path(file_path)
                 try:
+                    self.transfer_tasks.update(task, name=source_path.name, phase="准备 / 打包", completed_bytes=0,
+                        total_bytes=None, cancellable=True, detail=f"本批 {len(file_paths)} 项，已完成 {sent} 项。")
                     transfer_path, transfer_name, display_name, temporary_archive = self._prepare_transfer_path(source_path)
+                    self.transfer_tasks.check_upload()
                     receipt_message = self._send_file_to_remote(transfer_path, transfer_name, display_name)
                     results.append(f"已发送：{display_name}\n{receipt_message}\n")
                     sent += 1
@@ -4152,6 +4221,8 @@ class ViewerConnection:
                     results.append(f"未完成：{source_path.name}\n{ex}\n")
                     if not self.stop_event.is_set():
                         self._put_event("viewer_status", f"发送项目失败：{source_path.name} - {ex}")
+                    if task.cancel.is_set() or self.stop_event.is_set():
+                        break
                 finally:
                     if temporary_archive is not None:
                         try:
@@ -4166,24 +4237,29 @@ class ViewerConnection:
                 self._put_event("viewer_status", status)
         finally:
             self.file_transfer_lock.release()
+            self.transfer_tasks.finish(task, "已取消" if task.cancel.is_set() else "连接已结束" if self.stop_event.is_set()
+                else "已完成" if failed == 0 and sent == len(file_paths) else "未完成", "\n".join(results))
             if results:
                 remaining = len(file_paths) - sent - failed
                 summary = f"已发送 {sent} 项，未完成 {failed} 项，未开始 {remaining} 项。\n文件夹以 ZIP 保存，不自动解压。\n\n"
                 self._put_event("viewer_file_results", summary + "\n".join(results))
 
     def _prepare_transfer_path(self, source: Path) -> tuple[Path, str, str, Path | None]:
+        self.transfer_tasks.check_upload()
+        task = self.transfer_tasks.upload
+        cancellation = TransferStop(self.stop_event, task) if task is not None else self.stop_event
         path = source.expanduser()
         if path.is_file():
             transfer_name = sanitize_file_name(path.name)
             display_name = path.name if transfer_name == path.name else f"{path.name} -> {transfer_name}"
             return path, transfer_name, display_name, None
         if path.is_dir():
-            source_size = safe_path_size(path, cancel_event=self.stop_event)
+            source_size = safe_path_size(path, cancel_event=cancellation)
             if source_size > MAX_FILE_TRANSFER_BYTES:
                 raise ProtocolError(f"文件夹超过 RemoteDesk 传输上限：{source_size} bytes")
             transfer_name = create_directory_archive_name(path)
             self._put_event("viewer_status", f"正在打包文件夹：{path.name} ({source_size} bytes)")
-            archive = create_directory_archive(path, source_size, cancel_event=self.stop_event)
+            archive = create_directory_archive(path, source_size, cancel_event=cancellation)
             return archive, transfer_name, f"{path.name} -> {transfer_name}", archive
         raise FileNotFoundError("只支持发送文件或文件夹。")
 
@@ -4197,6 +4273,7 @@ class ViewerConnection:
             raise ProtocolError(f"文件超过 RemoteDesk 传输上限：{file_size} bytes")
 
         transfer_id = uuid4().hex
+        task = self.transfer_tasks.upload
         send_checksum = bool(self.remote_capabilities & CAPABILITY_FILE_CHECKSUM)
         send_cancel = bool(self.remote_capabilities & CAPABILITY_FILE_TRANSFER_CANCEL)
         receipt = ViewerFileReceipt(transfer_id) if self.remote_capabilities & CAPABILITY_FILE_TRANSFER_RECEIPT else None
@@ -4206,6 +4283,11 @@ class ViewerConnection:
         heartbeat_lease = self._begin_outgoing_file_transfer()
         legacy_drain = False
         try:
+            with self.transfer_tasks.lock:
+                self.transfer_tasks.check_upload()
+                self.transfer_tasks.update(task, name=display_name, phase="发送中", completed_bytes=0, total_bytes=file_size,
+                    transfer_id=transfer_id, cancellable=send_cancel,
+                    detail="取消只影响当前文件批次。" if send_cancel else "旧版远端不支持传输中取消；桌面会话保持连接。")
             self._write_file_control(encode_file_transfer_start(transfer_id, transfer_name, file_size))
             transfer_active = True
             self._put_event("viewer_status", f"正在发送：{display_name} ({file_size} bytes)")
@@ -4215,6 +4297,7 @@ class ViewerConnection:
             last_progress_at = 0.0
             with path.open("rb") as input_file:
                 while offset < file_size:
+                    self.transfer_tasks.check_upload()
                     if receipt is not None and receipt.completed.is_set() and not receipt.success:
                         raise OSError(receipt.message or "远端拒绝接收文件。")
                     if self.stop_event.is_set():
@@ -4227,6 +4310,7 @@ class ViewerConnection:
                     digest.update(chunk)
                     self._write_file_control(encode_file_transfer_chunk(transfer_id, offset, chunk))
                     offset += len(chunk)
+                    self.transfer_tasks.update(task, force=False, completed_bytes=offset)
 
                     now = time.monotonic()
                     if now - last_progress_at >= 0.75:
@@ -4242,9 +4326,15 @@ class ViewerConnection:
             ):
                 raise EOFError("源文件在传输过程中发生变化。")
 
+            with self.transfer_tasks.lock:
+                self.transfer_tasks.check_upload()
+                self.transfer_tasks.update(task, phase="校验 / 提交", completed_bytes=offset, cancellable=False,
+                    detail="完整数据正在提交保存，无法撤回；等待接收结果。")
             if send_checksum:
                 self._write_file_control(encode_file_transfer_checksum(transfer_id, digest.hexdigest()))
             self._write_file_control(encode_file_transfer_complete(transfer_id))
+            self.transfer_tasks.update(task, phase="等待保存确认" if receipt is not None else "已发送，旧端无保存回执",
+                cancellable=False, detail="文件数据已发送，可能已保存，无法撤回；正在核对接收结果。")
             if receipt is not None:
                 self._put_event("viewer_status", f"数据已发送，正在等待远端保存确认：{transfer_name}")
                 deadline = time.monotonic() + self.file_receipt_timeout
@@ -4302,7 +4392,22 @@ class ViewerConnection:
         session = self.session
         if sock is None or session is None:
             raise ConnectionError("连接已断开。")
+        manager = self.transfer_tasks
+        kind = payload[0] if payload else -1
+        upload = kind in (file_protocol.CONTROL_FILE_TRANSFER_START, file_protocol.CONTROL_FILE_TRANSFER_CHUNK,
+                          file_protocol.CONTROL_FILE_TRANSFER_CHECKSUM, file_protocol.CONTROL_FILE_TRANSFER_COMPLETE)
+        download = kind in (file_protocol.CONTROL_FILE_TRANSFER_REQUEST_CLIPBOARD_FILES,
+                            file_protocol.CONTROL_FILE_TRANSFER_CONFIRM_CLIPBOARD_FILES)
+        task = manager.upload if upload else manager.download if download else None
         with self.write_lock:
+            if self.stop_event.is_set() or self.sock is not sock or self.session is not session:
+                raise ConnectionError("连接已断开。")
+            # A cancelled job may have waited behind video/clipboard/input writes.
+            # Recheck only before a frame starts: once started, finish the frame
+            # so cancelling files never corrupts or closes the desktop stream.
+            if task is not None and (task.cancel.is_set() or task.terminal
+                    or task is not (manager.upload if upload else manager.download)):
+                raise file_protocol.TransferCancelledError("已取消文件任务。")
             write_message(sock, session, MESSAGE_CONTROL, payload)
 
     def _request_video_key_frame(self) -> None:
@@ -4364,6 +4469,7 @@ class ViewerConnection:
         """Wake all transport workers without waiting for the write lock."""
 
         self.stop_event.set()
+        self.transfer_tasks.close()
         self.stop_auto_clipboard()
         with self.frame_condition:
             self.pending_frame = None
@@ -5011,6 +5117,9 @@ class ViewerConnection:
             put_ui_event(self.events, "viewer_closed", self.generation)
 
     def _handle_control(self, payload: bytes) -> None:
+        manager = getattr(self, "transfer_tasks", None)
+        if manager is not None and manager.accept_control(payload):
+            return
         control = decode_control(payload, include_clipboard_text=True)
         kind = int(control.get("kind") or 0)
         if kind == CONTROL_SESSION_REJECTED:
@@ -5346,6 +5455,7 @@ class ViewerConnection:
                     break
                 item = pop_next_input_payload(self.pending_inputs)
                 self.input_send_active = item is not None
+                epoch = self.input_epoch
             if item is None:
                 continue
 
@@ -5355,7 +5465,15 @@ class ViewerConnection:
                 if sock is None or session is None:
                     continue
                 with self.write_lock:
+                    with self.input_condition:
+                        if epoch != self.input_epoch:
+                            continue
+                        if self.read_only and item[0] not in (INPUT_KEY_UP, INPUT_MOUSE_UP):
+                            continue
+                        self.input_inflight = item
                     write_message(sock, session, MESSAGE_INPUT, item[1])
+                    with self.input_condition:
+                        self._observe_sent_input(item[1])
             except Exception as ex:
                 if not self.stop_event.is_set():
                     self._put_event("viewer_status", f"Input send failed: {ex}")
@@ -5363,6 +5481,7 @@ class ViewerConnection:
                 break
             finally:
                 with self.input_condition:
+                    self.input_inflight = None
                     self.input_send_active = False
                     self.input_condition.notify_all()
 
@@ -5464,7 +5583,13 @@ class RemoteDeskLinuxApp:
         self.last_motion_sent = 0.0
         self.last_frame_status_update = 0.0
         self.viewer_pressed_keys = ViewerPressedKeyState()
+        self.viewer_read_only = False
+        self.transfer_task_panel = None
+        self.transfer_task_history = {}
         self.closing = False
+        self.ui_dialog_queue: deque[tuple[Any, tuple[Any, ...]]] = deque()
+        self.ui_dialog_after_id: Any | None = None
+        self.ui_dialog_active = False
         self.relay_host = None
         self.relay_options = None
         self.viewer_relay_options = None
@@ -5578,6 +5703,11 @@ class RemoteDeskLinuxApp:
         self.relay_list.column("status", width=150)
         self.relay_list.heading("address", text="直连 IP / 端口")
         self.relay_list.column("address", width=280)
+        fit_table_columns(self.relay_list, {
+            "#0": (240, 100, ()), "platform": (90, 70, ("Windows", "Android", "Linux")),
+            "status": (150, 100, ("本机（不可自连）", "使用中（可接管）", "在线")),
+            "address": (280, 180, ()),
+        })
         self.relay_list.bind("<Double-1>", lambda _event: self._connect_relay())
         self.relay_list.bind('<<TreeviewSelect>>', lambda _event: self._select_relay_key())
         password_form = ttk.Frame(tab)
@@ -6275,9 +6405,15 @@ class RemoteDeskLinuxApp:
                 target = min(offset, start - 8) if start < offset else max(offset, start + min(size, viewport) + 8 - viewport)
                 getattr(canvas, axis + "view_moveto")(max(0, target) / max(1, total))
 
-        def scroll_content(event: tk.Event[Any], delta: int | None = None) -> str:
+        def scroll_content(event: tk.Event[Any], delta: int | None = None) -> str | None:
             wheel_delta = delta if delta is not None else int(getattr(event, "delta", 0))
             if wheel_delta:
+                # Preserve the table/log's native wheel binding while it has
+                # rows to scroll; only hand the gesture to the page at an edge.
+                if isinstance(event.widget, (ttk.Treeview, tk.Text, tk.Listbox)):
+                    first, last = event.widget.yview()
+                    if (wheel_delta > 0 and first > 0) or (wheel_delta < 0 and last < 1):
+                        return None
                 canvas.yview_scroll(-3 if wheel_delta > 0 else 3, "units")
             return "break"
 
@@ -6803,6 +6939,14 @@ class RemoteDeskLinuxApp:
             expected_device_id=expected_id,
         )
         self.viewer = viewer
+        viewer.set_read_only(getattr(self, "viewer_read_only", False))
+        pending_poll = getattr(self, "event_poll_after_id", None)
+        if pending_poll is not None:
+            # The first frame must not inherit a status-only idle interval.
+            # A poll already dispatching events owns its next timer instead.
+            self.root.after_cancel(pending_poll)
+            delay = EVENT_BACKLOG_POLL_MS if not self.events.empty() else EVENT_POLL_MS
+            self.event_poll_after_id = self.root.after(delay, self._poll_events)
         if self.frame_label is not None:
             viewer.set_display_size(
                 self.frame_label.winfo_width(),
@@ -7050,8 +7194,12 @@ class RemoteDeskLinuxApp:
         clipboard_buttons = []
         for label, action in (("发送本机剪贴板", lambda: self.viewer_clipboard()),
                               ("取回远端剪贴板", lambda: self.viewer_clipboard(read=True)),
-                              ("粘贴到远端", lambda: self.viewer_clipboard(paste=True))):
+                              ("粘贴到远端", lambda: self.viewer_clipboard(paste=True)),
+                              ("取回远端文件", self.receive_viewer_files),
+                              ("传输任务", self._show_transfer_tasks),
+                              ("仅观看：开" if getattr(self, "viewer_read_only", False) else "仅观看：关", self._toggle_viewer_read_only)):
             clipboard_buttons.append(ttk.Button(clipboard_bar, text=label, command=action, style="Viewer.TButton"))
+        self.viewer_read_only_button = clipboard_buttons[-1]
         clipboard_columns = 0
         def update_clipboard_layout(event: Any = None) -> None:
             nonlocal clipboard_columns
@@ -7491,7 +7639,7 @@ class RemoteDeskLinuxApp:
             return
         viewer = self.viewer
         android = str(getattr(viewer, "remote_device_info", {}).get("platform", "")).lower() == "android"
-        enabled = android and self._viewer_has_capability(viewer, CAPABILITY_INPUT_CONTROL)
+        enabled = android and not getattr(self, "viewer_read_only", False) and self._viewer_has_capability(viewer, CAPABILITY_INPUT_CONTROL)
         try:
             for button in self.viewer_android_buttons:
                 button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
@@ -7506,6 +7654,8 @@ class RemoteDeskLinuxApp:
             pass
 
     def _send_android_navigation(self, virtual_key: int) -> None:
+        if getattr(self, "viewer_read_only", False):
+            return
         viewer = self.viewer
         if viewer is None:
             self._set_viewer_status("手机导航不可用：未连接。")
@@ -7663,21 +7813,22 @@ class RemoteDeskLinuxApp:
             if not result.items:
                 self._set_viewer_status("没有可发送的文件或文件夹。")
                 return
-            if not self._show_file_transfer_confirmation_dialog(
+            confirmed = self._show_file_transfer_confirmation_dialog(
                 parent,
                 result.title,
                 result.action_text,
                 list(result.items),
                 result.note,
-            ):
-                self._set_viewer_status("已取消文件传输。")
-                return
+            )
             if (
                 result.viewer is not self.viewer
                 or result.viewer.generation != self.viewer_generation
                 or self.closing
                 or cancel_event.is_set()
             ):
+                return
+            if not confirmed:
+                self._set_viewer_status("已取消文件传输。")
                 return
             if result.viewer.send_files(list(result.normalized_paths)):
                 self._set_viewer_status(result.queued_status)
@@ -7772,6 +7923,11 @@ class RemoteDeskLinuxApp:
         tree.column("name", width=160, minwidth=100)
         tree.column("source", width=330, minwidth=180)
         tree.column("destination", width=300, minwidth=180)
+        fit_table_columns(tree, {
+            "kind": (70, 58, tuple({item.kind for item in items})),
+            "size": (90, 76, tuple({format_transfer_bytes(item.size_bytes) for item in items})),
+            "name": (160, 100, ()), "source": (330, 180, ()), "destination": (300, 180, ()),
+        })
         vertical_scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=tree.yview)
         horizontal_scrollbar = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=tree.xview)
         tree.configure(yscrollcommand=vertical_scrollbar.set, xscrollcommand=horizontal_scrollbar.set)
@@ -7863,6 +8019,9 @@ class RemoteDeskLinuxApp:
         viewer = self.viewer
         if viewer is None:
             return
+        if getattr(self, "viewer_read_only", False) and (not read or paste or after_copy):
+            self._set_viewer_status("仅观看已开启，未向远端发送输入或剪贴板。")
+            return
         baseline = self._local_clipboard_text()
         if not read and not paste:
             self._release_pressed_viewer_inputs(flush=True, background_flush=True)
@@ -7915,9 +8074,22 @@ class RemoteDeskLinuxApp:
         finally:
             apply.completed.set()
 
+    def _toggle_viewer_read_only(self) -> None:
+        self.viewer_read_only = not getattr(self, "viewer_read_only", False)
+        if self.viewer is not None:
+            self.viewer.set_read_only(self.viewer_read_only)
+        self.viewer_pressed_keys.clear()
+        self.viewer_clipboard_paste_key = False
+        button = getattr(self, "viewer_read_only_button", None)
+        if button is not None:
+            button.configure(text="仅观看：开" if self.viewer_read_only else "仅观看：关")
+        self._update_viewer_android_navigation()
+        self._set_viewer_status("仅观看已开启：键鼠、粘贴及自动剪贴板写入已暂停；文件任务可继续。"
+                                if self.viewer_read_only else "已恢复远端输入。")
+
     def send_viewer_text(self) -> None:
         viewer = self.viewer
-        if viewer is None:
+        if viewer is None or getattr(self, "viewer_read_only", False):
             return
         text = self.text_input.get()
         if not text:
@@ -7927,6 +8099,70 @@ class RemoteDeskLinuxApp:
             self._set_viewer_status(f"Sent {sent} text character(s).")
         except Exception as ex:
             self._set_viewer_status(f"Text input failed: {ex}")
+
+    def _show_transfer_tasks(self) -> None:
+        panel = getattr(self, "transfer_task_panel", None)
+        if panel is None:
+            panel = self.transfer_task_panel = TransferTaskPanel(self)
+            apply_adaptive_window_geometry(panel.window, preferred_size=(900, 480), minimum_size=(420, 280),
+                                           parent=self.viewer_window or self.root)
+        for owner, task in getattr(self, "transfer_task_history", {}).values():
+            panel.update(owner, task)
+        viewer = self.viewer
+        if viewer is not None and isinstance(getattr(viewer, "transfer_tasks", None), ViewerTransferTasks):
+            for task in viewer.transfer_tasks.snapshot():
+                panel.update(viewer, task)
+        panel.window.deiconify()
+        panel.window.lift()
+
+    def _update_transfer_task(self, owner, task) -> None:
+        history = getattr(self, "transfer_task_history", None)
+        if history is None:
+            history = self.transfer_task_history = {}
+        first = task.id not in history
+        history[task.id] = (owner, task)
+        for key in list(history):
+            if len(history) <= 100:
+                break
+            if history[key][1].terminal:
+                del history[key]
+        panel = getattr(self, "transfer_task_panel", None)
+        if panel is not None:
+            panel.update(owner, task)
+        elif first and not task.terminal and owner is self.viewer:
+            self._show_transfer_tasks()
+
+    def receive_viewer_files(self) -> None:
+        viewer = self.viewer
+        if viewer is None or not viewer.remote_capabilities & file_protocol.CAPABILITY_FILE_SEND:
+            self._set_viewer_status("当前远端不支持取回文件；请先在远端文件管理器中复制文件。")
+            return
+        directory = filedialog.askdirectory(title="选择取回文件保存位置", parent=self.viewer_window or self.root)
+        if not directory or self.viewer is not viewer:
+            return
+        legacy = not viewer.remote_capabilities & file_protocol.CAPABILITY_FILE_TRANSFER_PREVIEW
+        if legacy and not messagebox.askyesno("确认从旧版远端取回文件", f"旧版远端不能预览文件清单。\n接收远端剪贴板文件到：\n{directory}\n\n同名文件会自动改名，文件夹保存为 ZIP。是否继续？", parent=self.viewer_window or self.root, default=messagebox.NO):
+            return
+        if self.viewer is not viewer:
+            return
+        _started, message = viewer.transfer_tasks.request_return(directory, legacy_confirmed=legacy)
+        self._set_viewer_status(message)
+
+    def _confirm_return_files(self, viewer, generation, preview) -> None:
+        if self.closing or viewer is not self.viewer or generation != self.viewer_generation:
+            return
+        task_id, raw_items, directory, note = preview
+        task = viewer.transfer_tasks.download
+        if task is None or task.id != task_id or task.cancel.is_set() or task.terminal:
+            return
+        items = [FileTransferPreviewItem(str(item.get("kind", "文件")), str(item.get("sourcePath", "")),
+            str(item.get("transferName", "")), int(item.get("sizeBytes", 0)),
+            str(Path(directory) / sanitize_file_name(str(item.get("transferName", "file")))) + FILE_TRANSFER_RENAME_SUFFIX)
+            for item in raw_items]
+        accepted = self._show_file_transfer_confirmation_dialog(self.viewer_window or self.root,
+            "确认取回远端文件", "取回到本机", items, f"保存位置：{directory}\n文件夹以 ZIP 保存，不自动解压。\n{note}")
+        if not self.closing and self.viewer is viewer and generation == self.viewer_generation:
+            viewer.transfer_tasks.confirm_return(task_id, accepted)
 
     def send_viewer_files(self) -> None:
         viewer = self.viewer
@@ -8090,7 +8326,7 @@ class RemoteDeskLinuxApp:
         report_failure: bool = True,
     ) -> bool:
         viewer = self.viewer
-        if viewer is None:
+        if viewer is None or getattr(self, "viewer_read_only", False):
             return False
         if not (viewer.remote_capabilities & CAPABILITY_INPUT_CONTROL):
             if report_failure:
@@ -8114,7 +8350,7 @@ class RemoteDeskLinuxApp:
         data: int = 0,
     ) -> bool:
         viewer = self.viewer
-        if viewer is None:
+        if viewer is None or getattr(self, "viewer_read_only", False):
             return False
         if not (viewer.remote_capabilities & CAPABILITY_INPUT_CONTROL):
             self._set_viewer_status("Remote does not advertise input control.")
@@ -8157,13 +8393,59 @@ class RemoteDeskLinuxApp:
         y = round(local_y * (self.remote_height - 1) / max(1, image_height - 1))
         return x, y
 
+    def _defer_ui_dialog(self, callback: Any, *args: Any) -> None:
+        if getattr(self, "closing", False):
+            return
+        pending = getattr(self, "ui_dialog_queue", None)
+        if pending is None:
+            pending = self.ui_dialog_queue = deque()
+        # Each prompt kind keeps its newest pending result. A dialog left open
+        # must not turn the bounded worker event queue into an unbounded queue.
+        for index, (queued_callback, _queued_args) in enumerate(pending):
+            if queued_callback == callback:
+                pending[index] = (callback, args)
+                break
+        else:
+            pending.append((callback, args))
+        if not getattr(self, "ui_dialog_active", False) and getattr(self, "ui_dialog_after_id", None) is None:
+            self.ui_dialog_after_id = self.root.after_idle(self._run_next_ui_dialog)
+
+    def _run_next_ui_dialog(self) -> None:
+        self.ui_dialog_after_id = None
+        if self.closing or not self.ui_dialog_queue:
+            return
+        callback, args = self.ui_dialog_queue.popleft()
+        self.ui_dialog_active = True
+        try:
+            # Tk modal waits run a nested event loop. Dispatch them separately
+            # so video/disconnect polling continues, but only one at a time.
+            callback(*args)
+        finally:
+            self.ui_dialog_active = False
+            if not self.closing and self.ui_dialog_queue:
+                self.ui_dialog_after_id = self.root.after_idle(self._run_next_ui_dialog)
+
+    def _show_viewer_file_failure(self, value: Any) -> None:
+        message = self._unpack_viewer_event(value)
+        if message is not None:
+            self._set_viewer_status(str(message))
+            messagebox.showwarning("文件传输未完成", str(message), parent=self.viewer_window or self.root)
+
     def _poll_events(self) -> None:
+        self.event_poll_after_id = None
+        if getattr(self, "closing", False):
+            return
         latest_frame: tuple[int, int, bytes, float, int, int, str] | None = None
         latest_native_frame: tuple[int, int, float, str] | None = None
         latest_file_preview: ViewerFilePreviewResult | None = None
         for event, value in iter_ui_event_batch(self.events):
+            if getattr(self, "closing", False):
+                return
             if event == "relay_setup":
-                self._handle_relay_setup(value)
+                if value[1] == "identity" and value[0] == self.relay_setup_generation and self.relay_setup_busy:
+                    self._defer_ui_dialog(self._handle_relay_setup, value)
+                else:
+                    self._handle_relay_setup(value)
             elif event == "relay_status":
                 connector, message = value
                 if connector is self.relay_host and not self.relay_setup_busy:
@@ -8238,14 +8520,20 @@ class RemoteDeskLinuxApp:
                 if clipboard is not None:
                     self._apply_viewer_auto_clipboard(clipboard)
             elif event == "viewer_file_failure":
-                message = self._unpack_viewer_event(value)
-                if message is not None:
-                    self._set_viewer_status(str(message))
-                    messagebox.showwarning("文件传输未完成", str(message), parent=self.viewer_window or self.root)
+                if self._unpack_viewer_event(value) is not None:
+                    self._defer_ui_dialog(self._show_viewer_file_failure, value)
             elif event == "viewer_file_results":
                 message = self._unpack_viewer_event(value)
                 if message is not None:
                     self._show_file_transfer_results(str(message))
+            elif event == "viewer_transfer_task":
+                if isinstance(value, tuple) and len(value) == 2:
+                    owner, task = value[1]
+                    self._update_transfer_task(owner, task)
+            elif event == "viewer_return_preview":
+                preview = self._unpack_viewer_event(value)
+                if preview is not None and self.viewer is not None:
+                    self._defer_ui_dialog(self._confirm_return_files, self.viewer, self.viewer_generation, preview)
             elif event == "viewer_upscaling":
                 enabled = self._unpack_viewer_event(value)
                 if enabled is not None:
@@ -8323,7 +8611,9 @@ class RemoteDeskLinuxApp:
                     )
             elif event == "viewer_file_preview_ready":
                 preview = self._unpack_viewer_event(value)
-                if isinstance(preview, ViewerFilePreviewResult):
+                if (isinstance(preview, ViewerFilePreviewResult)
+                        and preview.token == getattr(self, "viewer_file_preview_token", -1)
+                        and preview.viewer is self.viewer):
                     latest_file_preview = preview
             elif event == "viewer_closed":
                 if value != self.viewer_generation:
@@ -8375,6 +8665,8 @@ class RemoteDeskLinuxApp:
                 frame = self._unpack_viewer_event(value)
                 if frame is not None:
                     latest_native_frame = frame
+        if getattr(self, "closing", False):
+            return
         if latest_native_frame is not None and self.viewer is not None:
             self._show_native_frame(*latest_native_frame)
         elif latest_frame is not None and self.viewer is not None:
@@ -8397,12 +8689,15 @@ class RemoteDeskLinuxApp:
                 backend_diagnostic,
             )
         if latest_file_preview is not None:
-            self._finish_viewer_file_transfer_preview(latest_file_preview)
-        next_poll_ms = (
-            EVENT_BACKLOG_POLL_MS
-            if not self.events.empty()
-            else EVENT_POLL_MS
-        )
+            self._defer_ui_dialog(self._finish_viewer_file_transfer_preview, latest_file_preview)
+        # Only a viewer needs frame-rate polling; host/status workers can be
+        # checked less often while still draining a queued burst immediately.
+        if not self.events.empty():
+            next_poll_ms = EVENT_BACKLOG_POLL_MS
+        elif self.viewer is not None:
+            next_poll_ms = EVENT_POLL_MS
+        else:
+            next_poll_ms = EVENT_IDLE_POLL_MS
         self.event_poll_after_id = self.root.after(next_poll_ms, self._poll_events)
 
     def _append_host_log(self, text: str) -> None:
@@ -8500,6 +8795,12 @@ class RemoteDeskLinuxApp:
         if self.closing:
             return
         self.closing = True
+        pending_dialog = getattr(self, "ui_dialog_after_id", None)
+        if pending_dialog is not None:
+            self.root.after_cancel(pending_dialog)
+            self.ui_dialog_after_id = None
+        if hasattr(self, "ui_dialog_queue"):
+            self.ui_dialog_queue.clear()
         self._cancel_relay_setup()
         if getattr(self, "device_panel", None) is not None: self.device_panel.close()
         pending_poll = getattr(self, "event_poll_after_id", None)

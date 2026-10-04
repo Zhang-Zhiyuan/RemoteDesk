@@ -19,7 +19,7 @@ internal sealed partial class RemoteViewerWindow
         (IsHandleCreated && GetForegroundWindow() == Handle);
 
     private bool CanUseAutomaticClipboard => !_isClosing && !IsDisposed &&
-        _clipboardTextEnabled && _client.IsConnected && _client.SupportsClipboardSnapshots;
+        !_client.IsLocalInputPaused && _clipboardTextEnabled && _client.IsConnected && _client.SupportsClipboardSnapshots;
 
     private bool IsManualClipboardBusy => _clipboardPasteInProgress ||
         _clipboardPullTask is { IsCompleted: false } || _client.IsClipboardRequestPending ||

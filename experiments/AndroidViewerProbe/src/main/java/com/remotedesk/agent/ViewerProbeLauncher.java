@@ -22,6 +22,7 @@ public final class ViewerProbeLauncher extends Activity {
                 .putExtra(RemoteDeskViewerActivity.EXTRA_HOST, config.optString("host", "127.0.0.1"))
                 .putExtra(RemoteDeskViewerActivity.EXTRA_PORT, config.optInt("port", getIntent().getIntExtra("port", 7411)))
                 .putExtra("legacyFileWatchdogProbe", getIntent().getBooleanExtra("legacyFileWatchdogProbe", false));
+            viewer.putExtra("dpiProbe", getIntent().getBooleanExtra("dpiProbe", false));
             if (config.has("relay")) {
                 AndroidRelay.Options target = AndroidRelay.Options.parse(config.getJSONObject("relay").toString());
                 AndroidRelaySettings.save(this, target.target(AndroidRelaySettings.localDeviceId(this)));

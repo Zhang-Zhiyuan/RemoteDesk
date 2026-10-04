@@ -23,6 +23,12 @@ internal sealed class ViewerActionOverflow : IDisposable
         _commands = commands;
         _priorityGroups = priorityGroups;
         _releaseInput = releaseInput;
+        // Keep parked commands inside the owning form's PMv2/font notification
+        // tree. A detached parking panel retains its old DeviceDpi when these
+        // buttons return to the toolbar after a monitor transition.
+        _overflowOwner.Size = Size.Empty;
+        _overflowOwner.TabStop = false;
+        panel.FindForm()?.Controls.Add(_overflowOwner);
         MoreButton = moreButton;
         Buttons = commands.Select(c => c.Button).Append(moreButton).ToArray();
         panel.Controls.Add(moreButton);

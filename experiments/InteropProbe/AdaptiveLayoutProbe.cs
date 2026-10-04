@@ -7,7 +7,8 @@ using RemoteDesk;
 // the user's desktop, and no networking/services/settings are started.
 internal static class AdaptiveLayoutProbe
 {
-    internal static int Run(bool softwarePaint = false, bool viewerClipping = false, bool viewerLifetime = false, bool multiScreen = false)
+    internal static int Run(bool softwarePaint = false, bool viewerClipping = false, bool viewerLifetime = false, bool multiScreen = false,
+        bool dpiDialogs = false, bool mainViewerDpi = false)
     {
         using var config = JsonDocument.Parse(Console.ReadLine()!);
         string output = Path.GetFullPath(config.RootElement.GetProperty("output").GetString()!);
@@ -23,8 +24,11 @@ internal static class AdaptiveLayoutProbe
             {
                 if (!SetThreadDesktop(desktop)) throw new Win32Exception();
                 Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
                 Application.EnableVisualStyles();
-                if (multiScreen) MultiScreenUiProbe.Verify(output);
+                if (dpiDialogs) DialogDpiProbe.Verify(output);
+                else if (mainViewerDpi) MainViewerDpiProbe.Verify(output);
+                else if (multiScreen) MultiScreenUiProbe.Verify(output);
                 else if (viewerLifetime) ViewerWindowLifetimeProbe.Verify(output);
                 else if (viewerClipping) ViewerClippingProbe.Verify(output);
                 else if (softwarePaint) SoftwarePaintProbe.Verify(output);
@@ -152,7 +156,12 @@ internal static class AdaptiveLayoutProbe
                     "文件夹会先打包为 ZIP；接收端不会自动解压。接收位置由远端返回，重名会自动改名。"),
                 () => new FileTransferResultDialog("已发送 1 项，未完成 1 项；实际保存结果如下。",
                     "已发送：一份具有比较长的名称的项目说明和测试资料.txt\r\n" + items[0].DestinationPath +
-                    "\r\n\r\n未完成：项目资源.zip\r\n远端磁盘空间不足；前面已保存的文件不会被删除。")
+                    "\r\n\r\n未完成：项目资源.zip\r\n远端磁盘空间不足；前面已保存的文件不会被删除。"),
+                () => new FileTransferTasksWindow(() => [new RemoteFileTransferTaskSnapshot(
+                    Guid.Parse("9d51d36e-77f7-4d8e-9a80-a7141c178145"), 1,
+                    RemoteFileTransferDirection.Upload, RemoteFileTransferTaskState.AwaitingReceipt,
+                    "发送 2 项文件", items[0].TransferName, 1024, 1024, 0, 2, true,
+                    "数据已发送，等待远端确认实际保存路径。", Destination: items[0].DestinationPath)], (_, _) => Task.FromResult(true))
             ];
             for (int index = 0; index < factories.Length; index++)
             {
@@ -170,7 +179,7 @@ internal static class AdaptiveLayoutProbe
                     using var bitmap = new Bitmap(form.Width, form.Height);
                     form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, form.Size));
                     bitmap.Save(Path.Combine(output, $"file-dialog-{index}-{fontSize}-{viewport.Width}.png"));
-                    foreach (Control control in Descendants(root).Where(c => c is Button or TextBox or DataGridView))
+                    foreach (Control control in Descendants(root).Where(c => c is Button or TextBox or DataGridView or ListView))
                     {
                         control.Select();
                         control.Focus();

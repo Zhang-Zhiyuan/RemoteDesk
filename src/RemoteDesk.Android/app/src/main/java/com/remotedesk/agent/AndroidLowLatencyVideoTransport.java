@@ -900,18 +900,22 @@ final class AndroidLowLatencyVideoTransport {
         }
 
         boolean offerMouseMove(byte[] inputPayload) {
+            return offerMouseMove(inputPayload, () -> true);
+        }
+
+        boolean offerMouseMove(byte[] inputPayload, java.util.function.BooleanSupplier inputCurrent) {
             if (inputPayload == null || inputPayload.length != 14 ||
                 (inputPayload[0] & 0xFF) != RemoteDeskProtocol.INPUT_MOUSE_MOVE ||
                 (inputPayload[1] & 0xFF) != RemoteDeskProtocol.MOUSE_NONE ||
                 (features & LowLatencyVideoProtocol.FEATURE_UDP_MOUSE_INPUT) == 0 ||
-                !canUseUdpMouseNow()) {
+                !canUseUdpMouseNow() || !inputCurrent.getAsBoolean()) {
                 return false;
             }
-            pendingMouse.set(new PendingMouse(inputPayload.clone()));
+            pendingMouse.set(new PendingMouse(inputPayload.clone(), inputCurrent));
             synchronized (stateLock) {
                 stateLock.notifyAll();
             }
-            if (!canUseUdpMouseNow()) {
+            if (!canUseUdpMouseNow() || !inputCurrent.getAsBoolean()) {
                 pendingMouse.set(null);
                 return false;
             }
@@ -1256,13 +1260,13 @@ final class AndroidLowLatencyVideoTransport {
                 return;
             }
             PendingMouse mouse = pendingMouse.getAndSet(null);
-            if (mouse == null) {
+            if (mouse == null || !mouse.inputCurrent.getAsBoolean()) {
                 return;
             }
             long sequence = ++nextMouseSequence;
             lastMouseSentSequence = sequence;
             lastMouseSentAtNanos = clock.nanoTime();
-            sendDatagram(sendCipher.encrypt(
+            byte[] encoded = sendCipher.encrypt(
                 LowLatencyVideoProtocol.KIND_MOUSE_MOVE,
                 sequence,
                 mouse.payload.length,
@@ -1271,7 +1275,8 @@ final class AndroidLowLatencyVideoTransport {
                 1,
                 RemoteDeskProtocol.MESSAGE_INPUT,
                 0,
-                mouse.payload));
+                mouse.payload);
+            if (mouse.inputCurrent.getAsBoolean()) sendDatagram(encoded);
         }
 
         private void sendDatagram(byte[] bytes) throws IOException {
@@ -1344,9 +1349,11 @@ final class AndroidLowLatencyVideoTransport {
 
     private static final class PendingMouse {
         final byte[] payload;
+        final java.util.function.BooleanSupplier inputCurrent;
 
-        PendingMouse(byte[] payload) {
+        PendingMouse(byte[] payload, java.util.function.BooleanSupplier inputCurrent) {
             this.payload = payload;
+            this.inputCurrent = inputCurrent;
         }
     }
 

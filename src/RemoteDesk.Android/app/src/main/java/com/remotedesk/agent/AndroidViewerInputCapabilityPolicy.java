@@ -5,7 +5,11 @@ final class AndroidViewerInputCapabilityPolicy {
     }
 
     static boolean canSendInput(boolean deviceInfoReceived, int remoteCapabilities) {
-        return deviceInfoReceived &&
+        return canSendInput(deviceInfoReceived, remoteCapabilities, false);
+    }
+
+    static boolean canSendInput(boolean deviceInfoReceived, int remoteCapabilities, boolean locallyPaused) {
+        return !locallyPaused && deviceInfoReceived &&
             (remoteCapabilities & RemoteDeskProtocol.CAPABILITY_INPUT_CONTROL) != 0;
     }
 

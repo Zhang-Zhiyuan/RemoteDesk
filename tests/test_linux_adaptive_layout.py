@@ -179,6 +179,58 @@ class RealTkAdaptiveLayoutTests(unittest.TestCase):
             finally:
                 ui.close()
 
+    def test_mouse_wheel_scrolls_device_rows_before_outer_page(self):
+        notebook = app.ttk.Notebook(self.root)
+        notebook.pack(fill=app.tk.BOTH, expand=True)
+        content = self.ui._create_scrollable_tab(notebook, "Device scrolling")
+        tree = self.ui._device_table(content, height=4)
+        for index in range(40):
+            tree.insert("", app.tk.END, text=f"Device {index}")
+        for index in range(20):
+            app.ttk.Label(content, text=f"Additional field {index}").pack(pady=4)
+        self.root.update()
+        canvas = content.master
+        original_page = canvas.yview()
+
+        for sequence, options in (("<Button-5>", {}), ("<MouseWheel>", {"delta": -120})):
+            tree.yview_moveto(0)
+            tree.event_generate(sequence, **options)
+            self.root.update()
+            self.assertGreater(tree.yview()[0], 0)
+            self.assertEqual(original_page, canvas.yview())
+
+        tree.yview_moveto(1)
+        tree.event_generate("<Button-5>")
+        self.root.update()
+        self.assertGreater(canvas.yview()[0], original_page[0])
+
+    def test_mouse_wheel_scrolls_host_log_before_outer_page(self):
+        notebook = app.ttk.Notebook(self.root)
+        notebook.pack(fill=app.tk.BOTH, expand=True)
+        content = self.ui._create_scrollable_tab(notebook, "Log scrolling")
+        log = app.tk.Text(content, height=4, width=20)
+        log.pack(fill=app.tk.X)
+        log.insert("1.0", "\n".join(f"Log line {index}" for index in range(40)))
+        for index in range(20):
+            app.ttk.Label(content, text=f"Additional field {index}").pack(pady=4)
+        self.root.update()
+        canvas = content.master
+        original_page = canvas.yview()
+
+        for sequence, options in (("<Button-5>", {}), ("<MouseWheel>", {"delta": -120})):
+            log.yview_moveto(0)
+            log.event_generate(sequence, **options)
+            self.root.update()
+            self.assertGreater(log.yview()[0], 0)
+            self.assertEqual(original_page, canvas.yview())
+
+        log.yview_moveto(0)
+        canvas.yview_moveto(1)
+        original_page = canvas.yview()
+        log.event_generate("<Button-4>")
+        self.root.update()
+        self.assertLess(canvas.yview()[0], original_page[0])
+
     def test_wrapped_actions_keep_callbacks_and_fit_after_repeated_resize(self):
         panel = app.ttk.Frame(self.root)
         panel.pack(fill=app.tk.X)

@@ -249,6 +249,13 @@ public final class AndroidLowLatencyVideoTransportTest {
             assertTrue(frameReceived.await(3, TimeUnit.SECONDS));
             assertArrayEquals(frame, receivedFrame.get());
 
+            assertTrue(!viewer.offerMouseMove(mouseMove(80, 90), () -> false));
+            // Revocation after mailbox admission must also be checked by the
+            // actual UDP sender, not merely by the UI enqueue path.
+            AtomicInteger inputChecks = new AtomicInteger();
+            viewer.offerMouseMove(mouseMove(81, 91), () -> inputChecks.incrementAndGet() <= 2);
+            Thread.sleep(100);
+            assertEquals(2, mouseApplied.getCount());
             assertTrue(viewer.offerMouseMove(mouseMove(100, 200)));
             awaitCount(mouseApplied, 1, 2_000);
             awaitCount(mouseAcknowledged, 1, 2_000);

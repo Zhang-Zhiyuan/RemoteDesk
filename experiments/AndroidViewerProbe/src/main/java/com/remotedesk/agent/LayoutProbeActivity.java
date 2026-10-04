@@ -61,6 +61,8 @@ public final class LayoutProbeActivity extends Activity {
         addContentView(root, new ViewGroup.LayoutParams(
             dp(getIntent().getIntExtra("width", 320)), dp(getIntent().getIntExtra("height", 640))));
         chrome.composer.setShowSoftInputOnFocus(false);
+        chrome.status.setText("已连接 · 合成测试电脑");
+        chrome.watchOnly.setOnClickListener(v -> chrome.inputPaused(!chrome.watchOnly.isSelected()));
         chrome.mode(false, false); chrome.adapt(compact);
         chrome.phoneNavigation(getIntent().getStringExtra("platform"));
         root.postDelayed(() -> runStage(0), 250);
@@ -101,7 +103,10 @@ public final class LayoutProbeActivity extends Activity {
                         && menuVisible.width() == chrome.more.getWidth(), "Pinned menu clipped");
                 tap(chrome.more);
                 for (int i = 0; i < chrome.mainRow.getChildCount(); i++) tap(chrome.mainRow.getChildAt(i));
+                tap(chrome.watchOnly);
             } else if (stage == 1) {
+                require(chrome.watchOnly.isSelected() && chrome.watchOnly.getLayout().getEllipsisCount(0) == 0,
+                    "Only-watch toggle clipped or coordinate tap missed");
                 require(chrome.mainRow.getChildCount() == 6 && actions == 6,
                     "Coordinate taps missed callbacks (including zoom/upscale): " + actions);
                 chrome.keyboard(true); chrome.adapt(compact);

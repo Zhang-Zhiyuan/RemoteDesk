@@ -36,4 +36,26 @@ public final class AndroidRelayPanelStatusTest {
         assertEquals("", status.display(null));
         status.failed(null); assertEquals("在线", status.display("在线"));
     }
+
+    @Test public void serviceFailureAfterSavingDoesNotClaimTheConfigurationWasLost() {
+        AndroidRelayPanelStatus status = new AndroidRelayPanelStatus();
+        for (String message : new String[] {
+            "设置已保存，但服务更新失败；请重启本机被控端。",
+            "登录已保存，但服务更新失败；请重启本机被控端。",
+            "已退出并清除登录，但服务更新失败；请重启本机被控端以停止旧连接。"
+        }) {
+            status.failed(message, true);
+            assertEquals(message, status.display(""));
+            assertEquals(message + "\n在线设备 2 台", status.display("在线设备 2 台"));
+        }
+    }
+
+    @Test public void laterRejectedSaveRestoresUnsavedPrefixAfterAnApplicationFailure() {
+        AndroidRelayPanelStatus status = new AndroidRelayPanelStatus();
+        status.failed("登录已保存，但服务更新失败", true);
+        status.beginSetup();
+        assertEquals("验证中", status.display("验证中"));
+        status.failed("存储不可写");
+        assertEquals("配置未保存：存储不可写", status.display(""));
+    }
 }

@@ -17,6 +17,7 @@ internal static class ViewerClippingProbe
         var overflow = Get<ViewerActionOverflow>(viewer, "_statusActionOverflow");
         var expectedActions = new[] {
             "_androidBackButton", "_androidHomeButton", "_androidRecentsButton",
+            "_inputPauseButton", "_transferTasksButton",
             "_pullRemoteFilesButton", "_openReceivedFilesButton", "_remoteInputMethodButton",
             "_switchCaptureTargetButton", "_additionalScreenButton", "_displayScaleButton", "_experimentalUpscaleButton",
             "_nativeDetailButton", "_fullScreenButton"
@@ -149,11 +150,61 @@ internal static class ViewerClippingProbe
         }
         viewer.Close();
         viewer.Dispose();
+        VerifyDynamicNativeOffer(output, cases, ref failures);
         foreach (Font font in fonts) font.Dispose();
         Application.DoEvents();
         Program.Save(Path.Combine(output, "viewer-layout.json"), new { complete = true, failures, cases,
             scope = "Actual WinForms on a private station, runtime fonts/resizes; no settings, real input or network sessions" });
         if (failures > 0) throw new InvalidOperationException($"Viewer layout: {failures} cases clipped; see viewer-layout.json");
+    }
+
+    private static void VerifyDynamicNativeOffer(string output, List<object> cases, ref int failures)
+    {
+        foreach (float points in new[] { 9f, 20f })
+        {
+            using var client = new RemoteViewerClient();
+            using var viewer = new RemoteViewerWindow(client, "Dynamic native-detail capability", false, false, false, false, false, false);
+            using var font = new Font("Microsoft YaHei UI", points);
+            viewer.Font = font;
+            viewer.Show();
+            Invoke(viewer, "UninstallSystemKeyboardCapture");
+            viewer.ClientSize = new Size(1400, 800);
+            Pump();
+            var button = Get<Button>(viewer, "_nativeDetailButton");
+            var actions = Get<FlowLayoutPanel>(viewer, "_fileTransferActionsPanel");
+            var overflow = Get<ViewerActionOverflow>(viewer, "_statusActionOverflow");
+            bool Reachable() => button.Visible && (button.Parent == actions ||
+                (overflow.MoreButton.Visible && overflow.OverflowButtons.Contains(button)));
+            void Offer(bool available)
+            {
+                var offer = new NativeDetailOffer(1, new Size(1920, 1080), available);
+                typeof(RemoteViewerClient).GetField("_nativeOffer", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(client, offer);
+                Invoke(viewer, "OnNativeOfferChanged", offer);
+                Pump();
+            }
+            Offer(true);
+            bool appeared = Reachable();
+            using (var bitmap = new Bitmap(viewer.Width, viewer.Height))
+            {
+                viewer.DrawToBitmap(bitmap, new Rectangle(Point.Empty, viewer.Size));
+                bitmap.Save(Path.Combine(output, $"viewer-native-appeared-{points}.png"));
+            }
+            viewer.ToggleNativeDetailsAsync().GetAwaiter().GetResult();
+            Offer(false);
+            bool paused = Reachable() && button.Text == "原生补清：暂停";
+            viewer.ToggleNativeDetailsAsync().GetAwaiter().GetResult();
+            Pump();
+            bool hiddenAfterOff = !button.Visible && !overflow.OverflowButtons.Contains(button);
+            Offer(true);
+            bool returned = Reachable();
+            bool passed = appeared && paused && hiddenAfterOff && returned;
+            cases.Add(new { scenario = "Native-detail capability changes without resizing", points,
+                dpi = viewer.DeviceDpi, appeared, paused, hiddenAfterOff, returned, passed });
+            if (!passed) failures++;
+            viewer.Close();
+        }
+
+        static void Pump() { for (int i = 0; i < 5; i++) Application.DoEvents(); }
     }
 
     private static T Get<T>(object instance, string field) => (T)instance.GetType().GetField(field,

@@ -76,4 +76,40 @@ public class AndroidFileSenderTest {
             assertTrue(done.await(2, TimeUnit.SECONDS)); assertEquals("file-id", ids.get(0));
         }
     }
+
+    @Test public void cancelledFramesWaitingForWriteLockNeverStartOrCommitButCleanupIsAllowed() throws Exception {
+        var executor = Executors.newSingleThreadExecutor();
+        try {
+            for (int kind : new int[] { RemoteDeskProtocol.CONTROL_FILE_TRANSFER_START,
+                    RemoteDeskProtocol.CONTROL_FILE_TRANSFER_CHUNK, RemoteDeskProtocol.CONTROL_FILE_TRANSFER_COMPLETE }) {
+                AndroidFileSender sender = new AndroidFileSender();
+                Object lock = new Object();
+                List<Integer> writes = new ArrayList<>();
+                AndroidFileSender.Writer guarded = sender.withCancellationFence(lock, payload -> writes.add(payload[0] & 255));
+                CountDownLatch waiting = new CountDownLatch(1);
+                java.util.concurrent.Future<?> queued;
+                synchronized (lock) {
+                    queued = executor.submit(() -> { waiting.countDown(); guarded.write(new byte[] {(byte)kind}); return null; });
+                    assertTrue(waiting.await(1, TimeUnit.SECONDS));
+                    sender.cancel();
+                }
+                try { queued.get(1, TimeUnit.SECONDS); fail("queued frame sent after cancellation: " + kind); }
+                catch (java.util.concurrent.ExecutionException expected) { assertTrue(expected.getCause() instanceof java.io.InterruptedIOException); }
+                assertTrue(writes.isEmpty());
+                guarded.write(new byte[] {RemoteDeskProtocol.CONTROL_FILE_TRANSFER_CANCEL});
+                assertEquals(java.util.Collections.singletonList((int)RemoteDeskProtocol.CONTROL_FILE_TRANSFER_CANCEL), writes);
+            }
+        } finally { executor.shutdownNow(); }
+    }
+
+    @Test public void legacyCancelBeforeStartDoesNotSendANewFile() throws Exception {
+        AndroidFileSender sender = new AndroidFileSender();
+        List<Integer> writes = new ArrayList<>();
+        sender.cancelBeforeStart();
+        try {
+            sender.send(new ByteArrayInputStream(new byte[0]), "not-started", 0, 0,
+                sender.withCancellationFence(new Object(), payload -> writes.add(payload[0] & 255)), () -> true, ignored -> {});
+            fail("legacy cancellation should not start a file still waiting for its first write");
+        } catch (java.io.InterruptedIOException expected) { assertTrue(writes.isEmpty()); }
+    }
 }

@@ -5,8 +5,6 @@ import android.app.AlertDialog;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
-import android.text.TextUtils;
-import android.view.Gravity;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -33,6 +31,7 @@ final class AndroidLanDiscoveryPanel extends LinearLayout implements AutoCloseab
     private final Button refresh, detectPort;
     private AndroidLanDiscovery pending;
     private List<AndroidLanDevice> nearby = Collections.emptyList();
+    private List<AndroidLanDevice> displayedDevices = Collections.emptyList();
     private long refreshedAt;
     private int epoch;
     private boolean active, closed, busy;
@@ -171,14 +170,16 @@ final class AndroidLanDiscoveryPanel extends LinearLayout implements AutoCloseab
     }
 
     private void render() {
-        devices.removeAllViews();
         List<AndroidLanDevice> visible = AndroidLanDevice.collapseAliases(nearby);
+        // Periodic scans usually return the same devices. Preserve row focus,
+        // touch state and layouts until a label or connection action changes.
+        if (AndroidLanDevice.sameSnapshot(displayedDevices, visible)) return;
+        displayedDevices = visible;
+        devices.removeAllViews();
         for (int i = 0; i < Math.min(3, visible.size()); i++) {
             AndroidLanDevice device = visible.get(i);
             Button item = button(device.description());
-            item.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-            item.setMaxLines(3); item.setEllipsize(TextUtils.TruncateAt.END);
-            item.setPadding(dp(12), dp(8), dp(12), dp(8));
+            AndroidUiTheme.styleDeviceButton(activity, item);
             item.setContentDescription("发现设备 " + device.name + "，" + device.address());
             item.setOnClickListener(view -> select.accept(device));
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);

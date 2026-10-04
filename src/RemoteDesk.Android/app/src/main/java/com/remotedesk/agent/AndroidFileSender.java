@@ -17,12 +17,30 @@ final class AndroidFileSender {
     interface Writer { void write(byte[] payload) throws Exception; }
     final String transferId = UUID.randomUUID().toString().replace("-", "");
     private final AtomicBoolean cancelled = new AtomicBoolean();
+    private final AtomicBoolean cancelBeforeStart = new AtomicBoolean();
     private final CountDownLatch receipt = new CountDownLatch(1);
     private volatile boolean accepted;
     private volatile String receiptMessage = "";
     long receiptTimeoutMillis = 120_000L;
 
     void cancel() { cancelled.set(true); }
+    void cancelBeforeStart() { cancelBeforeStart.set(true); }
+
+    Writer withCancellationFence(Object writeLock, Writer delegate) {
+        return payload -> {
+            synchronized (writeLock) {
+                // Recheck after waiting behind another write. Do not interrupt
+                // a frame already being written; only the cleanup Cancel frame
+                // is allowed through after cancellation.
+                if (payload.length > 0 && (payload[0] & 255) == RemoteDeskProtocol.CONTROL_FILE_TRANSFER_START && cancelBeforeStart.get())
+                    throw new InterruptedIOException("文件尚未开始，已取消");
+                if ((cancelled.get() || Thread.currentThread().isInterrupted()) &&
+                    (payload.length == 0 || (payload[0] & 255) != RemoteDeskProtocol.CONTROL_FILE_TRANSFER_CANCEL))
+                    throw new InterruptedIOException("已取消文件传输");
+                delegate.write(payload);
+            }
+        };
+    }
 
     synchronized void receive(RemoteDeskTransport.ControlMessage message) {
         if (message.kind != RemoteDeskProtocol.CONTROL_FILE_TRANSFER_RECEIPT ||

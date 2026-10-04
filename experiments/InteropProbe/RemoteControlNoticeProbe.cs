@@ -16,6 +16,7 @@ internal static class RemoteControlNoticeProbe
     {
         using var config = JsonDocument.Parse(Console.ReadLine()!);
         string output = Path.GetFullPath(config.RootElement.GetProperty("output").GetString()!);
+        bool dpiOnly = config.RootElement.TryGetProperty("dpiOnly", out var dpiValue) && dpiValue.GetBoolean();
         Directory.CreateDirectory(output);
         nint station = CreateWindowStation(null, 0, 0x000F037F, 0);
         if (station == 0 || !SetProcessWindowStation(station)) throw new Win32Exception();
@@ -30,7 +31,8 @@ internal static class RemoteControlNoticeProbe
                 Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
                 Application.EnableVisualStyles();
-                Verify(output);
+                if (dpiOnly) VerifyDpi(output);
+                else Verify(output);
             }
             catch (Exception error) { failure = error; }
         });
@@ -38,6 +40,56 @@ internal static class RemoteControlNoticeProbe
         worker.Start(); worker.Join();
         if (failure is not null) throw failure;
         return 0;
+    }
+
+    private static void VerifyDpi(string output)
+    {
+        var cases = new List<object>();
+        var failures = new List<string>();
+        using var editor = new Form { Text = "Owned private focus target", ShowInTaskbar = false };
+        var entry = new TextBox { Dock = DockStyle.Fill };
+        editor.Controls.Add(entry);
+        editor.Show(); entry.Focus(); Pump();
+        nint originalFocus = GetFocus();
+        foreach (float points in new[] { 9f, 14f, 24f })
+        foreach (int width in new[] { 320, 800, 1920 })
+        {
+            using var notice = new RemoteControlNotice();
+            using var font = new Font("Microsoft YaHei UI", points);
+            notice.Font = font;
+            var area = new Rectangle(-800, 40, width, 1000);
+            notice.SetDisplayWorkingArea(area);
+            notice.ShowActive(); Pump();
+            foreach (int dpi in new[] { 96, 192, 96, 120, 168, 240, 96 })
+            {
+                string tag = $"notice-font{points}-width{width}-dpi{dpi}-case{cases.Count}";
+                object transition = SyntheticDpi.Apply(notice, dpi);
+                var label = notice.Controls.OfType<Label>().Single();
+                var button = notice.Controls.OfType<Button>().Single();
+                int requiredTextHeight = label.GetPreferredSize(new Size(label.Width, 0)).Height;
+                var issues = new List<string>();
+                if (!area.Contains(notice.Bounds)) issues.Add($"Bounds {notice.Bounds} outside working area {area}");
+                if (!notice.ClientRectangle.Contains(label.Bounds) || !notice.ClientRectangle.Contains(button.Bounds))
+                    issues.Add($"Label/button {label.Bounds}/{button.Bounds} outside client {notice.ClientRectangle}");
+                if (label.Bounds.IntersectsWith(button.Bounds)) issues.Add("Label overlaps disconnect action");
+                if (requiredTextHeight > label.Height) issues.Add($"Label clips preferred text height {requiredTextHeight} > {label.Height}");
+                if (TextRenderer.MeasureText("断开中", button.Font).Height > button.Height) issues.Add("Disconnect text clipped");
+                if (GetFocus() != originalFocus) issues.Add("DPI transition stole typing focus");
+                cases.Add(new { tag, transition, notice.Bounds, area, label = label.Bounds, button = button.Bounds,
+                    requiredTextHeight, issues });
+                failures.AddRange(issues.Select(issue => tag + ": " + issue));
+                if (issues.Count > 0 || dpi == 192 || dpi == 96)
+                {
+                    using var image = new Bitmap(notice.Width, notice.Height);
+                    notice.DrawToBitmap(image, notice.ClientRectangle);
+                    image.Save(Path.Combine(output, tag + ".png"));
+                }
+            }
+            notice.Close(); Pump();
+        }
+        Program.Save(Path.Combine(output, "notice-dpi.json"), new { passed = failures.Count == 0, cases, failures,
+            scope = "Standalone no-activate notices on a private station; synthetic DPI notifications and owned editor focus; no authenticated or production session" });
+        if (failures.Count > 0) throw new InvalidOperationException($"Notice DPI: {failures.Count} findings; see notice-dpi.json");
     }
 
     private static void Verify(string output)

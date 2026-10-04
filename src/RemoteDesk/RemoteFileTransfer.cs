@@ -30,7 +30,8 @@ internal readonly record struct RemoteFilePasteResult(
     bool Truncated,
     int ArchivedDirectories = 0,
     string? FailureMessage = null,
-    IReadOnlyList<RemoteFileItemResult>? Results = null);
+    IReadOnlyList<RemoteFileItemResult>? Results = null,
+    bool Cancelled = false);
 
 internal sealed record RemoteFileItemResult(string Name, bool Success, string Details);
 

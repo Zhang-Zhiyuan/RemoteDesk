@@ -16,6 +16,8 @@ internal sealed partial class RemoteViewerWindow
             [(_androidBackButton, async () => await SendAndroidNavigationAsync(Keys.Escape)),
              (_androidHomeButton, async () => await SendAndroidNavigationAsync(Keys.Home)),
              (_androidRecentsButton, async () => await SendAndroidNavigationAsync(Keys.F12)),
+             (_inputPauseButton, ToggleLocalInputPause),
+             (_transferTasksButton, ShowTransferTasks),
              (_pullRemoteFilesButton, async () => await PullRemoteClipboardFilesAsync()),
              (_openReceivedFilesButton, OpenReceivedFilesDirectory),
              (_remoteInputMethodButton, async () => await SwitchRemoteInputMethodAsync()),
@@ -25,7 +27,7 @@ internal sealed partial class RemoteViewerWindow
              (_experimentalUpscaleButton, ToggleExperimentalUpscaling),
              (_nativeDetailButton, async () => await ToggleNativeDetailsAsync()),
              (_fullScreenButton, ToggleFullScreen)],
-            [[_androidBackButton], [_androidHomeButton], [_androidRecentsButton],
+            [[_inputPauseButton], [_transferTasksButton], [_androidBackButton], [_androidHomeButton], [_androidRecentsButton],
              [_displayScaleButton, _experimentalUpscaleButton], [_fullScreenButton], [_switchCaptureTargetButton, _additionalScreenButton],
              [_pullRemoteFilesButton, _openReceivedFilesButton], [_remoteInputMethodButton], [_nativeDetailButton]],
             ReleaseAllRemoteInputs);

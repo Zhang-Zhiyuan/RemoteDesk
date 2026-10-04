@@ -19,10 +19,20 @@
         </activity>
         <activity android:name="com.remotedesk.agent.LayoutProbeActivity" android:exported="true"
             android:windowSoftInputMode="stateAlwaysHidden|adjustNothing" />
+        <activity android:name="com.remotedesk.agent.DeviceRowsProbeActivity" android:exported="true"
+            android:theme="@style/AppTheme" android:windowSoftInputMode="stateAlwaysHidden|adjustNothing" />
         <activity android:name="com.remotedesk.agent.Ipv6ProbeActivity" android:exported="true" />
         <activity android:name="com.remotedesk.agent.RemoteDeskViewerActivity" android:exported="false"
             android:windowSoftInputMode="adjustResize"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode" />
         <receiver android:name="com.remotedesk.agent.ViewerProbeReceiver" android:exported="true" />
+        <receiver android:name="com.remotedesk.agent.DpiProbeReceiver" android:exported="true" />
+        <provider android:name="com.remotedesk.agent.ViewerFilesProbeProvider"
+            android:authorities="com.remotedesk.viewerprobe.files" android:exported="false" />
+        <provider android:name="com.remotedesk.agent.SafDocumentsProbeProvider"
+            android:authorities="com.remotedesk.viewerprobe.saf" android:exported="true"
+            android:grantUriPermissions="true" android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter><action android:name="android.content.action.DOCUMENTS_PROVIDER" /></intent-filter>
+        </provider>
     </application>
 </manifest>

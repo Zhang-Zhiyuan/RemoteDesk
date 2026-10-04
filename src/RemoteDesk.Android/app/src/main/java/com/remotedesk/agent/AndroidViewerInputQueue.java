@@ -76,7 +76,17 @@ final class AndroidViewerInputQueue implements AutoCloseable {
     }
 
     synchronized void discardAll() {
+        // A pending release barrier must survive a subsequent capability update
+        // or a quick pause/resume; otherwise an in-flight key-down can stick.
+        commands.removeIf(command -> !command.releaseAll);
+        activeReleaseLimit = hardCapacity;
+        notifyAll();
+    }
+
+    synchronized void releaseAll(int x, int y) {
+        if (closed) return;
         commands.clear();
+        commands.addLast(new Command(x, y));
         activeReleaseLimit = hardCapacity;
         notifyAll();
     }
@@ -165,6 +175,14 @@ final class AndroidViewerInputQueue implements AutoCloseable {
         final int data;
         final long mouseRouteGeneration;
         final long inputCapabilityGeneration;
+        final boolean releaseAll;
+
+        private Command(int x, int y) {
+            kind = button = data = 0;
+            this.x = x; this.y = y;
+            mouseRouteGeneration = inputCapabilityGeneration = 0;
+            releaseAll = true;
+        }
 
         Command(int kind, int button, int x, int y, int data) {
             this(kind, button, x, y, data, 0L, 0L);
@@ -189,6 +207,7 @@ final class AndroidViewerInputQueue implements AutoCloseable {
             this.data = data;
             this.mouseRouteGeneration = mouseRouteGeneration;
             this.inputCapabilityGeneration = inputCapabilityGeneration;
+            releaseAll = false;
         }
 
         private boolean samePayload(Command other) {

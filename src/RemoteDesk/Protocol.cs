@@ -150,7 +150,8 @@ internal static class Protocol
         ReadOnlyMemory<byte> payload,
         SecureSession session,
         SemaphoreSlim writeLock,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<bool>? shouldSend = null)
     {
         if (!Enum.IsDefined(messageType))
         {
@@ -176,6 +177,9 @@ internal static class Protocol
             await writeLock.WaitAsync(cancellationToken);
             try
             {
+                // Revalidate optional UI intent after waiting behind another write, before
+                // consuming an encryption nonce. Never cancel a partially written frame.
+                if (shouldSend?.Invoke() == false) return;
                 BinaryPrimitives.WriteInt32LittleEndian(
                     packetBuffer.AsSpan(0, EncryptedHeaderLength),
                     encryptedLength);

@@ -36,7 +36,7 @@ final class AndroidViewerChrome {
     final TextView status, health, hint;
     final View indicator;
     final EditText composer;
-    final Button mode, keyboard, mouse, drag, screens, send, upscale, more;
+    final Button mode, keyboard, mouse, drag, screens, send, upscale, more, watchOnly;
     boolean keyboardOpen, mouseOpen;
     private boolean compact;
     private boolean compactKeys;
@@ -47,6 +47,7 @@ final class AndroidViewerChrome {
     private final LinearLayout entryRow;
     private final Button compactSwitch, compactClose;
     private boolean modeInitialized, previousTrackpad, previousLocked;
+    private boolean inputPaused;
     private final Activity activity;
     private final Actions actions;
 
@@ -63,6 +64,8 @@ final class AndroidViewerChrome {
         dot.setMarginEnd(dp(9)); headline.addView(indicator, dot);
         status = text(13, Color.WHITE); status.setMaxLines(1);
         headline.addView(status, new LinearLayout.LayoutParams(0, -2, 1));
+        watchOnly = button("仅观看：关", null);
+        headline.addView(watchOnly);
         header.addView(headline);
         health = text(10, 0xff99aac3); health.setMaxLines(1);
         header.addView(health);
@@ -100,7 +103,10 @@ final class AndroidViewerChrome {
         LinearLayout entry = row(); entryRow = entry;
         composer = new EditText(activity);
         composer.setTextSize(14); composer.setTextColor(Color.WHITE); composer.setHintTextColor(0xff99aac3);
-        composer.setHint("输入文字后发送到远端");
+        // A long placeholder can stretch the empty field to several lines at
+        // large font scales in compact keyboard mode, needlessly hiding the desktop.
+        composer.setHint("输入文字");
+        composer.setContentDescription("输入文字后发送到远端");
         composer.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
         composer.setMaxLines(2);
         composer.setFilters(new InputFilter[] { new InputFilter.LengthFilter(AndroidViewerKeyboard.MAX_TEXT_LENGTH) });
@@ -182,12 +188,22 @@ final class AndroidViewerChrome {
 
     void controls(boolean enabled) {
         keyboard.setEnabled(enabled); mouse.setEnabled(enabled);
+        drag.setEnabled(enabled);
         for (Button navigation : new Button[] {phoneBack, phoneHome, phoneRecents})
             navigation.setEnabled(enabled && androidRemote);
         composer.setEnabled(enabled);
         updateSendState();
         keyboardPanel.setAlpha(enabled ? 1 : 0.45f);
         if (!enabled) { actions.keyboard(false); setMouseOpen(false); }
+    }
+
+    void inputPaused(boolean paused) {
+        inputPaused = paused;
+        watchOnly.setText(paused ? "仅观看：开" : "仅观看：关");
+        watchOnly.setContentDescription(paused ? "已暂停本地远端输入，点击恢复控制" : "点击仅观看并暂停本地远端输入");
+        mark(watchOnly, paused);
+        modeInitialized = false;
+        mode(previousTrackpad, previousLocked);
     }
 
     void upscaling(boolean enabled) {
@@ -239,7 +255,7 @@ final class AndroidViewerChrome {
         mode.setText(trackpad ? "触控板" : "直接触摸");
         mode.setContentDescription(trackpad ? "当前触控板模式，点击切换直接触摸" : "当前直接触摸模式，点击切换触控板");
         drag.setText(locked ? "结束拖动" : "拖动锁定"); mark(drag, locked);
-        hint.setText(locked ? "拖动已锁定 · 移动手指定位 · 点结束拖动释放" :
+        hint.setText(inputPaused ? "仅观看 · 输入已暂停 · 可缩放浏览，已确认文件继续发送" : locked ? "拖动已锁定 · 移动手指定位 · 点结束拖动释放" :
             trackpad ? "滑动移鼠标 · 轻触点击 · 双指滑动滚动" : "点哪里点哪里 · 单指拖动 · 双指滑动滚动");
     }
 

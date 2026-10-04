@@ -1,10 +1,53 @@
 using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Runtime.ExceptionServices;
 using Xunit;
 
 namespace RemoteDesk.Tests;
 
 public sealed class RemoteControlNoticeTests
 {
+    [Fact]
+    public void DpiTransitionArrangesAfterFrameworkScalingInsteadOfClippingDisconnect()
+    {
+        Exception? failure = null;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                using var notice = new RemoteControlNotice();
+                var area = new Rectangle(-800, 40, 320, 1000);
+                notice.SetDisplayWorkingArea(area);
+                _ = notice.Handle; // Hidden, NOACTIVATE; no remote connection or input.
+                foreach (int dpi in new[] { 96, 192, 96 })
+                {
+                    var suggested = new DpiRect(area.Left, area.Top, area.Left + 600, area.Top + 55);
+                    nint memory = Marshal.AllocHGlobal(Marshal.SizeOf<DpiRect>());
+                    try
+                    {
+                        Marshal.StructureToPtr(suggested, memory, false);
+                        SendMessage(notice.Handle, 0x02E0, dpi | dpi << 16, memory);
+                    }
+                    finally { Marshal.FreeHGlobal(memory); }
+                    Assert.True(area.Contains(notice.Bounds));
+                    Assert.All(notice.Controls.Cast<Control>(), control => Assert.True(notice.ClientRectangle.Contains(control.Bounds)));
+                    var label = notice.Controls.OfType<Label>().Single();
+                    Assert.True(label.GetPreferredSize(new Size(label.Width, 0)).Height <= label.Height);
+                }
+            }
+            catch (Exception error) { failure = error; }
+        }) { IsBackground = true };
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        Assert.True(thread.Join(TimeSpan.FromSeconds(10)));
+        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private readonly record struct DpiRect(int Left, int Top, int Right, int Bottom);
+    [DllImport("user32.dll")]
+    private static extern nint SendMessage(nint hwnd, uint message, nint wparam, nint lparam);
+
     [Fact]
     public void OnlyAuthenticatedLeasesMarkActivityAndOldCleanupCannotHideReplacement()
     {

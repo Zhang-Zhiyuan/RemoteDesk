@@ -4,8 +4,37 @@ import queue
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, font as tkfont, messagebox, simpledialog
 import remotedesk_linux_devices as model
+
+
+def fit_table_columns(tree, specifications):
+    """Keep headings/short fields readable; long names and paths can scroll.
+
+    Each column has (96-DPI width, minimum width, complete short-field values).
+    Minimums matter: Treeview otherwise silently shrinks even a wide column to
+    20 physical pixels when its viewport is narrow.
+    """
+    tree.configure(style="Readable.Treeview")
+    initialized = False
+    def fit(_event=None):
+        nonlocal initialized
+        style = ttk.Style(tree)
+        name = tree.cget("style") or "Treeview"
+        row = tkfont.Font(root=tree, font=style.lookup(name, "font"))
+        heading = tkfont.Font(root=tree, font=style.lookup(name + ".Heading", "font"))
+        row_height = row.metrics("linespace") + 10
+        if int(style.lookup(name, "rowheight") or 0) != row_height:
+            style.configure(name, rowheight=row_height)
+        scale = max(.75, min(3., float(tree.tk.call("tk", "scaling")) / (96 / 72)))
+        for column, (width, minimum, values) in specifications.items():
+            minimum = max(round(minimum * scale), heading.measure(tree.heading(column, "text")) + 16,
+                          *(row.measure(value) + 16 for value in values))
+            width = max(round(width * scale), minimum, tree.column(column, "width") if initialized else 0)
+            tree.column(column, width=width, minwidth=minimum)
+        initialized = True
+    fit()
+    tree.bind("<<ThemeChanged>>", fit, add="+")
 
 
 class DevicePanel(ttk.LabelFrame):
@@ -26,6 +55,8 @@ class DevicePanel(ttk.LabelFrame):
         self.tree = app._device_table(self, columns=("address", "state"), show="tree headings", height=4, selectmode="browse")
         self.tree.heading("#0", text="设备 / 备注"); self.tree.heading("address", text="IP / 端口"); self.tree.heading("state", text="状态")
         self.tree.column("#0", width=220); self.tree.column("address", width=210); self.tree.column("state", width=180)
+        fit_table_columns(self.tree, {"#0": (220, 100, ()), "address": (210, 180, ()),
+                                     "state": (180, 140, ("已保存 · 可自动探测", "被控未启动"))})
         self.rows = {}
         # Programmatic selection during refresh must not overwrite edited fields.
         self.tree.bind("<ButtonRelease-1>", self.fill_selection)

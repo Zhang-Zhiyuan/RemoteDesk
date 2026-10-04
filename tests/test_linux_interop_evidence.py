@@ -11,6 +11,14 @@ SPEC.loader.exec_module(node)
 
 
 class LinuxViewerEvidenceTests(unittest.TestCase):
+    def test_external_display_requires_explicit_owned_environment_and_safe_bind(self):
+        with mock.patch.dict(node.os.environ, {}, clear=True), mock.patch.object(node, "start_xvfb") as start:
+            with self.assertRaisesRegex(ValueError, "explicitly owned"):
+                node.host({"useOwnedDisplay": True, "bindAddress": "127.0.0.1"}, None)
+            with self.assertRaisesRegex(ValueError, "local listener"):
+                node.host({"bindAddress": "192.0.2.1"}, None)
+            start.assert_not_called()
+
     def test_owned_xvfb_does_not_reset_when_its_last_probe_client_closes(self):
         output = mock.MagicMock()
         with mock.patch.object(node.os, "pipe", return_value=(31, 32)), \

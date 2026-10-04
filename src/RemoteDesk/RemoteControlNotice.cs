@@ -58,8 +58,15 @@ internal sealed class RemoteControlNotice : Form
         };
         _message.MouseUp += (_, _) => { _dragOrigin = null; _message.Capture = false; };
         _message.MouseCaptureChanged += (_, _) => { if (!_message.Capture) _dragOrigin = null; };
-        DpiChanged += (_, _) => ArrangeOnScreen();
         FontChanged += (_, _) => ArrangeOnScreen();
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        // The public DpiChanged event runs before WinForms applies its suggested
+        // bounds and scales children. Arrange against the final fonts/bounds.
+        base.OnDpiChanged(e);
+        ArrangeOnScreen();
     }
 
     protected override bool ShowWithoutActivation => true;

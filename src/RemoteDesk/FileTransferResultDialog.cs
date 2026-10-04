@@ -23,6 +23,7 @@ internal sealed class FileTransferResultDialog : Form
         var close = new Button { Text = "知道了", AutoSize = true, MinimumSize = new Size(90, 32), Padding = new Padding(8, 4, 8, 4), Anchor = AnchorStyles.Right, DialogResult = DialogResult.OK, Margin = new Padding(0, 10, 0, 0) };
         root.Controls.Add(close, 0, 2);
         FileTransferDialogLayout.Attach(this, root, resultDetails);
+        ResponsiveWindowLayout.TrackDpiAndResizeBounds(this, new Size(900, 500), new Size(480, 280));
         AcceptButton = CancelButton = close;
         ActiveControl = close;
     }
@@ -36,6 +37,7 @@ internal sealed class FileTransferResultDialog : Form
     internal static string FormatDetails(RemoteFilePasteResult result, string destinationNote, bool remotePasteRequested)
     {
         var lines = new List<string> { destinationNote, "" };
+        if (result.Cancelled) lines.Add("任务已取消。已完成的文件保留，未开始的项目没有发送。\r\n");
         if (result.Results is not null)
             foreach (var item in result.Results)
                 lines.Add($"{(item.Success ? "已发送" : "未完成")}：{item.Name}\r\n{item.Details}\r\n");
@@ -49,7 +51,7 @@ internal sealed class FileTransferResultDialog : Form
 
     internal static void ShowResults(IWin32Window owner, RemoteFilePasteResult result, string destinationNote, bool remotePasteRequested = false)
     {
-        using var dialog = new FileTransferResultDialog($"已发送 {result.SentFiles} 项，未完成 {result.FailedFiles} 项；实际保存结果如下。",
+        using var dialog = new FileTransferResultDialog($"{(result.Cancelled ? "任务已取消。" : "")}已发送 {result.SentFiles} 项，未完成 {result.FailedFiles} 项；实际保存结果如下。",
             FormatDetails(result, destinationNote, remotePasteRequested));
         dialog.ShowDialog(owner);
     }

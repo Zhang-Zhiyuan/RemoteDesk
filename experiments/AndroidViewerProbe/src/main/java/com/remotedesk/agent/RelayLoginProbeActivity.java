@@ -21,6 +21,10 @@ public final class RelayLoginProbeActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        if (getIntent().getBooleanExtra("cancellationProbe", false)) {
+            runCancellationProbe();
+            return;
+        }
         if (getIntent().getBooleanExtra("ui", false)) {
             ScrollView scroll = new ScrollView(this);
             panel = new AndroidRelayPanel(this, ignored -> { });
@@ -78,6 +82,75 @@ public final class RelayLoginProbeActivity extends Activity {
                 runOnUiThread(() -> label.setText("Test stopped: " + error.getClass().getSimpleName()));
             } finally { deleteFile("relay-login-ready.json"); }
         }, "RelayLoginProbe").start();
+    }
+
+    /** Local callbacks only: no listener, SSH connection, saved relay or network request. */
+    @SuppressWarnings("unchecked")
+    private void runCancellationProbe() {
+        JSONObject result = new JSONObject();
+        AndroidRelayPanel fixture = null;
+        try {
+            result.put("runId", getIntent().getStringExtra("runId"));
+            fixture = new AndroidRelayPanel(this, ignored -> { });
+            java.lang.reflect.Method begin = AndroidRelayPanel.class.getDeclaredMethod("beginPendingOperation");
+            begin.setAccessible(true);
+            java.util.function.Consumer<Socket> directory =
+                (java.util.function.Consumer<Socket>) begin.invoke(fixture);
+            Socket directorySocket = new Socket();
+            directory.accept(directorySocket);
+            java.util.function.Consumer<Socket> login =
+                (java.util.function.Consumer<Socket>) begin.invoke(fixture);
+            AndroidRelayAdminLogin.Operation queuedLogin = new AndroidRelayAdminLogin.Operation();
+            login.accept(queuedLogin);
+            directory.accept(null); // A cancelled directory finishes after the next login was queued.
+            result.put("newLoginSurvivedOldCleanup", !queuedLogin.isClosed());
+            ((android.widget.Button) ViewerProbeApplication.field(fixture, "cancelSetupButton")).performClick();
+            result.put("cancelButtonClosedQueuedLogin", queuedLogin.isClosed());
+            result.put("previousDirectoryClosed", directorySocket.isClosed());
+
+            Socket late = new Socket();
+            directory.accept(late);
+            result.put("lateDirectorySocketClosed", late.isClosed());
+
+            java.util.function.Consumer<Socket> next =
+                (java.util.function.Consumer<Socket>) begin.invoke(fixture);
+            Socket nextSocket = new Socket();
+            next.accept(nextSocket);
+            java.lang.reflect.Field active = AndroidRelayPanel.class.getDeclaredField("active");
+            active.setAccessible(true);
+            active.set(fixture, true); // Model the visible state without starting its network ticker.
+            fixture.active(false);
+            result.put("leavingPageClosedCurrentSocket", nextSocket.isClosed());
+
+            java.lang.reflect.Method failed = AndroidRelayPanel.class.getDeclaredMethod("showSetupFailure", String.class, boolean.class);
+            failed.setAccessible(true);
+            String warning = "登录已保存，但服务更新失败；请重启本机被控端。";
+            failed.invoke(fixture, warning, true);
+            java.lang.reflect.Method status = AndroidRelayPanel.class.getDeclaredMethod("setStatus", String.class);
+            status.setAccessible(true);
+            status.invoke(fixture, "在线设备 2 台");
+            String actual = ((TextView) ViewerProbeApplication.field(fixture, "status")).getText().toString();
+            result.put("savedFailureMessage", actual);
+            result.put("savedFailureAccurateAfterDirectoryRefresh", actual.equals(warning + "\n在线设备 2 台"));
+            boolean passed = true;
+            for (String name : new String[] { "newLoginSurvivedOldCleanup", "cancelButtonClosedQueuedLogin",
+                "previousDirectoryClosed", "lateDirectorySocketClosed", "leavingPageClosedCurrentSocket",
+                "savedFailureAccurateAfterDirectoryRefresh" }) passed &= result.getBoolean(name);
+            result.put("passed", passed);
+        } catch (Exception failure) {
+            try { result.put("passed", false).put("error", failure.toString()); }
+            catch (Exception ignored) { }
+        } finally {
+            if (fixture != null) fixture.close();
+        }
+        try (java.io.FileOutputStream output = openFileOutput("relay-cancellation-probe.json", MODE_PRIVATE)) {
+            output.write(result.toString(2).getBytes(StandardCharsets.UTF_8));
+        } catch (Exception failure) { throw new RuntimeException(failure); }
+        TextView label = new TextView(this);
+        label.setText(result.toString());
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(label);
+        setContentView(scroll);
     }
     @Override protected void onResume() { super.onResume(); if (panel != null) panel.active(true); }
     @Override protected void onPause() { if (panel != null) panel.active(false); super.onPause(); }

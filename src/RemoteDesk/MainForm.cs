@@ -1173,6 +1173,9 @@ public sealed partial class MainForm : Form
         _pullRemoteFilesButton = CreateSecondaryButton(RemoteFilePullUi.DefaultButtonText);
         _pullRemoteFilesButton.Enabled = false;
         _openReceivedFilesButton = CreateSecondaryButton("接收目录");
+        _transferTasksButton = CreateSecondaryButton("传输任务");
+        _viewerInputPauseButton = CreateSecondaryButton("仅观看：关");
+        _viewerInputPauseButton.Enabled = false;
         _remoteUpdateButton = CreateSecondaryButton("同步程序版本");
         _remoteUpdateButton.Enabled = false;
         _viewerToggleButton = CreatePrimaryButton("连接");
@@ -1215,6 +1218,8 @@ public sealed partial class MainForm : Form
         toolbar.Controls.Add(_pasteFilesButton);
         toolbar.Controls.Add(_pullRemoteFilesButton);
         toolbar.Controls.Add(_openReceivedFilesButton);
+        toolbar.Controls.Add(_transferTasksButton);
+        toolbar.Controls.Add(_viewerInputPauseButton);
         toolbar.Controls.Add(_remoteUpdateButton);
         toolbar.Controls.Add(_viewerToggleButton);
         long toolbarPopulatedAt = Stopwatch.GetTimestamp();
@@ -1266,7 +1271,7 @@ public sealed partial class MainForm : Form
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             FlowDirection = FlowDirection.RightToLeft,
-            WrapContents = false,
+            WrapContents = true,
             BackColor = SurfaceBackColor,
             Padding = new Padding(0, 8, 0, 0),
             Margin = new Padding(0)
@@ -1275,6 +1280,7 @@ public sealed partial class MainForm : Form
         _editSavedDeviceRemarkButton.Margin = new Padding(0);
         savedDeviceActions.Controls.Add(_deleteSavedDeviceButton);
         savedDeviceActions.Controls.Add(_editSavedDeviceRemarkButton);
+        ConfigureWrappedActionRow(savedDeviceActions);
         long hostsCreatedAt = Stopwatch.GetTimestamp();
 
         var hostsSection = CreateSection(
@@ -1657,6 +1663,8 @@ public sealed partial class MainForm : Form
         SetToolTip(_relayVideoModeBox, ViewerVideoModeDescription);
         SetToolTip(_viewerStatusLabel, "右键可复制当前状态，或打开本机文件接收目录。");
         SetToolTip(_openReceivedFilesButton, "打开本机 RemoteDesk 文件接收目录，连接断开时也可使用。");
+        SetToolTip(_transferTasksButton, "查看发送、取回文件的进度和保存回执；取消单个任务不会断开远程桌面。");
+        SetToolTip(_viewerInputPauseButton, "暂停或恢复此连接的键鼠、粘贴和剪贴板写入。画面与已确认的文件传输继续，重连保留此选择。");
         SetToolTip(
             _relayConfigureButton,
             "通过 SSH 自动安装或更新你的私有 Linux 中继；管理员密码仅在本次操作的内存中使用。");
@@ -2437,6 +2445,9 @@ public sealed partial class MainForm : Form
         _pasteFilesButton.Click += async (_, _) => await PasteClipboardFilesFromMainAsync();
         _pullRemoteFilesButton.Click += async (_, _) => await PullRemoteClipboardFilesAsync();
         _openReceivedFilesButton.Click += (_, _) => OpenReceivedFilesDirectory();
+        _transferTasksButton.Click += (_, _) => ShowTransferTasks();
+        _viewerInputPauseButton.Click += (_, _) => _viewerClient.SetLocalInputPaused(!_viewerClient.IsLocalInputPaused);
+        _viewerClient.LocalInputPausedChanged += OnViewerLocalInputPausedChanged;
         _remoteUpdateButton.Click += async (_, _) => await SynchronizeRemoteUpdateAsync();
         _relayConfigureButton.Click += async (_, _) =>
             await ConfigureRelayServerAsync();
@@ -2452,11 +2463,7 @@ public sealed partial class MainForm : Form
         _relayAddressButton.Click += async (_, _) => await ShowRelayAddressesAsync();
         _relayConnectButton.Click += async (_, _) =>
             await ToggleRelayViewerAsync();
-        _relayDevicesList.SelectedIndexChanged += (_, _) =>
-        {
-            SelectRelayDeviceKey();
-            UpdateRelayActionState();
-        };
+        _relayDevicesList.SelectedIndexChanged += RelayDeviceSelectionChanged;
         _relayDevicesList.DoubleClick += async (_, _) =>
         {
             if (_relayConnectButton.Enabled &&
@@ -4126,32 +4133,7 @@ public sealed partial class MainForm : Form
                 await RelayTunnelClient.ListDevicesAsync(
                     options,
                     _relayOperationCancellation.Token);
-            if (_isClosing || IsDisposed || configurationGeneration != _relayConfigurationGeneration)
-            {
-                return;
-            }
-            string? selectedId = GetSelectedRelayDevice()?.DeviceId;
-            _relayDevicesList.BeginUpdate();
-            try
-            {
-                _relayDevicesList.Items.Clear();
-                foreach (RelayOnlineDevice device in devices)
-                {
-                    ListViewItem item = CreateRelayDeviceListItem(device, _settings.Relay.DeviceId);
-                    _relayDevicesList.Items.Add(item);
-                    if (string.Equals(
-                            device.DeviceId,
-                            selectedId,
-                            StringComparison.OrdinalIgnoreCase))
-                    {
-                        item.Selected = true;
-                    }
-                }
-            }
-            finally
-            {
-                _relayDevicesList.EndUpdate();
-            }
+            if (!ApplyRelayDeviceList(devices, configurationGeneration)) return;
 
             SetRelayStatus(
                 devices.Count == 0
@@ -5226,7 +5208,7 @@ public sealed partial class MainForm : Form
             return;
         }
 
-        SetViewerStatus($"正在探测 {address}:{port} 状态...", MutedTextColor);
+        SetViewerStatus($"正在探测 {NetworkUtils.FormatEndpoint(address, port)} 状态...", MutedTextColor);
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
@@ -5771,28 +5753,12 @@ public sealed partial class MainForm : Form
             string.Equals(device.Address, currentAddress, StringComparison.OrdinalIgnoreCase)) ?? devices.FirstOrDefault();
 
         _updatingDiscoveredHosts = true;
-        _discoveredHostsBox.BeginUpdate();
-        _discoveredHostsList.BeginUpdate();
         try
         {
-            _discoveredHostsBox.Items.Clear();
-            _discoveredHostsList.Items.Clear();
-            foreach (RemoteDeviceListItem device in devices)
-            {
-                _discoveredHostsBox.Items.Add(device);
-                _discoveredHostsList.Items.Add(device);
-            }
-
-            if (selected is not null)
-            {
-                _discoveredHostsBox.SelectedItem = selected;
-                _discoveredHostsList.SelectedItem = selected;
-            }
+            UpdateDirectDeviceLists(_discoveredHostsBox, _discoveredHostsList, devices, selected);
         }
         finally
         {
-            _discoveredHostsList.EndUpdate();
-            _discoveredHostsBox.EndUpdate();
             _updatingDiscoveredHosts = false;
         }
 
@@ -5950,15 +5916,14 @@ public sealed partial class MainForm : Form
     private void ApplyRemoteDevice(RemoteDeviceListItem device)
     {
         _selectedHistoryDevice = FindSavedForDiscovery(device.Address, device.Port, device.DeviceId);
+        SelectDirectDeviceKey(device, _selectedHistoryDevice);
         _viewerHostBox.Text = device.Address;
         _viewerPortBox.Value = ClampToRange(device.Port, _viewerPortBox);
         if (_selectedHistoryDevice is not null)
         {
-            if (_selectedHistoryDevice.ProtectedPassword is not null)
-                _viewerPasswordBox.Text = AppSettingsService.UnprotectSecret(_selectedHistoryDevice.ProtectedPassword);
             _viewerAutoPortBox.Checked = _selectedHistoryDevice.AutoDetectPort;
         }
-        SetViewerStatus($"已选择 {device.DisplayName} ({device.Address}:{device.Port})，{device.GetLongStatus()}", MutedTextColor);
+        SetViewerStatus($"已选择 {device.DisplayName} ({NetworkUtils.FormatEndpoint(device.Address, device.Port)})，{device.GetLongStatus()}", MutedTextColor);
         UpdateViewerActionState();
     }
 
@@ -6752,18 +6717,8 @@ public sealed partial class MainForm : Form
 
     internal static ListViewItem CreateRelayDeviceListItem(RelayOnlineDevice device, string? localDeviceId)
     {
-        bool isLocal = RelayDeviceSelectionPolicy.IsLocalDevice(device, localDeviceId);
-        var item = new ListViewItem(isLocal ? $"{device.MachineName}（本机）" : device.MachineName)
-        {
-            Tag = device,
-            ForeColor = isLocal ? MutedTextColor : TextColor
-        };
-        item.SubItems.Add(device.Platform);
-        item.SubItems.Add(device.BuildDisplay);
-        item.SubItems.Add(isLocal ? "本机（不可自连）" : device.StatusText);
-        item.SubItems.Add(device.LastSeenDisplay);
-        item.SubItems.Add(device.AddressDisplay);
-        item.ToolTipText = $"设备 ID：{device.DeviceId}\n{device.AddressDisplay}\n仅可达的地址能直连；跨网请选择中继连接。";
+        var item = new ListViewItem();
+        UpdateRelayDeviceListItem(item, device, localDeviceId);
         return item;
     }
 
@@ -7163,7 +7118,7 @@ public sealed partial class MainForm : Form
         string target =
             string.IsNullOrWhiteSpace(host)
                 ? "远程设备"
-                : $"{host.Trim()}:{port}";
+                : NetworkUtils.FormatEndpoint(host.Trim(), port);
         return
             $"正在连接 {target}（加密握手）...";
     }
@@ -7349,6 +7304,11 @@ public sealed partial class MainForm : Form
 
     private async Task SendClipboardAsync()
     {
+        if (_viewerClient.IsLocalInputPaused)
+        {
+            SetViewerStatus("仅观看已开启，未向远端写入剪贴板。恢复控制后可重试。", MutedTextColor);
+            return;
+        }
         if (!CanConnectedViewer(RemoteDeviceCapabilities.ClipboardText))
         {
             SetViewerStatus("远程设备未声明剪贴板能力。", MutedTextColor);
@@ -7418,7 +7378,7 @@ public sealed partial class MainForm : Form
         {
             Title = "选择要发送到被控端的文件",
             CheckFileExists = true,
-            Multiselect = false
+            Multiselect = true
         };
 
         if (dialog.ShowDialog(this) != DialogResult.OK)
@@ -7430,8 +7390,8 @@ public sealed partial class MainForm : Form
         {
             SetViewerStatus("正在读取文件信息...", MutedTextColor);
             FileTransferConfirmationPreview preview = await _viewerClient.PrepareFileTransferPreviewAsync(
-                [dialog.FileName],
-                maxFiles: 1,
+                dialog.FileNames,
+                maxFiles: MaxClipboardFilePasteCount,
                 fileGeneration);
             if (!ConfirmOutgoingFileTransfer(
                 fileGeneration,
@@ -7444,9 +7404,14 @@ public sealed partial class MainForm : Form
             }
 
             _sendFileButton.Enabled = false;
+            ShowTransferTasks();
             SetViewerStatus("正在准备发送文件...", MutedTextColor);
             RemoteFilePasteResult result = await _viewerClient.SendFilePastePlanToRemoteAsync(preview.Plan, "发送文件失败", fileGeneration);
             if (!_isClosing && !IsDisposed) FileTransferResultDialog.ShowResults(this, result, preview.Note);
+        }
+        catch (RemoteFileTransferCancelledException)
+        {
+            if (!_isClosing && !IsDisposed) SetViewerStatus("文件任务已取消，已完成的文件保留。", MutedTextColor);
         }
         catch (Exception ex)
         {
@@ -7712,6 +7677,7 @@ public sealed partial class MainForm : Form
             }
 
             SetViewerStatus("正在发送剪贴板文件...", MutedTextColor);
+            ShowTransferTasks();
             RemoteFilePasteResult result = await _viewerClient.SendFilePastePlanToRemoteAsync(preview.Plan, expectedGeneration: fileGeneration);
             string status = RemoteViewerWindow.FormatClipboardFilePasteStatus(result, MaxClipboardFilePasteCount);
             Color statusColor = result.FailedFiles > 0
@@ -7721,6 +7687,10 @@ public sealed partial class MainForm : Form
                     : MutedTextColor;
             SetViewerStatus(status, statusColor);
             if (!_isClosing && !IsDisposed) FileTransferResultDialog.ShowResults(this, result, preview.Note);
+        }
+        catch (RemoteFileTransferCancelledException)
+        {
+            if (!_isClosing && !IsDisposed) SetViewerStatus("文件任务已取消，已完成的文件保留。", MutedTextColor);
         }
         catch (Exception ex) when (ex is TimeoutException or
             System.Runtime.InteropServices.ExternalException or
@@ -7863,6 +7833,7 @@ public sealed partial class MainForm : Form
 
         _remoteFilePullStatusStage = RemoteFilePullStatusStage.Waiting;
         SetRemoteFilePullPending(true);
+        ShowTransferTasks();
         try
         {
             SetViewerStatus(
@@ -8120,6 +8091,10 @@ public sealed partial class MainForm : Form
                     $"已加密连接 | 仅观看：远程设备未声明输入控制能力。远端版本 {RemoteDeskBuildInfo.FormatBuildStamp(device.BuildStamp)}",
                     MutedTextColor);
             }
+            else if (_viewerClient.IsConnected && _viewerClient.IsLocalInputPaused)
+            {
+                SetViewerStatus($"已加密连接 | 仅观看（本地暂停输入） | 远端版本 {RemoteDeskBuildInfo.FormatBuildStamp(device.BuildStamp)}", MutedTextColor);
+            }
             else if (_viewerClient.IsConnected)
             {
                 SetViewerStatus(
@@ -8147,7 +8122,7 @@ public sealed partial class MainForm : Form
             SelectViewerCaptureTarget(target);
             _settings.Viewer.CaptureTargetId = target.Id;
             SaveSettingsFromUi();
-            string inputMode = NormalizeCapabilities(_connectedViewerCapabilities).HasFlag(RemoteDeviceCapabilities.InputControl)
+            string inputMode = !_viewerClient.IsLocalInputPaused && NormalizeCapabilities(_connectedViewerCapabilities).HasFlag(RemoteDeviceCapabilities.InputControl)
                 ? string.Empty
                 : " | 仅观看";
             SetViewerStatus($"已加密连接{inputMode} | {target.DisplayName}", SuccessTextColor);
@@ -8202,7 +8177,9 @@ public sealed partial class MainForm : Form
     {
         RemoteDeviceCapabilities capabilities = NormalizeCapabilities(_connectedViewerCapabilities);
         _viewerCaptureTargetBox.Enabled = connected && capabilities.HasFlag(RemoteDeviceCapabilities.CaptureTargetSelection);
-        _sendClipboardButton.Enabled = connected && capabilities.HasFlag(RemoteDeviceCapabilities.ClipboardText);
+        _sendClipboardButton.Enabled = connected && !_viewerClient.IsLocalInputPaused && capabilities.HasFlag(RemoteDeviceCapabilities.ClipboardText);
+        _viewerInputPauseButton.Enabled = connected || _viewerClient.IsLocalInputPaused;
+        _viewerInputPauseButton.Text = _viewerClient.IsLocalInputPaused ? "仅观看：开" : "仅观看：关";
         _readClipboardButton.Enabled = connected && capabilities.HasFlag(RemoteDeviceCapabilities.ClipboardText);
         _sendFileButton.Enabled = connected && capabilities.HasFlag(RemoteDeviceCapabilities.FileReceive);
         _pasteFilesButton.Enabled = !_pastingClipboardFilesFromMain &&
@@ -8236,6 +8213,7 @@ public sealed partial class MainForm : Form
             : string.Empty;
         SetToolTip(
             _sendClipboardButton,
+            _viewerClient.IsLocalInputPaused ? "仅观看已开启；恢复控制后才能向远端写入剪贴板。" :
             connected && capabilities.HasFlag(RemoteDeviceCapabilities.ClipboardText)
                 ? "把本机文本剪贴板写入远端；远程窗口 Ctrl+V 使用远端剪贴板。"
                 : disconnected);
@@ -8247,7 +8225,7 @@ public sealed partial class MainForm : Form
         SetToolTip(
             _sendFileButton,
             connected && capabilities.HasFlag(RemoteDeviceCapabilities.FileReceive)
-                ? $"选择一个本机文件发送到远端下载目录。{checksumSuffix}"
+                ? $"选择本机文件发送到远端接收目录（一次最多 {MaxClipboardFilePasteCount} 项）；传输前确认清单，传输任务中可查看进度和取消。{checksumSuffix}"
                 : disconnected);
         SetToolTip(
             _pasteFilesButton,
@@ -8860,6 +8838,13 @@ public sealed partial class MainForm : Form
 
         public bool CanOpenViewerNow => IsSavedOnly || IsHostRunning || CanRemoteStart;
 
+        internal bool HasSameSnapshot(RemoteDeviceListItem other) =>
+            MachineName == other.MachineName && DeviceId == other.DeviceId && Remark == other.Remark &&
+            Address == other.Address && Port == other.Port && CaptureTarget == other.CaptureTarget &&
+            Platform == other.Platform && Capabilities == other.Capabilities && BuildStamp == other.BuildStamp &&
+            IsHostRunning == other.IsHostRunning && CanRemoteStart == other.CanRemoteStart &&
+            IsSaved == other.IsSaved && IsSavedOnly == other.IsSavedOnly && LastConnectedAt == other.LastConnectedAt;
+
         public static RemoteDeviceListItem FromDiscovered(DiscoveredHost host, SavedRemoteDevice? savedDevice)
         {
             return new RemoteDeviceListItem(
@@ -8939,7 +8924,7 @@ public sealed partial class MainForm : Form
                     ? string.Empty
                     : $"{MachineName} | ";
             return $"{machineNamePrefix}{Platform} | " +
-                $"{Address}:{Port} | {status}";
+                $"{NetworkUtils.FormatEndpoint(Address, Port)} | {status}";
         }
 
         public string GetLongStatus()
@@ -8968,7 +8953,7 @@ public sealed partial class MainForm : Form
                     ? string.Empty
                     : $" / {MachineName}";
             return $"{DisplayName}{machineNameSuffix} " +
-                $"[{Platform}] ({Address}:{Port}) - " +
+                $"[{Platform}] ({NetworkUtils.FormatEndpoint(Address, Port)}) - " +
                 GetShortStatus();
         }
 

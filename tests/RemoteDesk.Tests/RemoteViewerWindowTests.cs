@@ -1739,9 +1739,24 @@ public sealed class RemoteViewerWindowTests
                         RemoteViewerWindow.WmKeyDown,
                         (nint)Keys.F11,
                         (nint)0x00570001);
-                    PreProcessControlState downState =
-                        picture.PreProcessControlMessage(
-                            ref keyDown);
+                    // This is an unmodified synthetic F11 message. WinForms
+                    // combines it with the calling thread's keyboard state,
+                    // which can inherit a user's held Ctrl/Shift key. Set only
+                    // this test thread's state (never SendInput/global state)
+                    // and restore it before pumping any more real messages.
+                    var previousKeyboardState = new byte[256];
+                    Assert.True(GetKeyboardState(previousKeyboardState));
+                    PreProcessControlState downState;
+                    try
+                    {
+                        Assert.True(SetKeyboardState(new byte[256]));
+                        Assert.Equal(Keys.None, Control.ModifierKeys);
+                        downState = picture.PreProcessControlMessage(ref keyDown);
+                    }
+                    finally
+                    {
+                        Assert.True(SetKeyboardState(previousKeyboardState));
+                    }
                     Application.DoEvents();
                     Assert.Equal(
                         PreProcessControlState
@@ -2683,4 +2698,12 @@ public sealed class RemoteViewerWindowTests
                     BindingFlags.NonPublic));
         field.SetValue(window, value);
     }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetKeyboardState([Out] byte[] state);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetKeyboardState(byte[] state);
 }

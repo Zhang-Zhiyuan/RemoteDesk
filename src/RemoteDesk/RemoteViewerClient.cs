@@ -1380,7 +1380,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
         lock (_inputLock)
         {
             if (_inputConnectionGeneration != expectedGeneration ||
-                !CanQueueInput(expectedConnection) ||
+                !CanQueueInput(expectedConnection) || IsLocalInputPaused ||
                 chord.Length > MaxQueuedInputs - _inputQueue.Count)
             {
                 return false;
@@ -1402,6 +1402,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
     private bool TryQueueInputLocked(
         RemoteInputCommand command)
     {
+        if (IsLocalInputPaused && !IsLocalInputRelease(command)) return false;
         InvalidateNativeDetails();
         if (command.Kind == RemoteInputKind.MouseMove &&
             _pendingReliablePointerInputs == 0 &&
@@ -1413,6 +1414,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
                     ref _lowLatencyVideoTransport);
             if (transport?.TryQueueMouseMove(command) == true)
             {
+                ObserveLocalPointerInput(command);
                 ObserveUdpMouseRouteLocked(active: true);
                 // A TCP move queued before UDP activation must not arrive
                 // later and pull the remote pointer back to stale
@@ -1428,6 +1430,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
             _inputQueue.Enqueue(
                 command,
                 MaxQueuedInputs);
+        if (queued) ObserveLocalPointerInput(command);
         if (queued &&
             IsReliablePointerInput(command))
         {
@@ -1522,7 +1525,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
         RemoteTextInputResult result;
         lock (_inputLock)
         {
-            if (!CanQueueInput(expectedConnection))
+            if (!CanQueueInput(expectedConnection) || IsLocalInputPaused)
             {
                 return new RemoteTextInputResult(0, false);
             }
@@ -1566,9 +1569,11 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
     public async Task SendLocalClipboardToRemoteAsync()
     {
+        long intentRevision = Interlocked.Read(ref _localInputIntentRevision);
+        if (!IsLocalInputIntentCurrent(intentRevision)) return;
         CancellationTokenSource? owner = _cancellationTokenSource;
         string text = await ClipboardTextService.GetTextAsync();
-        if (!IsCurrentConnection(owner)) return;
+        if (!IsCurrentConnection(owner) || !IsLocalInputIntentCurrent(intentRevision)) return;
         if (string.IsNullOrEmpty(text))
         {
             ClipboardStatusReceived?.Invoke("本机剪贴板没有文本。");
@@ -1584,6 +1589,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
     public async Task<bool> SendClipboardTextToRemoteAsync(string text, string? successMessage = null,
         bool forPasteShortcut = false, long? expectedGeneration = null)
     {
+        long intentRevision = Interlocked.Read(ref _localInputIntentRevision);
+        if (!IsLocalInputIntentCurrent(intentRevision)) return false;
         CancellationTokenSource? owner = _cancellationTokenSource;
         long requestGeneration = InputConnectionGeneration;
         if (!IsCurrentConnection(owner) ||
@@ -1605,16 +1612,17 @@ internal sealed partial class RemoteViewerClient : IDisposable
             ClipboardStatusReceived?.Invoke("上一项剪贴板操作仍在等待远端，请稍后重试；长时间无响应请重连。");
             return false;
         }
-        if (!await SendControlAsync(payload, owner))
+        if (!await SendControlAsync(payload, owner, expectedInputRevision: intentRevision))
         {
             _clipboardRequests.Take(request.Generation, textReply: false, success: false)?.Completion.TrySetResult(false);
-            ClipboardStatusReceived?.Invoke("连接已断开，无法发送文本剪贴板。");
+            ClipboardStatusReceived?.Invoke(IsLocalInputIntentCurrent(intentRevision)
+                ? "连接已断开，无法发送文本剪贴板。" : "仅观看状态已阻止文本剪贴板写入。");
             return false;
         }
         bool success = await WaitForClipboardReplyAsync(request, owner);
         if (success && IsCurrentConnection(owner) && successMessage != string.Empty)
             ClipboardStatusReceived?.Invoke(successMessage ?? "已写入远端文本剪贴板。");
-        return success && IsCurrentConnection(owner);
+        return success && IsCurrentConnection(owner) && IsLocalInputIntentCurrent(intentRevision);
     }
 
     public Task ReadRemoteClipboardAsync(bool notifyRequest = true) =>
@@ -1730,7 +1738,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
         {
             requestSent = await SendControlAsync(
                 RemoteMessageCodec.EncodeFileTransferRequestClipboardFiles(),
-                request.OwnerConnection);
+                request.OwnerConnection,
+                operationCancellation: request.TransferTask?.Cancellation.Token ?? default);
         }
         finally
         {
@@ -1758,11 +1767,12 @@ internal sealed partial class RemoteViewerClient : IDisposable
         }
 
         CancelReturnedClipboardFileBatchIfActive(request);
-        const string disconnectedMessage = "连接已断开，无法请求远端文件。";
+        string disconnectedMessage = request.IsWaitCancelled
+            ? "已取消请求远端文件。" : "连接已断开，无法请求远端文件。";
         CompleteReturnedClipboardFileRequest(
             request,
             CreateReturnedClipboardFileBatchResult(
-                ReturnedClipboardFileBatchOutcome.Disconnected,
+                request.IsWaitCancelled ? ReturnedClipboardFileBatchOutcome.Cancelled : ReturnedClipboardFileBatchOutcome.Disconnected,
                 disconnectedMessage));
         if (notifyRequest)
         {
@@ -1853,7 +1863,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
         {
             requestSent = await SendControlAsync(
                 RemoteMessageCodec.EncodeFileTransferRequestClipboardFiles(),
-                request.OwnerConnection);
+                request.OwnerConnection,
+                operationCancellation: request.TransferTask?.Cancellation.Token ?? default);
         }
         finally
         {
@@ -1863,10 +1874,11 @@ internal sealed partial class RemoteViewerClient : IDisposable
         if (!requestSent)
         {
             CancelReturnedClipboardFileBatchIfActive(request);
-            const string disconnectedMessage = "连接已断开，无法从远程画面拖出文件。";
+            string disconnectedMessage = request.IsWaitCancelled
+                ? cancelledMessage : "连接已断开，无法从远程画面拖出文件。";
             ReturnedClipboardFileBatchResult disconnectedResult =
                 CreateReturnedClipboardFileBatchResult(
-                    ReturnedClipboardFileBatchOutcome.Disconnected,
+                    request.IsWaitCancelled ? ReturnedClipboardFileBatchOutcome.Cancelled : ReturnedClipboardFileBatchOutcome.Disconnected,
                     disconnectedMessage);
             CompleteReturnedClipboardFileRequest(request, disconnectedResult);
             if (notifyRequest)
@@ -1933,19 +1945,15 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
     public async Task SendFileToRemoteAsync(string path)
     {
-        await _fileTransferLock.WaitAsync();
-        try
+        RemoteFilePasteItem item = new(path, Directory.Exists(path)
+            ? RemoteFilePasteItemKind.Directory : RemoteFilePasteItemKind.File);
+        var plan = new RemoteFilePastePlan([path], 0, 0, false, [item]);
+        await RunOutgoingFileTransferTaskAsync(plan, InputConnectionGeneration, async (task, owner) =>
         {
-            CancellationTokenSource ownerConnection = RequireActiveFileTransferConnection();
-            RemoteFilePasteItem item = Directory.Exists(path)
-                ? new RemoteFilePasteItem(path, RemoteFilePasteItemKind.Directory)
-                : new RemoteFilePasteItem(path, RemoteFilePasteItemKind.File);
-            await SendTransferItemToRemoteCoreAsync(item, ownerConnection);
-        }
-        finally
-        {
-            ReleaseFileTransferLock();
-        }
+            var result = await SendTransferItemToRemoteCoreAsync(item, owner, task);
+            UpdateFileTransferTask(task, value => value with { CompletedItems = 1, Status = result.Message });
+            return result;
+        });
     }
 
     public async Task SendRemoteUpdateAsync(string packagePath)
@@ -1967,20 +1975,15 @@ internal sealed partial class RemoteViewerClient : IDisposable
         }
 
         RemoteUpdater.ValidateRemoteUpdatePackageName(packagePath);
-        await _fileTransferLock.WaitAsync();
-        try
+        var plan = new RemoteFilePastePlan([packagePath], 0, 0, false);
+        await RunOutgoingFileTransferTaskAsync(plan, InputConnectionGeneration, async (task, ownerConnection) =>
         {
             ThrowIfRemoteClipboardFileRequestPendingForUpdate();
-            CancellationTokenSource ownerConnection = RequireActiveFileTransferConnection();
-            await SendFileToRemoteCoreAsync(
+            return await SendFileToRemoteCoreAsync(
                 packagePath,
                 remoteUpdate: true,
-                ownerConnection: ownerConnection);
-        }
-        finally
-        {
-            ReleaseFileTransferLock();
-        }
+                ownerConnection: ownerConnection, task: task);
+        });
     }
 
     public async Task RequestRemoteUpdatePackageAsync()
@@ -2063,18 +2066,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
     {
         ArgumentNullException.ThrowIfNull(plan);
         long generation = expectedGeneration ?? InputConnectionGeneration;
-        await _fileTransferLock.WaitAsync();
-        try
-        {
-            CancellationTokenSource ownerConnection = RequireActiveFileTransferConnection();
-            if (InputConnectionGeneration != generation)
-                throw new IOException("连接已改变，原文件确认已失效，请重新确认文件和接收位置。");
-            return await SendFilesToRemoteCoreAsync(plan, failurePrefix, ownerConnection);
-        }
-        finally
-        {
-            ReleaseFileTransferLock();
-        }
+        return await RunOutgoingFileTransferTaskAsync(plan, generation,
+            (task, owner) => SendFilesToRemoteCoreAsync(plan, failurePrefix, owner, task));
     }
 
     public async Task<RemoteFileDropPasteResult> SendFilesToRemoteDropPasteAsync(IEnumerable<string> paths, int maxFiles)
@@ -2093,37 +2086,37 @@ internal sealed partial class RemoteViewerClient : IDisposable
     {
         ArgumentNullException.ThrowIfNull(plan);
         long generation = expectedGeneration ?? InputConnectionGeneration;
-        await _fileTransferLock.WaitAsync();
+        long inputIntentRevision = Interlocked.Read(ref _localInputIntentRevision);
+        return await RunOutgoingFileTransferTaskAsync(plan, generation, async (task, ownerConnection) =>
+        {
         bool batchStarted = false;
         bool batchClosed = false;
-        CancellationTokenSource? ownerConnection = null;
         try
         {
-            ownerConnection = RequireActiveFileTransferConnection();
-            if (InputConnectionGeneration != generation)
-                throw new IOException("连接已改变，原文件确认已失效，请重新确认文件和接收位置。");
-            if (plan.Files.Count > 0)
+            if (plan.Files.Count > 0 && IsLocalInputIntentCurrent(inputIntentRevision))
             {
-                if (!await SendControlAsync(
+                batchStarted = await SendControlAsync(
                         RemoteMessageCodec.EncodeFileDropPasteBegin(),
-                        ownerConnection))
+                        ownerConnection, expectedInputRevision: inputIntentRevision,
+                        operationCancellation: task.OperationToken);
+                if (!batchStarted && !IsCurrentConnection(ownerConnection))
                 {
                     throw new IOException("连接已断开，无法准备远端当前位置粘贴。");
                 }
-
-                batchStarted = true;
             }
 
             RemoteFilePasteResult result = await SendFilesToRemoteCoreAsync(
                 plan,
                 "拖放文件失败",
-                ownerConnection);
+                ownerConnection, task);
             bool remotePasteRequested = false;
-            if (batchStarted && result.SentFiles > 0)
+            if (batchStarted && result.SentFiles > 0 && !task.Cancellation.IsCancellationRequested &&
+                IsLocalInputIntentCurrent(inputIntentRevision))
             {
                 remotePasteRequested = await SendControlAsync(
                     RemoteMessageCodec.EncodeFileDropPasteCommit(),
-                    ownerConnection);
+                    ownerConnection, expectedInputRevision: inputIntentRevision,
+                    operationCancellation: task.OperationToken);
                 batchClosed = remotePasteRequested;
                 if (!remotePasteRequested)
                 {
@@ -2145,15 +2138,15 @@ internal sealed partial class RemoteViewerClient : IDisposable
             {
                 await TryCancelRemoteFileDropPasteAsync(ownerConnection);
             }
-
-            ReleaseFileTransferLock();
         }
+        });
     }
 
     private async Task<RemoteFilePasteResult> SendFilesToRemoteCoreAsync(
         RemoteFilePastePlan plan,
         string failurePrefix,
-        CancellationTokenSource ownerConnection)
+        CancellationTokenSource ownerConnection,
+        FileTransferTaskContext? task = null)
     {
         int sentFiles = 0;
         int failedFiles = 0;
@@ -2167,9 +2160,13 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 if (!IsCurrentConnection(ownerConnection)) throw new IOException("连接已断开或切换，未开始此项传输。");
                 var (archivedDirectory, savedMessage) = await SendTransferItemToRemoteCoreAsync(
                     item,
-                    ownerConnection);
+                    ownerConnection, task);
                 results.Add(new(RemoteFileTransfer.GetTransferDisplayName(item.Path), true, savedMessage));
                 sentFiles++;
+                UpdateFileTransferTask(task, value => value with
+                {
+                    CompletedItems = sentFiles, Status = savedMessage
+                });
                 if (archivedDirectory)
                 {
                     archivedDirectories++;
@@ -2179,12 +2176,25 @@ internal sealed partial class RemoteViewerClient : IDisposable
             {
                 failedFiles++;
                 string fileName = RemoteFileTransfer.GetTransferDisplayName(item.Path);
-                string details = ex is OperationCanceledException ? "连接已结束，保存状态未确认，请检查远端接收目录后再重试。" : ex.Message;
+                string details = ex is OperationCanceledException
+                    ? task?.Cancellation.IsCancellationRequested == true
+                        ? "已取消；保存状态未确认，请检查远端接收目录。"
+                        : "连接已结束，保存状态未确认，请检查远端接收目录后再重试。"
+                    : ex.Message;
                 results.Add(new(fileName, false, details));
                 failureMessage ??= $"{fileName}：{details}";
                 FileTransferStatusReceived?.Invoke(
                     false,
                     $"{failurePrefix}：{(string.IsNullOrWhiteSpace(fileName) ? item.Path : fileName)} - {ex.Message}");
+                if (task?.Cancellation.IsCancellationRequested == true)
+                {
+                    foreach (RemoteFilePasteItem remaining in plan.TransferItems.Skip(results.Count))
+                    {
+                        failedFiles++;
+                        results.Add(new(RemoteFileTransfer.GetTransferDisplayName(remaining.Path), false, "已取消，未开始发送。"));
+                    }
+                    break;
+                }
             }
         }
 
@@ -2196,16 +2206,24 @@ internal sealed partial class RemoteViewerClient : IDisposable
             plan.Truncated,
             archivedDirectories,
             failureMessage,
-            results);
+            results,
+            Cancelled: task?.Cancellation.IsCancellationRequested == true);
     }
 
     private async Task<(bool Archived, string Message)> SendTransferItemToRemoteCoreAsync(
         RemoteFilePasteItem item,
-        CancellationTokenSource ownerConnection)
+        CancellationTokenSource ownerConnection,
+        FileTransferTaskContext? task = null)
     {
         string? temporaryArchivePath = null;
         try
         {
+            (task?.OperationToken ?? ownerConnection.Token).ThrowIfCancellationRequested();
+            UpdateFileTransferTask(task, value => value with
+            {
+                State = RemoteFileTransferTaskState.Preparing,
+                CurrentFileName = RemoteFileTransfer.GetTransferDisplayName(item.Path), Status = "正在准备文件"
+            });
             string sourcePath = item.Path;
             string transferFileName = Path.GetFileName(sourcePath);
             bool archivedDirectory = item.Kind == RemoteFilePasteItemKind.Directory;
@@ -2218,7 +2236,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
                 transferFileName = RemoteFileTransfer.CreateDirectoryArchiveFileName(sourcePath);
                 FileTransferStatusReceived?.Invoke(true, $"正在打包文件夹：{transferFileName}");
-                CancellationToken cancellationToken = ownerConnection.Token;
+                CancellationToken cancellationToken = task?.OperationToken ?? ownerConnection.Token;
                 cancellationToken.ThrowIfCancellationRequested();
                 if (!IsCurrentConnection(ownerConnection))
                 {
@@ -2243,7 +2261,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
             string savedMessage = await SendFileToRemoteCoreAsync(
                 sourcePath,
                 transferFileName,
-                ownerConnection: ownerConnection);
+                ownerConnection: ownerConnection, task: task);
             return (archivedDirectory, savedMessage);
         }
         finally
@@ -2259,10 +2277,11 @@ internal sealed partial class RemoteViewerClient : IDisposable
         string path,
         string? transferFileName = null,
         bool remoteUpdate = false,
-        CancellationTokenSource? ownerConnection = null)
+        CancellationTokenSource? ownerConnection = null,
+        FileTransferTaskContext? task = null)
     {
         ownerConnection ??= RequireActiveFileTransferConnection();
-        CancellationToken cancellationToken = ownerConnection.Token;
+        CancellationToken cancellationToken = task?.OperationToken ?? ownerConnection.Token;
         cancellationToken.ThrowIfCancellationRequested();
         if (!File.Exists(path))
         {
@@ -2312,11 +2331,13 @@ internal sealed partial class RemoteViewerClient : IDisposable
         BeginOutgoingFileTransfer(ownerConnection);
         try
         {
+            StartTrackedOutgoingFile(task, fileName, fileLength);
+            cancellationToken.ThrowIfCancellationRequested();
             FileTransferStatusReceived?.Invoke(true, $"{transferAction}：{fileName} ({RemoteFileTransfer.FormatBytes(fileLength)})");
             byte[] startPayload = remoteUpdate
                 ? RemoteMessageCodec.EncodeRemoteUpdateStart(transferId, fileName, fileLength)
                 : RemoteMessageCodec.EncodeFileTransferStart(transferId, fileName, fileLength);
-            if (!await SendControlAsync(startPayload, ownerConnection))
+            if (!await SendFileControlAsync(startPayload, ownerConnection, cancellationToken))
             {
                 throw new IOException(transferStartedError);
             }
@@ -2334,6 +2355,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
             {
                 while (offset < fileLength)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (requireReceipt && receipt.Task.IsCompletedSuccessfully && !receipt.Task.Result.Success)
                         throw new IOException(receipt.Task.Result.StatusMessage ?? "远端拒绝接收文件。");
                     int bytesToRead = (int)Math.Min(
@@ -2353,14 +2375,15 @@ internal sealed partial class RemoteViewerClient : IDisposable
                         offset,
                         buffer.AsSpan(0, read),
                         chunkPayload);
-                    if (!await SendControlAsync(
+                    if (!await SendFileControlAsync(
                             chunkPayload.AsMemory(0, payloadLength),
-                            ownerConnection))
+                            ownerConnection, cancellationToken))
                     {
                         throw new IOException("连接已断开，文件传输中止。");
                     }
 
                     offset += read;
+                    RecordFileTransferBytes(task, read);
                     int percent = fileLength == 0 ? 100 : (int)Math.Min(100, offset * 100 / fileLength);
                     if (percent >= lastReportedPercent + 10 || offset == fileLength)
                     {
@@ -2376,24 +2399,31 @@ internal sealed partial class RemoteViewerClient : IDisposable
             }
 
             RemoteFileTransfer.EnsureSourceUnchanged(path, sourceSnapshot);
+            cancellationToken.ThrowIfCancellationRequested();
 
             if (checksum is not null)
             {
                 string checksumHex = Convert.ToHexString(checksum.GetHashAndReset()).ToLowerInvariant();
-                if (!await SendControlAsync(
+                if (!await SendFileControlAsync(
                         RemoteMessageCodec.EncodeFileTransferChecksum(transferId, checksumHex),
-                        ownerConnection))
+                        ownerConnection, cancellationToken))
                 {
                     throw new IOException("连接已断开，无法发送文件校验值。");
                 }
             }
 
-            if (!await SendControlAsync(
+            if (!await SendFileControlAsync(
                     RemoteMessageCodec.EncodeFileTransferComplete(transferId),
-                    ownerConnection))
+                    ownerConnection, cancellationToken))
             {
                 throw new IOException("连接已断开，无法完成文件传输。");
             }
+
+            UpdateFileTransferTask(task, value => value with
+            {
+                State = RemoteFileTransferTaskState.AwaitingReceipt,
+                Status = $"文件已发送，等待远端保存确认：{fileName}"
+            });
 
             FileTransferStatusReceived?.Invoke(
                 true,
@@ -2414,15 +2444,23 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 if (!result.Success) throw new IOException(result.StatusMessage ?? "远端保存文件失败。");
                 if (!IsCurrentConnection(ownerConnection)) throw new IOException("连接已切换，文件传输已结束。");
                 FileTransferStatusReceived?.Invoke(true, result.StatusMessage ?? $"远端已保存：{fileName}");
+                RecordFileTransferDestination(task, result.StatusMessage);
+                UpdateFileTransferTask(task, value => value with
+                {
+                    Status = result.StatusMessage ?? $"远端已确认保存：{fileName}，未返回实际位置。"
+                });
                 return result.StatusMessage ?? $"远端已确认保存 {fileName}，但未返回实际路径。";
             }
             // A completed local TCP write may still be buffered in the relay.
             // Legacy receivers and remote updates do not provide a correlated
             // save receipt, so retain only a bounded tail-delivery grace.
             pendingFileDelivery = true;
-            return $"已发送 {fileName}；旧版远端未返回保存确认或实际路径，请到被控端检查。";
+            string unconfirmed = $"已发送 {fileName}；旧版远端未返回保存确认或实际路径，请到被控端检查。";
+            UpdateFileTransferTask(task, value => value with { Status = unconfirmed });
+            return unconfirmed;
         }
-        catch (Exception ex) when (transferStarted && RemoteFileTransfer.IsRecoverableTransferException(ex))
+        catch (Exception ex) when (transferStarted &&
+            (RemoteFileTransfer.IsRecoverableTransferException(ex) || ex is OperationCanceledException))
         {
             await TrySendFileTransferCancelAsync(
                 transferId,
@@ -2518,7 +2556,9 @@ internal sealed partial class RemoteViewerClient : IDisposable
     private async Task<bool> SendControlAsync(
         ReadOnlyMemory<byte> payload,
         CancellationTokenSource? expectedConnection,
-        MessageType messageType = MessageType.Control)
+        MessageType messageType = MessageType.Control,
+        long? expectedInputRevision = null,
+        CancellationToken operationCancellation = default)
     {
         TcpClient? tcpClient = _tcpClient;
         NetworkStream? stream = _stream;
@@ -2538,8 +2578,14 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
         try
         {
-            await Protocol.WriteMessageAsync(stream, messageType, payload, session, _writeLock, cancellationTokenSource.Token);
-            return true;
+            bool admitted = true;
+            await Protocol.WriteMessageAsync(stream, messageType, payload, session, _writeLock, cancellationTokenSource.Token,
+                expectedInputRevision.HasValue || operationCancellation.CanBeCanceled
+                    ? () => admitted = !operationCancellation.IsCancellationRequested &&
+                        (expectedInputRevision is not { } revision || IsLocalInputIntentCurrent(revision)) &&
+                        IsCurrentConnection(expectedConnection)
+                    : null);
+            return admitted;
         }
         catch (Exception ex) when (ex is OperationCanceledException or IOException or SocketException or ObjectDisposedException or CryptographicException)
         {
@@ -2830,7 +2876,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 while (TryDequeueInputBatch(
                     batch,
                     inputConnectionGeneration,
-                    out long mouseRouteGeneration))
+                    out long mouseRouteGeneration,
+                    out long inputIntentRevision))
                 {
                     await Protocol.WriteInputMessagesAsync(
                         stream,
@@ -2838,12 +2885,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
                         ownerSession,
                         _writeLock,
                         ownerCancellationTokenSource.Token,
-                        command =>
-                            command.Kind !=
-                                RemoteInputKind.MouseMove ||
-                            mouseRouteGeneration ==
-                                Interlocked.Read(
-                                    ref _mouseRouteGeneration));
+                        command => AdmitInputToWire(command, inputConnectionGeneration,
+                            inputIntentRevision, mouseRouteGeneration));
                     CompleteInputFlushWaitersAfterWrite(
                         inputConnectionGeneration,
                         batch);
@@ -3599,6 +3642,20 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 };
             })
             .ToArray();
+        if (request.IsWaitCancelled)
+        {
+            await TryRejectReturnedClipboardFilePreviewAsync(request);
+            return;
+        }
+        UpdateFileTransferTask(request.TransferTask, value => value with
+        {
+            TotalItems = items.Count,
+            // Folder previews contain source bytes (or zero when enumeration is
+            // deferred), not the size of the ZIP that will actually cross the wire.
+            TotalBytes = items.Any(item => item.Kind == "文件夹") ? null : items.Sum(item => item.SizeBytes),
+            State = RemoteFileTransferTaskState.AwaitingConfirmation,
+            Status = $"等待确认接收 {items.Count} 项文件"
+        });
         if (items.Count == 0)
         {
             _incomingFileReceiver.CancelReturnedClipboardFileBatch();
@@ -3729,9 +3786,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
             FileTransferStatusReceived?.Invoke(true, "已确认拉取远端文件，等待接收。");
             if (request.OwnerConnection is { } standardOwnerConnection)
             {
-                await TrySendControlFromReceiveLoopAsync(
-                    RemoteMessageCodec.EncodeFileTransferConfirmClipboardFiles(),
-                    standardOwnerConnection);
+                await request.TrySendPreviewConfirmationAsync(() => TrySendControlFromReceiveLoopAsync(
+                    RemoteMessageCodec.EncodeFileTransferConfirmClipboardFiles(), standardOwnerConnection));
             }
             return;
         }
@@ -3756,6 +3812,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
             return;
         }
 
+        RemoteControlMessage? progressControl = receiptControl;
         if (!_remoteCapabilities.HasFlag(RemoteDeviceCapabilities.FileTransferReceipt)) receiptControl = null;
 
         try
@@ -3765,6 +3822,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
             {
                 return;
             }
+
+            TrackIncomingFileProgress(progressControl, message, ownerConnection);
 
             if (!string.IsNullOrWhiteSpace(message))
             {
@@ -3852,16 +3911,20 @@ internal sealed partial class RemoteViewerClient : IDisposable
         string normalizedFileName = string.IsNullOrWhiteSpace(control.FileName)
             ? string.Empty
             : FileTransferReceiver.SanitizeFileName(control.FileName);
-        if (TryGetActiveReturnedClipboardFileRequest(out ReturnedClipboardFileRequestContext request) &&
-            !request.TryReserveExpectedTransfer(
-                normalizedFileName,
-                control.FileLength,
-                out string? rejectionReason))
+        string message;
+        lock (_returnedClipboardFileRequestLock)
         {
-            throw new InvalidDataException(rejectionReason);
+            if (_returnedClipboardFileRequest is { } request)
+            {
+                if (request.IsWaitCancelled || request.IsRejectRequested)
+                    throw new InvalidDataException("此文件回传批次已取消，已拒绝迟到的文件。");
+                if (!request.TryReserveExpectedTransfer(normalizedFileName, control.FileLength, out string? rejectionReason))
+                    throw new InvalidDataException(rejectionReason);
+            }
+            // Serialize Start with task cancellation's AbortActiveTransfer. A late Start
+            // must not recreate a receiver after the cancellation already removed it.
+            message = _incomingFileReceiver.Start(control);
         }
-
-        string message = _incomingFileReceiver.Start(control);
         ClearPendingSelfUpdateState();
         return message;
     }
@@ -4079,6 +4142,18 @@ internal sealed partial class RemoteViewerClient : IDisposable
             }
         }
 
+        if (ownerConnection is not null)
+        {
+            request.TransferTask = CreateFileTransferTask(RemoteFileTransferDirection.Download,
+                "拉取远端文件", InputConnectionGeneration, ownerConnection, 0, null,
+                _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.FileTransferPreview) &&
+                    _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.FileTransferCancel), request);
+            if (!IsActiveReturnedClipboardFileRequest(request))
+            {
+                FinishFileTransferTask(request.TransferTask, RemoteFileTransferTaskState.Failed, "连接已结束，文件请求未继续。");
+                return true;
+            }
+        }
         request.StartIdleTimeout(
             _returnedClipboardFileRequestIdleTimeout,
             HandleReturnedClipboardFileRequestIdleTimeout);
@@ -4183,9 +4258,13 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 return;
             }
 
+            // External drag cancellation and task-panel cancellation share the
+            // same writer-admission fence. An unsent request needs no peer drain.
+            TryCancel(request.TransferTask?.Cancellation);
             _incomingFileReceiver.CancelReturnedClipboardFileBatch();
             _incomingFileReceiver.AbortActiveTransfer();
-            Volatile.Write(ref _suppressInputUntilReturnedClipboardRequestDrained, 1);
+            Volatile.Write(ref _suppressInputUntilReturnedClipboardRequestDrained,
+                request.PreserveConnectionOnCancellation ? 0 : 1);
             request.MarkRejectRequested();
             requestIsActive = true;
         }
@@ -4228,6 +4307,23 @@ internal sealed partial class RemoteViewerClient : IDisposable
     private void HandleReturnedClipboardFileRequestIdleTimeout(
         ReturnedClipboardFileRequestContext request)
     {
+        if (request.PreserveConnectionOnCancellation && request.IsRejectRequested)
+        {
+            // Do not reuse an untagged slot, but cancellation is never a reason to
+            // tear down an otherwise healthy desktop session. Late terminal status
+            // still drains this exact request; reconnect also clears its barrier.
+            lock (_returnedClipboardFileRequestLock)
+            {
+                if (!ReferenceEquals(_returnedClipboardFileRequest, request)) return;
+                request.StopIdleTimeout();
+                Volatile.Write(ref _suppressInputUntilReturnedClipboardRequestDrained, 0);
+            }
+            const string status = "本机已取消接收；远端尚未确认停止。桌面连接保留，新的拉取需等此批结束或重连。";
+            FinishFileTransferTask(request.TransferTask, RemoteFileTransferTaskState.Cancelled, status);
+            request.Completion.TrySetResult(CreateReturnedClipboardFileBatchResult(
+                ReturnedClipboardFileBatchOutcome.Cancelled, status));
+            return;
+        }
         CancellationTokenSource? ownerConnection;
         TcpClient? ownerTcpClient;
         lock (_returnedClipboardFileRequestLock)
@@ -4377,6 +4473,12 @@ internal sealed partial class RemoteViewerClient : IDisposable
         ReturnedClipboardFileBatchResult result)
     {
         request.StopIdleTimeout();
+        FinishFileTransferTask(request.TransferTask, result.Outcome switch
+        {
+            ReturnedClipboardFileBatchOutcome.Succeeded => RemoteFileTransferTaskState.Completed,
+            ReturnedClipboardFileBatchOutcome.Cancelled => RemoteFileTransferTaskState.Cancelled,
+            _ => RemoteFileTransferTaskState.Failed
+        }, result.Message, result.FilesForDisplay.Count > 0 ? string.Join("; ", result.FilesForDisplay) : null);
         request.Completion.TrySetResult(result);
         if (!IsRemoteClipboardFileRequestPending)
         {
@@ -4530,6 +4632,9 @@ internal sealed partial class RemoteViewerClient : IDisposable
         {
             generation = ++_inputConnectionGeneration;
             _inputQueue.Clear();
+            _localHeldKeys.Clear();
+            _localHeldButtons.Clear();
+            _localLastPointerInput = null;
             _inputWriteInProgress = false;
             _pendingReliablePointerInputs = 0;
             _udpMouseRouteObserved = 0;
@@ -4555,11 +4660,13 @@ internal sealed partial class RemoteViewerClient : IDisposable
     private bool TryDequeueInputBatch(
         List<RemoteInputCommand> batch,
         long generation,
-        out long mouseRouteGeneration)
+        out long mouseRouteGeneration,
+        out long inputIntentRevision)
     {
         batch.Clear();
         lock (_inputLock)
         {
+            inputIntentRevision = Interlocked.Read(ref _localInputIntentRevision);
             mouseRouteGeneration =
                 Interlocked.Read(
                     ref _mouseRouteGeneration);
@@ -4644,6 +4751,9 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
             _inputConnectionGeneration++;
             _inputQueue.Clear();
+            _localHeldKeys.Clear();
+            _localHeldButtons.Clear();
+            _localLastPointerInput = null;
             _inputWriteInProgress = false;
             _pendingReliablePointerInputs = 0;
             _udpMouseRouteObserved = 0;
@@ -5068,6 +5178,10 @@ internal sealed partial class RemoteViewerClient : IDisposable
         public CancellationTokenSource? OwnerConnection { get; }
 
         public bool RequiresPreview { get; }
+
+        public FileTransferTaskContext? TransferTask { get; set; }
+
+        public bool PreserveConnectionOnCancellation { get; set; }
 
         public TaskCompletionSource<ReturnedClipboardFileBatchResult> Completion { get; }
 

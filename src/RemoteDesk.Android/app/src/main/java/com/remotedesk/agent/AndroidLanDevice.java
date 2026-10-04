@@ -37,6 +37,19 @@ final class AndroidLanDevice {
         return new ArrayList<>(unique.values());
     }
 
+    /** Rows retain callbacks to these immutable devices, so compare action fields as well as labels. */
+    static boolean sameSnapshot(List<AndroidLanDevice> previous, List<AndroidLanDevice> next) {
+        if (previous.size() != next.size()) return false;
+        for (int i = 0; i < previous.size(); i++) {
+            AndroidLanDevice a = previous.get(i), b = next.get(i);
+            if (!a.host.equals(b.host) || a.port != b.port ||
+                !a.name.equals(b.name) || !a.platform.equals(b.platform) ||
+                a.listening != b.listening || a.advertised != b.advertised ||
+                !a.deviceId.equals(b.deviceId)) return false;
+        }
+        return true;
+    }
+
     static boolean explicitPort(String value) {
         String text = value == null ? "" : value.trim();
         if (text.startsWith("[")) {

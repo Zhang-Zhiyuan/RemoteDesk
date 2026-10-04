@@ -33,6 +33,12 @@ def main():
     parser.add_argument("--adb", required=True)
     parser.add_argument("--serial", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--avd", help="Exact owned AVD name, required for real SAF tests")
+    parser.add_argument("--file-count", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--provider-case", choices=("size-fallback", "unknown-size", "unreadable"),
+        help="Select a synthetic DocumentsProvider entry through the real system picker")
+    parser.add_argument("--touch-apk", type=Path, default=Path(__file__).resolve().parent /
+        "AndroidViewerProbe/build/outputs/apk/debug/RemoteDeskAndroidViewerProbe-debug.apk")
     parser.add_argument("--files", action="store_true", help="Also exercise the real SAF picker and confirmed upload UI")
     parser.add_argument("--mumu-manager", type=Path,
         help="Optional installed MuMuManager.exe; verifies a loopback serial is its running emulator")
@@ -63,9 +69,22 @@ def main():
     peer = {"gets": 0, "sets": [], "inputs": [], "clipboard": REMOTE_TEXT, "file_starts": 0, "files": []}
     file_data = bytes(range(256)) * (12 * 1024 if args.file_silence_seconds and not args.legacy_no_file_receipt else 1024) + "中文😀\r\n".encode("utf-8")
     fixture = output / ("RemoteDesk-upload-" + uuid.uuid4().hex[:8] + ".bin")
+    if args.provider_case:
+        if not args.files or args.file_count != 1:
+            parser.error("Provider scenarios require --files and one document")
+        fixture = output / ("saf-" + args.provider_case + ".bin")
+        file_data = bytes(index % 251 for index in range(3073))
     device_fixture = "/sdcard/Download/" + fixture.name
+    fixtures = [(fixture, device_fixture, file_data)]
+    if args.file_count == 2:
+        second = output / (fixture.stem + "-second.bin")
+        fixtures.append((second, "/sdcard/Download/" + second.name, b"second synthetic document\n" * 137))
+    touch_apk = "/data/local/tmp/remotedesk-saf-touch-" + uuid.uuid4().hex[:8] + ".apk"
     if args.files:
-        fixture.write_bytes(file_data)
+        if not args.avd or not args.serial.startswith("emulator-") or not args.touch_apk.is_file():
+            raise RuntimeError("SAF requires an owned --avd and a built --touch-apk fixture")
+        for host, _, content in fixtures:
+            host.write_bytes(content)
         (output / "received").mkdir()
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -88,6 +107,15 @@ def main():
 
     def adb(*command):
         return subprocess.run(adb_prefix + list(map(str, command)), check=True, capture_output=True, timeout=25).stdout.decode("utf-8").strip()
+
+    if args.files and args.avd not in adb("emu", "avd", "name").splitlines():
+        raise RuntimeError("Serial does not match the explicitly owned AVD")
+
+    def capture(name):
+        adb("shell", "uiautomator", "dump", "/data/local/tmp/remotedesk-clipboard-test.xml")
+        (output / (name + ".xml")).write_text(adb("shell", "cat", "/data/local/tmp/remotedesk-clipboard-test.xml"), encoding="utf-8")
+        (output / (name + ".png")).write_bytes(subprocess.run(adb_prefix + ["exec-out", "screencap", "-p"],
+            capture_output=True, check=True, timeout=25).stdout)
 
     def server():
         incoming = None
@@ -190,7 +218,7 @@ def main():
         action("clipboard_snapshot")
         return adb("shell", "run-as", PACKAGE, "cat", "files/clipboard-sha256.txt")
 
-    def tap(text):
+    def tap(text, hold=False, resource_id=None):
         labels = (text,) if isinstance(text, str) else text
         for attempt in range(3):
             # Never use a previous page's bounds after a failed snapshot.
@@ -210,14 +238,35 @@ def main():
         tree = ET.fromstring(adb("shell", "cat", "/data/local/tmp/remotedesk-clipboard-test.xml"))
         allowed = {PACKAGE, "com.android.documentsui", "com.google.android.documentsui"}
         matches = [node for node in tree.iter("node") if node.get("package") in allowed
-            and (node.get("text") in labels or node.get("content-desc") in labels)]
+            and (node.get("text") in labels or node.get("content-desc") in labels)
+            and (resource_id is None or node.get("resource-id") == resource_id)]
         if len(matches) != 1:
             (output / "failed-ui.xml").write_bytes(ET.tostring(tree, encoding="utf-8"))
             (output / "failed-ui.png").write_bytes(subprocess.run(adb_prefix + ["exec-out", "screencap", "-p"],
                 capture_output=True, check=True, timeout=25).stdout)
             raise RuntimeError("Expected one visible control: " + str(text) + "; found " + str(len(matches)))
-        x1, y1, x2, y2 = map(int, re.findall(r"\d+", matches[0].get("bounds")))
-        adb("shell", "input", "tap", (x1+x2)//2, (y1+y2)//2)
+        target = matches[0]
+        if hold:
+            parents = {child: parent for parent in tree.iter() for child in parent}
+            candidate = target
+            while candidate in parents:
+                if candidate.get("class", "").endswith("MaterialCardView"):
+                    target = candidate
+                    break
+                candidate = parents[candidate]
+        x1, y1, x2, y2 = map(int, re.findall(r"\d+", target.get("bounds")))
+        x, y = (x1+x2)//2, (y1+y2)//2
+        if target.get("package") in {"com.android.documentsui", "com.google.android.documentsui"} and args.files:
+            # API 30's shell input command sets SOURCE_TOUCHSCREEN but leaves
+            # TOOL_TYPE_UNKNOWN. DocumentsUI's SelectionTracker only routes
+            # FINGER/STYLUS gestures, unlike ordinary toolbar Views. Inject a
+            # real finger type through the shell's normal input permission.
+            adb("shell", "CLASSPATH=" + touch_apk, "app_process", "/system/bin",
+                "com.remotedesk.agent.SafTouchProbe", x, y, 750 if hold else 60)
+        elif hold:
+            adb("shell", "input", "swipe", x, y, x, y, 750)
+        else:
+            adb("shell", "input", "tap", x, y)
 
     def clipboard_menu(item):
         tap("更多")
@@ -227,6 +276,13 @@ def main():
     worker = threading.Thread(target=server, daemon=True)
     worker.start()
     try:
+        if args.files:
+            # A failed picker run can leave DocumentsUI above the now-finished
+            # calling Activity. This is exclusively an owned AVD; reset only
+            # those two fixture processes, and never accept a stale snapshot.
+            adb("shell", "am", "force-stop", "com.android.documentsui")
+            adb("shell", "am", "force-stop", PACKAGE)
+            adb("shell", "run-as", PACKAGE, "rm", "-f", "files/viewer-state.json")
         adb("reverse", "tcp:" + str(port), "tcp:" + str(port))
         adb("shell", "am", "start", "-W", "-n", PACKAGE + "/com.remotedesk.agent.ViewerProbeLauncher", "--ei", "port", port,
             "--ez", "legacyFileWatchdogProbe", str(args.legacy_file_watchdog).lower())
@@ -235,8 +291,11 @@ def main():
         wait(lambda: state().get("frame", [0, 0])[0] == 1280)
         check("actual viewer receives encrypted fixture frames", True)
         if args.files:
-            adb("push", str(fixture), device_fixture)
-            tap("更多"); tap("发送文件…")
+            adb("push", str(args.touch_apk), touch_apk)
+            for host, device, _ in fixtures:
+                if not args.provider_case:
+                    adb("push", str(host), device)
+            tap("更多"); tap(("发送文件…", "发送多个文件…"))
             wait(lambda: any("mCurrentFocus=" in line and ".documentsui/" in line
                 for line in adb("shell", "dumpsys", "window").splitlines()))
             adb("shell", "input", "keyevent", "4")
@@ -244,27 +303,59 @@ def main():
                 for line in adb("shell", "dumpsys", "window").splitlines()))
             check("cancel system file picker sends no file data", peer["file_starts"] == 0)
             def select_file():
-                tap("更多"); tap("发送文件…")
+                tap("更多"); tap(("发送文件…", "发送多个文件…"))
+                if args.provider_case:
+                    tap(("Show roots", "显示根目录"))
+                    tap("RemoteDesk SAF fixtures", resource_id="android:id/title")
                 try:
-                    tap(fixture.name)
+                    tap(fixture.name, hold=args.file_count > 1)
                 except RuntimeError:
                     tap(("Show roots", "显示根目录"))
                     tap(("Downloads", "下载"))
-                    tap(fixture.name)
+                    tap(fixture.name, hold=args.file_count > 1)
+                if args.file_count > 1:
+                    tap(fixtures[1][0].name)
+                    capture("system-multi-selected")
+                    tap(("OPEN", "Open", "打开", "选择", "SELECT", "Select"))
+                capture("upload-confirmation")
             select_file()
+            if args.provider_case == "unknown-size":
+                wait(lambda: "未提供大小" in state().get("status", ""))
+                check("unknown-size streamed provider is rejected before confirmation or file START", peer["file_starts"] == 0)
+                check("metadata rejection identifies the selected document", fixture.name in state().get("status", ""))
+                capture("provider-unknown-size-rejected")
+                tap("知道了")
+                check("provider metadata failure releases the file task", not state().get("fileBusy", True))
+                report["complete"] = True
+                save()
+                return
             tap("取消")
             check("cancel upload confirmation sends no file data", peer["file_starts"] == 0)
             select_file()
             original_owner = state().get("ownerGeneration")
             tap("发送")
+            if args.provider_case == "unreadable":
+                wait(lambda: "Synthetic provider cannot open" in state().get("status", ""))
+                check("unreadable provider reports one failed file without sending START", peer["file_starts"] == 0)
+                capture("provider-unreadable-rejected")
+                tap("知道了")
+                check("provider open failure releases the file task", not state().get("fileBusy", True))
+                report["complete"] = True
+                save()
+                return
             if args.legacy_no_file_receipt:
                 wait(lambda: "对方是旧版" in state().get("status", ""))
                 queued = state()
                 check("legacy upload reports unconfirmed save while a bounded tail drain remains active",
                     not queued.get("fileBusy", True) and queued.get("fileLegacyDrain", False))
-            wait(lambda: len(peer["files"]) == 1, 15 + args.file_silence_seconds)
-            check("Android picker upload reaches actual receiver with exact bytes", Path(peer["files"][0]).read_bytes() == file_data)
+            wait(lambda: len(peer["files"]) == args.file_count, 15 + args.file_silence_seconds)
+            received = {Path(path).name: Path(path).read_bytes() for path in peer["files"]}
+            check("Android picker upload reaches actual receiver with exact bytes",
+                all(received.get(host.name) == content for host, _, content in fixtures))
+            report["files"] = [{"name": host.name, "bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+                for host, _, content in fixtures]
             wait(lambda: ("对方是旧版" if args.legacy_no_file_receipt else "文件已保存到测试接收目录") in state().get("status", ""))
+            capture("upload-results")
             tap("知道了")
             check("legacy result does not pretend to have a remote save receipt" if args.legacy_no_file_receipt else
                 "Android upload completion is confirmed by remote save receipt", True)
@@ -317,7 +408,11 @@ def main():
         listener.close()
         worker.join(2)
         if args.files:
-            adb("shell", "rm", "-f", device_fixture)
+            adb("shell", "am", "force-stop", "com.android.documentsui")
+            for _, device, _ in fixtures:
+                if not args.provider_case:
+                    adb("shell", "rm", "-f", device)
+            adb("shell", "rm", "-f", touch_apk)
 
 
 if __name__ == "__main__":
