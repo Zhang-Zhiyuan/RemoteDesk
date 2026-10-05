@@ -49,6 +49,8 @@ public final class ViewerProbeApplication extends Application implements Applica
                 .put("frame",new JSONArray().put(viewport.frameWidth).put(viewport.frameHeight))
                 .put("viewport",bounds(frame)).put("header",bounds(chrome.header)).put("dock",bounds(chrome.dock))
                 .put("keyboard",chrome.keyboardOpen).put("keyboardPanel",bounds(chrome.keyboardPanel))
+                .put("mouseOpen",chrome.mouseOpen).put("fullscreen",field(viewer,"viewerFullscreen"))
+                .put("exitFullscreen",bounds((View)field(viewer,"exitFullscreenButton")))
                 .put("toolbarRow",bounds(chrome.mainRow))
                 .put("toolbarStrip",bounds((View)chrome.mainRow.getParent()))
                 .put("toolbarScrollX",((View)chrome.mainRow.getParent()).getScrollX())

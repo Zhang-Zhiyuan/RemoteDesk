@@ -21,6 +21,7 @@ internal sealed class FileTransferTasksWindow : Form
     private Guid? _detailsTask;
     private readonly double[] _logicalColumnWidths = [70, 240, 230, 150];
     private bool _applyingColumnWidths;
+    private bool _reconcilingTasks;
 
     internal static void ShowFor(RemoteViewerClient client)
     {
@@ -92,7 +93,12 @@ internal sealed class FileTransferTasksWindow : Form
         root.Controls.Add(actions, 0, 4);
         FileTransferDialogLayout.Attach(this, root, _tasks);
         ResponsiveWindowLayout.TrackDpiAndResizeBounds(this, new Size(900, 560), new Size(440, 280));
-        _tasks.SelectedIndexChanged += (_, _) => { _actionNotice = null; UpdateSelectedTask(); };
+        _tasks.SelectedIndexChanged += (_, _) =>
+        {
+            if (_reconcilingTasks) return;
+            _actionNotice = null;
+            UpdateSelectedTask();
+        };
         _cancel.Click += async (_, _) => await CancelSelectedTaskAsync();
         close.Click += (_, _) => Close();
         CancelButton = close;
@@ -146,6 +152,7 @@ internal sealed class FileTransferTasksWindow : Form
         for (int i = 0; sameOrder && i < tasks.Count; i++)
             sameOrder = ((RemoteFileTransferTaskSnapshot)_tasks.Items[i].Tag!).TaskId == tasks[i].TaskId;
         Guid? selected = (_tasks.SelectedItems.Count > 0 ? _tasks.SelectedItems[0].Tag as RemoteFileTransferTaskSnapshot : null)?.TaskId;
+        Guid? focused = (_tasks.FocusedItem?.Tag as RemoteFileTransferTaskSnapshot)?.TaskId;
         var rows = tasks.Select(task =>
         {
             var row = previous.TryGetValue(task.TaskId, out var old) ? old : new ListViewItem();
@@ -161,6 +168,10 @@ internal sealed class FileTransferTasksWindow : Form
         }).ToArray();
         if (!sameOrder)
         {
+            // Native Clear/Add emits a temporary empty selection. Reconcile
+            // the final selection once so a new task cannot erase the current
+            // receipt selection or cancellation feedback while it is read.
+            _reconcilingTasks = true;
             _tasks.BeginUpdate();
             try
             {
@@ -169,8 +180,14 @@ internal sealed class FileTransferTasksWindow : Form
                 var selection = rows.FirstOrDefault(row => ((RemoteFileTransferTaskSnapshot)row.Tag!).TaskId == selected)
                     ?? rows.LastOrDefault();
                 if (selection is not null) selection.Selected = true;
+                var focus = rows.FirstOrDefault(row => ((RemoteFileTransferTaskSnapshot)row.Tag!).TaskId == focused);
+                if (focus is not null) focus.Focused = true;
             }
-            finally { _tasks.EndUpdate(); }
+            finally
+            {
+                try { _tasks.EndUpdate(); }
+                finally { _reconcilingTasks = false; }
+            }
         }
         string summary = tasks.Count == 0 ? "暂无传输任务。发送或取回文件后，这里会显示进度和保存回执。"
             : $"进行中 {tasks.Count(task => !task.IsTerminal)} 项 · 最近任务 {tasks.Count} 项。关闭面板不会中断传输；取消不会删除已经完成的文件。";

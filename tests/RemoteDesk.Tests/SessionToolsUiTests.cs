@@ -113,6 +113,55 @@ public sealed class SessionToolsUiTests
     });
 
     [Fact]
+    public void AddingAnotherTaskPreservesSelectedReceiptAndKeyboardFocus() => OnSta(() =>
+    {
+        var task = Snapshot();
+        RemoteFileTransferTaskSnapshot[] tasks = [task];
+        using var form = Panel(() => tasks);
+        form.RefreshTasks();
+        var row = form.TasksForTests.Items[0];
+        row.Selected = true;
+        row.Focused = true;
+        var details = form.DetailsForTests;
+        _ = details.Handle;
+        details.Select(details.Text.IndexOf(task.Destination!, StringComparison.Ordinal), task.Destination!.Length);
+        tasks = [task with { BytesTransferred = 1024 }, Snapshot()];
+        form.RefreshTasks();
+        Assert.Same(row, form.TasksForTests.SelectedItems[0]);
+        Assert.Equal(task.Destination, details.SelectedText);
+        Assert.Same(row, form.TasksForTests.FocusedItem);
+    });
+
+    [Fact]
+    public void AddingAnotherTaskDoesNotEraseCurrentCancellationNotice() => OnSta(() =>
+    {
+        var task = Snapshot();
+        RemoteFileTransferTaskSnapshot[] tasks = [task];
+        using var form = Panel(() => tasks, (_, _) => Task.FromResult(true));
+        form.RefreshTasks();
+        Complete(form.CancelSelectedTaskAsync());
+        Assert.Contains("已请求取消", form.DetailsForTests.Text);
+        tasks = [task, Snapshot()];
+        form.RefreshTasks();
+        Assert.Contains("已请求取消", form.DetailsForTests.Text);
+    });
+
+    [Fact]
+    public void RemovingSelectedTaskDoesNotCarryReceiptSelectionToReplacement() => OnSta(() =>
+    {
+        var task = Snapshot();
+        RemoteFileTransferTaskSnapshot[] tasks = [task];
+        using var form = Panel(() => tasks);
+        form.RefreshTasks();
+        var details = form.DetailsForTests;
+        _ = details.Handle;
+        details.Select(details.Text.IndexOf(task.Destination!, StringComparison.Ordinal), task.Destination!.Length);
+        tasks = [task with { TaskId = Guid.NewGuid() }];
+        form.RefreshTasks();
+        Assert.Equal("", details.SelectedText);
+    });
+
+    [Fact]
     public void ReceiptSelectionDoesNotCarryOverToAnotherTask() => OnSta(() =>
     {
         var first = Snapshot();

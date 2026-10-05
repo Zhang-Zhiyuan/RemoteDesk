@@ -20,6 +20,7 @@ final class SshUiProbe {
     private static String clipboardText = "";
     static void created(AndroidSshTerminalActivity owner) {
         activity = owner;
+        DpiUiProbe.current = owner;
         // Synthetic fixture screenshot only; production keeps FLAG_SECURE.
         UI.post(() -> owner.getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE));
         UI.postDelayed(SshUiProbe::snapshot, 400);
@@ -108,6 +109,8 @@ final class SshUiProbe {
                 .put("ctrl",((TextView)field("ctrl")).getText())
                 .put("clipboardText",clipboardText)
                 .put("terminalBounds",ViewerProbeApplication.bounds((View)field("terminal")))
+                .put("loginBounds",ViewerProbeApplication.bounds((View)field("loginPanel")))
+                .put("statusBounds",ViewerProbeApplication.bounds((View)field("status")))
                 .put("webView",android.webkit.WebView.getCurrentWebViewPackage().versionName)
                 .put("config",owner.getResources().getConfiguration().toString());
             Files.write(new File(owner.getFilesDir(),"ssh-state.json").toPath(),data.toString(2).getBytes(java.nio.charset.StandardCharsets.UTF_8));

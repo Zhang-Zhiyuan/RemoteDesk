@@ -94,7 +94,15 @@ public final class AndroidSshTerminalActivity extends Activity {
             view.setPadding(safe.left, safe.top, safe.right, safe.bottom);
             return insets;
         });
-        status = label("SSH · " + deviceName); root.addView(status);
+        status = label("SSH · " + deviceName);
+        // A long device name/error must not consume the whole login form at large font scales.
+        // Keep the full text available through a native, scrollable detail dialog.
+        status.setMaxLines(2); status.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        status.setMinHeight(AndroidDisplay.dp(this, 48));
+        status.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        status.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("SSH 状态")
+            .setMessage(status.getText()).setPositiveButton("关闭", null).show());
+        root.addView(status);
         loginPanel = new ScrollView(this);
         LinearLayout form = new LinearLayout(this); form.setOrientation(LinearLayout.VERTICAL);
         int pad = AndroidDisplay.dp(this, 12); form.setPadding(pad, pad, pad, pad);

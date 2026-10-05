@@ -217,7 +217,7 @@ def ssh_arguments(options, username, proxy_port, token_path, known_hosts, identi
         raise FileNotFoundError("未找到系统 OpenSSH 客户端，请安装 openssh-client。")
     proxy = shlex.join([sys.executable, str(Path(__file__).resolve()), "--proxy", str(proxy_port), str(token_path)]).replace("%", "%%")
     # OpenSSH parses -o values as ssh_config, independently of argv quoting.
-    records = str(known_hosts).replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
+    records = _config_quote(known_hosts, expand_tokens=True)
     identity_args = []
     if identity_file:
         identity = str(Path(identity_file).expanduser().absolute())
@@ -225,7 +225,7 @@ def ssh_arguments(options, username, proxy_port, token_path, known_hosts, identi
             raise ValueError("SSH 私钥路径不能包含控制字符。")
         identity_args = ["-i", identity, "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none"]
     return [executable, "-F", "/dev/null", "-tt", *identity_args, "-o", "ProxyCommand=" + proxy,
-            "-o", "HostKeyAlias=" + host_key_alias(options), "-o", 'UserKnownHostsFile="' + records + '"',
+            "-o", "HostKeyAlias=" + host_key_alias(options), "-o", "UserKnownHostsFile=" + records,
             "-o", "GlobalKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=ask", "-o", "CheckHostIP=no",
             "-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "EscapeChar=none",
             "-o", "PermitLocalCommand=no", "-o", "ClearAllForwardings=yes", "-o", "ServerAliveInterval=20",
@@ -258,7 +258,8 @@ class TerminalSession:
         if self.thread is not None:
             raise RuntimeError("SSH 会话不能重复启动。")
         # Fail synchronously before making any relay connection.
-        terminal_arguments(ssh_arguments(self.options, self.username, 1, Path("unused"), Path("unused"), self.identity_file))
+        terminal_arguments(ssh_arguments(self.options, self.username, 1, Path("unused"),
+                                         self.config_directory / "known_hosts", self.identity_file))
         self.thread = threading.Thread(target=self._worker, name="RemoteDeskSshTerminal", daemon=True)
         self.thread.start()
 

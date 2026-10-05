@@ -78,7 +78,15 @@ def main():
         return json.loads(adb("shell", "run-as", PACKAGE, "cat", "files/viewer-state.json"))
 
     def server():
-        return json.loads(Path(args.server).read_text(encoding="utf-8"))
+        # The fixture replaces its snapshot atomically. Windows can briefly deny
+        # an open during replacement; do not mistake that for a viewer failure.
+        for attempt in range(50):
+            try:
+                return json.loads(Path(args.server).read_text(encoding="utf-8"))
+            except PermissionError:
+                if attempt == 49:
+                    raise
+                time.sleep(.02)
 
     def save():
         (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -130,7 +138,19 @@ def main():
             raise AssertionError("One or more recorded checks failed; see report.json")
 
     def ui():
-        adb("shell", "uiautomator", "dump", "/data/local/tmp/remotedesk-test-ui.xml")
+        # API 30's separate UiAutomation process can terminate with a Binder
+        # "Bad file descriptor" (exit 137) while the Activity remains healthy.
+        # Retry only that tool-process failure, never a missing/failed UI assertion.
+        for attempt in range(3):
+            try:
+                adb("shell", "uiautomator", "dump", "/data/local/tmp/remotedesk-test-ui.xml")
+                break
+            except subprocess.CalledProcessError as error:
+                if error.returncode != 137 or attempt == 2:
+                    raise
+                report.setdefault("automationRetries", []).append({"tool": "uiautomator", "exitCode": 137})
+                save()
+                time.sleep(.5)
         data = ET.fromstring(adb("shell", "cat", "/data/local/tmp/remotedesk-test-ui.xml"))
         # Fresh devices can show an OS tutorial on first immersive entry.
         # Acknowledge only that identified tutorial, never a generic OK or a
@@ -183,6 +203,20 @@ def main():
         if len(matches) != 1:
             raise RuntimeError("Expected unique visible probe control: " + text)
         bounds = list(map(int, re.findall(r"\d+", matches[0].get("bounds"))))
+        if bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+            # API30 UiAutomator sometimes clips the immersive floating button
+            # outside its stale accessibility-window bounds to [0,0][0,0].
+            # Only this owned control may use its actual on-screen View bounds;
+            # still inject real touchscreen input and verify the state change.
+            observed = state()
+            if text != "工具栏" or not observed.get("fullscreen"):
+                raise RuntimeError("Visible control has empty accessibility bounds: " + text)
+            bounds = observed["exitFullscreen"]
+            if bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+                raise RuntimeError("Fullscreen restore also has no actual View bounds")
+            report["fullscreenNativeBoundsFallback"] = bounds
+            (output / "fullscreen-accessibility-zero-bounds.xml").write_text(
+                adb("shell", "cat", "/data/local/tmp/remotedesk-test-ui.xml"), encoding="utf-8")
         adb("shell", "input", "tap", (bounds[0]+bounds[2])//2, (bounds[1]+bounds[3])//2)
         time.sleep(.4)
 
@@ -204,6 +238,9 @@ def main():
         check("Fullscreen retains toolbar restore control", any(n.get("text") == "工具栏" for n in ui()))
         photo("fullscreen")
         tap("工具栏")
+        restored = wait(lambda s: not s.get("fullscreen", True))
+        check("Floating toolbar button exits fullscreen", not restored["fullscreen"])
+        report["beforeBack"] = {key: restored.get(key) for key in ("keyboard", "mouseOpen", "fullscreen")}
         adb("shell", "input", "keyevent", 4)
         check("Back asks before disconnecting", any(n.get("text") == "断开远程连接？" for n in ui()))
         tap("继续控制")
@@ -215,7 +252,9 @@ def main():
 
     try:
         if args.suite == "fullscreen":
-            fullscreen_checks(server()["sessions"], already_fullscreen=True)
+            action("landscape")
+            wait(lambda s: s["h264"] and s["viewport"][2] > s["viewport"][3] and "FPS 0.0" not in s["health"])
+            fullscreen_checks(server()["sessions"], already_fullscreen=any(n.get("text") == "工具栏" for n in ui()))
             assert_finished(); return
         action("portrait")
         first = wait(lambda s: s["h264"] and "FPS 0.0" not in s["health"] and s["viewport"][2] < s["viewport"][3])

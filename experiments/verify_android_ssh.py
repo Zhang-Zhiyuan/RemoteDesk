@@ -83,7 +83,14 @@ try:
         capture('system-key-real-pty');check('system_selected_openssh_ed25519_key_authenticates_real_linux_pty')
     elif a.phase=='basic':
         wait(lambda s:s['pageReady']);check('local_xterm_loaded_on_webview_83')
-        capture('login');command('connect');wait(lambda s:s['trustDialog']);capture('first-hostkey')
+        capture('login');command('connect')
+        time.sleep(.5)
+        if not state()['connection']:
+            # Fill owned test credentials through the probe, then require a real
+            # native click if the programmatic request did not start a session.
+            report['nativeConnectFallback'] = True
+            click_label('连接 SSH')
+        wait(lambda s:s['trustDialog']);capture('first-hostkey')
         check('first_host_key_requires_explicit_confirmation')
         time.sleep(25)
         wait(lambda s:s['trustDialog'] and s['connection'],3);check('trust_dialog_survives_20_second_gate_deadline')

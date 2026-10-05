@@ -183,13 +183,15 @@ function Get-GradleCommand {
     throw "Gradle was not found. Install Gradle, open the Android project once in Android Studio, or pass -GradlePath."
 }
 
-function Get-LocalIPv4Summary {
+function Get-LocalIpSummary {
     $addresses = @()
     try {
-        $addresses = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+        $addresses = Get-NetIPAddress -ErrorAction Stop |
             Where-Object {
                 $_.IPAddress -notlike "127.*" -and
                 $_.IPAddress -notlike "169.254.*" -and
+                $_.IPAddress -ne "::1" -and
+                -not ([System.Net.IPAddress]::Parse($_.IPAddress)).IsIPv6LinkLocal -and
                 $_.PrefixOrigin -ne "WellKnown"
             } |
             Sort-Object IPAddress |
@@ -204,8 +206,10 @@ function Get-LocalIPv4Summary {
                 } |
                 ForEach-Object { $_.GetIPProperties().UnicastAddresses } |
                 Where-Object {
-                    $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and
-                    -not [System.Net.IPAddress]::IsLoopback($_.Address)
+                    $_.Address.AddressFamily -in @([System.Net.Sockets.AddressFamily]::InterNetwork, [System.Net.Sockets.AddressFamily]::InterNetworkV6) -and
+                    -not [System.Net.IPAddress]::IsLoopback($_.Address) -and
+                    -not $_.Address.IsIPv6LinkLocal -and
+                    $_.Address.ToString() -notlike "169.254.*"
                 } |
                 ForEach-Object { $_.Address.ToString() } |
                 Sort-Object -Unique
@@ -228,13 +232,17 @@ function Test-RemoteDeskTcpHandshake {
         [int]$TcpPort
     )
 
-    $client = [System.Net.Sockets.TcpClient]::new([System.Net.Sockets.AddressFamily]::InterNetwork)
+    $client = $null
     try {
+        $ip = [System.Net.IPAddress]::Parse($Address)
+        $client = [System.Net.Sockets.TcpClient]::new($ip.AddressFamily)
         $client.NoDelay = $true
-        $connect = $client.BeginConnect($Address, $TcpPort, $null, $null)
-        if (-not $connect.AsyncWaitHandle.WaitOne(1000)) {
-            return "TCP connect timeout"
+        $connect = $client.BeginConnect($ip, $TcpPort, $null, $null)
+        $wait = $connect.AsyncWaitHandle
+        try {
+            if (-not $wait.WaitOne(1000)) { return "TCP connect timeout" }
         }
+        finally { $wait.Dispose() }
 
         $client.EndConnect($connect)
         $stream = $client.GetStream()
@@ -261,11 +269,11 @@ function Test-RemoteDeskTcpHandshake {
         return $_.Exception.Message
     }
     finally {
-        $client.Close()
+        if ($null -ne $client) { $client.Dispose() }
     }
 }
 
-function Resolve-IPv4Targets {
+function Resolve-RemoteDeskTargets {
     param([string]$NameOrAddress)
 
     if ([string]::IsNullOrWhiteSpace($NameOrAddress)) {
@@ -274,7 +282,7 @@ function Resolve-IPv4Targets {
 
     $parsed = $null
     if ([System.Net.IPAddress]::TryParse($NameOrAddress.Trim(), [ref]$parsed)) {
-        if ($parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+        if ($parsed.AddressFamily -in @([System.Net.Sockets.AddressFamily]::InterNetwork, [System.Net.Sockets.AddressFamily]::InterNetworkV6)) {
             return @($parsed.ToString())
         }
 
@@ -283,7 +291,7 @@ function Resolve-IPv4Targets {
 
     try {
         return [System.Net.Dns]::GetHostAddresses($NameOrAddress.Trim()) |
-            Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } |
+            Where-Object { $_.AddressFamily -in @([System.Net.Sockets.AddressFamily]::InterNetwork, [System.Net.Sockets.AddressFamily]::InterNetworkV6) } |
             ForEach-Object { $_.ToString() } |
             Sort-Object -Unique
     }
@@ -309,17 +317,20 @@ function Test-RemoteDeskUdpDiscovery {
         [int]$UdpPort
     )
 
-    $client = [System.Net.Sockets.UdpClient]::new()
+    $client = $null
     try {
+        $ip = [System.Net.IPAddress]::Parse($Address)
+        $client = [System.Net.Sockets.UdpClient]::new($ip.AddressFamily)
         Disable-UdpConnectionReset $client.Client
         $client.Client.ReceiveTimeout = 1000
         $payload = [System.Text.Encoding]::UTF8.GetBytes("RemoteDesk.Discover.v1")
-        $endpoint = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Parse($Address), $UdpPort)
+        $endpoint = [System.Net.IPEndPoint]::new($ip, $UdpPort)
         [void]$client.Send($payload, $payload.Length, $endpoint)
-        $remote = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
+        $any = if ($ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) { [System.Net.IPAddress]::IPv6Any } else { [System.Net.IPAddress]::Any }
+        $remote = [System.Net.IPEndPoint]::new($any, 0)
         $response = $client.Receive([ref]$remote)
         if ($response.Length -gt 0) {
-            return "UDP discovery response from $($remote.Address):$($remote.Port)"
+            return "UDP discovery response from $remote"
         }
 
         return "UDP discovery returned empty response"
@@ -328,7 +339,7 @@ function Test-RemoteDeskUdpDiscovery {
         return "UDP discovery failed/no response"
     }
     finally {
-        $client.Close()
+        if ($null -ne $client) { $client.Dispose() }
     }
 }
 
@@ -363,13 +374,17 @@ function Test-RemoteDeskAuthentication {
         return "Authentication skipped; pass -PromptForPassword to verify credentials"
     }
 
-    $client = [System.Net.Sockets.TcpClient]::new([System.Net.Sockets.AddressFamily]::InterNetwork)
+    $client = $null
     try {
+        $ip = [System.Net.IPAddress]::Parse($Address)
+        $client = [System.Net.Sockets.TcpClient]::new($ip.AddressFamily)
         $client.NoDelay = $true
-        $connect = $client.BeginConnect($Address, $TcpPort, $null, $null)
-        if (-not $connect.AsyncWaitHandle.WaitOne(3000)) {
-            return "TCP connect timeout"
+        $connect = $client.BeginConnect($ip, $TcpPort, $null, $null)
+        $wait = $connect.AsyncWaitHandle
+        try {
+            if (-not $wait.WaitOne(3000)) { return "TCP connect timeout" }
         }
+        finally { $wait.Dispose() }
 
         $client.EndConnect($connect)
         $stream = $client.GetStream()
@@ -412,7 +427,7 @@ function Test-RemoteDeskAuthentication {
         return $_.Exception.Message
     }
     finally {
-        $client.Close()
+        if ($null -ne $client) { $client.Dispose() }
     }
 }
 
@@ -423,13 +438,14 @@ function Write-RemoteDeskLanProbe {
     )
 
     foreach ($address in @($Addresses | Sort-Object -Unique)) {
+        $displayAddress = if ($address.Contains(':')) { "[$address]" } else { $address }
         $tcp = Test-RemoteDeskTcpHandshake -Address $address -TcpPort $Port
-        Write-Check "$Name TCP RemoteDesk handshake $address`:$Port" ($tcp -eq "RemoteDesk TCP handshake OK") $tcp
+        Write-Check "$Name TCP RemoteDesk handshake $displayAddress`:$Port" ($tcp -eq "RemoteDesk TCP handshake OK") $tcp
         $udp = Test-RemoteDeskUdpDiscovery -Address $address -UdpPort $DiscoveryPort
-        Write-Check "$Name UDP discovery $address`:$DiscoveryPort" ($udp -like "UDP discovery response*") $udp
+        Write-Check "$Name UDP discovery $displayAddress`:$DiscoveryPort" ($udp -like "UDP discovery response*") $udp
         if (-not [string]::IsNullOrEmpty($Password)) {
             $auth = Test-RemoteDeskAuthentication -Address $address -TcpPort $Port -Secret $Password
-            Write-Check "$Name TCP authentication $address`:$Port" ($auth -eq "RemoteDesk authentication OK") $auth
+            Write-Check "$Name TCP authentication $displayAddress`:$Port" ($auth -eq "RemoteDesk authentication OK") $auth
         }
     }
 }
@@ -1167,7 +1183,7 @@ function Write-ScopeReadiness {
         Write-Host "Windows-to-Windows" -ForegroundColor Cyan
         Write-Check "Controller/host executable" (Test-Path $WindowsExe) ($(if (Test-Path $WindowsExe) { "$((Get-Item $WindowsExe).Length) bytes" } else { "missing; run .\scripts\Publish-RemoteDesk.ps1" }))
         Write-Check "Distributable zip" (Test-Path $WindowsZip) ($(if (Test-Path $WindowsZip) { "$((Get-Item $WindowsZip).Length) bytes" } else { "missing; run .\scripts\Publish-RemoteDesk.ps1" }))
-        Write-Check "Local IPv4 for LAN use" (-not [string]::IsNullOrWhiteSpace($LocalIpSummary)) ($(if ($LocalIpSummary) { $LocalIpSummary } else { "none; check network adapter" }))
+        Write-Check "Local IPv4 / IPv6 for LAN use" (-not [string]::IsNullOrWhiteSpace($LocalIpSummary)) ($(if ($LocalIpSummary) { $LocalIpSummary } else { "none; check network adapter" }))
         Write-Check "Windows live test requirement" $true "requires two Windows machines or a loopback/manual LAN session; automated tests cover protocol, discovery, settings, diagnostics, video mode, input queue, boundaries, and viewer loopback compatibility"
     }
 
@@ -1316,7 +1332,7 @@ function Save-AcceptanceReport {
     $lines.Add("") | Out-Null
     $lines.Add("- Generated at: $generatedAt") | Out-Null
     $lines.Add("- Scope: $scope") | Out-Null
-    $lines.Add("- Local IPv4: $localIpText") | Out-Null
+    $lines.Add("- Local IPv4 / IPv6: $localIpText") | Out-Null
     $lines.Add("- Target probe: $targetText") | Out-Null
     $lines.Add("- Acceptance checklist: docs\Windows-Android-Acceptance.md") | Out-Null
     $lines.Add("") | Out-Null
@@ -2602,8 +2618,8 @@ else {
     Write-Check "adb for Android install/test" $true "skipped by $androidScopeReason"
 }
 
-$localIp = Get-LocalIPv4Summary
-Write-Check "Local IPv4" (-not [string]::IsNullOrWhiteSpace($localIp)) ($(if ($localIp) { $localIp } else { "none" }))
+$localIp = Get-LocalIpSummary
+Write-Check "Local IPv4 / IPv6" (-not [string]::IsNullOrWhiteSpace($localIp)) ($(if ($localIp) { $localIp } else { "none" }))
 
 $processes = Get-Process RemoteDesk, ffmpeg -ErrorAction SilentlyContinue
 Write-Check "No stale RemoteDesk/ffmpeg process" ($null -eq $processes) (Format-ProcessSummary $processes)
@@ -2655,8 +2671,8 @@ if ($ScopeCheck) {
 if (-not [string]::IsNullOrWhiteSpace($Target)) {
     Write-Host ""
     Write-Host "Target diagnostics: $Target" -ForegroundColor Cyan
-    $resolvedTargets = @(Resolve-IPv4Targets $Target)
-    Write-Check "Resolve target IPv4" ($resolvedTargets.Count -gt 0) ($(if ($resolvedTargets.Count -gt 0) { $resolvedTargets -join ", " } else { "no IPv4 address" }))
+    $resolvedTargets = @(Resolve-RemoteDeskTargets $Target)
+    Write-Check "Resolve target IPv4 / IPv6" ($resolvedTargets.Count -gt 0) ($(if ($resolvedTargets.Count -gt 0) { $resolvedTargets -join ", " } else { "no IPv4 / IPv6 address" }))
     if ($resolvedTargets.Count -gt 0) {
         Write-RemoteDeskLanProbe "Target" $resolvedTargets
         if ($LinuxProtocolProbe) {
@@ -2669,7 +2685,8 @@ if (-not [string]::IsNullOrWhiteSpace($Target)) {
                     -Secret $Password `
                     -SendFile:$LinuxProtocolProbeSendFile `
                     -PullRemoteFiles:$LinuxProtocolProbePullRemoteFiles
-                Write-Check "Linux protocol probe $address`:$Port" $linuxProbe.Ok $linuxProbe.Detail
+                $displayAddress = if ($address.Contains(':')) { "[$address]" } else { $address }
+                Write-Check "Linux protocol probe $displayAddress`:$Port" $linuxProbe.Ok $linuxProbe.Detail
             }
         }
     }

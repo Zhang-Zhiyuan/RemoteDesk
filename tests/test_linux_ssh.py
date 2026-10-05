@@ -149,6 +149,26 @@ class SshNativeArgumentsTests(unittest.TestCase):
         with mock.patch.object(ssh.shutil, "which", return_value=None), self.assertRaises(FileNotFoundError):
             ssh.terminal_arguments(["ssh"])
 
+    def test_native_known_hosts_path_rejects_environment_expansion_and_controls(self):
+        with mock.patch.object(ssh.shutil, "which", return_value="/usr/bin/ssh"):
+            for path in ("/tmp/${REMOTEDESK_OWNED_ALT}/known_hosts", "/tmp/known\nhosts", "/tmp/known\0hosts"):
+                with self.subTest(path=path), self.assertRaises(ssh.AliasConfigurationError):
+                    ssh.ssh_arguments(self.options(), "owned", 12345, "/tmp/token", path)
+            arguments = ssh.ssh_arguments(self.options(), "owned", 12345, "/tmp/token", "/tmp/literal %h with spaces/known_hosts")
+            self.assertIn('UserKnownHostsFile="/tmp/literal %%h with spaces/known_hosts"', arguments)
+
+    def test_native_terminal_validates_actual_records_directory_before_worker_start(self):
+        session = ssh.TerminalSession(self.options(), KEY, "owned",
+                                      config_directory="/tmp/${REMOTEDESK_OWNED_ALT}")
+        with mock.patch.object(ssh.shutil, "which", return_value="/usr/bin/ssh"), \
+                mock.patch.object(ssh.threading, "Thread") as worker, \
+                mock.patch.object(ssh, "terminal_arguments") as terminal:
+            with self.assertRaises(ssh.AliasConfigurationError):
+                session.start()
+        worker.assert_not_called()
+        terminal.assert_not_called()
+        self.assertIsNone(session.thread)
+
     def test_selected_private_key_is_a_literal_argument_and_disables_agent_identity_mix(self):
         arguments = ssh.ssh_arguments(self.options(), "owned", 12345, "/tmp/token", "/tmp/records",
                                       identity_file="/tmp/key with space;literal")

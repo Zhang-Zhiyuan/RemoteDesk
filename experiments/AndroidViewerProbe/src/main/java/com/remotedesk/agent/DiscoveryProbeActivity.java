@@ -33,6 +33,9 @@ public final class DiscoveryProbeActivity extends Activity {
                 report.put("scope","Actual Android discovery transport and JSON parser; no credentials or remote input");
                 report.put("sdk",android.os.Build.VERSION.SDK_INT).put("checks",checks);
                 parserChecks();
+                if (getIntent().getBooleanExtra("externalOwnedFixture", false)) {
+                    externalOwnedFixtureChecks();
+                } else {
                 try (DatagramSocket fixture = new DatagramSocket(new InetSocketAddress("127.0.0.9",40566))) {
                     fixture.setSoTimeout(250);
                     AtomicBoolean done = new AtomicBoolean();
@@ -55,6 +58,7 @@ public final class DiscoveryProbeActivity extends Activity {
                     } finally { pending.close(); done.set(true); fixture.close(); replies.join(1500); }
                 }
                 tcpFallbackChecks();
+                }
                 pending = new AndroidLanDiscovery();
                 long started = android.os.SystemClock.elapsedRealtime();
                 List<AndroidLanDevice> nearby = pending.scan(this,null,Collections.emptyList());
@@ -85,6 +89,22 @@ public final class DiscoveryProbeActivity extends Activity {
     private JSONObject payload(Object port,Object running) throws Exception {
         return new JSONObject().put("Type",RemoteDeskProtocol.DISCOVERY_RESPONSE_TYPE).put("MachineName","Discovery fixture")
             .put("Platform","Windows").put("Port",port).put("IsHostRunning",running);
+    }
+    private void externalOwnedFixtureChecks() throws Exception {
+        // The production self-connect guard intentionally rejects the old on-device loopback
+        // fixture. Assert that guard instead of bypassing it, and exercise UDP via the owned host.
+        for (String self : new String[]{"127.0.0.9", "127.0.0.10", "::1"}) {
+            pending = new AndroidLanDiscovery(); boolean rejected = false;
+            try { pending.scan(this, self, Collections.emptyList()); }
+            catch (AndroidSelfConnectionGuard.Rejected expected) { rejected = true; }
+            finally { pending.close(); }
+            check("Self target rejected before discovery sockets: " + self, rejected);
+        }
+        pending = new AndroidLanDiscovery();
+        List<AndroidLanDevice> found = pending.scan(this, "10.0.2.2", Collections.emptyList());
+        check("Owned external UDP reply retains custom TCP port",found.stream().anyMatch(d->d.host.equals("10.0.2.2") && d.port==45678 && d.listening));
+        check("Repeated UDP rounds deduplicate the same endpoint",found.stream().filter(d->d.port==45678).count()==1);
+        check("JSON Address cannot redirect the explicit target",found.stream().noneMatch(d->d.host.equals("203.0.113.99")));
     }
     private AndroidLanDevice parse(String text) throws Exception {
         byte[] bytes=text.getBytes(StandardCharsets.UTF_8);

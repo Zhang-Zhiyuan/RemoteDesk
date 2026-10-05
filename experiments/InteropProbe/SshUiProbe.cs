@@ -29,10 +29,12 @@ internal static class SshUiProbe
                 Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
                 Application.EnableVisualStyles();
-                if (config.RootElement.TryGetProperty("fileHeaderOnly", out JsonElement fileHeaderOnly) && fileHeaderOnly.GetBoolean())
+                if (config.RootElement.TryGetProperty("sessionToolsOnly", out JsonElement sessionToolsOnly) && sessionToolsOnly.GetBoolean())
+                    SessionToolsInteractionProbe.Verify(output);
+                else if (config.RootElement.TryGetProperty("fileHeaderOnly", out JsonElement fileHeaderOnly) && fileHeaderOnly.GetBoolean())
                     FileTransferHeaderUiProbe.Verify(output, config.RootElement.TryGetProperty("replayLegacyHeaders", out var legacyHeaders) && legacyHeaders.GetBoolean());
                 else if (config.RootElement.TryGetProperty("aliasOnly", out JsonElement aliasOnly) && aliasOnly.GetBoolean()) VerifyAliasUi(output);
-                else Verify(output);
+                else Verify(output, !(config.RootElement.TryGetProperty("dialogLayoutOnly", out var layoutOnly) && layoutOnly.GetBoolean()));
             }
             catch (Exception error) { failure = error; }
         });
@@ -196,7 +198,7 @@ internal static class SshUiProbe
         }
     }
 
-    private static void Verify(string output)
+    private static void Verify(string output, bool verifyNative = true)
     {
         var cases = new List<object>();
         var failures = new List<string>();
@@ -243,7 +245,7 @@ internal static class SshUiProbe
         Program.Save(Path.Combine(output, "ssh-ui.json"), new { passed = failures.Count == 0, cases, failures,
             scope = "Real WinForms on private station; synthetic 96/120/144/168/192/240 DPI plus fonts 9/14/20; no production input/settings/network" });
         if (failures.Count > 0) throw new InvalidOperationException($"SSH dialog: {failures.Count} layout findings.");
-        VerifyRealOpenSsh(output);
+        if (verifyNative) VerifyRealOpenSsh(output);
     }
 
     private static void VerifyRealOpenSsh(string output)
