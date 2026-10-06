@@ -7,6 +7,8 @@ from collections import deque
 from dataclasses import asdict, dataclass
 import json
 import os
+import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -122,6 +124,67 @@ def install_command(missing: list[MissingDependency]) -> list[str]:
             "install", *packages]
 
 
+def preflight_install(command: list[str]) -> None:
+    """Read the resolver's plan without privilege, downloads or package writes.
+
+    APT simulation is advisory (another package manager may change the state),
+    so call it both before consent and immediately before requesting elevation.
+    Never repair a machine's sources or turn an app install into a driver update.
+    """
+    if not command or command[0] != "/usr/bin/apt-get" or "install" not in command:
+        raise ValueError("Invalid dependency installation command")
+    packages = command[command.index("install") + 1:]
+    if not packages or any(package not in ALLOWED_PACKAGES for package in packages):
+        raise ValueError("Invalid dependency package list")
+    try:
+        distribution = platform.freedesktop_os_release()
+    except OSError:
+        distribution = {}
+    system = distribution.get("PRETTY_NAME", distribution.get("ID", "Linux"))
+    context = f"当前系统：{system}\n当前 Python：{sys.version_info.major}.{sys.version_info.minor}（{sys.executable}）"
+    environment = system_environment()
+    environment["LC_ALL"] = "C"  # APT's documented Inst/Remv operations are parsed below.
+    try:
+        result = subprocess.run([command[0], "--simulate", *command[1:]],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=environment, timeout=20, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError("安装前检查未完成，尚未申请管理员权限或开始安装。\n"
+            + context + "\n请检查系统包管理器后重试。\n" + str(error)) from error
+    output = (result.stdout + "\n" + result.stderr).strip()
+    if result.returncode:
+        raise RuntimeError("系统软件源无法满足 RemoteDesk 的运行依赖，尚未申请管理员权限或开始安装。\n"
+            + context + "\n请检查软件源是否对应当前系统版本，以及依赖版本是否冲突；RemoteDesk 不会自动改源、降级系统或修复其他软件。"
+            + "\n\nAPT 检查结果：\n" + output[-3000:])
+    if re.search(r"(?m)^Remv\s", output):
+        raise RuntimeError("安装计划需要删除已有软件，已停止自动安装；请先由系统管理员处理。\n" + context)
+    planned = re.findall(r"(?m)^Inst\s+(\S+)\s+([^\n]+)", output)
+    if not planned:
+        raise RuntimeError("系统包管理器没有可安装的缺项，但当前运行环境仍无法使用这些组件。\n"
+            + context + "\n请使用 RemoteDesk 自带启动器，或检查 Python/虚拟环境与系统包是否兼容；本次不会重复申请安装。")
+    # Conf may finish a previously unpacked driver, even without a matching Inst.
+    changed = re.findall(r"(?m)^(?:Inst|Conf)\s+(\S+)\s+([^\n]+)", output)
+    protected = sorted({name for name, _ in changed if name.partition(":")[0].startswith((
+        "nvidia-", "libnvidia-", "cuda-", "libcuda", "linux-image-", "linux-modules-", "linux-headers-"))})
+    if protected:
+        raise RuntimeError("安装计划会改动显卡驱动或内核组件，已停止自动安装。\n" + context
+            + "\n涉及：" + ", ".join(protected[:12]) + "\n请由系统管理员处理这些组件后重试。")
+    # Check positive Ubuntu-origin evidence in the *selected plan*, not every
+    # configured source: unrelated PPAs must not block otherwise healthy installs.
+    codename = distribution.get("UBUNTU_CODENAME") or (
+        distribution.get("VERSION_CODENAME", "") if distribution.get("ID") == "ubuntu" else "")
+    if codename:
+        conflicts = []
+        for name, detail in planned:
+            for version, suite in re.findall(r"(?:^|[ (])Ubuntu:([^/\s]+)/([A-Za-z0-9.+_-]+)", detail):
+                if suite != codename and not suite.startswith(codename + "-"):
+                    conflicts.append(f"{name}：Ubuntu {version} / {suite}")
+        if conflicts:
+            raise RuntimeError("软件源中的安装候选包与当前 Ubuntu 版本不匹配，已停止自动安装。\n"
+                + context + f"\n当前应使用：{codename}\n" + "\n".join(conflicts[:12])
+                + "\n请先由系统管理员检查软件源；RemoteDesk 不会混装其他发行版的组件或自动改源。")
+
+
 def elevated_command(command: list[str], graphical: bool) -> list[str]:
     if os.geteuid() == 0:
         return command
@@ -133,6 +196,90 @@ def elevated_command(command: list[str], graphical: bool) -> list[str]:
     raise RuntimeError("无法申请管理员权限：桌面需要 polkit 授权代理，或在终端中启动后使用 sudo。")
 
 
+def scrollable_dialog(parent, message: str, *, question: bool) -> bool:
+    """Long dependency diagnostics must not push consent buttons off screen."""
+    import tkinter as tk
+    from tkinter import font as tkfont, ttk
+    window = tk.Toplevel(parent, name="dependency_details")
+    window.withdraw()
+    window.title("RemoteDesk · 运行环境")
+    window.rowconfigure(0, weight=1)
+    window.columnconfigure(0, weight=1)
+    content = ttk.Frame(window, name="content", padding=14)
+    content.grid(row=0, column=0, sticky="nsew")
+    content.rowconfigure(1, weight=1)
+    content.columnconfigure(0, weight=1)
+    width = min(760, max(1, parent.winfo_screenwidth() - 48))
+    height = min(580, max(1, parent.winfo_screenheight() - 96))
+    heading = ttk.Label(content, text="安装缺少的运行组件？" if question else "运行环境需要处理",
+        wraplength=max(1, width - 40))
+    heading.grid(row=0, column=0, sticky="w", pady=(0, 10))
+    details = ttk.Frame(content, name="details")
+    details.grid(row=1, column=0, sticky="nsew")
+    details.rowconfigure(0, weight=1)
+    details.columnconfigure(0, weight=1)
+    text = tk.Text(details, name="message", wrap="word", height=1, width=1,
+        font="TkDefaultFont", padx=8, pady=8, takefocus=True)
+    scrollbar = ttk.Scrollbar(details, orient="vertical", command=text.yview)
+    text.configure(yscrollcommand=scrollbar.set)
+    text.grid(row=0, column=0, sticky="nsew")
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    text.insert("1.0", message)
+    text.configure(state="disabled")
+    def select_all(_event):
+        text.tag_add("sel", "1.0", "end-1c")
+        return "break"
+    text.bind("<Control-a>", select_all)
+    actions = ttk.Frame(content, name="actions")
+    actions.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+    accepted = False
+    def finish(value=False):
+        nonlocal accepted
+        accepted = value
+        window.destroy()
+    cancel = ttk.Button(actions, name="dismiss", text="取消" if question else "知道了", width=0, command=finish)
+    buttons = [cancel]
+    if question:
+        buttons.append(ttk.Button(actions, name="install", text="安装依赖", width=0, command=lambda: finish(True)))
+    vertical = None
+    def arrange(event=None):
+        nonlocal vertical
+        if event is not None and event.widget is not window:
+            return
+        available = max(1, window.winfo_width() - 28)
+        heading.configure(wraplength=available)
+        stack = sum(button.winfo_reqwidth() for button in buttons) + 8 * (len(buttons) - 1) > available
+        if vertical != stack:
+            vertical = stack
+            for button in buttons:
+                button.pack_forget()
+            for index, button in enumerate(buttons):
+                if stack:
+                    button.pack(side="top", fill="x", pady=(0, 6 if index + 1 < len(buttons) else 0))
+                else:
+                    button.pack(side="right", padx=(0, 8 if index else 0))
+        button_height = (sum(button.winfo_reqheight() for button in buttons) + 6 * (len(buttons) - 1)
+                         if stack else max(button.winfo_reqheight() for button in buttons))
+        needed = heading.winfo_reqheight() + button_height + 3 * tkfont.nametofont("TkDefaultFont").metrics("linespace") + 60
+        # Stacking cannot help if even a single action is wider than the window.
+        # Account for the actual font/DPI, rather than only a fixed pixel minimum.
+        minimum_width = max(380, max(button.winfo_reqwidth() for button in buttons) + 28)
+        window.minsize(min(width, minimum_width), min(height, max(260, needed)))
+    window.minsize(min(380, width), min(260, height))
+    x = max(0, (parent.winfo_screenwidth() - width) // 2)
+    y = max(0, (parent.winfo_screenheight() - height) // 2)
+    window.geometry(f"{width}x{height}+{x}+{y}")
+    window.bind("<Configure>", arrange)
+    window.protocol("WM_DELETE_WINDOW", finish)
+    window.bind("<Escape>", lambda _event: finish())
+    window.deiconify()
+    window.update_idletasks()
+    window.grab_set()
+    cancel.focus_set()  # Long installation prompts never default to acceptance.
+    parent.wait_window(window)
+    return accepted
+
+
 def dialog(message: str, *, question: bool, graphical: bool) -> bool:
     if graphical:
         root = None
@@ -141,6 +288,8 @@ def dialog(message: str, *, question: bool, graphical: bool) -> bool:
             from tkinter import messagebox
             root = tk.Tk(className="RemoteDeskDependencies")
             root.withdraw()
+            if len(message) > 600 or message.count("\n") > 12:
+                return scrollable_dialog(root, message, question=question)
             if question:
                 return bool(messagebox.askyesno("RemoteDesk · 运行环境", message, parent=root))
             messagebox.showerror("RemoteDesk · 运行环境", message, parent=root)
@@ -258,6 +407,7 @@ def prepare_runtime(mode: str = "app", *, graphical: bool | None = None) -> int:
         summary = "\n".join(f"• {item.label}（{item.package}）" for item in missing)
         try:
             command = install_command(missing)
+            preflight_install(command)
         except RuntimeError as error:
             raise RuntimeError(str(error) + "\n\n" + summary) from error
         manual = "sudo " + shlex.join(command)
@@ -268,6 +418,7 @@ def prepare_runtime(mode: str = "app", *, graphical: bool | None = None) -> int:
         if not dialog(message, question=True, graphical=graphical):
             print("RemoteDesk 依赖安装未获确认；本次启动已取消。", file=sys.stderr)
             return CANCELLED
+        preflight_install(command)
         elevated = elevated_command(command, graphical)
         code, output = run_installer(elevated, graphical)
         if code == 126 and elevated[0] == "/usr/bin/pkexec":
@@ -294,12 +445,25 @@ def prepare_runtime(mode: str = "app", *, graphical: bool | None = None) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="RemoteDesk Linux dependency check / consent-based installation")
     parser.add_argument("--mode", choices=("app", "host"), default="app")
-    parser.add_argument("--check", action="store_true", help="Read-only JSON report; never prompts or installs")
+    checks = parser.add_mutually_exclusive_group()
+    checks.add_argument("--check", action="store_true", help="Read-only JSON report; never prompts or installs")
+    checks.add_argument("--check-install", action="store_true",
+                        help="Read-only dependency and APT plan report; never prompts, elevates or installs")
     args = parser.parse_args()
-    if args.check:
+    if args.check or args.check_install:
         try:
             missing = detect_missing(args.mode)
-            print(json.dumps({"interpreter": sys.executable, "missing": [asdict(item) for item in missing]}, ensure_ascii=False, indent=2))
+            report = {"interpreter": sys.executable, "missing": [asdict(item) for item in missing]}
+            if args.check_install:
+                try:
+                    if missing:
+                        preflight_install(install_command(missing))
+                    report["installable"] = True
+                except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+                    report.update(installable=False, error=str(error))
+                    print(json.dumps(report, ensure_ascii=False, indent=2))
+                    return UNAVAILABLE
+            print(json.dumps(report, ensure_ascii=False, indent=2))
             return 1 if missing else 0
         except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
             print(json.dumps({"error": str(error)}, ensure_ascii=False))

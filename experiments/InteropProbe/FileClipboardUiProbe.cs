@@ -7,8 +7,16 @@ using RemoteDesk;
 // interactive user's clipboard is neither read nor changed.
 internal static class FileClipboardUiProbe
 {
-    internal static Task<IReadOnlyList<object>> RunAsync(RemoteViewerClient client, string source, string received, nint privateDesktop = default)
+    internal static Task<IReadOnlyList<object>> RunAsync(RemoteViewerClient client, string source, string received,
+        nint privateDesktop = default, TimeSpan? operationTimeout = null)
     {
+        // A real public relay can take longer than the loopback fixture's
+        // twenty seconds to transfer one MiB. Bound the test separately from
+        // the product's own transfer/receipt deadlines; never cancel an active
+        // upload merely because a LAN-only fixture budget was reused for WAN.
+        TimeSpan scenarioTimeout = operationTimeout ?? TimeSpan.FromSeconds(20);
+        if (scenarioTimeout <= TimeSpan.Zero || scenarioTimeout > TimeSpan.FromMinutes(2))
+            throw new ArgumentOutOfRangeException(nameof(operationTimeout));
         var done = new TaskCompletionSource<IReadOnlyList<object>>(TaskCreationOptions.RunContinuationsAsynchronously);
         var thread = new Thread(() =>
         {
@@ -32,7 +40,7 @@ internal static class FileClipboardUiProbe
                     { ShowInTaskbar = false };
                 window.Shown += async (_, _) =>
                 {
-                    try { done.TrySetResult(await CheckAsync(window, source, received)); }
+                    try { done.TrySetResult(await CheckAsync(window, source, received, scenarioTimeout)); }
                     catch (Exception error) { done.TrySetException(error); }
                     finally { window.Close(); }
                 };
@@ -43,10 +51,11 @@ internal static class FileClipboardUiProbe
         }) { IsBackground = true };
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
-        return done.Task.WaitAsync(TimeSpan.FromSeconds(45));
+        return done.Task.WaitAsync(scenarioTimeout + scenarioTimeout + TimeSpan.FromSeconds(5));
     }
 
-    private static async Task<IReadOnlyList<object>> CheckAsync(RemoteViewerWindow window, string source, string received)
+    private static async Task<IReadOnlyList<object>> CheckAsync(RemoteViewerWindow window, string source, string received,
+        TimeSpan operationTimeout)
     {
         Invoke(window, "UninstallSystemKeyboardCapture");
         var picture = window.Controls.OfType<PictureBox>().Single();
@@ -83,7 +92,7 @@ internal static class FileClipboardUiProbe
             };
             timer.Start();
             picture.Focus();
-            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            using var deadline = new CancellationTokenSource(operationTimeout);
             await ((Task)Invoke(window, "PasteClipboardFilesToRemoteAsync", (object)new[] { source })!).WaitAsync(deadline.Token);
             string[] added = Directory.GetFiles(received).Except(before).ToArray();
             bool passed = sawConfirmation && exactPreview && !transferredBeforeConfirmation && (accept

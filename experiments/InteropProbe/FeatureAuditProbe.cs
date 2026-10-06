@@ -5,7 +5,8 @@ using System.Text.Json;
 using RemoteDesk;
 
 // Actual product client against an explicitly owned Linux/Xvfb host. Never
-// inject desktop input, read the local clipboard, or install/update anything.
+// touch the local clipboard or install/update anything. Input is opt-in and
+// restricted by the caller to the owned 1920x1080 interop target.
 internal static class FeatureAuditProbe
 {
     internal static async Task<int> RunAsync(JsonElement config, string output)
@@ -76,6 +77,31 @@ internal static class FeatureAuditProbe
             await client.SelectCaptureTargetAsync(targets[0].Id);
             await Until(() => targetChanges > before && frames > beforeFrames + 3);
             Check("Capture target selection acknowledged and video continues", true);
+            if (config.TryGetProperty("ownedInputFixture", out var inputFixture) && inputFixture.GetBoolean())
+            {
+                async Task Click(int x, int y)
+                {
+                    await client.SendInputAsync(RemoteInputCommand.MouseMove(x, y));
+                    await client.SendInputAsync(RemoteInputCommand.MouseDown(RemoteMouseButton.Left, x, y));
+                    await client.SendInputAsync(RemoteInputCommand.MouseUp(RemoteMouseButton.Left, x, y));
+                    await Task.Delay(500, token);
+                }
+                await Click(350, 400);
+                await Click(350, 620);
+                await client.SendInputAsync(RemoteInputCommand.KeyDown(0xa2));
+                await client.SendInputAsync(RemoteInputCommand.KeyDown(0x41));
+                await client.SendInputAsync(RemoteInputCommand.KeyUp(0x41));
+                await client.SendInputAsync(RemoteInputCommand.KeyUp(0xa2));
+                await client.SendInputAsync(RemoteInputCommand.KeyDown(0x08));
+                await client.SendInputAsync(RemoteInputCommand.KeyUp(0x08));
+                await client.SendInputAsync(RemoteInputCommand.KeyDown(0xa1));
+                await client.SendInputAsync(RemoteInputCommand.KeyDown(0x41));
+                await client.SendInputAsync(RemoteInputCommand.KeyUp(0x41));
+                await client.SendInputAsync(RemoteInputCommand.KeyUp(0xa1));
+                var sent = client.SendTextInput(" RemoteDesk 中文😀");
+                Check("Owned target click, right Shift and Unicode queued; caller must verify remote state",
+                    sent.SentCodePoints == 15 && !sent.Truncated);
+            }
             Check("Send known Chinese/emoji clipboard text to owned Xvfb only",
                 await client.SendClipboardTextToRemoteAsync("RemoteDesk clipboard 中文😀"));
             var bytes = Enumerable.Range(0, 128 * 1024 + 31).Select(i => (byte)(i % 239)).ToArray();
@@ -134,7 +160,7 @@ internal static class FeatureAuditProbe
             await client.DisconnectAsync();
             Program.Save(Path.Combine(output, "features.json"), new {
                 complete = failure == null, failure, checks, frames, jpeg, h264,
-                scope = "Actual Windows product client to owned physical Linux Xvfb; no Windows capture/input or local clipboard mutation",
+                scope = "Actual Windows product client to owned Linux Xvfb; physical/WSL environment is recorded by the caller; no Windows capture/input or local clipboard mutation",
                 route = relay is null ? "direct LAN" : "native public relay TLS/TCP; no LAN fallback"
             });
         }

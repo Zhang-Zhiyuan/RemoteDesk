@@ -17,6 +17,14 @@ import xml.etree.ElementTree as ET
 PACKAGE = "com.remotedesk.viewerprobe"
 
 
+def rotation_command(help_text):
+    """Select an advertised command; current Android dropped set-user-rotation."""
+    for command in ("user-rotation", "set-user-rotation"):
+        if re.search(r"(?m)^\s*" + re.escape(command) + r"(?:\s|$)", help_text):
+            return command
+    raise RuntimeError("Owned device does not advertise a supported wm rotation command")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--adb", required=True)
@@ -35,8 +43,8 @@ def main():
     if not args.serial.startswith("emulator-"):
         raise RuntimeError("Owned emulator required")
 
-    def adb(*command):
-        return subprocess.run(prefix + list(map(str, command)), capture_output=True, check=True,
+    def adb(*command, check=True):
+        return subprocess.run(prefix + list(map(str, command)), capture_output=True, check=check,
             timeout=30).stdout.decode("utf-8").strip()
 
     def shell(*command):
@@ -44,6 +52,9 @@ def main():
 
     if args.avd not in adb("emu", "avd", "name").splitlines():
         raise RuntimeError("Serial is not the owned AVD")
+    # Some wm versions print valid help but return 255; validate the advertised
+    # command rather than treating that help-only status as an execution error.
+    rotate = rotation_command(adb("shell", "wm", "help", check=False))
     args.output.mkdir(parents=True, exist_ok=False)
     report = {"densityDpi": args.density, "fontScale": args.font,
         "orientation": "landscape" if args.landscape else "portrait", "snapshots": [], "checks": []}
@@ -187,13 +198,13 @@ def main():
         time.sleep(1) # Let density/font configuration broadcasts finish before locking orientation.
         # Set rotation mode+value atomically. Separate Settings writes can be
         # overwritten by WindowManager's outstanding sensor-to-user transition.
-        shell("wm", "set-user-rotation", "lock", 1 if args.landscape else 0)
+        shell("wm", rotate, "lock", 1 if args.landscape else 0)
         wanted_rotation = str(1 if args.landscape else 0)
         for attempt in range(6):
             time.sleep(.5)
             if shell("settings", "get", "system", "user_rotation") == wanted_rotation:
                 break
-            shell("wm", "set-user-rotation", "lock", wanted_rotation)
+            shell("wm", rotate, "lock", wanted_rotation)
         else:
             raise AssertionError("Owned emulator did not accept the requested rotation lock")
         report["system"] = {"size": shell("wm", "size"), "density": shell("wm", "density"),

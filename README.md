@@ -65,7 +65,7 @@ Windows / Linux 的“传输任务”可查看进度、保存回执和取消任�
 
 ### Windows
 
-安装 .NET SDK **8.0.424**，然后运行：
+安装 .NET SDK **8.0.425**，然后运行：
 
 ```powershell
 dotnet run --project src/RemoteDesk/RemoteDesk.csproj -c Release
@@ -82,7 +82,7 @@ Windows 版包含管理员启动清单，调试运行也请使用管理员终端
 python3 scripts/linux/remotedesk_linux_app.py
 ```
 
-Debian / Ubuntu 缺少运行依赖时，程序会列出缺项，经确认和系统授权后安装。Ubuntu 22.04 请用便携包（自动使用系统 Python），不要强装要求 glibc 2.38 的 amd64 deb。安装方式见 [Linux 安装说明](docs/Linux-SystemPackage.md)。
+Debian / Ubuntu 缺少运行依赖时，程序会先检查安装计划，经确认和系统授权后安装。软件源版本冲突或安装计划涉及驱动、内核时会停止并提示，不会自动改源。Ubuntu 22.04 请用便携包（自动使用系统 Python），不要强装要求 glibc 2.38 的 amd64 deb。安装方式见 [Linux 安装说明](docs/Linux-SystemPackage.md)。
 
 ### Android
 

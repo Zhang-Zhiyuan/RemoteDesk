@@ -18,7 +18,7 @@ internal sealed class FileTransferResultDialog : Form
         root.Controls.Add(new Label { AutoSize = true, Dock = DockStyle.Fill, Text = heading, Padding = new Padding(0, 0, 0, 10) }, 0, 0);
         var resultDetails = new TextBox { Multiline = true, ReadOnly = true, Dock = DockStyle.Fill,
             MinimumSize = new Size(0, 120), AccessibleName = "实际保存位置和传输结果",
-            ScrollBars = ScrollBars.Both, WordWrap = false, Text = details };
+            ScrollBars = ScrollBars.Vertical, WordWrap = true, Text = details };
         root.Controls.Add(resultDetails, 0, 1);
         var close = new Button { Text = "知道了", AutoSize = true, MinimumSize = new Size(90, 32), Padding = new Padding(8, 4, 8, 4), Anchor = AnchorStyles.Right, DialogResult = DialogResult.OK, Margin = new Padding(0, 10, 0, 0) };
         root.Controls.Add(close, 0, 2);

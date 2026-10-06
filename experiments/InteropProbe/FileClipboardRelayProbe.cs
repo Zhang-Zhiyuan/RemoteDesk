@@ -184,7 +184,8 @@ internal static class FileClipboardRelayProbe
             Record($"reverse result: {download.Outcome}; {download.Message}; paths={download.LocalPaths.Count}");
             Check("confirmed reverse file transfer over relay", download.Success && download.LocalPaths.Count == 1 && File.ReadAllBytes(download.LocalPaths[0]).SequenceEqual(bytes));
             if (interactiveFileUi)
-                checks.AddRange(await FileClipboardUiProbe.RunAsync(viewer, binary, received, privateDesktop));
+                checks.AddRange(await FileClipboardUiProbe.RunAsync(viewer, binary, received, privateDesktop,
+                    operationTimeout: ownedRelay is null ? TimeSpan.FromMinutes(2) : null));
             if (sshClient is not null)
             {
                 using var command = sshClient.CreateCommand("printf OWNED-SSH-AFTER");

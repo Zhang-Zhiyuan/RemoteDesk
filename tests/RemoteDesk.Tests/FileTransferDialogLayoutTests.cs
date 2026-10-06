@@ -61,9 +61,29 @@ public sealed class FileTransferDialogLayoutTests
         Assert.Equal(result, details.Text);
         Assert.True(details.ReadOnly);
         Assert.True(details.Multiline);
-        Assert.Equal(ScrollBars.Both, details.ScrollBars);
+        Assert.Equal(ScrollBars.Vertical, details.ScrollBars);
+        Assert.True(details.WordWrap);
         Assert.True(details.MinimumSize.Height >= 120);
         Assert.Equal("实际保存位置和传输结果", details.AccessibleName);
         Assert.Same(dialog.AcceptButton, dialog.CancelButton);
+    }
+
+    [Fact]
+    public void LongReceiptPathsWrapWithoutChangingSelectableContents()
+    {
+        string path = @"D:\RemoteDeskReceived\" +
+            string.Join("\\", Enumerable.Repeat("很长的目录名称-without-spaces", 20)) + @"\报告 (2).txt";
+        string receipt = "已发送：报告.txt\r\n文件已保存到被控端：" + path + "（SHA-256 已校验）";
+        using var dialog = new FileTransferResultDialog("已发送 1 项", receipt);
+        var scroll = Assert.IsType<Panel>(Assert.Single(dialog.Controls.Cast<Control>()));
+        var content = Assert.IsType<TableLayoutPanel>(Assert.Single(scroll.Controls.Cast<Control>()));
+        var details = Assert.Single(content.Controls.OfType<TextBox>());
+        details.SelectAll();
+
+        Assert.True(details.WordWrap);
+        Assert.Equal(ScrollBars.Vertical, details.ScrollBars);
+        Assert.Equal(receipt, details.Text);
+        Assert.Equal(receipt, details.SelectedText);
+        Assert.Contains(path, details.SelectedText, StringComparison.Ordinal);
     }
 }

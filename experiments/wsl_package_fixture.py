@@ -40,8 +40,13 @@ def extract_package(package, directory):
     with tarfile.open(package, "r:gz") as archive:
         for member in archive.getmembers():
             path = PurePosixPath(member.name)
-            if path.is_absolute() or ".." in path.parts or not (member.isdir() or member.isfile()):
+            if path.is_absolute() or ".." in path.parts or not (
+                    member.isdir() or member.isfile() or member.issym() or member.islnk()):
                 raise ValueError("Unsafe package member")
+            # Bundled runtime libraries use relative links. Permit only links
+            # confined to this owned extraction directory; the data filter is
+            # reapplied during extraction to catch earlier-link traversal too.
+            tarfile.data_filter(member, directory)
         archive.extractall(directory, filter="data")
 
 

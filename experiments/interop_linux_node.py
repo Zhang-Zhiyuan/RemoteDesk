@@ -162,6 +162,9 @@ def host(config, output):
             relay_host.start()
             if not relay_host.online.wait(40): raise RuntimeError("Native Linux relay registration failed")
         save(output / "endpoint.json", {"port": port, "display": os.environ["DISPLAY"],
+            # An owned xvfb-run may require its private Xauthority cookie.
+            # Export only the path, never the cookie, for scoped local checks.
+            "xauthority": os.environ.get("XAUTHORITY", ""),
             "route": "native public relay TLS/TCP" if relay_host else "direct LAN"})
         print(json.dumps({"ready": True, "port": port}), flush=True)
         deadline = time.monotonic() + 1750
