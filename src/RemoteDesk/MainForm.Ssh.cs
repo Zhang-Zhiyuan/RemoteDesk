@@ -188,7 +188,7 @@ public sealed partial class MainForm
         {
             bool recalled = await existing.RecallAsync();
             if (!_isClosing && !IsDisposed) SetRelayStatus(recalled ? "已唤回原 SSH 终端；连接和运行中的命令保持不变。" :
-                "SSH 会话仍保留，当前系统未能唤回窗口，请从任务栏切回；右键“SSH 终端”可另开一个。", MutedTextColor);
+                "SSH 会话仍保留，当前系统未能唤回窗口，请从任务栏切回；也可在“终端选项”中选择“新建终端”。", MutedTextColor);
             return;
         }
         if (_relayOperationInProgress || SshConnectionBlockReason(selected) is not null) return;

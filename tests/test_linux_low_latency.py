@@ -2677,6 +2677,7 @@ Available hardware decoders:
             application._start_viewer_attempt("192.0.2.1", 56565, "fixture", reconnecting=False)
 
         self.assertIs(viewer_type.return_value, application.viewer)
+        application.disconnect_button.config.assert_called_with(state=app.tk.NORMAL, text="取消连接")
         application.root.after_cancel.assert_called_once_with(idle_timer)
         self.assertNotIn(idle_timer, pending)
         self.assertEqual(1, len(pending))
@@ -2774,7 +2775,8 @@ Available hardware decoders:
             [call.args[0] for call in application.root.after.call_args_list],
         )
         application._close_viewer_window.assert_not_called()
-        application.disconnect_button.config.assert_called_with(state=app.tk.NORMAL)
+        application.disconnect_button.config.assert_any_call(state=app.tk.NORMAL, text="断开当前连接")
+        application.disconnect_button.config.assert_called_with(state=app.tk.NORMAL, text="取消重连")
 
     def test_bad_password_on_retry_revokes_prior_reconnect_qualification(
         self,

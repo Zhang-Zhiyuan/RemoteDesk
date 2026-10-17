@@ -673,8 +673,10 @@ class SessionControlTests(unittest.TestCase):
                 return create(*args, **kwargs)
         with mock.patch.object(app, "ViewerConnection", side_effect=factory):
             ui._start_viewer_attempt("192.0.2.1", 1, "owned", reconnecting=False)
+            ui.disconnect_button.config.assert_called_with(state=app.tk.NORMAL, text="取消连接")
             ui.viewer = None
             ui._start_viewer_attempt("192.0.2.1", 1, "owned", reconnecting=True)
+            ui.disconnect_button.config.assert_called_with(state=app.tk.NORMAL, text="取消重连")
         self.assertEqual(2, len(created))
         self.assertTrue(all(viewer.read_only for viewer in created))
 

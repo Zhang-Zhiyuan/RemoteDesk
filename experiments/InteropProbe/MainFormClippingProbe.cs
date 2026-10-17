@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using RemoteDesk;
@@ -32,7 +33,7 @@ internal static class MainFormClippingProbe
         });
         worker.SetApartmentState(ApartmentState.STA);
         worker.Start(); worker.Join();
-        if (failure is not null) throw failure;
+        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
         return 0;
     }
 
@@ -49,6 +50,8 @@ internal static class MainFormClippingProbe
             SetText(main, "_localIpsBox", "192.0.2.123\r\n2001:db8:1234:5678:abcd:ef12:3456:7890\r\nfd12:3456::1");
             SetText(main, "_hostStatusLabel", "正在监听 192.0.2.123:56565；管理员模式");
             SetText(main, "_viewerStatusLabel", string.Join("\r\n", Enumerable.Range(1, 18).Select(i => $"诊断 {i}：已连接很长的测试设备名称，网络链路正常；文件已保存到 C:\\SyntheticReceived\\测试目录\\远程传输结果.txt。")));
+            SetText(main, "_viewerToggleButton", "断开当前连接");
+            SetText(main, "_relayConnectButton", "断开当前连接");
             SetText(main, "_relayServerSummaryLabel", "relay-with-a-very-long-synthetic-hostname.example.invalid:56567 · 已保存登录 · 本机 ID 12345678");
             SetText(main, "_relayRouteStatusLabel", "已选择测试无线网络，延迟 12 ms；候选有线网络延迟 150 ms。当前会话保持稳定线路，不会频繁切换网卡。");
             SetText(main, "_relayStatusLabel", "已连接公网中继服务器，发现 12 台在线设备；如果连接失败，请确认被控端设备密钥并刷新列表。\r\n测试长状态：所有状态文本应完整换行，设备列表仍应保持可访问。");
@@ -148,6 +151,31 @@ internal static class MainFormClippingProbe
                             label.Text, label.Bounds, label.PreferredSize, parent = label.Parent!.ClientRectangle,
                             scrolling = label.Parent is ScrollableControl scroll && scroll.VerticalScroll.Visible
                         }).ToArray() });
+                }
+            }
+            main.ClientSize = new Size(ResponsiveWindowLayout.ScaleLogical(520, main.DeviceDpi), 820);
+            foreach (int tab in new[] { 1, 2 })
+            {
+                tabs.SelectedIndex = tab; Pump();
+                var attempt = (CancellationTokenSource)typeof(MainForm).GetMethod("BeginViewerConnectionAction",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(main, new object[] { false })!;
+                try
+                {
+                    var button = Field<Button>(main, tab == 1 ? "_viewerToggleButton" : "_relayConnectButton");
+                    tabs.SelectedTab!.ScrollControlIntoView(button); Pump();
+                    string prefix = $"connect-action-font{points}-tab{tab}";
+                    if (!button.Enabled || button.Text != "取消连接") issues.Add(prefix + ": connecting has no cancel action");
+                    Save(main, Path.Combine(output, prefix + ".png"));
+                    typeof(MainForm).GetMethod("TryCancelViewerConnectionAction", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(main, null);
+                    Pump();
+                    if (button.Enabled || button.Text != "取消中…" || !attempt.IsCancellationRequested)
+                        issues.Add(prefix + ": cancelling permits another connection");
+                    Save(main, Path.Combine(output, prefix + "-cancelled.png"));
+                }
+                finally
+                {
+                    typeof(MainForm).GetMethod("EndViewerConnectionAction", BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .Invoke(main, new object[] { attempt });
                 }
             }
             main.Close(); Pump();

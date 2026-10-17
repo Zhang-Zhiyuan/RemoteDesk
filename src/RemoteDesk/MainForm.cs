@@ -388,6 +388,7 @@ public sealed partial class MainForm : Form
         if (disposing && _layoutPreview)
         {
             _isClosing = true;
+            TryShutdown(() => _relayOperationCancellation.Cancel());
             CloseSshTerminals();
             CloseViewerWindowFromDisconnect();
             _remoteControlNotices?.Dispose();
@@ -4298,6 +4299,7 @@ public sealed partial class MainForm : Form
 
     private async Task ToggleRelayViewerAsync()
     {
+        if (TryCancelViewerConnectionAction()) return;
         if (IsViewerReconnecting())
         {
             await CancelViewerReconnectAsync(
@@ -4307,8 +4309,7 @@ public sealed partial class MainForm : Form
             return;
         }
 
-        if (_viewerActionInProgress ||
-            _relayOperationInProgress)
+        if (_relayOperationInProgress)
         {
             return;
         }
@@ -4327,10 +4328,8 @@ public sealed partial class MainForm : Form
         string? deviceKey = disconnecting ? null : RequestRelayDeviceKey(selected!);
         if (!disconnecting && deviceKey is null) return;
 
-        _viewerActionInProgress = true;
-        _viewerActionDisconnecting = disconnecting;
-        SetViewerConnectionInputsEnabled(false);
-        UpdateViewerActionState();
+        CancellationTokenSource? attempt = BeginViewerConnectionAction(disconnecting);
+        CancellationToken cancellationToken = attempt?.Token ?? CancellationToken.None;
         try
         {
             if (disconnecting)
@@ -4345,7 +4344,8 @@ public sealed partial class MainForm : Form
             SaveSettingsFromUi();
             RelayConnectionOptions route =
                 CreateRelayOptions(selected!.DeviceId);
-            await OptimizeRelayNetworkAsync(route);
+            await OptimizeRelayNetworkAsync(route, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             if (_isClosing || IsDisposed) return;
             var snapshot = new ViewerConnectionSnapshot(
                 route.ServerAddress,
@@ -4374,11 +4374,12 @@ public sealed partial class MainForm : Form
                 route,
                 snapshot.Password,
                 snapshot.VideoMode,
-                _relayOperationCancellation.Token);
+                cancellationToken);
             bool deviceInfoReceived =
                 await _viewerClient.WaitForCurrentDeviceInfoAsync(
                     RemoteViewerClient.DeviceInfoHandshakeTimeout,
-                    _relayOperationCancellation.Token);
+                    cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             if (!deviceInfoReceived)
             {
                 await _viewerClient.DisconnectAsync();
@@ -4398,9 +4399,9 @@ public sealed partial class MainForm : Form
                 $"已通过私有中继连接 {selected.MachineName}。" + (keySaved ? "" : "设备密钥未能保存，下次连接需要重新填写。"),
                 keySaved ? SuccessTextColor : DangerColor);
         }
-        catch (OperationCanceledException)
-            when (_relayOperationCancellation.IsCancellationRequested)
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
         {
+            await CompleteCancelledViewerConnectionAsync();
         }
         catch (Exception ex)
         {
@@ -4427,27 +4428,18 @@ public sealed partial class MainForm : Form
         }
         finally
         {
-            if (!_isClosing && !IsDisposed)
-            {
-                _viewerActionInProgress = false;
-                _viewerActionDisconnecting = false;
-                if (!_viewerClient.IsConnected)
-                {
-                    _pendingViewerConnection = null;
-                }
-                SetViewerConnectionInputsEnabled(
-                    !_viewerClient.IsConnected);
-                UpdateViewerActionState();
-            }
+            EndViewerConnectionAction(attempt);
         }
     }
 
-    private async Task OptimizeRelayNetworkAsync(RelayConnectionOptions options)
+    private async Task OptimizeRelayNetworkAsync(RelayConnectionOptions options, CancellationToken cancellationToken = default)
     {
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            _relayOperationCancellation.Token, cancellationToken);
         try
         {
             await _relayNetworkOptimizer.OptimizeAsync(options,
-                _relayOptimizeNetworkBox.Checked, _relayOperationCancellation.Token);
+                _relayOptimizeNetworkBox.Checked, cancellation.Token);
         }
         catch (OperationCanceledException) when (_relayOperationCancellation.IsCancellationRequested) { }
     }
@@ -4536,6 +4528,7 @@ public sealed partial class MainForm : Form
 
     private async Task ToggleViewerAsync()
     {
+        if (TryCancelViewerConnectionAction()) return;
         if (IsViewerReconnecting())
         {
             await CancelViewerReconnectAsync(
@@ -4544,18 +4537,10 @@ public sealed partial class MainForm : Form
             return;
         }
 
-        if (_viewerActionInProgress)
-        {
-            return;
-        }
-
         bool disconnecting =
             _viewerClient.IsConnected;
-        _viewerActionInProgress = true;
-        _viewerActionDisconnecting =
-            disconnecting;
-        SetViewerConnectionInputsEnabled(false);
-        UpdateViewerActionState();
+        CancellationTokenSource? attempt = BeginViewerConnectionAction(disconnecting);
+        CancellationToken cancellationToken = attempt?.Token ?? CancellationToken.None;
         try
         {
             if (disconnecting)
@@ -4571,12 +4556,15 @@ public sealed partial class MainForm : Form
             {
                 if (string.IsNullOrWhiteSpace(_viewerHostBox.Text))
                 {
-                    await DiscoverHostsAsync(silent: false);
+                    await DiscoverHostsAsync(silent: false, cancellationToken);
                 }
 
+                cancellationToken.ThrowIfCancellationRequested();
                 SaveSettingsFromUi();
-                if (!await ResolveViewerEndpointAsync()) return;
-                bool remoteStartAttempted = await EnsureRemoteHostReadyAsync();
+                if (!await ResolveViewerEndpointAsync(cancellationToken)) return;
+                cancellationToken.ThrowIfCancellationRequested();
+                bool remoteStartAttempted = await EnsureRemoteHostReadyAsync(cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
                 PrepareViewerCapabilitiesForConnection();
                 if (_viewerWindow is null || _viewerWindow.IsDisposed)
                 {
@@ -4595,11 +4583,12 @@ public sealed partial class MainForm : Form
                     MutedTextColor);
                 try
                 {
-                    await ConnectViewerAsync();
+                    await ConnectViewerAsync(cancellationToken);
                 }
-                catch (Exception ex) when (!remoteStartAttempted && IsConnectionFailureForRemoteStartRetry(ex))
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested &&
+                    !remoteStartAttempted && IsConnectionFailureForRemoteStartRetry(ex))
                 {
-                    if (!await TryDirectRemoteStartAsync())
+                    if (!await TryDirectRemoteStartAsync(cancellationToken))
                     {
                         throw;
                     }
@@ -4609,12 +4598,17 @@ public sealed partial class MainForm : Form
                             _viewerHostBox.Text,
                             (int)_viewerPortBox.Value),
                         MutedTextColor);
-                    await ConnectViewerAsync();
+                    await ConnectViewerAsync(cancellationToken);
                 }
 
+                cancellationToken.ThrowIfCancellationRequested();
                 ShowViewerWindow();
                 RememberCurrentViewerDevice();
             }
+        }
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
+        {
+            await CompleteCancelledViewerConnectionAsync();
         }
         catch (Exception ex)
         {
@@ -4642,33 +4636,22 @@ public sealed partial class MainForm : Form
         }
         finally
         {
-            if (!_isClosing && !IsDisposed)
-            {
-                _viewerActionInProgress = false;
-                _viewerActionDisconnecting =
-                    false;
-                if (!_viewerClient.IsConnected)
-                {
-                    _pendingViewerConnection = null;
-                }
-                SetViewerConnectionInputsEnabled(
-                    !_viewerClient.IsConnected);
-                UpdateViewerActionState();
-            }
+            EndViewerConnectionAction(attempt);
         }
     }
 
-    private async Task ConnectViewerAsync()
+    private async Task ConnectViewerAsync(CancellationToken cancellationToken)
     {
         await _viewerClient.ConnectAsync(
             _viewerHostBox.Text.Trim(),
             (int)_viewerPortBox.Value,
             _viewerPasswordBox.Text,
-            GetSelectedViewerVideoMode());
+            GetSelectedViewerVideoMode(), cancellationToken);
         bool deviceInfoReceived =
             await _viewerClient.WaitForCurrentDeviceInfoAsync(
                 RemoteViewerClient.DeviceInfoHandshakeTimeout,
-                CancellationToken.None);
+                cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         if (!deviceInfoReceived)
         {
             await _viewerClient.DisconnectAsync();
@@ -5163,7 +5146,7 @@ public sealed partial class MainForm : Form
         intent.Dispose();
     }
 
-    private async Task<bool> EnsureRemoteHostReadyAsync()
+    private async Task<bool> EnsureRemoteHostReadyAsync(CancellationToken cancellationToken)
     {
         RemoteDeviceListItem? device = GetSelectedRemoteDevice();
         if (device is null ||
@@ -5190,7 +5173,8 @@ public sealed partial class MainForm : Form
             (int)_viewerPortBox.Value,
             _viewerPasswordBox.Text,
             TimeSpan.FromSeconds(4),
-            CancellationToken.None);
+            cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (!result.Success)
         {
@@ -5199,11 +5183,11 @@ public sealed partial class MainForm : Form
 
         _viewerPortBox.Value = ClampToRange(result.Port, _viewerPortBox);
         SetViewerStatus(result.Message, SuccessTextColor);
-        await Task.Delay(TimeSpan.FromMilliseconds(250));
+        await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken);
         return true;
     }
 
-    private async Task<bool> TryDirectRemoteStartAsync()
+    private async Task<bool> TryDirectRemoteStartAsync(CancellationToken cancellationToken)
     {
         string address = _viewerHostBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(address) ||
@@ -5220,7 +5204,8 @@ public sealed partial class MainForm : Form
                 (int)_viewerPortBox.Value,
                 _viewerPasswordBox.Text,
                 TimeSpan.FromSeconds(3),
-                CancellationToken.None);
+                cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
 
             if (!result.Success)
             {
@@ -5230,7 +5215,7 @@ public sealed partial class MainForm : Form
 
             _viewerPortBox.Value = ClampToRange(result.Port, _viewerPortBox);
             SetViewerStatus(result.Message, SuccessTextColor);
-            await Task.Delay(TimeSpan.FromMilliseconds(250));
+            await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken);
             return true;
         }
         catch (Exception ex) when (ex is TimeoutException or InvalidOperationException or SocketException or ObjectDisposedException)
@@ -5582,14 +5567,14 @@ public sealed partial class MainForm : Form
         }
     }
 
-    private async Task DiscoverHostsAsync(bool silent)
+    private async Task DiscoverHostsAsync(bool silent, CancellationToken cancellationToken = default)
     {
         if (_viewerClient.IsConnected || _isClosing || IsDisposed)
         {
             return;
         }
 
-        var scanCancellation = new CancellationTokenSource();
+        var scanCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         CancellationTokenSource? previousScan = _discoveryScanCancellation;
         _discoveryScanCancellation = scanCancellation;
         try
@@ -7017,27 +7002,13 @@ public sealed partial class MainForm : Form
 
         if (_viewerActionInProgress)
         {
-            _viewerToggleButton.Text =
-                _viewerActionDisconnecting
-                    ? "断开中..."
-                    : "连接中...";
-            _viewerToggleButton.Enabled = false;
-            ApplyButtonStyle(
-                _viewerToggleButton,
-                NeutralBadgeBackColor,
-                NeutralBadgeTextColor,
-                PanelBorderColor);
-            SetToolTip(
-                _viewerToggleButton,
-                _viewerActionDisconnecting
-                    ? "正在安全关闭当前远程会话。"
-                    : "正在探测目标、完成加密握手并启动远程画面。");
+            ApplyPendingViewerAction(_viewerToggleButton);
             return;
         }
 
         if (_viewerClient.IsConnected)
         {
-            _viewerToggleButton.Text = "断开";
+            _viewerToggleButton.Text = "断开当前连接";
             _viewerToggleButton.Enabled = true;
             ApplyButtonStyle(_viewerToggleButton, DangerColor, Color.White, DangerColor);
             SetToolTip(_viewerToggleButton, "断开当前远程连接。");
@@ -7111,21 +7082,13 @@ public sealed partial class MainForm : Form
 
         if (_viewerActionInProgress)
         {
-            _relayConnectButton.Text = _viewerActionDisconnecting
-                ? "断开中..."
-                : "连接中...";
-            _relayConnectButton.Enabled = false;
-            ApplyButtonStyle(
-                _relayConnectButton,
-                NeutralBadgeBackColor,
-                NeutralBadgeTextColor,
-                PanelBorderColor);
+            ApplyPendingViewerAction(_relayConnectButton);
             return;
         }
 
         if (_viewerClient.IsConnected)
         {
-            _relayConnectButton.Text = "断开";
+            _relayConnectButton.Text = "断开当前连接";
             _relayConnectButton.Enabled = true;
             ApplyButtonStyle(
                 _relayConnectButton,

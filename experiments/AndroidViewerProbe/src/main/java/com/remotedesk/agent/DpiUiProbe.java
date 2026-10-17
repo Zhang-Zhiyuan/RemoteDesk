@@ -124,6 +124,20 @@ final class DpiUiProbe {
                 .put("densityDpi", resources.getDisplayMetrics().densityDpi)
                 .put("density", resources.getDisplayMetrics().density)
                 .put("fontScale", resources.getConfiguration().fontScale);
+            if (activity instanceof MainActivity) {
+                ViewGroup content = (ViewGroup) ViewerProbeApplication.field(activity, "mainContentLayout");
+                ViewGroup header = (ViewGroup) content.getChildAt(0);
+                ViewGroup copy = (ViewGroup) header.getChildAt(1);
+                View title = copy.getChildAt(0);
+                boolean compact = header.getChildAt(0).getVisibility() == View.GONE;
+                int[] headerPosition = new int[2], titlePosition = new int[2];
+                header.getLocationOnScreen(headerPosition); title.getLocationOnScreen(titlePosition);
+                report.put("mainHeader", new JSONObject().put("compact", compact)
+                    .put("height", header.getHeight()).put("titleHeight", title.getHeight())
+                    .put("verticalPadding", header.getPaddingTop() + header.getPaddingBottom())
+                    .put("titleOffset", titlePosition[0] - headerPosition[0])
+                    .put("leftPadding", header.getPaddingLeft()));
+            }
             JSONArray windows = new JSONArray();
             for (View root : WindowInspector.getGlobalWindowViews()) {
                 JSONArray views = new JSONArray();

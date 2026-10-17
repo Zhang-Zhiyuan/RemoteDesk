@@ -165,7 +165,7 @@ public final class MainActivity extends Activity {
         AndroidUiTheme.styleButton(this, returnToDesktopButton, AndroidUiTheme.ButtonRole.SECONDARY);
 
         Button presenceButton = new Button(this);
-        presenceButton.setText("保持发现常驻");
+        presenceButton.setText("后台保持设备发现");
         presenceButton.setOnClickListener(view -> startPresenceService());
         AndroidUiTheme.styleButton(
             this,
@@ -173,7 +173,7 @@ public final class MainActivity extends Activity {
             AndroidUiTheme.ButtonRole.SECONDARY);
 
         Button stopButton = new Button(this);
-        stopButton.setText("停止服务");
+        stopButton.setText("停止被控与后台发现");
         AndroidUiTheme.styleButton(
             this,
             stopButton,
@@ -289,7 +289,7 @@ public final class MainActivity extends Activity {
             hostColumn,
             AndroidUiTheme.createSectionSubtitle(
                 this,
-                "H.264 模式授权时请选择“整个屏幕”。启动成功后自动返回桌面；无障碍权限用于远程触控与文本输入。"));
+                "让其它设备查看并操作此手机。启动成功后自动返回桌面。"));
         addLabeledField(hostColumn, "本机设备密钥", passwordEdit);
         CheckBox compatibleHost = new CheckBox(this);
         compatibleHost.setText("免重复录屏授权（无障碍兼容模式）");
@@ -314,6 +314,17 @@ public final class MainActivity extends Activity {
                 }
             }
         });
+        // Keep the main actions near the device key, before optional capture
+        // and power settings. A small phone must not scroll past every option
+        // just to start sharing or return to the desktop.
+        addColumnView(hostColumn, startHostButton);
+        addColumnView(hostColumn, returnToDesktopButton);
+        addColumnView(hostColumn, AndroidUiTheme.createSectionSubtitle(this,
+            "配置页含设备密钥，可能被系统录屏保护遮黑。返回桌面即可查看其它内容；被控会继续运行。"));
+        addColumnDivider(hostColumn);
+        addColumnView(hostColumn, AndroidUiTheme.createSectionTitle(this, "被控选项"));
+        addColumnView(hostColumn, AndroidUiTheme.createSectionSubtitle(this,
+            "默认使用 H.264 流畅模式，录屏授权时请选择“整个屏幕”。远程触控与文本输入需要无障碍权限。"));
         addColumnView(hostColumn, compatibleHost);
         addColumnView(hostColumn, AndroidUiTheme.createSectionSubtitle(this,
             "Android 11 及以上可用。开启无障碍后不再弹录屏授权，锁屏后仍可连接，约 3 FPS；系统保护的内容除外。关闭此项使用 H.264 流畅模式。"));
@@ -336,11 +347,9 @@ public final class MainActivity extends Activity {
         addColumnView(hostColumn, keepScreenAwake);
         addColumnView(hostColumn, AndroidUiTheme.createSectionSubtitle(this,
             "无人连接时释放亮屏和性能锁，降低耗电及系统清理风险。兼容模式不依赖录屏授权；H.264 在锁屏后可能需要重新授权。"));
-        addColumnView(hostColumn, startHostButton);
-        addColumnView(hostColumn, returnToDesktopButton);
-        addColumnView(hostColumn, AndroidUiTheme.createSectionSubtitle(this,
-            "含设备密钥的配置页可能被系统录屏保护遮黑。返回桌面即可查看其它内容；可从 RemoteDesk 应用图标返回管理连接。"));
         addColumnView(hostColumn, presenceButton);
+        addColumnView(hostColumn, AndroidUiTheme.createSectionSubtitle(this,
+            "后台发现仅让其它设备找到这台手机；远程查看或操作还需启动被控端。"));
         addColumnView(hostColumn, stopButton);
 
         statusColumn = createVerticalColumn();
@@ -496,10 +505,10 @@ public final class MainActivity extends Activity {
     }
 
     private View createAppHeader() {
-        LinearLayout header = new LinearLayout(this);
+        AndroidMainHeaderLayout header = new AndroidMainHeaderLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setPadding(dp(18), dp(18), dp(18), dp(18));
+        header.setPadding(dp(16), dp(12), dp(16), dp(12));
         header.setBackground(AndroidUiTheme.shape(
             this,
             AndroidUiTheme.HEADER,
@@ -520,8 +529,8 @@ public final class MainActivity extends Activity {
             14,
             AndroidUiTheme.PRIMARY,
             0));
-        LinearLayout.LayoutParams markParams = new LinearLayout.LayoutParams(dp(52), dp(52));
-        markParams.setMarginEnd(dp(14));
+        LinearLayout.LayoutParams markParams = new LinearLayout.LayoutParams(dp(40), dp(40));
+        markParams.setMarginEnd(dp(12));
         header.addView(mark, markParams);
 
         LinearLayout copy = new LinearLayout(this);
@@ -550,38 +559,11 @@ public final class MainActivity extends Activity {
         subtitleParams.topMargin = dp(1);
         copy.addView(subtitle, subtitleParams);
 
-        TextView badge = new TextView(this);
-        badge.setText(R.string.platform_badge);
-        badge.setTextColor(Color.rgb(191, 219, 254));
-        badge.setTextSize(10.0f);
-        badge.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        badge.setLetterSpacing(0.08f);
-        badge.setGravity(Gravity.CENTER);
-        badge.setPadding(dp(9), dp(4), dp(9), dp(4));
-        badge.setBackground(AndroidUiTheme.shape(
-            this,
-            AndroidUiTheme.HEADER_SURFACE,
-            99,
-            Color.rgb(51, 65, 85),
-            1));
-        LinearLayout.LayoutParams badgeParams = new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT);
-        badgeParams.topMargin = dp(8);
-        badgeParams.gravity = Gravity.START;
-        copy.addView(badge, badgeParams);
-
         header.addView(copy, new LinearLayout.LayoutParams(
             0,
             ViewGroup.LayoutParams.WRAP_CONTENT,
             1.0f));
-        header.addOnLayoutChangeListener((view, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
-            int widthDp = Math.round((right - left) / getResources().getDisplayMetrics().density);
-            boolean compact = AndroidAdaptiveLayout.compactMainHeader(widthDp,
-                getResources().getConfiguration().fontScale);
-            mark.setVisibility(compact ? View.GONE : View.VISIBLE);
-            badge.setVisibility(compact ? View.GONE : View.VISIBLE);
-        });
+        header.setCompactContent(mark, subtitle);
         return header;
     }
 
@@ -1126,10 +1108,10 @@ public final class MainActivity extends Activity {
     private void requestStopService() {
         if (RemoteDeskForegroundService.isHostRunning()) {
             new AlertDialog.Builder(this)
-                .setTitle("停止被控服务？")
-                .setMessage("这会断开控制端并关闭自动恢复。再次启动兼容模式无需重复录屏授权；H.264 模式需要重新授权。")
+                .setTitle("停止被控与后台发现？")
+                .setMessage("这会断开控制端、停止后台发现并关闭自动恢复。App 留在前台时仍可被发现。再次启动兼容模式无需重复录屏授权；H.264 模式需要重新授权。")
                 .setNegativeButton("取消", null)
-                .setPositiveButton("停止服务", (dialog, which) -> stopRemoteDeskService())
+                .setPositiveButton("停止", (dialog, which) -> stopRemoteDeskService())
                 .show();
         } else {
             stopRemoteDeskService();
@@ -1141,7 +1123,7 @@ public final class MainActivity extends Activity {
         AndroidHostResume.setArmed(this, false);
         stopService(new Intent(this, RemoteDeskForegroundService.class));
         startDiscoveryPreview();
-        updateStatusPanel("已请求停止服务");
+        updateStatusPanel("已请求停止被控与后台发现；App 留在前台时仍可被发现。");
         statusView.postDelayed(() -> {
             startDiscoveryPreview();
             updateStatusPanel(currentHeadline());

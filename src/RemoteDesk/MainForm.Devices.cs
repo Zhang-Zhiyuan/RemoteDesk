@@ -115,12 +115,17 @@ public sealed partial class MainForm
             string.Equals(h.MachineName, name, StringComparison.OrdinalIgnoreCase)).ToArray();
     }
 
-    private async Task<bool> ResolveViewerEndpointAsync()
+    private async Task<bool> ResolveViewerEndpointAsync(CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         _confirmedHistorySource = null;
         var endpoint = ParseDeviceEndpoint(_viewerHostBox.Text, _viewerAutoPortBox.Checked ? "" : _viewerPortBox.Value.ToString());
-        using (var selfCheckTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
-            await SelfConnectionGuard.ValidateDirectHostAsync(endpoint.Host, selfCheckTimeout.Token);
+        using (var selfCheckTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        {
+            selfCheckTimeout.CancelAfter(TimeSpan.FromSeconds(5));
+            await Task.Run(() => SelfConnectionGuard.ValidateDirectHostAsync(endpoint.Host, selfCheckTimeout.Token), cancellationToken);
+        }
+        cancellationToken.ThrowIfCancellationRequested();
         if (endpoint.ExplicitPort) _viewerAutoPortBox.Checked = false;
         _viewerHostBox.Text = endpoint.Host;
         if (endpoint.ExplicitPort) _viewerPortBox.Value = endpoint.Port;
@@ -135,23 +140,29 @@ public sealed partial class MainForm
         if (RemoteDeviceIdentity.Same(saved?.DeviceId, RemoteDeviceIdentity.LocalId)) saved = null;
         if (!_viewerAutoPortBox.Checked) return ConfirmMovedSavedDevice(saved, endpoint.Host, requestedPort);
         SetViewerStatus("正在自动查找设备和监听端口…", MutedTextColor);
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(4));
         IReadOnlyList<DiscoveredHost> found;
         try
         {
             var targets = GetRecentDevices().Where(d => string.Equals(d.Address, endpoint.Host, StringComparison.OrdinalIgnoreCase))
                 .Select(d => new DiscoveryProbeTarget(endpoint.Host, d.Port)).Append(new(endpoint.Host, requestedPort)).ToArray();
-            found = await NetworkDiscoveryService.DiscoverAsync(TimeSpan.FromMilliseconds(1100), timeout.Token,
-                directTargets: targets, hostProbePort: Protocol.DefaultPort, includeBroadcast: saved is not null);
+            found = await Task.Run(async () =>
+            {
+                var discovered = await NetworkDiscoveryService.DiscoverAsync(TimeSpan.FromMilliseconds(1100), timeout.Token,
+                    directTargets: targets, hostProbePort: Protocol.DefaultPort, includeBroadcast: saved is not null).ConfigureAwait(false);
+                return RemoveLocalDiscoveredHosts(discovered, out _);
+            }, timeout.Token);
         }
         catch (Exception ex) when (ex is OperationCanceledException or System.Net.Sockets.SocketException or IOException)
         { found = []; }
+        cancellationToken.ThrowIfCancellationRequested();
         if (_isClosing || IsDisposed) return false;
-        found = RemoveLocalDiscoveredHosts(found, out _);
         // Resolve DNS aliases to the actual source IP before selecting the response.
         IReadOnlyList<IPAddress> ips = [];
         try { ips = await NetworkDiscoveryService.ResolveDirectProbeAddressesAsync([endpoint.Host], timeout.Token); }
         catch (Exception ex) when (ex is OperationCanceledException or System.Net.Sockets.SocketException) { }
+        cancellationToken.ThrowIfCancellationRequested();
         var sameTarget = found.Where(h => ips.Any(ip => ip.ToString() == h.Address)).ToArray();
         IReadOnlyList<DiscoveredHost> options = saved is null ? sameTarget.Where(h => h.IsHostRunning || h.CanRemoteStart).ToArray() :
             FindDeviceCandidates(endpoint.Host, requestedPort, saved.DeviceId, saved.MachineName, found);

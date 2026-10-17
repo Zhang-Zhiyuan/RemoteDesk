@@ -263,6 +263,12 @@ def main():
         bounds = state["windows"][0]["bounds"]
         check("actual main window matches requested orientation", (bounds[2]-bounds[0] > bounds[3]-bounds[1]) == args.landscape)
         check("actual main resources match system density and font", state["densityDpi"] == args.density and state["fontScale"] == args.font)
+        header = state["mainHeader"]
+        if header["compact"]:
+            check("compact header removes hidden subtitle height",
+                header["height"] <= header["titleHeight"] + header["verticalPadding"] + 1)
+            check("compact header removes hidden logo width",
+                header["titleOffset"] == header["leftPadding"])
         if args.rename_only:
             capture("relay-name", "relay-name")
             hide_ime(with_ime("relay-name-ime", "输入共享名称（可留空）"))
@@ -270,7 +276,15 @@ def main():
             report["completed"] = True
             return
         if not args.dialogs_only:
-            tap("被控"); capture("main-host")
+            tap("被控")
+            host_state = capture("main-host")
+            host_views = host_state["windows"][0]["views"]
+            start = next(view for view in host_views if view.get("text") == "启动被控端")
+            options = next(view for view in host_views if view.get("text") == "被控选项")
+            check("host primary action precedes optional capture and power settings",
+                start["bounds"][3] <= options["bounds"][1])
+            check("host primary action has complete text at current font size",
+                start["contentHeight"] >= start["textHeight"] and not start["ellipsis"])
             tap("设置"); capture("main-settings")
             tap("设备")
             capture("main-relay", "reveal", "登录服务器")

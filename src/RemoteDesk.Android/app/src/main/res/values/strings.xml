@@ -4,7 +4,6 @@
     <string name="app_name">RemoteDesk</string>
     <string name="brand_mark" translatable="false">RD</string>
     <string name="header_subtitle">Android · 直连与私有中转远程桌面</string>
-    <string name="platform_badge" translatable="false">ANDROID</string>
     <string name="main_ready">已就绪，可在局域网中发现</string>
     <string name="connecting_to">正在连接 %1$s:%2$d</string>
     <string name="accessibility_service_description">RemoteDesk 为通过设备密钥验证的远程设备提供触控、文本输入和系统操作。可选的免重复授权模式使用无障碍截图，锁屏后仍可连接；系统保护的页面不会被截取。可随时从应用或常驻通知停止服务。</string>

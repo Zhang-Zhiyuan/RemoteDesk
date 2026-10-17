@@ -313,8 +313,14 @@ public sealed class RemoteViewerClientTransferTaskTests
         Assert.True(await peer.Client.RequestRemoteClipboardFilesAsync()); // Existing API treats an already pending pull as handled.
         await peer.AssertInputStillWorksAsync();
         Assert.Single(peer.Controls, control => control.Kind == RemoteControlKind.FileTransferRequestClipboardFiles);
+        // The request slot is detached before the finished task and its public
+        // completion notification are published. Observing Pending=false alone
+        // races that publication; wait for the batch's actual completion event.
+        var completed = new TaskCompletionSource<ReturnedClipboardFileBatchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        peer.Client.RemoteClipboardFileBatchCompleted += result => completed.TrySetResult(result);
         await peer.SendAsync(RemoteMessageCodec.EncodeFileTransferStatus(false, "远端文件回传已取消"));
-        await peer.WaitUntilAsync(() => !peer.Client.IsRemoteClipboardFileRequestPending);
+        await completed.Task.WaitAsync(peer.Token);
+        Assert.False(peer.Client.IsRemoteClipboardFileRequestPending);
         Assert.Equal(RemoteFileTransferTaskState.Cancelled, peer.Client.FileTransferTasks.Single().State);
         Assert.False(File.Exists(Path.Combine(peer.DirectoryPath, "data.bin")));
         Assert.False(File.Exists(Path.Combine(peer.DirectoryPath, "late.bin")));

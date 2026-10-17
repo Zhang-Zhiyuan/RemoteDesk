@@ -7035,7 +7035,7 @@ class RemoteDeskLinuxApp:
         self.connect_button = ttk.Button(buttons, text="连接", command=self.connect_viewer, style="Accent.TButton")
         self.disconnect_button = ttk.Button(
             buttons,
-            text="断开",
+            text="断开当前连接",
             command=self.disconnect_viewer,
             state=tk.DISABLED,
             style="Danger.TButton",
@@ -7429,7 +7429,7 @@ class RemoteDeskLinuxApp:
         action = "正在重新连接" if reconnecting else "正在连接"
         self._set_viewer_status(f"{action} {host}:{port}...")
         self.connect_button.config(state=tk.DISABLED)
-        self.disconnect_button.config(state=tk.NORMAL)
+        self.disconnect_button.config(state=tk.NORMAL, text="取消重连" if reconnecting else "取消连接")
         self._set_viewer_file_action_state(False)
 
     def disconnect_viewer(self) -> None:
@@ -7456,7 +7456,7 @@ class RemoteDeskLinuxApp:
         self._close_viewer_window()
         self._set_viewer_status("已断开。")
         self.connect_button.config(state=tk.NORMAL)
-        self.disconnect_button.config(state=tk.DISABLED)
+        self.disconnect_button.config(state=tk.DISABLED, text="断开当前连接")
         self._set_viewer_file_action_state(False)
 
     @staticmethod
@@ -9182,6 +9182,7 @@ class RemoteDeskLinuxApp:
             elif event == "viewer_reconnect_qualified":
                 qualified = self._unpack_viewer_event(value)
                 if qualified is not None:
+                    self.disconnect_button.config(state=tk.NORMAL, text="断开当前连接")
                     self.viewer_reconnect_policy.mark_device_info()
                     self._schedule_viewer_stability_reset()
                     self._apply_viewer_capture_target_transition(
@@ -9259,14 +9260,14 @@ class RemoteDeskLinuxApp:
                         f"连接中断，{delay:g} 秒后自动重连..."
                     )
                     self.connect_button.config(state=tk.DISABLED)
-                    self.disconnect_button.config(state=tk.NORMAL)
+                    self.disconnect_button.config(state=tk.NORMAL, text="取消重连")
                     self._schedule_viewer_reconnect(delay)
                 else:
                     self.viewer_reconnect_policy.cancel()
                     self.viewer_reconnect_target = None
                     self._close_viewer_window()
                     self.connect_button.config(state=tk.NORMAL)
-                    self.disconnect_button.config(state=tk.DISABLED)
+                    self.disconnect_button.config(state=tk.DISABLED, text="断开当前连接")
             elif event == "viewer_frame":
                 frame = self._unpack_viewer_event(value)
                 if frame is not None:
