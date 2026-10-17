@@ -25,7 +25,7 @@ public sealed class SshAliasUiTests
         Field<Button>(main, "_readClipboardButton").Enabled = true;
         Call(main, "UpdateRelayActionState");
         Assert.True(Field<Button>(main, "_sshTerminalButton").Enabled);
-        Assert.False(Field<Button>(main, "_manageSshAliasesButton").Enabled);
+        Assert.False(Field<ToolStripMenuItem>(main, "_manageSshAliasesButton").Enabled);
         Assert.Contains("取消", Field<ToolTip>(main, "_toolTip").GetToolTip(Field<Button>(main, "_sshTerminalButton")));
 
         if (closeAll) Call(main, "CloseSshTerminals");
@@ -36,8 +36,8 @@ public sealed class SshAliasUiTests
         Assert.True(Field<bool>(main, "_pullingRemoteFilesFromMain")); Assert.Equal("desktop-key-draft", key.Text);
         Assert.False(Field<Button>(main, "_sendClipboardButton").Enabled); Assert.True(Field<Button>(main, "_readClipboardButton").Enabled);
         Set(main, "_sshOpening", null); Call(main, "UpdateRelayActionState");
-        Assert.True(Field<Button>(main, "_manageSshAliasesButton").Enabled); // Works offline, no selected device or configured relay.
-        Assert.False(Field<Button>(main, "_configureSshAliasButton").Enabled);
+        Assert.True(Field<ToolStripMenuItem>(main, "_manageSshAliasesButton").Enabled); // Works offline, no selected device or configured relay.
+        Assert.False(Field<ToolStripMenuItem>(main, "_configureSshAliasButton").Enabled);
         Assert.DoesNotContain("请先关闭", Field<ToolTip>(main, "_toolTip").GetToolTip(Field<Button>(main, "_relayLogoutButton")));
         }
         finally { Set(main, "_sshOpening", null); }

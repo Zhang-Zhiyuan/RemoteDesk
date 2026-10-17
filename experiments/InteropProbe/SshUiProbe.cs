@@ -70,7 +70,7 @@ internal static class SshUiProbe
                     foreach (Control control in SyntheticDpi.Descendants(dialog).Where(control => control is TextBox or Button or ComboBox))
                     {
                         scroll.ScrollControlIntoView(control); control.Select(); SyntheticDpi.Pump();
-                        Check(control, scroll, issues);
+                        Check(control, scroll.Contains(control) ? scroll : dialog, issues);
                     }
                     var selectedAliases = SyntheticDpi.Descendants(dialog).OfType<ComboBox>().Select(combo => new { combo.SelectedIndex, combo.Text,
                         nativeText = WindowText(combo.Handle), itemText = combo.SelectedItem?.ToString() }).ToArray();
@@ -93,7 +93,7 @@ internal static class SshUiProbe
                 using var main = new MainForm(settings, Path.Combine(output, "preview-log"));
                 main.Show(); SyntheticDpi.Pump();
                 using var font = new Font("Microsoft YaHei UI", points); main.Font = font; SyntheticDpi.Pump();
-                var button = Get<Button>(main, "_configureSshAliasButton");
+                var button = Get<Button>(main, "_sshMoreButton");
                 Control parent = button; while (parent is not TabPage) parent = parent.Parent!;
                 var page = (TabPage)parent; Get<TabControl>(main, "_tabs").SelectedTab = page; SyntheticDpi.Pump();
                 var list = Get<ListView>(main, "_relayDevicesList"); _ = list.Handle;
@@ -111,7 +111,7 @@ internal static class SshUiProbe
                         SyntheticDpi.Pump();
                         string tag = $"alias-main-font{points}-dpi{dpi}-width{width}-{cases.Count}";
                         var issues = new List<string>();
-                        foreach (Button action in new[] { button, Get<Button>(main, "_sshTerminalButton"), Get<Button>(main, "_sshLoginSettingsButton"), Get<Button>(main, "_closeSshTerminalsButton"), Get<Button>(main, "_manageSshAliasesButton") })
+                        foreach (Button action in new[] { button, Get<Button>(main, "_sshTerminalButton") })
                         { page.ScrollControlIntoView(action); SyntheticDpi.Pump(); Check(action, page, issues); }
                         if (!button.Enabled) issues.Add("Configured SSH-capable device alias button is disabled.");
                         page.ScrollControlIntoView(button); SyntheticDpi.Pump();
@@ -203,10 +203,13 @@ internal static class SshUiProbe
         var cases = new List<object>();
         var failures = new List<string>();
         foreach (float points in new[] { 9f, 14f, 20f })
+        foreach (bool expanded in new[] { false, true })
         {
             using var font = new Font("Microsoft YaHei UI", points);
             using var form = MainForm.CreateSshConnectionDialog("自有 SSH 终端测试设备", font, "synthetic-device-key", out _, out _);
             form.Show(); SyntheticDpi.Pump();
+            SyntheticDpi.Descendants(form).OfType<CheckBox>().Single().Checked = expanded;
+            SyntheticDpi.Pump();
             foreach (int dpi in new[] { 96, 120, 144, 168, 192, 240, 96 })
             {
                 object transition = SyntheticDpi.Apply(form, dpi);
@@ -220,20 +223,21 @@ internal static class SshUiProbe
                     var scroll = (ScrollableControl)form.Controls[0];
                     GetClientRect(form.Handle, out NativeRect nativeClient);
                     Rectangle nativeViewport = new(form.PointToScreen(Point.Empty), new Size(nativeClient.Right, nativeClient.Bottom));
-                    foreach (Control child in SyntheticDpi.Descendants(form).Where(control => control is TextBox or Button))
+                    foreach (Control child in SyntheticDpi.Descendants(form).Where(control => control.Visible && control is TextBox or Button or CheckBox))
                     {
                         scroll.ScrollControlIntoView(child);
                         child.Select();
                         SyntheticDpi.Pump();
                         Rectangle childBounds = child.RectangleToScreen(child.ClientRectangle);
-                        if (child.Width <= 0 || child.Height <= 0 || !scroll.RectangleToScreen(scroll.ClientRectangle).Contains(childBounds) || !nativeViewport.Contains(childBounds))
+                        Control viewport = scroll.Contains(child) ? scroll : form;
+                        if (child.Width <= 0 || child.Height <= 0 || !viewport.RectangleToScreen(viewport.ClientRectangle).Contains(childBounds) || !nativeViewport.Contains(childBounds))
                             issues.Add(child.GetType().Name + " cannot be reached: " + child.Bounds + " screen=" + child.RectangleToScreen(child.ClientRectangle) +
                                 " viewport=" + scroll.RectangleToScreen(scroll.ClientRectangle) + " display=" + scroll.DisplayRectangle +
                                 " extent=" + scroll.AutoScrollMinSize + " focus=" + child.Focused + " active=" + form.ActiveControl?.GetType().Name);
                         if (child is Button && TextRenderer.MeasureText(child.Text, child.Font).Height > child.Height)
                             issues.Add("Button text height clipped: " + child.Text);
                     }
-                    string tag = $"ssh-{points}-{dpi}-{width}-{cases.Count}";
+                    string tag = $"ssh-{points}-{dpi}-{width}-{(expanded ? "advanced" : "simple")}-{cases.Count}";
                     cases.Add(new { tag, transition, form.Bounds, managedClient = form.ClientSize, nativeViewport, issues });
                     failures.AddRange(issues.Select(issue => tag + ": " + issue));
                     using var bitmap = new Bitmap(form.Width, form.Height);

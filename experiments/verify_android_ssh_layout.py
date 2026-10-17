@@ -26,6 +26,7 @@ def capture(name):
     (out/(name+'.json')).write_text(json.dumps(state(),ensure_ascii=False,indent=2),encoding='utf-8')
 def check(name,value):
     checks.append(dict(name=name,passed=bool(value)));assert value,name
+
 def dpi(action,text=None):
     args=['am','broadcast','-n',package+'/com.remotedesk.agent.DpiProbeReceiver','--es','action',action,'--es','runId',action]
     if text is not None:args+=['--es','text',text]
@@ -36,8 +37,8 @@ def tap(text):
     xml=shell('cat','/data/local/tmp/owned-ssh-layout.xml');(out/'last-ui.xml').write_text(xml,encoding='utf-8')
     nodes=[n for n in ET.fromstring(xml).iter('node') if n.get('text')==text]
     assert len(nodes)==1,'Expected visible control '+text
-    b=list(map(int,re.findall(r'\d+',nodes[0].get('bounds'))));shell('input','tap',(b[0]+b[2])//2,(b[1]+b[3])//2)
-report=dict(scope='Owned AVD isolated product SSH Activity; UI-only port1, no authentication or network session',checks=checks,passed=False)
+    dpi('activate',text)
+report=dict(scope='Owned AVD isolated product SSH Activity; real layout and IME, in-app control activation; UI-only port1, no network session',checks=checks,passed=False)
 try:
     if a.font_scale is not None:
         shell('settings','put','system','font_scale',a.font_scale)
@@ -48,20 +49,24 @@ try:
     if a.before:check('reproduced_fixed_status_starves_long_name_login',height<100)
     else:
         check('long_name_login_retains_scrollable_space',height>=120 and height>s['statusBounds'][3]-s['statusBounds'][1])
-        # Real click in the compact status, then use the native scrollable detail dialog.
-        b=s['statusBounds'];shell('input','tap',(b[0]+b[2])//2,(b[1]+b[3])//2);time.sleep(.4)
+        # Exercise the real product callback and native scrollable status dialog.
+        dpi('activate',s['status']);time.sleep(.4)
         details=dpi('snapshot');capture('status-details')
-        check('full_long_status_remains_available_in_dialog',any(v.get('text')==s['status'] for w in details['windows'] for v in w['views']))
+        check('full_long_status_remains_available_in_dialog',len(details['windows']) > 1 and any(v.get('text')==s['status'] for w in details['windows'] for v in w['views']))
         tap('关闭')
-        for label in ('目标 SSH 用户名','目标 SSH 密码（不保存）'):
-            detail=dpi('focus',label);time.sleep(.8);detail=dpi('snapshot');capture('ime-'+('username' if '用户名' in label else 'password'))
+        for label in ('目标电脑的系统账号','目标 SSH 密码（不保存）'):
+            detail=dpi('focus',label);time.sleep(.8);detail=dpi('snapshot');capture('ime-'+('username' if '账号' in label else 'password'))
             edit=next(v for w in detail['windows'] for v in w['views'] if v.get('hint')==label)
             check(label+' reachable with real IME',edit['onScreen'] and edit['contentHeight']>=edit['textHeight'] and 'mInputShown=true' in shell('dumpsys','input_method'))
             shell('input','keyevent','KEYCODE_BACK')
-        detail=dpi('reveal','连接 SSH');capture('connect-reachable')
-        button=next(v for w in detail['windows'] for v in w['views'] if v.get('text')=='连接 SSH')
+        detail=dpi('reveal','连接终端');capture('connect-reachable')
+        button=next(v for w in detail['windows'] for v in w['views'] if v.get('text')=='连接终端')
         check('connect_button_fully_reachable_after_scroll',button['onScreen'] and button['contentHeight']>=button['textHeight'])
-        tap('连接 SSH');s=wait(lambda s:'填写' in s['status'] or '密钥' in s['status'])
+        dpi('reveal','更多设置 ▸');tap('更多设置 ▸')
+        detail=dpi('reveal','查看 / 管理主机身份');capture('advanced-settings')
+        button=next(v for w in detail['windows'] for v in w['views'] if v.get('text')=='连接终端')
+        check('connect_remains_visible_with_advanced_settings',button['onScreen'] and button['contentHeight']>=button['textHeight'])
+        tap('连接终端');s=wait(lambda s:'填写' in s['status'] or '密钥' in s['status'])
         check('empty_credentials_do_not_open_network_session',not s['connection'])
     report['passed']=True
 finally:

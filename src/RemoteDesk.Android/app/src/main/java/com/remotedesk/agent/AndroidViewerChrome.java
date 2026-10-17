@@ -24,6 +24,7 @@ final class AndroidViewerChrome {
         void drag();
         void more();
         void screens();
+        default void privacy() { }
         void zoom();
         void upscale();
         void diagnostics();
@@ -36,7 +37,7 @@ final class AndroidViewerChrome {
     final TextView status, health, hint;
     final View indicator;
     final EditText composer;
-    final Button mode, keyboard, mouse, drag, screens, send, upscale, more, watchOnly;
+    final Button mode, keyboard, mouse, drag, screens, send, upscale, more, watchOnly, privacy;
     boolean keyboardOpen, mouseOpen;
     private boolean compact;
     private boolean compactKeys;
@@ -152,6 +153,9 @@ final class AndroidViewerChrome {
         screens = button("屏幕", v -> actions.screens());
         weighted(mainRow, keyboard); weighted(mainRow, mode); weighted(mainRow, mouse);
         weighted(mainRow, screens);
+        privacy = button("隐私屏…", v -> actions.privacy());
+        privacy.setVisibility(View.GONE);
+        weighted(mainRow, privacy);
         weighted(mainRow, button("缩放", v -> actions.zoom()));
         upscale = button("新版放大：关", v -> actions.upscale());
         weighted(mainRow, upscale);
@@ -171,6 +175,14 @@ final class AndroidViewerChrome {
         menuParams.setMargins(dp(4), dp(2), dp(2), dp(2));
         mainBar.addView(more, menuParams);
         dock.addView(mainBar);
+    }
+
+    void privacy(boolean supported, AndroidPrivacyScreen.Controls state) {
+        privacy.setVisibility(supported ? View.VISIBLE : View.GONE);
+        privacy.setText(state == null ? "隐私屏…" : state.label());
+        privacy.setContentDescription(privacy.getText() + "，长按可恢复本地显示或刷新状态");
+        privacy.setEnabled(supported && (state == null || state.command != 2));
+        mark(privacy, state != null && state.status != null && state.status.enabled);
     }
 
     void keyboard(boolean open) {

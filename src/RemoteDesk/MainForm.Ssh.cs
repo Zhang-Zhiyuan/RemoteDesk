@@ -8,10 +8,11 @@ public sealed partial class MainForm
     private CheckBox _allowSshBox = null!;
     private NumericUpDown _sshHostPortBox = null!;
     private Button _sshTerminalButton = null!;
-    private Button _sshLoginSettingsButton = null!;
-    private Button _configureSshAliasButton = null!;
-    private Button _manageSshAliasesButton = null!;
-    private Button _closeSshTerminalsButton = null!;
+    private Button _sshMoreButton = null!;
+    private ToolStripMenuItem _sshLoginSettingsButton = null!;
+    private ToolStripMenuItem _configureSshAliasButton = null!;
+    private ToolStripMenuItem _manageSshAliasesButton = null!;
+    private ToolStripMenuItem _closeSshTerminalsButton = null!;
     private RelaySshHostOptions _sshHostOptions = new(false, 22, "");
     private readonly HashSet<SshTerminalSession> _sshTerminals = [];
     private CancellationTokenSource? _sshOpening;
@@ -40,25 +41,39 @@ public sealed partial class MainForm
 
     private void AddSshDeviceActions(FlowLayoutPanel actions)
     {
-        _sshTerminalButton = CreateSecondaryButton("SSH 终端");
-        _sshLoginSettingsButton = CreateSecondaryButton("SSH 登录设置…");
-        _configureSshAliasButton = CreateSecondaryButton("配置终端 SSH");
-        _manageSshAliasesButton = CreateSecondaryButton("管理终端别名");
-        _closeSshTerminalsButton = CreateSecondaryButton("关闭 SSH 终端");
+        _sshTerminalButton = CreateSecondaryButton("打开终端");
+        _sshMoreButton = CreateSecondaryButton("终端选项 ▾");
+        _sshLoginSettingsButton = new ToolStripMenuItem("换账号连接…");
+        _configureSshAliasButton = new ToolStripMenuItem("设置命令行别名（可选）…");
+        _manageSshAliasesButton = new ToolStripMenuItem("管理命令行别名…");
+        _closeSshTerminalsButton = new ToolStripMenuItem("断开所有 SSH 终端…");
         _sshTerminalButton.Click += async (_, _) => await OpenSshTerminalAsync();
         _sshLoginSettingsButton.Click += async (_, _) => await OpenSshTerminalCoreAsync(configure: true, forceNew: true);
         var terminalMenu = new ContextMenuStrip();
         terminalMenu.Items.Add("新建终端（保留已有连接）", null, async (_, _) => await OpenSshTerminalCoreAsync(forceNew: true));
+        terminalMenu.Items.Add(_sshLoginSettingsButton);
+        terminalMenu.Items.Add(new ToolStripSeparator());
+        terminalMenu.Items.Add(_configureSshAliasButton);
+        terminalMenu.Items.Add(_manageSshAliasesButton);
+        terminalMenu.Items.Add(new ToolStripSeparator());
+        terminalMenu.Items.Add(_closeSshTerminalsButton);
+        terminalMenu.Opening += (_, _) =>
+        {
+            terminalMenu.Font = Font;
+            terminalMenu.Items[0].Enabled = _sshLoginSettingsButton.Enabled;
+        };
         _sshTerminalButton.ContextMenuStrip = terminalMenu;
         _sshTerminalButton.Disposed += (_, _) => terminalMenu.Dispose();
+        _sshMoreButton.Click += (_, _) => terminalMenu.Show(_sshMoreButton, new Point(0, _sshMoreButton.Height));
         _configureSshAliasButton.Click += async (_, _) => await ConfigureSshAliasAsync();
         _manageSshAliasesButton.Click += (_, _) => ManageSshAliases();
-        _closeSshTerminalsButton.Click += (_, _) => CloseSshTerminals();
+        _closeSshTerminalsButton.Click += (_, _) =>
+        {
+            if (MessageBox.Show(this, "断开所有 SSH 终端？运行中的命令可能随连接结束。远程桌面不受影响。",
+                "断开终端", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) == DialogResult.OK) CloseSshTerminals();
+        };
         actions.Controls.Add(_sshTerminalButton);
-        actions.Controls.Add(_sshLoginSettingsButton);
-        actions.Controls.Add(_configureSshAliasButton);
-        actions.Controls.Add(_manageSshAliasesButton);
-        actions.Controls.Add(_closeSshTerminalsButton);
+        actions.Controls.Add(_sshMoreButton);
     }
 
     private void ApplySshSettingsToUi()
@@ -123,18 +138,19 @@ public sealed partial class MainForm
             catch (ArgumentException error) { reason = error.Message; }
         }
         bool existing = alias is not null && _sshTerminals.Any(terminal => terminal.IsActive && terminal.HostKeyAlias == alias);
-        _sshTerminalButton.Text = _sshOpening is not null ? "取消 SSH 连接" : existing ? "唤回 SSH 终端" : "一键 SSH 终端";
-        _sshTerminalButton.Enabled = _sshOpening is not null || (!_isClosing && IsRelayConfigured() && !_relayOperationInProgress && reason is null);
+        _sshTerminalButton.Text = _sshOpening is not null ? "取消连接" : existing ? "返回终端" : "打开终端";
+        _sshTerminalButton.Enabled = _sshOpening is not null || (!_isClosing && IsRelayConfigured() && (existing || !_relayOperationInProgress && reason is null));
         SetToolTip(_sshTerminalButton, _sshOpening is not null
             ? "取消正在进行的 SSH 连接或别名验证，不影响远程桌面和已确认的文件传输。"
-            : reason ?? "首次填写 SSH 登录设置，之后一键连接；已有会话优先唤回，最小化不断线。右键可新建另一终端。首次指纹与密码仍由系统 SSH 核验。");
+            : existing ? "返回已连接的 SSH 终端，不重新登录、不打断命令。" : reason ?? "首次输入目标电脑的系统账号；以后直接打开。无需配置端口或命令行别名。密码在终端中输入。");
+        _sshMoreButton.Enabled = !_isClosing;
         _sshLoginSettingsButton.Enabled = _sshOpening is null && !_isClosing && IsRelayConfigured() && !_relayOperationInProgress && reason is null;
-        SetToolTip(_sshLoginSettingsButton, "修改此设备的 SSH 用户名、设备密钥或私钥路径后连接；不打断已有 SSH。SSH 密码不保存。");
+        _sshLoginSettingsButton.ToolTipText = "修改登录信息并新建终端，不打断已有连接。";
         _configureSshAliasButton.Enabled = _sshOpening is null && !_isClosing && IsRelayConfigured() && !_relayOperationInProgress && reason is null;
-        SetToolTip(_configureSshAliasButton, reason ?? "为此设备配置标准 ssh 别名；此后可在终端直接输入 ssh 别名，不必先打开远程桌面。");
+        _configureSshAliasButton.ToolTipText = reason ?? "仅供系统命令行使用；点击“打开终端”不需要此设置。";
         _manageSshAliasesButton.Enabled = _sshOpening is null && !_isClosing;
-        SetToolTip(_manageSshAliasesButton, "查看 / 移除当前用户已配置的终端别名；离线也可使用，不删除私钥、主机指纹或设备密钥。");
-        _closeSshTerminalsButton.Text = _sshTerminals.Count == 0 ? "关闭 SSH 终端" : $"关闭 SSH 终端（{_sshTerminals.Count}）";
+        _manageSshAliasesButton.ToolTipText = "查看 / 移除命令行别名；不会关闭连接或删除密钥。";
+        _closeSshTerminalsButton.Text = $"断开所有 SSH 终端（{_sshTerminals.Count}）…";
         _closeSshTerminalsButton.Enabled = _sshTerminals.Count > 0;
         _allowSshBox.Enabled = !_relayOperationInProgress;
         _sshHostPortBox.Enabled = _allowSshBox.Checked && !_relayOperationInProgress;
@@ -164,12 +180,7 @@ public sealed partial class MainForm
     {
         if (_sshOpening is not null) { _sshOpening.Cancel(); return; }
         RelayOnlineDevice? selected = GetSelectedRelayDevice();
-        if (_isClosing || _relayOperationInProgress || !IsRelayConfigured() || SshConnectionBlockReason(selected) is not null) return;
-        if (!File.Exists(SshTerminalLauncher.ExecutablePath))
-        {
-            MessageBox.Show(this, "未找到 Windows OpenSSH 客户端。请在 Windows 可选功能中安装“OpenSSH 客户端”，再重试。", "SSH 终端", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
+        if (_isClosing || !IsRelayConfigured() || selected is null) return;
         RelayConnectionOptions route = CreateRelayOptions(selected!.DeviceId);
         string alias = SshTerminalLauncher.HostKeyAlias(route.TlsCertificateSha256, route.DeviceId);
         var existing = _sshTerminals.FirstOrDefault(terminal => terminal.HostKeyAlias == alias && terminal.IsActive);
@@ -178,6 +189,12 @@ public sealed partial class MainForm
             bool recalled = await existing.RecallAsync();
             if (!_isClosing && !IsDisposed) SetRelayStatus(recalled ? "已唤回原 SSH 终端；连接和运行中的命令保持不变。" :
                 "SSH 会话仍保留，当前系统未能唤回窗口，请从任务栏切回；右键“SSH 终端”可另开一个。", MutedTextColor);
+            return;
+        }
+        if (_relayOperationInProgress || SshConnectionBlockReason(selected) is not null) return;
+        if (!File.Exists(SshTerminalLauncher.ExecutablePath))
+        {
+            MessageBox.Show(this, "未找到 Windows OpenSSH 客户端。请在 Windows 可选功能中安装“OpenSSH 客户端”，再重试。", "SSH 终端", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
         if (_sshTerminals.Count(terminal => terminal.IsActive) >= 8)
@@ -359,7 +376,7 @@ public sealed partial class MainForm
             IReadOnlyList<SshCommandProfile> profiles = SshCommandProfiles.ReadAll();
             if (profiles.Count == 0)
             {
-                MessageBox.Show(this, "当前用户还没有配置终端 SSH 别名。请选择支持 SSH 的在线设备，点击“配置终端 SSH”。", "终端 SSH 别名", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(this, "还没有命令行别名。普通连接直接点“打开终端”；若需要在命令行使用 ssh 别名，可在“终端选项”中设置。", "终端 SSH 别名", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             using var dialog = CreateSshAliasManagerDialog(profiles, Font, out ComboBox aliases);
@@ -427,61 +444,94 @@ public sealed partial class MainForm
         out TextBox username, out TextBox deviceKey, out TextBox identityFile, out TextBox alias)
     {
         bool configureAlias = suggestedAlias is not null;
-        var dialog = new Form { Text = (configureAlias ? "配置终端 SSH · " : "SSH · ") + name, Font = font, AutoScaleMode = AutoScaleMode.Dpi,
+        var dialog = new Form { Text = (configureAlias ? "命令行别名 · " : "连接终端 · ") + name, Font = font, AutoScaleMode = AutoScaleMode.Dpi,
             StartPosition = FormStartPosition.CenterParent, MinimizeBox = false, MaximizeBox = false };
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(16), ColumnCount = 1, RowCount = 8 };
+        var panel = new TableLayoutPanel { Name = "sshLoginBody", Dock = DockStyle.Fill, AutoScroll = true,
+            Padding = new Padding(16), ColumnCount = 1, RowCount = 0, GrowStyle = TableLayoutPanelGrowStyle.AddRows };
         panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         var explanation = new Label { AutoSize = true, Dock = DockStyle.Top, UseMnemonic = false,
-            Text = configureAlias ? "配置后可在系统终端直接输入 ssh 别名；设备密钥验证成功后，会备份并修改当前用户的 .ssh/config。遇到已有别名冲突、Include 或 Match 时不会覆盖。\nSSH 密码不保存；私钥留空使用系统默认密钥 / agent。首次连接请核对主机指纹。" :
-                "首次设置后即可一键打开；再次点击会唤回已有终端。最小化保持连接，退出 RemoteDesk 或断开 SSH 会结束连接。\n用户名与私钥路径会记住，SSH 密码不保存；私钥留空使用系统默认密钥 / agent。首次连接仍需核对主机指纹。" };
+            Text = configureAlias ? "可选功能：在系统命令行使用 ssh 别名。验证设备密钥后会备份并修改 .ssh/config，不覆盖已有冲突配置。SSH 密码不保存。" :
+                "输入目标电脑的系统账号，密码在打开的终端中输入。以后会记住账号；已连接时再次点击可返回原终端。" };
         panel.Controls.Add(explanation);
-        panel.SizeChanged += (_, _) => explanation.MaximumSize = new Size(Math.Max(1, panel.ClientSize.Width - panel.Padding.Horizontal), 0);
         var aliasInput = new TextBox { Dock = DockStyle.Top, MaxLength = 64, Text = suggestedAlias ?? "", PlaceholderText = "例如 5090、lab-pc" };
         alias = aliasInput;
         if (configureAlias)
         {
-            panel.RowCount += 2;
-            panel.Controls.Add(new Label { Text = "终端别名（字母 / 数字 / - / _，以字母或数字开头）", AutoSize = true, Dock = DockStyle.Top });
+            panel.Controls.Add(new Label { Text = "命令行别名", AutoSize = true, Dock = DockStyle.Top });
             panel.Controls.Add(aliasInput);
         }
         else dialog.Disposed += (_, _) => aliasInput.Dispose();
-        panel.Controls.Add(new Label { Text = "SSH 用户名", AutoSize = true, Dock = DockStyle.Top });
-        var user = new TextBox { Dock = DockStyle.Top, MaxLength = 128, PlaceholderText = "例如 zzy 或 DOMAIN\\user", Text = profile?.Username ?? "" };
+        panel.Controls.Add(new Label { Text = "目标电脑的系统账号", AutoSize = true, Dock = DockStyle.Top });
+        var user = new TextBox { Name = "sshUsername", AccessibleName = "目标电脑的系统账号", Dock = DockStyle.Top,
+            MaxLength = 128, PlaceholderText = "例如 zzy 或 DOMAIN\\user", Text = profile?.Username ?? "" };
         panel.Controls.Add(user); username = user;
-        panel.Controls.Add(new Label { Text = "这台设备的 RemoteDesk 密钥", AutoSize = true, Dock = DockStyle.Top });
-        var key = new TextBox { Dock = DockStyle.Top, MaxLength = 4096, UseSystemPasswordChar = true, Text = savedDeviceKey };
-        panel.Controls.Add(key); deviceKey = key;
-        panel.Controls.Add(new Label { Text = "可选 SSH 私钥文件（OpenSSH 格式）", AutoSize = true, Dock = DockStyle.Top });
+
+        var advanced = new TableLayoutPanel { Name = "sshAdvancedSettings", Dock = DockStyle.Top, AutoSize = true,
+            ColumnCount = 1, RowCount = 0, GrowStyle = TableLayoutPanelGrowStyle.AddRows, Margin = Padding.Empty };
+        advanced.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        bool needsKey = string.IsNullOrWhiteSpace(savedDeviceKey);
+        var keyParent = needsKey || configureAlias ? panel : advanced;
+        keyParent.Controls.Add(new Label { Text = "这台设备的 RemoteDesk 密钥（不是系统密码）", AutoSize = true, Dock = DockStyle.Top });
+        var key = new TextBox { Name = "sshDeviceKey", Dock = DockStyle.Top, MaxLength = 4096, UseSystemPasswordChar = true, Text = savedDeviceKey };
+        keyParent.Controls.Add(key); deviceKey = key;
+        if (!needsKey && !configureAlias)
+            panel.Controls.Add(new Label { Text = "已复用此设备保存的 RemoteDesk 密钥。", AutoSize = true, Dock = DockStyle.Top });
+        advanced.Controls.Add(new Label { Text = "SSH 私钥文件（可选）", AutoSize = true, Dock = DockStyle.Top });
         var identityRow = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
         identityRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         identityRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        var identity = new TextBox { Dock = DockStyle.Top, Text = profile?.IdentityFile ?? "", PlaceholderText = "留空使用系统默认密钥 / agent", MaxLength = 32767 };
+        var identity = new TextBox { Name = "sshIdentityFile", Dock = DockStyle.Top, Text = profile?.IdentityFile ?? "",
+            PlaceholderText = "通常留空，使用系统默认密钥或密码登录", MaxLength = 32767 };
         var browse = new Button { Text = "选择…", AutoSize = true };
         browse.Click += (_, _) =>
         {
-            using var picker = new OpenFileDialog { Title = "选择 SSH 私钥（不会上传或保存内容）", CheckFileExists = true, Multiselect = false };
+            using var picker = new OpenFileDialog { Title = "选择 SSH 私钥（不上传）", CheckFileExists = true, Multiselect = false };
             if (picker.ShowDialog(dialog) == DialogResult.OK) identity.Text = picker.FileName;
         };
         identityRow.Controls.Add(identity, 0, 0); identityRow.Controls.Add(browse, 1, 0);
-        panel.Controls.Add(identityRow); identityFile = identity;
-        var actions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
-        var connect = new Button { Text = configureAlias ? "验证并配置别名" : "打开 SSH 终端", AutoSize = true };
+        advanced.Controls.Add(identityRow); identityFile = identity;
+        advanced.Controls.Add(new Label { Text = "无需填写中继端口或配置别名；SSH 密码与私钥内容不会保存到此设置。", AutoSize = true, Dock = DockStyle.Top });
+        var more = new CheckBox { Name = "sshMoreSettings", Appearance = Appearance.Button, AutoSize = true,
+            Text = "更多设置 ▸", AccessibleName = "展开可选的 SSH 登录设置" };
+        void ShowAdvanced()
+        {
+            advanced.Visible = more.Checked;
+            more.Text = more.Checked ? "收起更多设置 ▾" : "更多设置 ▸";
+        }
+        more.CheckedChanged += (_, _) => ShowAdvanced();
+        panel.Controls.Add(more); panel.Controls.Add(advanced);
+        more.Checked = configureAlias || !string.IsNullOrEmpty(identity.Text) && !File.Exists(identity.Text);
+        ShowAdvanced();
+        var validation = new Label { Name = "sshValidation", AutoSize = true, Dock = DockStyle.Top, ForeColor = Color.Firebrick };
+        panel.Controls.Add(validation);
+        panel.SizeChanged += (_, _) =>
+        {
+            int width = Math.Max(1, panel.ClientSize.Width - panel.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth);
+            foreach (Label label in panel.Controls.OfType<Label>().Concat(advanced.Controls.OfType<Label>()))
+                label.MaximumSize = new Size(width, 0);
+        };
+        // Keep Connect/Cancel outside the scrolling fields, including at large DPI.
+        var actions = new FlowLayoutPanel { Dock = DockStyle.Bottom, Padding = new Padding(12, 8, 12, 12), AutoSize = true, WrapContents = true };
+        var connect = new Button { Text = configureAlias ? "验证并配置别名" : "打开终端", AutoSize = true };
         var cancel = new Button { Text = "取消", AutoSize = true, DialogResult = DialogResult.Cancel };
         connect.Click += (_, _) =>
         {
-            if (configureAlias && !SshAliasConfig.IsValidAlias(aliasInput.Text.Trim())) { aliasInput.Focus(); return; }
-            if (!SshTerminalLauncher.IsValidUsername(user.Text.Trim())) { user.Focus(); return; }
-            if (string.IsNullOrWhiteSpace(key.Text)) { key.Focus(); return; }
+            validation.Text = "";
+            if (configureAlias && !SshAliasConfig.IsValidAlias(aliasInput.Text.Trim()))
+            { validation.Text = "别名请用字母、数字、- 或 _，以字母或数字开头。"; aliasInput.Focus(); return; }
+            if (!SshTerminalLauncher.IsValidUsername(user.Text.Trim()))
+            { validation.Text = "请填写目标电脑的有效系统账号。"; user.Focus(); return; }
+            if (string.IsNullOrWhiteSpace(key.Text))
+            { if (key.Parent == advanced) more.Checked = true; validation.Text = "请填写这台设备的 RemoteDesk 密钥。"; key.Focus(); return; }
             if (!string.IsNullOrWhiteSpace(identity.Text) && !File.Exists(identity.Text.Trim()))
-            {
-                MessageBox.Show(dialog, "所选私钥文件不存在，请重新选择，或留空使用默认密钥 / agent。", "SSH 私钥", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                identity.Focus(); return;
-            }
+            { more.Checked = true; validation.Text = "私钥文件不存在，请重新选择，或清空后使用密码登录。"; identity.Focus(); return; }
             dialog.DialogResult = DialogResult.OK;
         };
-        actions.Controls.Add(connect); actions.Controls.Add(cancel); ConfigureWrappingDialogActions(actions); panel.Controls.Add(actions);
-        dialog.Controls.Add(panel); dialog.AcceptButton = connect; dialog.CancelButton = cancel; dialog.Shown += (_, _) => { if (configureAlias) aliasInput.Focus(); else user.Focus(); };
-        ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(560, configureAlias ? 580 : 480), new Size(360, 300));
+        actions.Controls.Add(connect); actions.Controls.Add(cancel); ConfigureWrappingDialogActions(actions);
+        dialog.Controls.Add(panel); dialog.Controls.Add(actions);
+        dialog.AcceptButton = connect; dialog.CancelButton = cancel;
+        dialog.Shown += (_, _) => { if (configureAlias) aliasInput.Focus(); else if (user.Text.Length == 0) user.Focus(); else if (needsKey) key.Focus(); else connect.Focus(); };
+        ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(560, configureAlias ? 520 : needsKey ? 380 : 320), new Size(360, 240));
         return dialog;
     }
 }

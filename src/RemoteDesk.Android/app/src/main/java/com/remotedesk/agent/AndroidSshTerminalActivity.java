@@ -38,7 +38,7 @@ public final class AndroidSshTerminalActivity extends Activity {
     private AndroidRelay.Options target;
     private String deviceName, savedKey = "";
     private LinearLayout root, terminalPanel;
-    private ScrollView loginPanel;
+    private LinearLayout loginPanel;
     private TextView status;
     private EditText username, password, deviceKey;
     private Button connect, ctrl;
@@ -121,29 +121,42 @@ public final class AndroidSshTerminalActivity extends Activity {
         status.setOnClickListener(v -> new AlertDialog.Builder(this).setTitle("SSH 状态")
             .setMessage(status.getText()).setPositiveButton("关闭", null).show());
         root.addView(status);
-        loginPanel = new ScrollView(this);
+        loginPanel = new LinearLayout(this); loginPanel.setOrientation(LinearLayout.VERTICAL);
+        ScrollView loginScroll = new ScrollView(this);
         LinearLayout form = new LinearLayout(this); form.setOrientation(LinearLayout.VERTICAL);
         int pad = AndroidDisplay.dp(this, 12); form.setPadding(pad, pad, pad, pad);
-        form.addView(label("目标：" + deviceName + "\nSSH 为独立通道。切到后台或返回列表保持连接，再点同一设备或通知可唤回原终端。断开 / 移除终端任务会结束连接；断网不会自动重放命令。"));
-        form.addView(label(savedKey.isEmpty() ? "填写此目标设备的设备密钥，以及目标 SSH 账号密码。" :
-            "复用已保存的设备密钥。下面仅填写目标 SSH 账号密码（不是中继 root 密码）。"));
+        form.addView(label("用目标电脑的系统账号登录，不是中继服务器的 root 账号。返回列表后连接会保留，再点此设备可回到终端。"));
+        LinearLayout advanced = new LinearLayout(this); advanced.setOrientation(LinearLayout.VERTICAL);
+        advanced.setVisibility(View.GONE);
         deviceKey = field("设备密钥", true); deviceKey.setText(savedKey);
         deviceKey.setContentDescription("目标设备密钥；已保存密钥可在此更改，仅用于本次 SSH 连接");
-        form.addView(deviceKey);
-        username = field("目标 SSH 用户名", false); form.addView(username);
+        if (savedKey.isEmpty()) form.addView(deviceKey);
+        else { form.addView(label("已复用保存的设备密钥。")); advanced.addView(deviceKey); }
+        username = field("目标电脑的系统账号", false); form.addView(username);
         username.setText(getSharedPreferences("ssh_target_accounts", MODE_PRIVATE).getString(AndroidSshProtocol.alias(target), ""));
         password = field("目标 SSH 密码（不保存）", true); form.addView(password);
-        form.addView(button("选择 SSH 私钥（可选）", v -> {
+        Button moreSettings = button("更多设置 ▸", v -> {
+            boolean expanded = advanced.getVisibility() != View.VISIBLE;
+            advanced.setVisibility(expanded ? View.VISIBLE : View.GONE);
+            ((Button)v).setText(expanded ? "收起更多设置 ▾" : "更多设置 ▸");
+        });
+        moreSettings.setContentDescription("展开可选的私钥、设备密钥和主机身份设置");
+        form.addView(moreSettings); form.addView(advanced);
+        advanced.addView(label("以下均为可选项；密码登录无需配置私钥、端口或命令行别名。"));
+        advanced.addView(button("选择 SSH 私钥（可选）", v -> {
             Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE)
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             try { startActivityForResult(picker, 7101); }
             catch (android.content.ActivityNotFoundException ex) { status.setText("系统没有可用的文件选择器，请使用密码登录或启用文件应用。"); }
         }));
-        form.addView(button("改用密码登录", v -> { clearPrivateKey(); password.setHint("目标 SSH 密码（不保存）"); password.setContentDescription("目标 SSH 密码（不保存）"); status.setText(R.string.ssh_password_mode); }));
-        form.addView(button("SSH 主机身份", v -> showHostIdentity()));
-        connect = button("连接 SSH", v -> startConnection()); connect.setEnabled(false); form.addView(connect);
-        Button back = button("返回在线设备", v -> finish()); form.addView(back);
-        loginPanel.addView(form); root.addView(loginPanel, new LinearLayout.LayoutParams(-1, 0, 1));
+        advanced.addView(button("改用密码登录", v -> { clearPrivateKey(); password.setHint("目标 SSH 密码（不保存）"); password.setContentDescription("目标 SSH 密码（不保存）"); status.setText(R.string.ssh_password_mode); }));
+        advanced.addView(button("查看 / 管理主机身份", v -> showHostIdentity()));
+        loginScroll.addView(form); loginPanel.addView(loginScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        LinearLayout loginActions = new LinearLayout(this); loginActions.setPadding(pad, 0, pad, pad);
+        connect = button("连接终端", v -> startConnection()); connect.setEnabled(false);
+        loginActions.addView(connect, new LinearLayout.LayoutParams(0, -2, 1));
+        Button back = button("返回", v -> finish()); loginActions.addView(back, new LinearLayout.LayoutParams(0, -2, 1));
+        loginPanel.addView(loginActions); root.addView(loginPanel, new LinearLayout.LayoutParams(-1, 0, 1));
         terminalPanel = new LinearLayout(this); terminalPanel.setOrientation(LinearLayout.VERTICAL);
         terminalPanel.setVisibility(View.GONE);
         terminal = new WebView(this); configureTerminal();

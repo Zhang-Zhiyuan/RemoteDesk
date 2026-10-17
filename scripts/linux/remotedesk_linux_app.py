@@ -32,7 +32,7 @@ import unicodedata
 from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from uuid import uuid4
 import remotedesk_linux_relay as relay
 import remotedesk_linux_relay_login as relay_login
@@ -3480,6 +3480,7 @@ class ViewerConnection:
         self.file_location_lock = threading.Lock()
         self.file_location_requests: dict[str, tuple[threading.Event, dict[str, Any]]] = {}
         self.privacy_lock = threading.Lock()
+        self.privacy_send_lock = threading.Lock()
         self.privacy_requests: dict[str, tuple[threading.Event, dict[str, Any]]] = {}
         self.clipboard_lock = threading.Lock()
         self.clipboard_pending: ViewerClipboardRequest | None = None
@@ -4177,7 +4178,8 @@ class ViewerConnection:
             with self.file_location_lock:
                 self.file_location_requests.pop(request_id, None)
 
-    def request_privacy_screen(self, action: int = 0, timeout: float = 12.0) -> dict[str, Any]:
+    def request_privacy_screen(self, action: int = 0, timeout: float = 12.0,
+                               send_if: Callable[[], bool] | None = None) -> dict[str, Any]:
         if self.stop_event.is_set():
             raise OSError("连接已断开，隐私屏状态未确认。")
         if not (self.remote_capabilities & CAPABILITY_PRIVACY_SCREEN):
@@ -4186,7 +4188,10 @@ class ViewerConnection:
         with self.privacy_lock:
             self.privacy_requests[request_id] = (completed, response)
         try:
-            self._write_file_control(encode_privacy_screen_request(request_id, action))
+            with self.privacy_send_lock:
+                if send_if is not None and not send_if():
+                    raise OSError("隐私屏请求已取消或连接已改变。")
+                self._write_file_control(encode_privacy_screen_request(request_id, action))
             deadline = time.monotonic() + timeout
             while not completed.wait(0.1):
                 if self.stop_event.is_set():
@@ -5755,18 +5760,31 @@ class RemoteDeskLinuxApp:
         self.relay_connect_button = ttk.Button(tab, text="连接选中设备", command=self._connect_relay, style="Accent.TButton", state=tk.DISABLED)
         self.relay_connect_button.pack(anchor=tk.W, pady=10)
         ttk.Button(tab, text="查看 / 使用 IP", command=self._request_relay_addresses).pack(anchor=tk.W)
-        self.relay_ssh_button = ttk.Button(tab, text="一键连接 / 唤回 SSH", command=self._open_relay_ssh, state=tk.DISABLED)
-        self.relay_ssh_button.pack(anchor=tk.W, pady=(8, 0))
-        self.relay_ssh_settings_button = ttk.Button(tab, text="SSH 登录设置…",
+        ssh_actions = ttk.Frame(tab)
+        ssh_actions.pack(fill=tk.X, pady=(8, 0))
+        self.relay_ssh_button = ttk.Button(ssh_actions, text="打开终端", command=self._open_relay_ssh, state=tk.DISABLED)
+        self.relay_ssh_button.pack(side=tk.LEFT)
+        self.relay_ssh_advanced = ttk.Frame(tab)
+        def toggle_ssh_options():
+            expanded = bool(self.relay_ssh_advanced.winfo_manager())
+            if expanded:
+                self.relay_ssh_advanced.pack_forget()
+            else:
+                self.relay_ssh_advanced.pack(fill=tk.X, after=ssh_actions, pady=(4, 0))
+            self.relay_ssh_more_button.configure(text="终端选项 ▸" if expanded else "收起选项 ▾")
+        self.relay_ssh_more_button = ttk.Button(ssh_actions, text="终端选项 ▸", command=toggle_ssh_options)
+        self.relay_ssh_more_button.pack(side=tk.LEFT, padx=8)
+        self.relay_ssh_settings_button = ttk.Button(self.relay_ssh_advanced, text="换账号连接…",
             command=lambda: self._open_relay_ssh(configure=True, force_new=True), state=tk.DISABLED)
         self.relay_ssh_settings_button.pack(anchor=tk.W, pady=(8, 0))
         ssh_menu = tk.Menu(self.relay_ssh_button, tearoff=False)
         ssh_menu.add_command(label="新建终端（保留已有连接）", command=lambda: self._open_relay_ssh(force_new=True))
         self.relay_ssh_button.bind("<Button-3>", lambda event: ssh_menu.tk_popup(event.x_root, event.y_root))
-        self.relay_ssh_alias_button = ttk.Button(tab, text="配置终端 SSH 别名", command=self._configure_terminal_ssh_alias, state=tk.DISABLED)
+        ttk.Button(self.relay_ssh_advanced, text="新建终端（保留已有连接）", command=lambda: self._open_relay_ssh(force_new=True)).pack(anchor=tk.W, pady=(8, 0))
+        self.relay_ssh_alias_button = ttk.Button(self.relay_ssh_advanced, text="命令行别名（可选）…", command=self._configure_terminal_ssh_alias, state=tk.DISABLED)
         self.relay_ssh_alias_button.pack(anchor=tk.W, pady=(8, 0))
-        ttk.Button(tab, text="移除终端 SSH 别名", command=self._remove_terminal_ssh_alias).pack(anchor=tk.W, pady=(8, 0))
-        self._wrapping_label(tab, text="首次配置后可一键打开，已有终端优先唤回；最小化保持连接，右键可新建终端。SSH 登录认证仍由系统终端完成。",
+        ttk.Button(self.relay_ssh_advanced, text="移除命令行别名…", command=self._remove_terminal_ssh_alias).pack(anchor=tk.W, pady=(8, 0))
+        self._wrapping_label(tab, text="首次输入目标电脑的系统账号，以后直接打开；最小化保持连接。普通连接无需配置别名或端口。",
                              style="Status.TLabel").pack(fill=tk.X, pady=6)
         self._update_relay_form()
 
@@ -6047,10 +6065,17 @@ class RemoteDeskLinuxApp:
     def _update_relay_device_actions(self):
         selected = self.relay_list.selection()
         target = self.relay_devices.get(selected[0]) if selected else None
+        existing = False
+        if target is not None and self.relay_options is not None:
+            alias = ssh_terminal.host_key_alias(replace(self.relay_options, device_id=target["deviceId"]))
+            existing = any(not session.done.is_set() and ssh_terminal.host_key_alias(session.options) == alias
+                           for session, _window, _label in getattr(self, "ssh_sessions", {}).values())
+        if getattr(self, "relay_ssh_button", None) is not None:
+            self.relay_ssh_button.configure(text="返回终端" if existing else "打开终端")
         for attribute, enabled in (
                 ("relay_connect_button", target is not None and "desktop" in target.get("services", ["desktop"])
                  and target["deviceId"] != self.relay_device_id),
-                ("relay_ssh_button", target is not None and target.get("sshTunneling") is True
+                ("relay_ssh_button", existing or target is not None and target.get("sshTunneling") is True
                  and "ssh" in target.get("services", [])),
                 ("relay_ssh_settings_button", target is not None and target.get("sshTunneling") is True
                  and "ssh" in target.get("services", [])),
@@ -6129,8 +6154,7 @@ class RemoteDeskLinuxApp:
     def _open_relay_ssh(self, *, configure=False, force_new=False):
         selected = self.relay_list.selection()
         target = self.relay_devices.get(selected[0]) if selected else None
-        if (self.relay_options is None or target is None or target.get("sshTunneling") is not True
-                or "ssh" not in target.get("services", [])):
+        if self.relay_options is None or target is None:
             self.relay_status.config(text="请刷新并选择已开启 SSH 的设备；服务器与被控端均需支持独立 SSH 通道。")
             return
         options = replace(self.relay_options, device_id=target["deviceId"])
@@ -6147,21 +6171,26 @@ class RemoteDeskLinuxApp:
                     window.lift()
                     session.activate()
                     return
+        if target.get("sshTunneling") is not True or "ssh" not in target.get("services", []):
+            self.relay_status.config(text="此设备尚未开启 SSH。需要在目标电脑启用 SSH 服务及中继访问；不需要在控制端设置端口。")
+            return
         if sum(not session.done.is_set() for session, _window, _label in self.ssh_sessions.values()) >= 4:
             self.relay_status.config(text="本机最多同时打开 4 个 SSH 终端，请先关闭一个。")
             return
         key = self.relay_password.get().strip()
-        if not key:
-            self.relay_status.config(text="请输入所选设备的设备密钥；不是 SSH 用户密码。")
-            return
         try:
             login_profile = ssh_terminal.load_login(options)
         except (OSError, ValueError):
             login_profile = {"username": "", "identityFile": None}
             messagebox.showwarning("SSH 用户名未读取", "保存的 SSH 用户名无法读取，请重新填写；原记录不会被静默覆盖。", parent=self.root)
         initial_username, saved_identity = login_profile["username"], login_profile["identityFile"]
-        login = (initial_username, saved_identity or "") if not configure and initial_username and (
-            not saved_identity or Path(saved_identity).is_file()) else self._ask_ssh_login(initial_username, identity_file=saved_identity or "")
+        key_draft = tk.StringVar(value="") if not key else None
+        if key_draft is not None:
+            login = self._ask_ssh_login(initial_username, identity_file=saved_identity or "", device_key=key_draft)
+            key = key_draft.get().strip()
+        else:
+            login = (initial_username, saved_identity or "") if not configure and initial_username and (
+                not saved_identity or Path(saved_identity).is_file()) else self._ask_ssh_login(initial_username, identity_file=saved_identity or "")
         if self.closing or not login or self.relay_options is None or self.relay_options != replace(options, device_id=self.relay_options.device_id):
             return
         username, identity_file = login
@@ -6180,10 +6209,11 @@ class RemoteDeskLinuxApp:
             session.close()
             self.ssh_sessions.pop(session_id, None)
             window.destroy()
+            self._update_relay_device_actions()
         # Reserve the actions first: a long failure message or larger font
         # must never push Disconnect outside the window.
-        ttk.Button(frame, text="断开 SSH", command=close_session).pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
-        ttk.Button(frame, text="唤回终端", command=session.activate).pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
+        ttk.Button(frame, text="断开 SSH", width=0, command=close_session).pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
+        ttk.Button(frame, text="唤回终端", width=0, command=session.activate).pack(side=tk.BOTTOM, fill=tk.X, pady=(4, 0))
         message_area = ttk.Frame(frame)
         message_area.pack(fill=tk.BOTH, expand=True)
         canvas = tk.Canvas(message_area, bg=APP_BG, bd=0, highlightthickness=0, width=1, height=1)
@@ -6219,47 +6249,65 @@ class RemoteDeskLinuxApp:
             close_session()
             messagebox.showerror("SSH 终端未打开", str(error), parent=self.root)
             return
+        self._update_relay_device_actions()
         try:
             ssh_terminal.save_username(options, username.strip(), identity_file=identity_file or None)
         except (OSError, ValueError):
             messagebox.showwarning("SSH 用户名未保存", "终端已打开，但用户名保存失败；下次需要重新填写。未保存私钥或口令。", parent=self.root)
 
-    def _ask_ssh_login(self, initial_username, *, for_alias=False, identity_file=""):
+    def _ask_ssh_login(self, initial_username, *, for_alias=False, identity_file="", device_key=None):
         ui = self
         class LoginDialog(simpledialog.Dialog):
             def body(dialog, parent):
+                outer = parent
+                parent = ui._create_scrollable_content(outer)
                 dialog.username = tk.StringVar(value=initial_username)
                 dialog.identity = tk.StringVar(value=identity_file)
-                ttk.Label(parent, text="目标 SSH 用户名（非中继管理员）").pack(anchor=tk.W, pady=(4, 3))
+                ui._wrapping_label(parent, text="输入目标电脑的系统账号。密码在终端中输入；以后会记住账号。", wraplength=360).pack(fill=tk.X, pady=(4, 8))
+                ui._wrapping_label(parent, text="目标电脑的系统账号", wraplength=360).pack(fill=tk.X, pady=(4, 3))
                 entry = ttk.Entry(parent, textvariable=dialog.username, width=1)
                 entry.pack(fill=tk.X)
-                ttk.Label(parent, text="私钥文件（可选；仅记住路径，不保存内容）").pack(anchor=tk.W, pady=(10, 3))
-                ttk.Entry(parent, textvariable=dialog.identity, width=1).pack(fill=tk.X)
+                if device_key is not None:
+                    ui._wrapping_label(parent, text="此设备的 RemoteDesk 密钥（不是系统密码）", wraplength=360).pack(fill=tk.X, pady=(8, 3))
+                    ttk.Entry(parent, textvariable=device_key, show="•", width=1).pack(fill=tk.X)
+                advanced = ttk.Frame(parent)
+                expanded = tk.BooleanVar(value=bool(identity_file and not Path(identity_file).expanduser().is_file()))
+                def toggle_advanced():
+                    if expanded.get(): advanced.pack(fill=tk.X, pady=4)
+                    else: advanced.pack_forget()
+                    more.configure(text="收起设置 ▾" if expanded.get() else "更多设置 ▸")
+                more = ttk.Checkbutton(parent, text="更多设置 ▸", variable=expanded, command=toggle_advanced)
+                more.pack(anchor=tk.W, pady=(8, 0))
+                ui._wrapping_label(advanced, text="私钥文件（可选；仅记住路径）", wraplength=360).pack(fill=tk.X, pady=(10, 3))
+                ttk.Entry(advanced, textvariable=dialog.identity, width=1).pack(fill=tk.X)
                 def browse():
                     selected = filedialog.askopenfilename(title="选择目标 SSH 私钥", parent=dialog)
                     if selected:
                         dialog.identity.set(selected)
-                ttk.Button(parent, text="选择私钥…", command=browse).pack(anchor=tk.W, pady=5)
-                ui._wrapping_label(parent, text="留空使用系统默认 SSH 身份或密码。密码/私钥口令只在系统终端输入，不保存。桌面仅观看不限制 SSH 权限。",
+                ttk.Button(advanced, text="选择私钥…", command=browse).pack(anchor=tk.W, pady=5)
+                ui._wrapping_label(advanced, text="留空使用系统默认密钥或密码登录。密码/私钥口令只在系统终端输入，不保存。",
                                    wraplength=360).pack(fill=tk.X, pady=6)
-                parent.pack_configure(fill=tk.BOTH, expand=True, padx=12)
+                toggle_advanced()
+                outer.pack_configure(fill=tk.BOTH, expand=True, padx=12)
                 # Dialog._place_window runs update_idletasks during construction;
                 # a timer fits after that final native placement, not before it.
                 dialog.after(10, lambda: apply_adaptive_window_geometry(dialog, preferred_size=(560, 380),
-                    minimum_size=(360, 300), parent=ui.root))
+                    minimum_size=(360, 260), parent=ui.root))
                 return entry
 
             def buttonbox(dialog):
                 buttons = ttk.Frame(dialog, padding=8)
-                ttk.Button(buttons, text="继续配置" if for_alias else "打开终端", command=dialog.ok).pack(side=tk.LEFT, padx=5)
-                ttk.Button(buttons, text="取消", command=dialog.cancel).pack(side=tk.LEFT, padx=5)
-                buttons.pack()
+                ttk.Button(buttons, text="继续配置" if for_alias else "打开终端", width=0, command=dialog.ok).pack(side=tk.LEFT, padx=5)
+                ttk.Button(buttons, text="取消", width=0, command=dialog.cancel).pack(side=tk.LEFT, padx=5)
+                buttons.pack(side=tk.BOTTOM, fill=tk.X, before=dialog.winfo_children()[0])
                 dialog.bind("<Return>", dialog.ok)
                 dialog.bind("<Escape>", dialog.cancel)
 
             def validate(dialog):
                 try:
                     ssh_terminal.validate_username(dialog.username.get().strip())
+                    if device_key is not None and not device_key.get().strip():
+                        raise ValueError("请填写此设备的 RemoteDesk 密钥。")
                     path = dialog.identity.get().strip()
                     if path and not Path(path).expanduser().is_file():
                         raise ValueError("请选择可读取的 SSH 私钥文件；文件内容不会保存到 RemoteDesk。")
@@ -6355,7 +6403,7 @@ class RemoteDeskLinuxApp:
             pending["operation"].close()
             pending["key"] = ""
         if not getattr(self, "closing", False) and hasattr(self, "relay_ssh_alias_button"):
-            self.relay_ssh_alias_button.configure(text="配置终端 SSH 别名")
+            self.relay_ssh_alias_button.configure(text="命令行别名（可选）…")
             self._update_relay_device_actions()
 
     def _finish_ssh_alias_verification(self, value):
@@ -6364,7 +6412,7 @@ class RemoteDeskLinuxApp:
         if pending is None or token != pending["token"]:
             return
         self.ssh_alias_pending = None
-        self.relay_ssh_alias_button.configure(text="配置终端 SSH 别名")
+        self.relay_ssh_alias_button.configure(text="命令行别名（可选）…")
         self._update_relay_device_actions()
         if self.closing or pending["current"] != self.relay_options or pending["generation"] != self.relay_setup_generation:
             pending["key"] = ""
@@ -6484,7 +6532,7 @@ class RemoteDeskLinuxApp:
             self.relay_status.config(text="请刷新并选择一台在线设备。")
             return
         if "desktop" not in device.get("services", ["desktop"]):
-            self.relay_status.config(text="此设备只开放 SSH，请使用“打开 SSH 终端”；未尝试桌面连接。")
+            self.relay_status.config(text="此设备只开放 SSH，请使用“打开终端”；未尝试桌面连接。")
             return
         if device["deviceId"] == self.relay_device_id:
             self.relay_status.config(text="这是本机，不能连接自己。")
@@ -6722,7 +6770,9 @@ class RemoteDeskLinuxApp:
     ) -> ttk.Frame:
         container = ttk.Frame(notebook, style="App.TFrame")
         notebook.add(container, text=title)
+        return self._create_scrollable_content(container)
 
+    def _create_scrollable_content(self, container: tk.Misc) -> ttk.Frame:
         canvas = tk.Canvas(
             container,
             bg=APP_BG,
@@ -7615,7 +7665,9 @@ class RemoteDeskLinuxApp:
                               ("仅观看：开" if getattr(self, "viewer_read_only", False) else "仅观看：关", self._toggle_viewer_read_only)):
             clipboard_buttons.append(ttk.Button(clipboard_bar, text=label, command=action, style="Viewer.TButton"))
         self.viewer_read_only_button = clipboard_buttons[-1]
-        clipboard_buttons.append(ttk.Button(clipboard_bar, text="隐私屏…", command=self._show_privacy_screen, style="Viewer.TButton"))
+        self.viewer_privacy_button = ttk.Button(clipboard_bar, text="隐私屏…", command=self._toggle_privacy_screen, style="Viewer.TButton")
+        self.viewer_privacy_button.bind("<Button-3>", self._privacy_screen_menu)
+        clipboard_buttons.append(self.viewer_privacy_button)
         clipboard_columns = 0
         def update_clipboard_layout(event: Any = None) -> None:
             nonlocal clipboard_columns
@@ -7853,6 +7905,7 @@ class RemoteDeskLinuxApp:
     def _close_viewer_window(self) -> None:
         window = self.viewer_window
         self.viewer_window = None
+        self.viewer_privacy_button = None
         self.viewer_window_status = None
         self.viewer_target_bar = None
         self.viewer_target_controls_anchor = None
@@ -8490,45 +8543,128 @@ class RemoteDeskLinuxApp:
         finally:
             apply.completed.set()
 
+    def _privacy_state(self) -> None:
+        if getattr(self, "_privacy_owner", None) is not self.viewer:
+            self._privacy_owner = self.viewer
+            self._privacy_status = None
+            self._privacy_command = None
+            self._privacy_query_busy = False
+            self._privacy_revision = 0
+            self._privacy_next_poll = 0.0
+
+    def _update_privacy_button(self) -> None:
+        button = getattr(self, "viewer_privacy_button", None)
+        if button is None:
+            return
+        self._privacy_state()
+        viewer = self.viewer
+        supported = viewer is not None and not viewer.stop_event.is_set() and bool(viewer.remote_capabilities & CAPABILITY_PRIVACY_SCREEN)
+        status = getattr(self, "_privacy_status", None)
+        command = getattr(self, "_privacy_command", None)
+        text = ("隐私屏：不支持" if not supported else "恢复本地显示" if command == 1 else
+                "正在恢复显示…" if command == 2 else "隐私屏…" if status is None else
+                "关闭隐私屏" if status.get("enabled") else "开启隐私屏" if status.get("allowed") else "隐私屏：未允许")
+        if button.cget("text") != text:
+            button.configure(text=text)
+        state = tk.NORMAL if supported and command != 2 else tk.DISABLED
+        if str(button.cget("state")) != state:
+            button.configure(state=state)
+
+    def _privacy_screen_menu(self, event: Any = None) -> None:
+        button = getattr(self, "viewer_privacy_button", None)
+        if button is None:
+            return
+        self._privacy_state()
+        status = getattr(self, "_privacy_status", None)
+        previous = getattr(self, "_privacy_menu", None)
+        if previous is not None:
+            try:
+                previous.destroy()
+            except tk.TclError:
+                pass
+        menu = tk.Menu(button, tearoff=False)
+        self._privacy_menu = menu
+        menu.add_command(label="开启隐私屏", command=lambda: self._show_privacy_screen(1),
+                         state=tk.DISABLED if getattr(self, "_privacy_command", None) is not None or
+                         (status is not None and not status.get("allowed")) else tk.NORMAL)
+        menu.add_command(label="关闭隐私屏 / 恢复显示", command=lambda: self._show_privacy_screen(2))
+        menu.add_command(label="刷新状态", command=lambda: self._show_privacy_screen(0))
+        try:
+            menu.tk_popup(event.x_root if event else button.winfo_rootx(),
+                          event.y_root if event else button.winfo_rooty() + button.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def _toggle_privacy_screen(self) -> None:
+        self._privacy_state()
+        command = getattr(self, "_privacy_command", None)
+        status = getattr(self, "_privacy_status", None)
+        if command == 1:
+            self._show_privacy_screen(2)
+        elif command == 2:
+            return
+        elif status is not None and (status.get("enabled") or status.get("allowed")):
+            self._show_privacy_screen(2 if status.get("enabled") else 1)
+        else:
+            if status is not None:
+                self._set_viewer_status(str(status.get("statusMessage") or "请先在被控端允许远端开关隐私屏。"))
+            self._privacy_screen_menu()
+
     def _show_privacy_screen(self, action: int = 0) -> None:
         viewer = self.viewer
         if viewer is None or viewer.stop_event.is_set():
             self._set_viewer_status("请先连接设备。")
             return
-        if getattr(self, "_privacy_busy", False):
+        self._privacy_state()
+        if action == 0 and (getattr(self, "_privacy_query_busy", False) or getattr(self, "_privacy_command", None) is not None):
             return
-        self._release_pressed_viewer_inputs(flush=True, background_flush=True)
-        self._privacy_busy = True
+        if action != 0 and (getattr(self, "_privacy_command", None) == 2 or
+                            (action == 1 and getattr(self, "_privacy_command", None) is not None)):
+            return
+        if action == 0:
+            self._privacy_query_busy = True
+        else:
+            self._privacy_revision = getattr(self, "_privacy_revision", 0) + 1
+            self._privacy_command = action
+            self._release_pressed_viewer_inputs(flush=True, background_flush=True)
+            self._set_viewer_status("正在开启隐私屏…" if action == 1 else "正在恢复本地显示…")
+        revision = getattr(self, "_privacy_revision", 0)
+        self._update_privacy_button()
         result: queue.Queue = queue.Queue(maxsize=1)
-        self._set_viewer_status("正在向被控端确认隐私屏状态…")
         def work() -> None:
             try:
-                result.put(viewer.request_privacy_screen(action))
+                result.put(viewer.request_privacy_screen(action, send_if=lambda: self.viewer is viewer and
+                    (action != 1 or revision == self._privacy_revision)))
             except Exception as ex:
                 result.put(ex)
         def completed() -> None:
             if self.closing or self.viewer is not viewer:
-                self._privacy_busy = False
                 return
             try:
                 status = result.get_nowait()
             except queue.Empty:
                 self.root.after(100, completed)
                 return
-            self._privacy_busy = False
+            if action == 0:
+                self._privacy_query_busy = False
+            if revision != self._privacy_revision:
+                return
+            if action != 0:
+                self._privacy_command = None
             if isinstance(status, Exception):
-                messagebox.showwarning("隐私屏状态未确认", str(status), parent=self.viewer_window or self.root)
+                self._privacy_status = None
+                self._update_privacy_button()
+                if action != 0:
+                    self._set_viewer_status(str(status))
+                    messagebox.showwarning("隐私屏状态未确认", str(status), parent=self.viewer_window or self.root)
                 return
-            note = str(status.get("statusMessage") or "")
-            self._set_viewer_status(note)
-            if action != 0 or not status.get("allowed"):
-                messagebox.showinfo("隐私屏查询结果", note, parent=self.viewer_window or self.root)
-                return
-            enabled = bool(status.get("enabled"))
-            prompt = ("本次查询：隐私屏已开启。是否关闭并恢复本地显示？" if enabled else
-                      "将遮挡被控电脑全部本地屏幕，远端继续显示。\n本地 Ctrl+Alt+Shift+P 或断开此连接可恢复。\n不阻止本地键鼠，不覆盖锁屏或 UAC，不是安全锁定。\n\n确认开启？")
-            if messagebox.askokcancel("隐私屏", prompt, parent=self.viewer_window or self.root) and self.viewer is viewer:
-                self._show_privacy_screen(2 if enabled else 1)
+            self._privacy_status = status
+            self._update_privacy_button()
+            if action != 0:
+                note = str(status.get("statusMessage") or "")
+                self._set_viewer_status(note)
+                if not status.get("success"):
+                    messagebox.showwarning("隐私屏未切换", note, parent=self.viewer_window or self.root)
         threading.Thread(target=work, name="RemoteDeskPrivacyScreen", daemon=True).start()
         self.root.after(100, completed)
 
@@ -8893,6 +9029,11 @@ class RemoteDeskLinuxApp:
         self.event_poll_after_id = None
         if getattr(self, "closing", False):
             return
+        if getattr(self, "viewer_privacy_button", None) is not None and time.monotonic() >= getattr(self, "_privacy_next_poll", 0):
+            self._update_privacy_button()
+            self._privacy_next_poll = time.monotonic() + 3.0
+            if self.viewer is not None and self.viewer.remote_capabilities & CAPABILITY_PRIVACY_SCREEN:
+                self._show_privacy_screen(0)
         latest_frame: tuple[int, int, bytes, float, int, int, str] | None = None
         latest_native_frame: tuple[int, int, float, str] | None = None
         latest_file_preview: ViewerFilePreviewResult | None = None
@@ -8916,6 +9057,7 @@ class RemoteDeskLinuxApp:
                         row[2].configure(text=message)
                     except tk.TclError:
                         pass
+                    self._update_relay_device_actions()
             elif event == "ssh_alias_verified":
                 self._defer_ui_dialog(self._finish_ssh_alias_verification, value)
             elif event == "relay_addresses":

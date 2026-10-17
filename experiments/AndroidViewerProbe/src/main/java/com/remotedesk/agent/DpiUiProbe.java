@@ -78,12 +78,14 @@ final class DpiUiProbe {
             java.lang.reflect.Field active = panel.getClass().getDeclaredField("active"); active.setAccessible(true); active.set(panel, true);
             invoke(panel, "showNameDialog", new Class<?>[] {AndroidRelay.Options.class, AndroidRelay.Device.class}, target,
                 new AndroidRelay.Device(target.deviceId, NAME, "Windows", false, List.of(), 0, "", NAME, true, ""));
-        } else if ("reveal".equals(action) || "focus".equals(action)) {
+        } else if ("reveal".equals(action) || "focus".equals(action) || "activate".equals(action)) {
             List<View> windows = WindowInspector.getGlobalWindowViews();
             View root = windows.get(windows.size() - 1);
             View match = find(root, intent.getStringExtra("text"));
             if (match == null) throw new IllegalArgumentException("Missing test view");
             match.requestRectangleOnScreen(new Rect(0, 0, match.getWidth(), match.getHeight()), true);
+            if ("activate".equals(action) && (!match.isShown() || !match.isEnabled() || !match.performClick()))
+                throw new IllegalStateException("Visible fixture control could not be activated");
             if ("focus".equals(action)) {
                 match.requestFocus();
                 match.postDelayed(() -> {

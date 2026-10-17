@@ -4,6 +4,13 @@ namespace RemoteDesk.Tests;
 
 public sealed class PrivacyScreenTests
 {
+    [Theory]
+    [InlineData(1, 1, 2, 2, true)]
+    [InlineData(1, 1, 1, 2, false)]
+    [InlineData(1, 2, 2, 2, false)]
+    public void ViewerRejectsOldQueryEnableAndReconnectReplies(long requestedGeneration, long generation, long requestedRevision, long revision, bool expected)
+        => Assert.Equal(expected, RemoteViewerWindow.AcceptPrivacyReply(requestedGeneration, generation, requestedRevision, revision));
+
     [Fact]
     public void EmergencyChordDoesNotTakeOtherApplicationsShortcuts()
     {

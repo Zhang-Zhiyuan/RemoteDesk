@@ -58,6 +58,32 @@ internal static class PrivacyScreenProbe
             var denied = await Request(PrivacyScreenAction.Enable);
             Require(!denied.Success && !denied.Enabled && !denied.Allowed, "local permission defaults off");
             await host.SetPrivacyScreenAllowedAsync(true);
+            using (var controls = new RemoteViewerWindow(viewer, "Owned privacy controls", false, false, false, false, false, false))
+            {
+                var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                async Task Click(string method) => await (Task)typeof(RemoteViewerWindow).GetMethod(method, flags)!.Invoke(controls, null)!;
+                var button = (Button)typeof(RemoteViewerWindow).GetField("_privacyScreenButton", flags)!.GetValue(controls)!;
+                await Click("RefreshPrivacyScreenAsync");
+                Require(button.Text == "开启隐私屏" && button.Enabled, "viewer shows directly actionable enable button");
+                await Click("TogglePrivacyScreenAsync");
+                Require(button.Text == "关闭隐私屏" && (await Request(PrivacyScreenAction.Query)).Enabled, "one viewer action enables without confirmation chain");
+                await Click("TogglePrivacyScreenAsync");
+                Require(button.Text == "开启隐私屏" && !(await Request(PrivacyScreenAction.Query)).Enabled, "same viewer action disables without reconnect");
+            }
+            foreach (var pane in panes)
+            {
+                // The hidden viewer's lifecycle can change Z order. Re-raise
+                // only these owned patterns before checking capture exclusion.
+                pane.TopMost = false; pane.TopMost = true; pane.BringToFront(); pane.Refresh();
+            }
+            await Task.Delay(150, cancellation);
+            foreach (var pane in panes)
+            {
+                using var sample = new Bitmap(1, 1);
+                using var graphics = Graphics.FromImage(sample);
+                graphics.CopyFromScreen(pane.Left + 100, pane.Top + 80, 0, 0, new Size(1, 1));
+                Require(sample.GetPixel(0, 0).ToArgb() == pane.BackColor.ToArgb(), "owned pattern visible before curtain on " + pane.Bounds);
+            }
             var enabled = await Request(PrivacyScreenAction.Enable);
             Require(enabled.Success && enabled.Enabled, "enable acknowledged by actual host and helper");
             await Task.Delay(700, cancellation);

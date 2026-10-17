@@ -7,6 +7,42 @@ import java.util.HexFormat;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class AndroidPrivacyScreenTest {
+    @Test public void queryNeverBlocksRestoreAndOldRepliesCannotUndoIt() {
+        var controls = new AndroidPrivacyScreen.Controls();
+        long query = controls.begin(0);
+        long enable = controls.begin(1);
+        assertTrue(controls.label().contains("恢复"));
+        long disable = controls.begin(2);
+        assertEquals(-1, controls.begin(2));
+        assertEquals(-1, controls.begin(1));
+        assertTrue(controls.complete(2, disable, new AndroidPrivacyScreen.Status("off", true, false, true, "restored")));
+        assertFalse(controls.complete(0, query, new AndroidPrivacyScreen.Status("old", true, true, true, "old")));
+        assertFalse(controls.queryBusy);
+        assertFalse(controls.complete(1, enable, new AndroidPrivacyScreen.Status("old", true, true, true, "old")));
+        assertEquals("开启隐私屏", controls.label());
+        assertEquals(0, controls.command);
+        assertEquals("restored", controls.status.note);
+    }
+
+    @Test public void restoreCompletesWhileQueryIsStillWaiting() throws Exception {
+        var exchange = new AndroidPrivacyScreen();
+        var sent = new java.util.concurrent.CountDownLatch(1);
+        var queryId = new java.util.concurrent.atomic.AtomicReference<String>();
+        var executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        int cap = RemoteDeskProtocol.CAPABILITY_PRIVACY_SCREEN;
+        try {
+            var query = executor.submit(() -> exchange.request(cap, 0, payload -> {
+                queryId.set(id(payload)); sent.countDown();
+            }, () -> true, 3000));
+            assertTrue(sent.await(1, java.util.concurrent.TimeUnit.SECONDS));
+            assertFalse(query.isDone());
+            assertFalse(exchange.request(cap, 2, payload -> exchange.receive(
+                new AndroidPrivacyScreen.Status(id(payload), true, false, true, "restored")), () -> true, 1000).enabled);
+            exchange.receive(new AndroidPrivacyScreen.Status(queryId.get(), true, true, true, "old query"));
+            assertTrue(query.get(1, java.util.concurrent.TimeUnit.SECONDS).enabled);
+        } finally { executor.shutdownNow(); }
+    }
+
     @Test public void sharedVectorsAndStrictValidation() throws Exception {
         for (int action = 0; action < 3; action++)
             assertEquals("2e0269640" + action, HexFormat.of().formatHex(RemoteDeskTransport.encodePrivacyScreenRequest("id", action)));

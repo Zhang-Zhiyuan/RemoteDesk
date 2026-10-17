@@ -71,6 +71,14 @@ class SshUiTests(unittest.TestCase):
         self.assertEqual("disabled", str(self.ui.relay_ssh_button.cget("state")))
         self.assertEqual("disabled", str(self.ui.relay_ssh_alias_button.cget("state")))
 
+    def test_terminal_advanced_actions_are_collapsed_by_default(self):
+        self.target(["ssh"])
+        self.assertEqual("打开终端", self.ui.relay_ssh_button.cget("text"))
+        self.assertFalse(self.ui.relay_ssh_advanced.winfo_manager())
+        self.ui.relay_ssh_more_button.invoke()
+        self.root.update()
+        self.assertEqual("pack", self.ui.relay_ssh_advanced.winfo_manager())
+
     def test_ssh_only_registration_and_desktop_toggle_reuse_connector(self):
         with mock.patch.object(relay, "RelayHostConnector") as factory:
             self.ui.host_password.set("owned-device-key")

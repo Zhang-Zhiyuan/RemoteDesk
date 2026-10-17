@@ -92,6 +92,7 @@ class RealServerDpiLayoutTests(unittest.TestCase):
                 ui._show_relay_directory([dict(deviceId=f"owned-{index}", machineName="隔离测试设备-" + str(index) + "很长的名称" * 4,
                     platform="Linux", busy=bool(index % 2), directAddresses=["192.0.2.1"], directPort=56565) for index in range(30)])
                 self.root.minsize(1, 1)  # Also stress WM/work-area constraints below the preferred minimum.
+                ui.relay_ssh_more_button.invoke()  # Optional controls must fit when explicitly expanded.
                 actions = 0
                 for width, height in ((1180, 760), (800, 600), (640, 480)):
                     self.root.geometry(f"{width}x{height}+0+0")

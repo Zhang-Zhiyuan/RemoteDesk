@@ -60,8 +60,12 @@ public sealed class SshMainFormTests
         Assert.True(key.UseSystemPasswordChar);
         Assert.Equal("device-key", key.Text);
         var panel = Assert.IsType<TableLayoutPanel>(user.Parent);
-        Assert.Equal(2, panel.Controls.OfType<TextBox>().Count());
-        Assert.True(Assert.Single(panel.Controls.OfType<FlowLayoutPanel>()).WrapContents);
+        Assert.Single(panel.Controls.OfType<TextBox>()); // Only the required username is exposed.
+        Assert.Equal("sshAdvancedSettings", key.Parent!.Name);
+        Assert.False(Assert.Single(panel.Controls.OfType<CheckBox>()).Checked);
+        var actions = Assert.Single(dialog.Controls.OfType<FlowLayoutPanel>());
+        Assert.True(actions.WrapContents);
+        Assert.Equal(DockStyle.Bottom, actions.Dock);
     });
 
     [Fact]
@@ -74,6 +78,27 @@ public sealed class SshMainFormTests
         Assert.Equal(profile.IdentityFile, identity.Text);
         Assert.Equal("device-key", gate.Text);
         Assert.False(identity.UseSystemPasswordChar);
+    });
+
+    [Fact]
+    public void MissingDeviceKeyRemainsInRequiredFieldsAndMoreSettingsAreOptional() => OnSta(() =>
+    {
+        using var dialog = MainForm.CreateSshConnectionDialog("Owned device", SystemFonts.MessageBoxFont!, "", out var user, out var key);
+        Assert.Same(user.Parent, key.Parent);
+        var panel = Assert.IsType<TableLayoutPanel>(user.Parent);
+        Assert.False(Assert.Single(panel.Controls.OfType<CheckBox>()).Checked);
+        Assert.Equal("打开终端", Assert.IsType<Button>(dialog.AcceptButton).Text);
+    });
+
+    [Fact]
+    public void TerminalOptionsDoNotCrowdPrimaryActions() => OnSta(() =>
+    {
+        using var main = CreatePreview();
+        var primary = Field<Button>(main, "_sshTerminalButton");
+        Assert.Equal("打开终端", primary.Text);
+        Assert.Same(primary.Parent, Field<Button>(main, "_sshMoreButton").Parent);
+        Assert.Contains(Field<ToolStripMenuItem>(main, "_configureSshAliasButton"), primary.ContextMenuStrip!.Items.Cast<ToolStripItem>());
+        Assert.Contains(Field<ToolStripMenuItem>(main, "_sshLoginSettingsButton"), primary.ContextMenuStrip.Items.Cast<ToolStripItem>());
     });
 
     [Fact]
