@@ -29,6 +29,7 @@ public sealed partial class MainForm
         var note = CreateMutedLabel("第一项会重启本机应用；后两项需要一次系统管理员授权。\n锁屏控制适用于当前用户已登录后的锁屏，不支持开机首次登录前接管或 Ctrl+Alt+Del。");
         note.AutoSize = true; note.MaximumSize = new Size(700, 0);
         AddSettingRow(panel, 3, "使用范围", note);
+        AddSettingRow(panel, 4, "隐私屏", CreatePrivacyScreenSettings());
         bool refreshing = false;
         bool refreshRequested = false;
         _refreshPermissionStatus = async () =>

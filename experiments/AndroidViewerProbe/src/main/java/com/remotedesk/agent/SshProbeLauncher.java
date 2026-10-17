@@ -19,9 +19,10 @@ public final class SshProbeLauncher extends Activity {
             SshUiProbe.fixture = data;
             AndroidRelay.Options options = new AndroidRelay.Options("10.0.2.2", data.getInt("port"), data.getString("token"),
                 data.getString("tlsCertificateSha256"), "abcdef01-2345-6789-abcd-ef0123456789", false);
-            AndroidRelaySettings.save(this, options);
+            boolean recallOnly = getIntent().getBooleanExtra("recallOnly", false);
+            if (!recallOnly) AndroidRelaySettings.save(this, options);
             AndroidRelay.Options target = options.target(data.getString("deviceId"));
-            AndroidConnectionHistoryStore.remember(this, "", target.serverAddress, target.port,
+            if (!recallOnly) AndroidConnectionHistoryStore.remember(this, "", target.serverAddress, target.port,
                 data.getString("deviceKey"), target, "隔离 SSH 中文主机");
             if (getIntent().getBooleanExtra("clearTrust", false)) getSharedPreferences("ssh_target_host_keys", MODE_PRIVATE).edit().clear().commit();
             AndroidSshTerminalActivity.launch(this, target, getIntent().getBooleanExtra("longName", false)

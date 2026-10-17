@@ -14,7 +14,18 @@ final class AndroidRelaySettings {
     }
 
     static void save(Context context, AndroidRelay.Options options) throws Exception {
+        AndroidRelay.Options previous = null;
+        try { previous = load(context); } catch (Exception ignored) { }
         AndroidPasswordStore.saveRelay(context, options == null ? "" : options.json().toString());
+        // Publication/admin-port changes are independent of outbound SSH. Only
+        // changing/removing the actual relay login revokes its live sessions.
+        if (!sameSshLogin(previous, options)) AndroidSshKeepAliveService.closeAll(context);
+    }
+
+    static boolean sameSshLogin(AndroidRelay.Options previous, AndroidRelay.Options next) {
+        return previous != null && next != null && previous.serverAddress.equalsIgnoreCase(next.serverAddress)
+            && previous.port == next.port && previous.tlsCertificateSha256.equals(next.tlsCertificateSha256)
+            && previous.accessToken.equals(next.accessToken);
     }
 
     static synchronized String localDeviceId(Context context) throws IOException {

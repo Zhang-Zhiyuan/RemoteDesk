@@ -153,7 +153,7 @@ class LinuxShortcutX11Tests(unittest.TestCase):
                     self.inject(host.INPUT_KEY_DOWN, virtual_key)
                     self.inject(host.INPUT_KEY_UP, virtual_key)
                     self.assertEqual([(host.INPUT_KEY_DOWN, virtual_key), (host.INPUT_KEY_UP, virtual_key)],
-                                     [(c.kind, c.data) for c in self.commands])
+                                     [(c.kind, c.data) for c in self.commands], self.events)
                 finally:
                     if virtual_key in (0x90, 0x91):
                         self.inject(host.INPUT_KEY_DOWN, virtual_key)

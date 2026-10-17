@@ -1,4 +1,5 @@
 import asyncio
+import gc
 from dataclasses import replace
 from pathlib import Path
 import queue
@@ -151,7 +152,7 @@ class EnrollmentTkTests(unittest.TestCase):
             root = app.tk.Tk()
         except app.tk.TclError:
             self.skipTest("Tk display unavailable")
-        self.addCleanup(root.destroy)
+        self.addCleanup(self.cleanup_tk)
         EnrollmentUiStateTests.setUp(self)
         self.ui.root = root
         self.ui.relay_setup_busy = False
@@ -171,6 +172,14 @@ class EnrollmentTkTests(unittest.TestCase):
         patcher = mock.patch.object(relay, "settings_path", return_value=self.path)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def cleanup_tk(self):
+        # These cases create a fresh Tcl interpreter each time. Release widget
+        # callback cycles on their owning thread, before the next case starts
+        # its asynchronous enrollment worker (which can trigger Python GC).
+        self.ui.root.destroy()
+        self.ui = None
+        gc.collect()
 
     def finish_setup(self):
         deadline = time.monotonic() + 4

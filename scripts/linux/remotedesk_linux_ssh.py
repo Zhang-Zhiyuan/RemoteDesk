@@ -181,33 +181,51 @@ def _load_logins(directory):
         value = json.loads(read_private(directory / "logins.json"))
     except FileNotFoundError:
         return {}
-    if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("logins"), dict):
+    if not isinstance(value, dict) or value.get("version") not in (1, 2) or not isinstance(value.get("logins"), dict):
         raise ValueError("SSH 用户名记录格式无效；原文件未改动。")
     logins = value["logins"]
     if len(logins) > 50 or any(not isinstance(scope, str) or not re.fullmatch(
             r"remotedesk-[0-9a-f]{64}-[0-9a-f-]{36}:ssh", scope) for scope in logins):
         raise ValueError("SSH 用户名记录格式无效；原文件未改动。")
-    for username in logins.values():
-        validate_username(username)
-    return logins
+    normalized = {}
+    for scope, login in logins.items():
+        if isinstance(login, str) and value["version"] == 1:
+            login = {"username": login, "identityFile": None}
+        if not isinstance(login, dict) or set(login) != {"username", "identityFile"}:
+            raise ValueError("SSH 登录设置格式无效；原文件未改动。")
+        validate_username(login["username"])
+        identity = login["identityFile"]
+        if identity is not None and (not isinstance(identity, str) or not Path(identity).is_absolute() or
+                len(identity) > 32767 or any(ord(char) < 32 or ord(char) == 127 for char in identity)):
+            raise ValueError("SSH 私钥路径记录无效；原文件未改动。")
+        normalized[scope] = login
+    return normalized
+
+
+def load_login(options, directory=None):
+    return _load_logins(Path(directory) if directory is not None else ssh_config_directory()).get(
+        host_key_alias(options), {"username": "", "identityFile": None})
 
 
 def load_username(options, directory=None):
-    return _load_logins(Path(directory) if directory is not None else ssh_config_directory()).get(host_key_alias(options), "")
+    return load_login(options, directory)["username"]
 
 
-def save_username(options, username, directory=None):
+def save_username(options, username, directory=None, identity_file=None):
     from remotedesk_linux_startup import private_directory, atomic_private_write
     validate_username(username)
+    identity = str(Path(identity_file).expanduser().absolute()) if identity_file else None
+    if identity:
+        _config_quote(identity)
     directory = Path(directory) if directory is not None else ssh_config_directory()
     private_directory(directory)
     logins = _load_logins(directory)
     scope = host_key_alias(options)
     logins.pop(scope, None)
-    logins[scope] = username
+    logins[scope] = {"username": username, "identityFile": identity}
     while len(logins) > 50:
         del logins[next(iter(logins))]
-    atomic_private_write(directory / "logins.json", json.dumps(dict(version=1, logins=logins), ensure_ascii=False).encode("utf-8"))
+    atomic_private_write(directory / "logins.json", json.dumps(dict(version=2, logins=logins), ensure_ascii=False).encode("utf-8"))
 
 
 def ssh_arguments(options, username, proxy_port, token_path, known_hosts, identity_file=None):
@@ -232,11 +250,11 @@ def ssh_arguments(options, username, proxy_port, token_path, known_hosts, identi
             "-o", "ServerAliveCountMax=3", "-l", username, "--", "remotedesk.invalid"]
 
 
-def terminal_arguments(command):
+def terminal_arguments(command, title="RemoteDesk SSH"):
     # Real terminal emulators supply a PTY and VT handling. No shell interpolation.
-    for name, prefix in (("xterm", ["-T", "RemoteDesk SSH", "-e"]),
-                         ("gnome-terminal", ["--wait", "--"]),
-                         ("konsole", ["--separate", "--nofork", "-e"])):
+    for name, prefix in (("xterm", ["-T", title, "-e"]),
+                         ("gnome-terminal", ["--wait", "--title", title, "--"]),
+                         ("konsole", ["--separate", "--nofork", "-p", "tabtitle=" + title, "-e"])):
         executable = shutil.which(name)
         if executable:
             return [executable, *prefix, *command]
@@ -253,6 +271,42 @@ class TerminalSession:
         self.identity_file = identity_file
         self.cancelled, self.done = threading.Event(), threading.Event()
         self.loop = self.task = self.thread = self.process = None
+        self.window_title = "RemoteDesk SSH " + uuid.uuid4().hex
+        self._recall_lock = threading.Lock()
+
+    def activate(self):
+        # Window-manager IPC must not block Tk. Never start another SSH merely
+        # because Wayland or a terminal emulator refuses window activation.
+        if self.done.is_set() or self.cancelled.is_set():
+            self._status("SSH 已结束，请重新连接。")
+            return
+        if not self._recall_lock.acquire(blocking=False):
+            return
+        def work():
+            try:
+                process, wmctrl = self.process, shutil.which("wmctrl")
+                focused = False
+                try:
+                    if not self.done.is_set() and not self.cancelled.is_set() and process is not None and process.poll() is None and wmctrl:
+                        windows = subprocess.run([wmctrl, "-lp"], capture_output=True, text=True, timeout=2, check=True)
+                        for line in windows.stdout.splitlines():
+                            parts = line.split(None, 4)
+                            if len(parts) == 5 and (parts[2] == str(process.pid) or parts[4] == self.window_title):
+                                if re.fullmatch(r"0x[0-9a-fA-F]+", parts[0]) and not self.done.is_set() and not self.cancelled.is_set():
+                                    focused = subprocess.run([wmctrl, "-i", "-a", parts[0]], timeout=2, check=False).returncode == 0
+                                break
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                self._status("已唤回原 SSH 终端；连接与运行中的命令保持不变。" if focused else
+                             "SSH 已结束，请重新连接。" if self.done.is_set() or self.cancelled.is_set() else
+                             "SSH 会话仍保留；系统未能唤回窗口，请从任务栏切回。未新建或替换连接。")
+            finally:
+                self._recall_lock.release()
+        try:
+            threading.Thread(target=work, name="RemoteDeskSshRecall", daemon=True).start()
+        except RuntimeError:
+            self._recall_lock.release()
+            self._status("无法唤回终端，请从任务栏切回；已有 SSH 连接不受影响。")
 
     def start(self):
         if self.thread is not None:
@@ -351,7 +405,7 @@ class TerminalSession:
             server = await asyncio.start_server(proxy, "127.0.0.1", 0, limit=16384)
             try:
                 port = server.sockets[0].getsockname()[1]
-                argv = terminal_arguments(ssh_arguments(self.options, self.username, port, token_path, known_hosts, identity_file))
+                argv = terminal_arguments(ssh_arguments(self.options, self.username, port, token_path, known_hosts, identity_file), self.window_title)
                 self.process = subprocess.Popen(argv, start_new_session=True)
                 self._status("已打开系统 SSH 终端；首次连接需要在终端确认目标指纹。")
                 async def wait_or_terminal_exit(event):

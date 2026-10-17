@@ -154,6 +154,12 @@ public sealed class IndependentScreenSessionTests
         var secondary = new ScreenCaptureTarget("synthetic-unplugged-screen", "Secondary", new Rectangle(-1080, 0, 1080, 1920));
         Type type = typeof(RemoteHostServer).GetNestedType("CaptureSessionState", BindingFlags.NonPublic)!;
         using var state = (IDisposable)Activator.CreateInstance(type, secondary, 100, null, false)!;
+        // This test supplies synthetic Default-desktop topology. Other GUI tests
+        // may change the process window station, and the real OS can lock; neither
+        // should turn this fixture into a secure-desktop capture test.
+        var captureField = type.GetField("_captureService", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        ((IDisposable)captureField.GetValue(state)!).Dispose();
+        captureField.SetValue(state, new ScreenCaptureService(secondary, static () => false));
         CaptureTargetStateSnapshot Refresh(params ScreenCaptureTarget[] targets) =>
             (CaptureTargetStateSnapshot)type.GetMethod("RefreshCaptureTopologyWithAutomaticFallback")!.Invoke(state, [targets])!;
         var removed = Refresh(primary);

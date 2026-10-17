@@ -112,6 +112,59 @@ class SshGateTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SshNativeArgumentsTests(unittest.TestCase):
+    def test_repeated_recall_is_coalesced_and_cancelled_before_focus(self):
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        session = ssh.TerminalSession(self.options(), KEY, "owned", status=lambda _: finished.set())
+        session.process = mock.Mock(pid=123, poll=mock.Mock(return_value=None))
+        def list_windows(*args, **kwargs):
+            entered.set()
+            if not release.wait(3): raise AssertionError("Test recall worker did not release")
+            return mock.Mock(stdout="0x123 0 123 owned " + session.window_title + "\n")
+        with mock.patch.object(ssh.shutil, "which", return_value="/owned/wmctrl"), \
+                mock.patch.object(ssh.subprocess, "run", side_effect=list_windows) as command:
+            try:
+                session.activate()
+                self.assertTrue(entered.wait(2))
+                for _ in range(100): session.activate()
+                self.assertEqual(1, command.call_count)
+                session.close()
+                release.set()
+                self.assertTrue(finished.wait(2))
+                self.assertEqual(1, command.call_count)  # Cancelled sessions must not focus a recycled native window.
+            finally:
+                release.set()
+
+    def test_login_v1_migrates_without_saving_secrets_or_key_contents(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            options = self.options()
+            records = directory / "logins.json"
+            records.write_text(json.dumps({"version": 1, "logins": {ssh.host_key_alias(options): "olduser"}}))
+            records.chmod(0o600)
+            self.assertEqual({"username": "olduser", "identityFile": None}, ssh.load_login(options, directory))
+            identity = directory / "selected private key"
+            identity.write_text("owned-test-content-never-read-by-preferences")
+            ssh.save_username(options, "newuser", directory, identity)
+            self.assertEqual({"username": "newuser", "identityFile": str(identity)}, ssh.load_login(options, directory))
+            encoded = records.read_text()
+            self.assertNotIn(identity.read_text(), encoded)
+            self.assertNotIn(KEY, encoded)
+            self.assertNotIn(options.access_token, encoded)
+            self.assertEqual(2, json.loads(encoded)["version"])
+            if sys.platform.startswith("linux"):
+                self.assertEqual(0o600, records.stat().st_mode & 0o777)
+            records.write_text('{"version":2,"logins":{"malformed":{"password":"do-not-rewrite"}}}')
+            with self.assertRaises(ValueError):
+                ssh.save_username(options, "newuser", directory)
+            self.assertIn("do-not-rewrite", records.read_text())
+
+    def test_terminal_title_is_literal_and_unique_per_session(self):
+        one = ssh.TerminalSession(self.options(), KEY, "owned")
+        two = ssh.TerminalSession(self.options(), KEY, "owned")
+        self.assertNotEqual(one.window_title, two.window_title)
+        with mock.patch.object(ssh.shutil, "which", return_value="/usr/bin/xterm"):
+            self.assertEqual(["/usr/bin/xterm", "-T", one.window_title, "-e", "ssh"], ssh.terminal_arguments(["ssh"], one.window_title))
+
     def options(self):
         return relay.RelayOptions("127.0.0.1", 12345, fixtures.TOKEN, "ab" * 32, ID).validate()
 

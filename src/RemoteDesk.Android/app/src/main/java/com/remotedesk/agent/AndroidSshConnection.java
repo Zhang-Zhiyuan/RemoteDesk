@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.net.ssl.SSLSocket;
 
-/** One foreground SSH shell; no retry, forwarding, exec channel, or desktop access. */
+/** One user-started SSH shell; no retry, forwarding, exec channel, or desktop access. */
 final class AndroidSshConnection implements AutoCloseable {
     interface Listener {
         boolean confirmHostKey(String fingerprint) throws Exception;

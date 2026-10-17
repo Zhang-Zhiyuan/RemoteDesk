@@ -443,6 +443,29 @@ final class RemoteDeskTransport {
         return output.toByteArray();
     }
 
+    static byte[] encodePrivacyScreenRequest(String requestId, int action) throws IOException {
+        if (action < 0 || action > 2 || requestId == null || requestId.trim().isEmpty())
+            throw new IOException("Invalid privacy screen request.");
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        output.write(RemoteDeskProtocol.CONTROL_PRIVACY_SCREEN_REQUEST);
+        writeString(output, requestId, MAX_CONTROL_STRING_CHARS);
+        output.write(action);
+        return output.toByteArray();
+    }
+
+    static AndroidPrivacyScreen.Status decodePrivacyScreenStatus(byte[] payload) throws IOException {
+        if (payload.length > MAX_CONTROL_PAYLOAD_BYTES) throw new IOException("Privacy status too large.");
+        ByteCursor cursor = new ByteCursor(payload);
+        if (cursor.readUnsignedByte() != RemoteDeskProtocol.CONTROL_PRIVACY_SCREEN_STATUS)
+            throw new IOException("Invalid privacy status kind.");
+        String id = cursor.readString(MAX_CONTROL_STRING_CHARS);
+        boolean success = cursor.readBoolean(), enabled = cursor.readBoolean(), allowed = cursor.readBoolean();
+        String note = cursor.readString(MAX_CONTROL_STRING_CHARS);
+        if (id.trim().isEmpty() || (enabled && !allowed)) throw new IOException("Invalid privacy status.");
+        cursor.ensureFullyRead();
+        return new AndroidPrivacyScreen.Status(id, success, enabled, allowed, note);
+    }
+
     static byte[] encodeFileReceiveLocationRequest(String requestId) throws IOException {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         output.write(RemoteDeskProtocol.CONTROL_FILE_RECEIVE_LOCATION_REQUEST);

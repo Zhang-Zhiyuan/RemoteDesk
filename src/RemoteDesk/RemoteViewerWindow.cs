@@ -169,6 +169,7 @@ internal sealed partial class RemoteViewerWindow : Form
     private bool _remoteDragOutMouseReleased;
     private bool _suppressRemoteFilePullShortcutKeyUp;
     private bool _suppressFullScreenShortcutKeyUp;
+    private bool _suppressPrivacyShortcutKeyUp;
     private bool _inputReleaseRetryInProgress;
     private bool _fileDropRegistrationUnavailable;
     private bool _isAndroidRemote;
@@ -334,6 +335,7 @@ internal sealed partial class RemoteViewerWindow : Form
         _openReceivedFilesButton = CreateStatusActionButton("接收目录");
         _inputPauseButton = CreateStatusActionButton("仅观看：关");
         _inputPauseButton.Click += (_, _) => ToggleLocalInputPause();
+        InitializePrivacyScreen();
         _transferTasksButton = CreateStatusActionButton("传输任务");
         _transferTasksButton.AccessibleName = "查看文件传输进度和取消任务";
         _transferTasksButton.Click += (_, _) => ShowTransferTasks();
@@ -366,6 +368,7 @@ internal sealed partial class RemoteViewerWindow : Form
         };
         _fileTransferActionsPanel.Controls.AddRange([_androidBackButton, _androidHomeButton, _androidRecentsButton]);
         _fileTransferActionsPanel.Controls.Add(_inputPauseButton);
+        _fileTransferActionsPanel.Controls.Add(_privacyScreenButton);
         _fileTransferActionsPanel.Controls.Add(_transferTasksButton);
         _fileTransferActionsPanel.Controls.Add(_pullRemoteFilesButton);
         _fileTransferActionsPanel.Controls.Add(_openReceivedFilesButton);
@@ -670,6 +673,20 @@ internal sealed partial class RemoteViewerWindow : Form
                 WmSysKeyUp;
         Keys keyCode =
             keyData & Keys.KeyCode;
+        if (_suppressPrivacyShortcutKeyUp && keyCode == Keys.P && (keyDown || keyUp))
+        {
+            if (keyUp) _suppressPrivacyShortcutKeyUp = false;
+            return true;
+        }
+        if (keyDown && !IsRemoteWindowsKeyHeld() && WindowsPrivacyScreen.IsRestoreShortcut(keyData) &&
+            WindowsPrivacyScreen.RequestLocalRestore())
+        {
+            // When this computer is both a host and a viewer, our low-level
+            // keyboard capture must not swallow its local emergency restore.
+            ReleaseAllRemoteInputs();
+            _suppressPrivacyShortcutKeyUp = true;
+            return true;
+        }
         // A locally consumed down owns its repeats until key-up, even if
         // releasing remote modifiers changes the hook's reconstructed chord.
         if (keyDown && ((_suppressFullScreenShortcutKeyUp && keyCode == Keys.F11) ||
@@ -2209,6 +2226,7 @@ internal sealed partial class RemoteViewerWindow : Form
         if (disposing)
         {
             DisposeAutomaticClipboard();
+            _privacyScreenTimer.Dispose();
             ReleaseAllRemoteInputs();
             UninstallSystemKeyboardCapture();
             _isClosing = true;
@@ -6990,6 +7008,12 @@ internal sealed partial class RemoteViewerWindow : Form
 
     private void PictureBox_KeyUp(object? sender, KeyEventArgs args)
     {
+        if (_suppressPrivacyShortcutKeyUp && args.KeyCode == Keys.P)
+        {
+            _suppressPrivacyShortcutKeyUp = false;
+            args.SuppressKeyPress = true;
+            return;
+        }
         if (TryHandleClipboardPasteKey(RemoteInputKind.KeyUp, args))
         {
             args.SuppressKeyPress = true;
@@ -7186,6 +7210,7 @@ internal sealed partial class RemoteViewerWindow : Form
         ReleaseAllRemoteInputs();
         _suppressFullScreenShortcutKeyUp = false;
         _suppressRemoteFilePullShortcutKeyUp = false;
+        _suppressPrivacyShortcutKeyUp = false;
     }
 
     private bool IsRemoteWindowsKeyHeld() => _remoteInputOwnership.AnyPressedKey(

@@ -42,7 +42,8 @@ internal enum RemoteDeviceCapabilities
     NativeDetailV1 = 1 << 26,
     FileReceiveLocation = 1 << 27,
     ClipboardSnapshotV1 = 1 << 28,
-    IndependentScreenSessions = 1 << 29
+    IndependentScreenSessions = 1 << 29,
+    PrivacyScreen = 1 << 30
 }
 
 internal static class RemoteDevicePlatforms
@@ -113,6 +114,7 @@ internal static class RemoteDeviceCapabilityInfo
             RemoteDeviceCapabilities.FileReceive |
             RemoteDeviceCapabilities.CaptureTargetSelection |
             RemoteDeviceCapabilities.IndependentScreenSessions |
+            RemoteDeviceCapabilities.PrivacyScreen |
             RemoteDeviceCapabilities.FileDropPaste |
             RemoteDeviceCapabilities.FileSend |
             RemoteDeviceCapabilities.FileChecksum |

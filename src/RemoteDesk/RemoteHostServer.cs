@@ -72,6 +72,8 @@ internal sealed partial class RemoteHostServer : IDisposable
     private readonly HashSet<Task> _clientTasks = new();
     private readonly HashSet<TcpClient> _activeClients = new();
     private readonly RemoteControlActivity _remoteControlActivity = new();
+    private readonly PrivacyScreenSession _privacyScreen = new(new WindowsPrivacyScreen());
+    public Task SetPrivacyScreenAllowedAsync(bool allowed) => _privacyScreen.SetAllowedAsync(allowed);
     private readonly DesktopDuplicationCircuitBreaker
         _desktopDuplicationCircuitBreaker = new();
 
@@ -833,6 +835,7 @@ internal sealed partial class RemoteHostServer : IDisposable
         catch (Exception ex) when (IsStopException(ex))
         {
         }
+        finally { _privacyScreen.Dispose(); }
     }
 
     private async Task AcceptLoopAsync(
@@ -1031,7 +1034,10 @@ internal sealed partial class RemoteHostServer : IDisposable
                         FileTransferReceiver.GetReceiveDirectory,
                         sendPasteShortcut:
                             inputInjectionDispatcher.SendPasteShortcut);
-                    var viewerState = new ViewerSessionState { ScreenSessionToken = activeClientGate.GetAttachmentToken(candidateOwner) };
+                    var viewerState = new ViewerSessionState {
+                        ScreenSessionToken = activeClientGate.GetAttachmentToken(candidateOwner),
+                        RequestPrivacyScreen = action => _privacyScreen.RequestAsync(action, candidateOwner, clientCancellation.Token)
+                    };
                     var interactionActivity =
                         new RemoteInteractionActivity();
                     await using var nativeDetails = new NativeDetailHostSession(
@@ -1742,6 +1748,7 @@ internal sealed partial class RemoteHostServer : IDisposable
 
     internal sealed class ViewerSessionState
     {
+        internal Func<PrivacyScreenAction, Task<PrivacyScreenStatus>>? RequestPrivacyScreen { get; init; }
         internal string? ScreenSessionToken { get; init; }
         internal bool ScreenSessionOfferSent { get; set; }
         private int _screenStreamPaused;
@@ -2040,8 +2047,9 @@ internal sealed partial class RemoteHostServer : IDisposable
             try
             {
                 // Even when the previous tail is already complete, leave the socket read loop.
-                // These explicitly classified read-only requests may be passed by later input,
-                // so their slow clipboard access cannot hold KeyUp, mouse, or ping messages.
+                // These input-independent requests may be passed by later input,
+                // so clipboard access or privacy-helper startup cannot hold KeyUp,
+                // mouse, or ping messages. The control operations remain ordered.
                 await Task.Yield();
                 cancellationToken.ThrowIfCancellationRequested();
                 await operation().ConfigureAwait(false);
@@ -5224,6 +5232,7 @@ internal sealed partial class RemoteHostServer : IDisposable
             RemoteControlKind.ClipboardGetText or
             RemoteControlKind.ClipboardSnapshotRequest or
             RemoteControlKind.HostVideoDiagnosticsRequest or
+            RemoteControlKind.PrivacyScreenRequest or
             RemoteControlKind
                 .FileTransferRequestClipboardFiles;
 
@@ -5637,6 +5646,14 @@ internal sealed partial class RemoteHostServer : IDisposable
             viewerState.PendingRemoteUpdateTransferId != control.TransferId;
         switch (control.Kind)
         {
+            case RemoteControlKind.PrivacyScreenRequest:
+                PrivacyScreenStatus privacy = viewerState.RequestPrivacyScreen is { } requestPrivacy
+                    ? await requestPrivacy(control.PrivacyAction)
+                    : new(false, false, false, "此被控端不支持隐私屏。");
+                using (writePriority.BeginControlWritePriority())
+                    await Protocol.WriteMessageAsync(stream, MessageType.Control,
+                        RemoteMessageCodec.EncodePrivacyScreenStatus(control.TransferId!, privacy), session, writeLock, cancellationToken);
+                break;
             case RemoteControlKind.ClipboardSnapshotRequest:
                 byte[]? snapshotReply = await BuildClipboardSnapshotResponseAsync(control, viewerState, cancellationToken);
                 if (snapshotReply is not null)

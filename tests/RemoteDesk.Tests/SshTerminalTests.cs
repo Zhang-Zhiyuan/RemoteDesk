@@ -8,6 +8,81 @@ namespace RemoteDesk.Tests;
 public sealed class SshTerminalTests
 {
     [Fact]
+    public async Task FailedTerminalLauncherReleasesTunnelAndCannotBeRecalled()
+    {
+        using var owner = new CountingOwner(new MemoryStream());
+        using var forwarder = new SshLocalForwarder(new MemoryStream(), owner);
+        var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"))
+            { UseShellExecute = false, CreateNoWindow = true };
+        foreach (string arg in new[] { "/d", "/c", "exit", "7" }) start.ArgumentList.Add(arg);
+        using var terminal = new SshTerminalSession(forwarder, start, "owned-alias", "remotedesk-ssh-" + Guid.NewGuid().ToString("N"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => terminal.Completion.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.False(terminal.IsActive);
+        Assert.False(await terminal.RecallAsync());
+        Assert.Equal(1, owner.Disposals);
+        using var local = new TcpClient();
+        await Assert.ThrowsAsync<SocketException>(() => local.ConnectAsync(IPAddress.Loopback, forwarder.Port));
+    }
+
+    [Fact]
+    public void QuickConnectRequiresSameTargetSavedUsernameDeviceKeyAndExistingIdentity()
+    {
+        string alias = SshTerminalLauncher.HostKeyAlias(new string('A', 64), Guid.NewGuid().ToString());
+        var profile = new SshTerminalProfile(alias, "user", null);
+        Assert.True(profile.CanQuickConnect(alias, "owned-device-key"));
+        Assert.False(profile.CanQuickConnect(alias, ""));
+        Assert.False(profile.CanQuickConnect(alias + "other", "owned-device-key"));
+        Assert.False((profile with { Username = "" }).CanQuickConnect(alias, "owned-device-key"));
+        string identity = Path.GetTempFileName();
+        try { Assert.True((profile with { IdentityFile = identity }).CanQuickConnect(alias, "owned-device-key")); }
+        finally { File.Delete(identity); }
+        Assert.False((profile with { IdentityFile = identity }).CanQuickConnect(alias, "owned-device-key"));
+    }
+
+    [Fact]
+    public void NamedTerminalRecallOnlyFocusesOriginalWindowAndDoesNotStartAnotherSsh()
+    {
+        string id = "remotedesk-ssh-" + Guid.NewGuid().ToString("N");
+        string alias = SshTerminalLauncher.HostKeyAlias(new string('A', 64), Guid.NewGuid().ToString());
+        var ssh = SshTerminalLauncher.CreateStartInfo("owned-ssh.exe", 32123, "user", alias, "known hosts");
+        var start = SshTerminalLauncher.CreateWindowStartInfo(ssh, "owned-wt.exe", id)!;
+        Assert.Equal("owned-wt.exe", start.FileName);
+        Assert.True(start.UseShellExecute);
+        Assert.Equal(id, start.ArgumentList[1]);
+        Assert.Contains("RemoteDesk SSH [" + id[^8..] + "]", start.ArgumentList);
+        Assert.Equal(ssh.ArgumentList, start.ArgumentList.Skip(7));
+        var recall = SshTerminalLauncher.CreateRecallStartInfo("owned-wt.exe", id);
+        Assert.Equal(new[] { "-w", id, "focus-tab", "-t", "0" }, recall.ArgumentList);
+        Assert.Throws<ArgumentException>(() => SshTerminalLauncher.CreateRecallStartInfo("owned-wt.exe", "user-window"));
+        ssh.ArgumentList.Add("literal;path");
+        Assert.Null(SshTerminalLauncher.CreateWindowStartInfo(ssh, "owned-wt.exe", id));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SuccessfulIpcLauncherExitKeepsTunnelButLegacyProcessExitClosesIt(bool ipc)
+    {
+        using var owner = new CountingOwner(new MemoryStream());
+        using var forwarder = new SshLocalForwarder(new MemoryStream(), owner);
+        var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"))
+            { UseShellExecute = false, CreateNoWindow = true };
+        foreach (string arg in new[] { "/d", "/c", "exit", "0" }) start.ArgumentList.Add(arg);
+        using var terminal = new SshTerminalSession(forwarder, start, "owned-alias", ipc ? "remotedesk-ssh-" + Guid.NewGuid().ToString("N") : null);
+        if (ipc)
+        {
+            await Task.Delay(250);
+            Assert.True(terminal.IsActive);
+            Assert.False(terminal.Completion.IsCompleted);
+            Assert.Equal(0, owner.Disposals);
+            terminal.Dispose();
+        }
+        await terminal.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(terminal.IsActive);
+        Assert.Equal(1, owner.Disposals);
+    }
+
+    [Fact]
     public void CommandUsesRealSystemTerminalWithoutSecretsOrShellInterpolation()
     {
         string alias = SshTerminalLauncher.HostKeyAlias(new string('A', 64), "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");

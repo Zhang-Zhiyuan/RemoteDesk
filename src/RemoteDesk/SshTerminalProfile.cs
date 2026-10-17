@@ -3,6 +3,11 @@ namespace RemoteDesk;
 // Connection preferences only: never stores a password or private-key content.
 internal sealed record SshTerminalProfile(string HostKeyAlias, string Username, string? IdentityFile)
 {
+    internal bool CanQuickConnect(string alias, string deviceKey) =>
+        string.Equals(HostKeyAlias, alias, StringComparison.Ordinal) &&
+        SshTerminalLauncher.IsValidUsername(Username) && !string.IsNullOrWhiteSpace(deviceKey) &&
+        (string.IsNullOrEmpty(IdentityFile) || File.Exists(IdentityFile));
+
     internal static List<SshTerminalProfile> Normalize(IEnumerable<SshTerminalProfile?>? profiles) => (profiles ?? [])
         .Where(profile => profile is not null && IsValidAlias(profile.HostKeyAlias) && SshTerminalLauncher.IsValidUsername(profile.Username) &&
             (string.IsNullOrEmpty(profile.IdentityFile) || profile.IdentityFile.Length <= 32767 &&

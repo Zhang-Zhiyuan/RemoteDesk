@@ -65,6 +65,9 @@ CONTROL_DEVICE_IDENTITY = 34
 CONTROL_FILE_TRANSFER_RECEIPT = 35
 CONTROL_FILE_RECEIVE_LOCATION_REQUEST = 38
 CONTROL_FILE_RECEIVE_LOCATION = 39
+CONTROL_PRIVACY_SCREEN_REQUEST = 46
+CONTROL_PRIVACY_SCREEN_STATUS = 47
+CAPABILITY_PRIVACY_SCREEN = 1 << 30
 CONTROL_CLIPBOARD_SNAPSHOT_REQUEST = 40
 CONTROL_CLIPBOARD_SNAPSHOT = 41
 CAPABILITY_FILE_RECEIVE_LOCATION = 1 << 27
@@ -846,6 +849,21 @@ def encode_file_receive_location_request(request_id: str) -> bytes:
     return bytes([CONTROL_FILE_RECEIVE_LOCATION_REQUEST]) + encode_dotnet_string(request_id)
 
 
+def encode_privacy_screen_request(request_id: str, action: int = 0) -> bytes:
+    validate_control_string(request_id)
+    if action not in (0, 1, 2):
+        raise ProtocolError("invalid privacy screen action")
+    return bytes([CONTROL_PRIVACY_SCREEN_REQUEST]) + encode_dotnet_string(request_id) + bytes([action])
+
+
+def encode_privacy_screen_status(request_id: str, success: bool, enabled: bool, allowed: bool, note: str) -> bytes:
+    validate_control_string(request_id)
+    if enabled and not allowed:
+        raise ProtocolError("inconsistent privacy screen status")
+    return (bytes([CONTROL_PRIVACY_SCREEN_STATUS]) + encode_dotnet_string(request_id)
+            + bytes([bool(success), bool(enabled), bool(allowed)]) + encode_bounded_dotnet_string(note, "Privacy screen status updated."))
+
+
 def encode_file_receive_location(request_id: str, success: bool, directory: str, note: str) -> bytes:
     validate_control_string(request_id)
     return (bytes([CONTROL_FILE_RECEIVE_LOCATION]) + encode_dotnet_string(request_id)
@@ -1047,6 +1065,20 @@ def decode_control(payload: bytes, *, include_clipboard_text: bool = False) -> d
         pass
     elif kind == CONTROL_FILE_TRANSFER_REJECT_CLIPBOARD_FILES:
         pass
+    elif kind in (CONTROL_PRIVACY_SCREEN_REQUEST, CONTROL_PRIVACY_SCREEN_STATUS):
+        message["requestId"] = cursor.read_dotnet_string()
+        validate_control_string(message["requestId"])
+        if kind == CONTROL_PRIVACY_SCREEN_REQUEST:
+            action = cursor.read_bytes(1)[0]
+            if action not in (0, 1, 2):
+                raise ProtocolError("invalid privacy screen action")
+            message["action"] = action
+        else:
+            flags = cursor.read_bytes(3)
+            if any(value not in (0, 1) for value in flags) or (flags[1] and not flags[2]):
+                raise ProtocolError("invalid privacy screen status")
+            message.update(success=bool(flags[0]), enabled=bool(flags[1]), allowed=bool(flags[2]))
+            message["statusMessage"] = cursor.read_dotnet_string()
     elif kind == CONTROL_FILE_RECEIVE_LOCATION_REQUEST:
         message["transferId"] = cursor.read_dotnet_string()
     elif kind == CONTROL_FILE_RECEIVE_LOCATION:
@@ -1080,6 +1112,8 @@ def decode_control(payload: bytes, *, include_clipboard_text: bool = False) -> d
 
 def control_name(kind: int) -> str:
     names = {
+        CONTROL_PRIVACY_SCREEN_REQUEST: "PrivacyScreenRequest",
+        CONTROL_PRIVACY_SCREEN_STATUS: "PrivacyScreenStatus",
         CONTROL_CAPTURE_TARGET_LIST: "CaptureTargetList",
         CONTROL_SELECT_CAPTURE_TARGET: "SelectCaptureTarget",
         CONTROL_CAPTURE_TARGET_CHANGED: "CaptureTargetChanged",

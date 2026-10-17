@@ -456,7 +456,7 @@ public final class RemoteDeskViewerActivity extends Activity {
     private void showViewerMenu() {
         releaseViewerGesture();
         String[] choices = { "画面缩放（" + Math.round(viewport.zoom * 100) + "%）", "画质：" +
-            (preferJpegClarity ? "文字清晰 JPEG" : "流畅 H.264 自动"), "全屏显示", "屏幕方向", "手势帮助", "连接诊断", "文字剪贴板", "发送多个文件…", localInputPaused ? "恢复控制（关闭仅观看）" : "仅观看（暂停本地输入）", "断开连接…" };
+            (preferJpegClarity ? "文字清晰 JPEG" : "流畅 H.264 自动"), "全屏显示", "屏幕方向", "手势帮助", "连接诊断", "文字剪贴板", "发送多个文件…", localInputPaused ? "恢复控制（关闭仅观看）" : "仅观看（暂停本地输入）", "隐私屏…", "断开连接…" };
         new android.app.AlertDialog.Builder(this).setTitle("远控工具")
             .setItems(choices, (dialog, which) -> {
                 if (which == 0) showZoomOptions();
@@ -472,8 +472,48 @@ public final class RemoteDeskViewerActivity extends Activity {
                 else if (which == 6) showClipboardMenu();
                 else if (which == 7) pickTransferFile();
                 else if (which == 8) setLocalInputPaused(!localInputPaused);
+                else if (which == 9) showPrivacyScreen(connectionOwner, 0);
                 else confirmDisconnect();
             }).show();
+    }
+
+    private void showPrivacyScreen(ViewerConnectionOwner owner, int action) {
+        if (owner == null || !isCurrentConnectionOwner(owner)) { toast("请先连接设备"); return; }
+        if (!owner.privacyBusy.compareAndSet(false, true)) { toast("正在确认隐私屏状态，请稍候"); return; }
+        releaseViewerGesture();
+        toast("正在向被控端确认隐私屏状态…");
+        try {
+            owner.privacyExecutor.execute(() -> {
+                try {
+                    AndroidPrivacyScreen.Status result = owner.privacyScreen.request(owner.remoteCapabilities.get(), action,
+                        payload -> { if (!sendControlMessageIfCurrent(owner, payload)) throw new IOException("连接已结束"); },
+                        () -> isCurrentConnectionOwner(owner), 12_000);
+                    runOnUiThread(() -> {
+                        if (!isCurrentConnectionOwner(owner) || isFinishing() || isDestroyed()) return;
+                        android.app.AlertDialog.Builder dialog = new android.app.AlertDialog.Builder(this)
+                            .setTitle("隐私屏 · 查询结果")
+                            .setMessage((result.enabled ? "本次确认：已开启\n\n" : "本次确认：未开启\n\n") + result.note +
+                                "\n\n仅普通桌面支持；不覆盖锁屏 / UAC，也不阻止本地键鼠。断开开启它的连接后恢复。")
+                            .setNegativeButton("关闭面板", null)
+                            .setNeutralButton("刷新状态", (d, w) -> showPrivacyScreen(owner, 0));
+                        if (result.enabled) dialog.setPositiveButton("恢复本地显示", (d, w) -> showPrivacyScreen(owner, 2));
+                        else if (result.allowed) dialog.setPositiveButton("开启隐私屏", (d, w) -> {
+                            if (!isCurrentConnectionOwner(owner)) return;
+                            new android.app.AlertDialog.Builder(this).setTitle("开启隐私屏？")
+                                .setMessage("将遮挡被控电脑的全部本地屏幕，远端继续显示。\n本地 Ctrl+Alt+Shift+P 可恢复。\n不阻止本地键鼠，不覆盖锁屏或 UAC，不是安全锁定。")
+                                .setNegativeButton("取消", null).setPositiveButton("开启", (confirm, value) -> showPrivacyScreen(owner, 1)).show();
+                        });
+                        dialog.show();
+                    });
+                } catch (Exception ex) {
+                    runOnUiThread(() -> {
+                        if (isCurrentConnectionOwner(owner) && !isFinishing() && !isDestroyed())
+                            new android.app.AlertDialog.Builder(this).setTitle("隐私屏状态未确认")
+                                .setMessage(MainActivity.formatExceptionMessage(ex)).setPositiveButton("知道了", null).show();
+                    });
+                } finally { owner.privacyBusy.set(false); }
+            });
+        } catch (RuntimeException ex) { owner.privacyBusy.set(false); toast("连接已结束，隐私屏状态未确认"); }
     }
 
     private void pickTransferFile() {
@@ -1404,6 +1444,10 @@ public final class RemoteDeskViewerActivity extends Activity {
         }
 
         if (message.messageType == RemoteDeskProtocol.MESSAGE_CONTROL) {
+            if (message.payload.length > 0 && (message.payload[0] & 0xff) == RemoteDeskProtocol.CONTROL_PRIVACY_SCREEN_STATUS) {
+                owner.privacyScreen.receive(RemoteDeskTransport.decodePrivacyScreenStatus(message.payload));
+                return;
+            }
             RemoteDeskTransport.ControlMessage control = RemoteDeskTransport.decodeControl(message.payload);
             if (control.kind == RemoteDeskProtocol.CONTROL_DEVICE_INFO) {
                 owner.remoteMachineName = control.machineName;
@@ -2552,6 +2596,7 @@ public final class RemoteDeskViewerActivity extends Activity {
             owner.inputExecutor.shutdownNow();
             owner.controlExecutor.shutdownNow();
             owner.clipboardExecutor.shutdownNow();
+            owner.privacyExecutor.shutdownNow();
             if (owner.fileBatch != null) owner.fileBatch.cancel();
             if (owner.fileSender != null) owner.fileSender.cancel();
             owner.fileExecutor.shutdownNow();
@@ -2907,6 +2952,9 @@ public final class RemoteDeskViewerActivity extends Activity {
         volatile AndroidFileUploadQueue<android.net.Uri> fileBatch;
         final AndroidFileTransferLiveness fileLiveness = new AndroidFileTransferLiveness();
         final AndroidFileReceiveLocation fileLocation = new AndroidFileReceiveLocation();
+        final AndroidPrivacyScreen privacyScreen = new AndroidPrivacyScreen();
+        final ExecutorService privacyExecutor = Executors.newSingleThreadExecutor();
+        final AtomicBoolean privacyBusy = new AtomicBoolean();
         final long generation;
         final Socket socket;
         final java.io.OutputStream output;

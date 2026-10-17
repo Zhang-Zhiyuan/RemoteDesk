@@ -41,11 +41,19 @@
   };
   terminal.onResize(({cols,rows}) => RemoteSsh.resize(cols,rows));
   new ResizeObserver(resize).observe(document.getElementById('terminal'));
+  let lastSubmitted = 0, lastParsed = 0;
   window.sshOutput = (base64, sequence) => {
+    // Resuming a background WebView may resend its single pending chunk before
+    // the original parsing callback runs. Never print the same bytes twice.
+    if (sequence <= lastSubmitted) {
+      if (sequence <= lastParsed) RemoteSsh.ack(sequence);
+      return;
+    }
+    lastSubmitted = sequence;
     const value = atob(base64);
     const bytes = new Uint8Array(value.length);
     for (let i=0; i<value.length; i++) bytes[i] = value.charCodeAt(i);
-    terminal.write(bytes, () => RemoteSsh.ack(sequence));
+    terminal.write(bytes, () => { lastParsed = sequence; RemoteSsh.ack(sequence); });
   };
   window.sshEnabled = (enabled, sessionGeneration) => {
     generation = sessionGeneration;

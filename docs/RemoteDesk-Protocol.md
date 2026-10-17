@@ -6,6 +6,34 @@ This document captures the RemoteDesk protocol surface that Windows, Android, an
 
 ## Transport
 
+### Privacy screen
+
+Capability bit 30 (`PrivacyScreen`) negotiates controls 46 and 47. It means
+the endpoint understands privacy requests, not that the local owner has enabled
+permission or that the current desktop is supported. Legacy peers receive no
+new controls. Currently Windows implements the host; all three viewers can use it.
+
+- `46`: request id (bounded .NET UTF-8 string), action byte: 0=query, 1=enable,
+  2=disable.
+- `47`: matching request id, success, enabled, allowed (three strict 0/1 bytes),
+  bounded status string. `enabled=true, allowed=false` is invalid.
+- Shared vectors: enable `id`: `2e02696401`; successful active/allowed status
+  `id`, note `中`: `2f02696401010103e4b8ad`.
+
+Only an authenticated desktop connection may change this state. Permission is
+persisted locally and defaults off; active state is never persisted. The
+connection that enables the curtain owns its lifetime. Closing that connection,
+revoking permission, local Ctrl+Alt+Shift+P, desktop/topology changes, or helper
+failure restores the display. Other attached screen windows may query or disable
+the shared curtain, but do not acquire it by polling. Reconnect does not enable it.
+Viewers correlate responses and discard stale connection results. Timeout means
+unknown, never success; Windows periodically queries and other viewers expose
+an explicit refresh. Transport routing is unchanged, so relay uses the same
+encrypted session. This is a local display curtain, not an input lock or a
+guarantee against other applications, cameras, secure desktops or physical users.
+
+### Connection transport
+
 - TCP default port: `56565`.
 - Server greeting: ASCII `RDK1`, followed by a 32-byte nonce.
 - Client authentication proof: ASCII `AUTH`, followed by `HMACSHA256(SHA256(password UTF-8), nonce)`.

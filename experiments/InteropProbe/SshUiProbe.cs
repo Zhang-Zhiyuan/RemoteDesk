@@ -111,7 +111,7 @@ internal static class SshUiProbe
                         SyntheticDpi.Pump();
                         string tag = $"alias-main-font{points}-dpi{dpi}-width{width}-{cases.Count}";
                         var issues = new List<string>();
-                        foreach (Button action in new[] { button, Get<Button>(main, "_sshTerminalButton"), Get<Button>(main, "_closeSshTerminalsButton"), Get<Button>(main, "_manageSshAliasesButton") })
+                        foreach (Button action in new[] { button, Get<Button>(main, "_sshTerminalButton"), Get<Button>(main, "_sshLoginSettingsButton"), Get<Button>(main, "_closeSshTerminalsButton"), Get<Button>(main, "_manageSshAliasesButton") })
                         { page.ScrollControlIntoView(action); SyntheticDpi.Pump(); Check(action, page, issues); }
                         if (!button.Enabled) issues.Add("Configured SSH-capable device alias button is disabled.");
                         page.ScrollControlIntoView(button); SyntheticDpi.Pump();

@@ -5,6 +5,7 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        if (WindowsPrivacyScreen.TryHandleCommand(args)) return;
         // SYSTEM modes must never initialize the normal UI, network host,
         // updater, clipboard or user settings.
         if (WindowsSecureDesktopService.TryHandleCommand(args)) return;

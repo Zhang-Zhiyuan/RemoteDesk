@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="ssh_keepalive_unavailable">无法启动 SSH 保活服务，或已有 4 个终端。请关闭不用的终端后重试；尚未连接。</string>
     <string name="app_name">RemoteDesk</string>
     <string name="brand_mark" translatable="false">RD</string>
     <string name="header_subtitle">Android · 直连与私有中转远程桌面</string>

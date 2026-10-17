@@ -145,7 +145,9 @@ internal enum RemoteControlKind : byte
     ScreenAttachmentOffer = 42,
     ScreenAttachmentJoin = 43,
     ScreenStreamPause = 44,
-    ScreenAttachmentAccepted = 45
+    ScreenAttachmentAccepted = 45,
+    PrivacyScreenRequest = 46,
+    PrivacyScreenStatus = 47
 }
 
 internal sealed record LowLatencyVideoOffer(
@@ -193,7 +195,9 @@ internal sealed record RemoteControlMessage(
     string? ClipboardRevision = null,
     bool ClipboardHasText = false,
     bool ClipboardChanged = false,
-    string? ScreenSessionToken = null);
+    string? ScreenSessionToken = null,
+    PrivacyScreenAction PrivacyAction = PrivacyScreenAction.Query,
+    PrivacyScreenStatus? PrivacyStatus = null);
 
 internal readonly record struct RemoteInputCommand(
     RemoteInputKind Kind,
@@ -1031,6 +1035,49 @@ internal static class RemoteMessageCodec
         return output.ToArray();
     }
 
+    public static byte[] EncodePrivacyScreenRequest(string requestId, PrivacyScreenAction action)
+    {
+        ValidateControlString(requestId);
+        if (!Enum.IsDefined(action)) throw new InvalidDataException("隐私屏操作无效。");
+        using var output = new MemoryStream();
+        using var writer = new BinaryWriter(output, Encoding.UTF8);
+        writer.Write((byte)RemoteControlKind.PrivacyScreenRequest);
+        writer.Write(requestId);
+        writer.Write((byte)action);
+        return output.ToArray();
+    }
+
+    public static byte[] EncodePrivacyScreenStatus(string requestId, PrivacyScreenStatus status)
+    {
+        ValidateControlString(requestId);
+        using var output = new MemoryStream();
+        using var writer = new BinaryWriter(output, Encoding.UTF8);
+        writer.Write((byte)RemoteControlKind.PrivacyScreenStatus);
+        writer.Write(requestId);
+        writer.Write(status.Success);
+        writer.Write(status.Enabled);
+        writer.Write(status.Allowed);
+        WriteBoundedString(writer, status.Message, "隐私屏状态已更新。");
+        return output.ToArray();
+    }
+
+    private static RemoteControlMessage DecodePrivacyScreen(BinaryReader reader, RemoteControlKind kind)
+    {
+        string requestId = ReadBoundedString(reader);
+        if (string.IsNullOrWhiteSpace(requestId)) throw new InvalidDataException("隐私屏请求缺少编号。");
+        if (kind == RemoteControlKind.PrivacyScreenRequest)
+        {
+            var action = (PrivacyScreenAction)reader.ReadByte();
+            if (!Enum.IsDefined(action)) throw new InvalidDataException("隐私屏操作无效。");
+            return new(kind, [], null, null, TransferId: requestId, PrivacyAction: action);
+        }
+        bool ReadFlag() => reader.ReadByte() switch { 0 => false, 1 => true, _ => throw new InvalidDataException("隐私屏状态无效。") };
+        bool success = ReadFlag(), enabled = ReadFlag(), allowed = ReadFlag();
+        if (enabled && !allowed) throw new InvalidDataException("隐私屏状态不一致。");
+        return new(kind, [], null, null, TransferId: requestId,
+            PrivacyStatus: new(success, enabled, allowed, ReadBoundedString(reader)));
+    }
+
     public static RemoteControlMessage DecodeControl(ReadOnlyMemory<byte> payload)
     {
         if (payload.Length == 0 || payload.Length > MaxControlPayloadBytes)
@@ -1044,6 +1091,7 @@ internal static class RemoteMessageCodec
 
         RemoteControlMessage control = kind switch
         {
+            RemoteControlKind.PrivacyScreenRequest or RemoteControlKind.PrivacyScreenStatus => DecodePrivacyScreen(reader, kind),
             RemoteControlKind.ScreenAttachmentOffer or RemoteControlKind.ScreenAttachmentJoin => DecodeScreenAttachment(reader, kind),
             RemoteControlKind.ScreenStreamPause => new RemoteControlMessage(kind, [], null, null, Success: reader.ReadBoolean()),
             RemoteControlKind.ScreenAttachmentAccepted => new RemoteControlMessage(kind, [], null, null),

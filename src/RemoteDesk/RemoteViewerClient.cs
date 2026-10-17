@@ -3036,6 +3036,11 @@ internal sealed partial class RemoteViewerClient : IDisposable
                     _fileLocationRequests.TryGetValue(control.TransferId ?? string.Empty, out var locationRequest))
                     locationRequest.TrySetResult(control);
                 break;
+            case RemoteControlKind.PrivacyScreenStatus:
+                if (IsCurrentConnection(ownerConnection) && control.PrivacyStatus is { } privacy &&
+                    _privacyRequests.TryGetValue(control.TransferId ?? string.Empty, out var privacyRequest))
+                    privacyRequest.TrySetResult(privacy);
+                break;
             case RemoteControlKind.HostVideoDiagnostics:
                 HostVideoDiagnosticsReceived?.Invoke(control.Text ?? string.Empty);
                 break;

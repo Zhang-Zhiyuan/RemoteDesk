@@ -6647,6 +6647,8 @@ public sealed partial class MainForm : Form
                 _settings.Relay.RegisterThisDevice;
             _relayOptimizeNetworkBox.Checked = _settings.Relay.OptimizeNetworkRoute;
             ApplySshSettingsToUi();
+            _allowPrivacyScreenBox.Checked = _settings.Host.AllowPrivacyScreen;
+            _ = _hostServer.SetPrivacyScreenAllowedAsync(_settings.Host.AllowPrivacyScreen);
             _relayViewerPasswordBox.Text = ""; // Filled only for the selected device, never a global fallback.
             SetSelectedViewerVideoMode(
                 _relayVideoModeBox,

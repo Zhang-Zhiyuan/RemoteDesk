@@ -490,7 +490,7 @@ public sealed class ReleaseScriptContractTests
             wrapperProperties,
             StringComparison.Ordinal);
         Assert.Contains(
-            "\"version\": \"8.0.425\"",
+            "\"version\": \"8.0.426\"",
             globalJson,
             StringComparison.Ordinal);
     }

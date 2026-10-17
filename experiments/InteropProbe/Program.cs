@@ -12,7 +12,10 @@ internal static class Program
     [STAThread]
     static int Main(string[] args)
     {
+        if (WindowsPrivacyScreen.TryHandleCommand(args)) return 0;
+        if (args.Length > 0 && args[0] == "privacy-screen") return PrivacyScreenProbe.Run();
         Console.InputEncoding = System.Text.Encoding.UTF8;
+        if (args.Length > 0 && args[0] == "ssh-recall-owned") return SshRecallProbe.Run();
         if (args.Length > 0 && args[0] == "ssh-ui-isolated") return SshUiProbe.Run();
         if (args.Length > 0 && args[0] == "dpi-dialogs-isolated") return AdaptiveLayoutProbe.Run(dpiDialogs: true);
         if (args.Length > 0 && args[0] == "dpi-main-viewer-isolated") return AdaptiveLayoutProbe.Run(mainViewerDpi: true);

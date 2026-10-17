@@ -6,6 +6,36 @@ namespace RemoteDesk;
 internal static class SshTerminalLauncher
 {
     internal static string ExecutablePath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "OpenSSH", "ssh.exe");
+    internal static string WindowsTerminalPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WindowsApps", "wt.exe");
+
+    // wt.exe is an IPC launcher, not the lifetime of the SSH process. Use a
+    // dedicated, randomly named window so recalling it never creates a new SSH.
+    internal static ProcessStartInfo? CreateWindowStartInfo(ProcessStartInfo ssh, string terminalPath, string windowId)
+    {
+        ValidateWindowId(windowId);
+        // Windows Terminal interprets semicolons itself, even without a shell.
+        // Preserve unusual literal key paths by falling back to native OpenSSH.
+        if (ssh.ArgumentList.Prepend(ssh.FileName).Any(value => value.Contains(';') || value.Any(char.IsControl))) return null;
+        var start = new ProcessStartInfo(terminalPath) { UseShellExecute = true, WindowStyle = ProcessWindowStyle.Normal };
+        foreach (string value in new[] { "-w", windowId, "new-tab", "--title", "RemoteDesk SSH [" + windowId[^8..] + "]", "--suppressApplicationTitle", ssh.FileName })
+            start.ArgumentList.Add(value);
+        foreach (string value in ssh.ArgumentList) start.ArgumentList.Add(value);
+        return start;
+    }
+
+    internal static ProcessStartInfo CreateRecallStartInfo(string terminalPath, string windowId)
+    {
+        ValidateWindowId(windowId);
+        var start = new ProcessStartInfo(terminalPath) { UseShellExecute = true, WindowStyle = ProcessWindowStyle.Normal };
+        foreach (string value in new[] { "-w", windowId, "focus-tab", "-t", "0" }) start.ArgumentList.Add(value);
+        return start;
+    }
+
+    private static void ValidateWindowId(string value)
+    {
+        if (!value.StartsWith("remotedesk-ssh-", StringComparison.Ordinal) ||
+            !Guid.TryParseExact(value["remotedesk-ssh-".Length..], "N", out _)) throw new ArgumentException("SSH 终端窗口身份无效。");
+    }
 
     internal static string HostKeyAlias(string certificateSha256, string deviceId)
     {

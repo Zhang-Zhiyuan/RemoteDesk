@@ -18,6 +18,7 @@ final class SshUiProbe {
     private static final Handler UI = new Handler(Looper.getMainLooper());
     private static String action = "launch", failure = "";
     private static String clipboardText = "";
+    private static AndroidSshConnection.Listener staleListener;
     static void created(AndroidSshTerminalActivity owner) {
         activity = owner;
         DpiUiProbe.current = owner;
@@ -83,8 +84,37 @@ final class SshUiProbe {
         } else if ("changeTrust".equals(action)) {
             AndroidRelay.Options target=(AndroidRelay.Options)field("target");
             activity.getSharedPreferences("ssh_target_host_keys",0).edit().putString(AndroidSshProtocol.alias(target), "SHA256:owned-changed-key-negative-control").commit();
+        } else if ("rememberListener".equals(action)) {
+            java.lang.reflect.Field listener = AndroidSshConnection.class.getDeclaredField("listener"); listener.setAccessible(true);
+            staleListener = (AndroidSshConnection.Listener)listener.get(field("connection"));
+        } else if ("lateOutput".equals(action)) {
+            new Thread(() -> { try { staleListener.output("STALE-OUTPUT-MUST-NOT-ENTER-NEW-SESSION".getBytes(java.nio.charset.StandardCharsets.UTF_8)); }
+                catch (Exception ex) { throw new IllegalStateException(ex); } }, "OwnedLateSshOutput").start();
+        } else if ("lateTrust".equals(action)) {
+            new Thread(() -> { try {
+                if (staleListener.confirmHostKey("SHA256:owned-stale-listener"))
+                    throw new IllegalStateException("Stale host key confirmation accepted");
+            } catch (Exception ex) { throw new IllegalStateException(ex); } }, "OwnedLateSshTrust").start();
         } else if ("clearTrust".equals(action)) {
             activity.getSharedPreferences("ssh_target_host_keys",0).edit().clear().commit();
+        } else if ("recall".equals(action)) {
+            AndroidSshTerminalActivity.launch(activity, (AndroidRelay.Options)field("target"), "隔离 SSH 中文主机");
+        } else if ("togglePublish".equals(action)) {
+            AndroidRelay.Options saved = AndroidRelaySettings.load(activity);
+            AndroidRelayUiPolicy.publish(saved, !saved.publish, value -> AndroidRelaySettings.save(activity, value));
+        } else if ("relayLogout".equals(action)) {
+            AndroidRelaySettings.save(activity, null);
+        } else if ("notificationRecall".equals(action) || "notificationStop".equals(action)) {
+            android.app.NotificationManager manager = activity.getSystemService(android.app.NotificationManager.class);
+            boolean found = false;
+            for (android.service.notification.StatusBarNotification row : manager.getActiveNotifications()) {
+                if (row.getId() != 56569) continue;
+                android.app.Notification notification = row.getNotification();
+                if ("notificationRecall".equals(action)) notification.contentIntent.send();
+                else notification.actions[0].actionIntent.send();
+                found = true;
+            }
+            if (!found) throw new IllegalStateException("Owned SSH notification missing");
         } else if ("finish".equals(action)) activity.finish();
     }
     private static Object field(String name) throws Exception { return ViewerProbeApplication.field(activity,name); }
@@ -98,9 +128,13 @@ final class SshUiProbe {
         if (owner==null || owner.isDestroyed()) return;
         try {
             JSONObject data=new JSONObject().put("action",action).put("failure",failure)
+                .put("processId",android.os.Process.myPid())
                 .put("status",((TextView)field("status")).getText()).put("pageReady",field("pageReady"))
                 .put("connection",field("connection")!=null).put("trustDialog",field("trustDialog")!=null)
+                .put("foreground",field("foreground")).put("taskId",owner.getTaskId())
+                .put("activityId",System.identityHashCode(owner)).put("keepAliveId",field("keepAliveId"))
                 .put("outputSequence",field("outputSequence")).put("inputGeneration",field("inputGeneration"))
+                .put("trustWaitId",System.identityHashCode(field("trustWait")))
                 .put("passwordLength",((EditText)field("password")).length())
                 .put("connectEnabled",((View)field("connect")).isEnabled())
                 .put("privateKeySelected",field("selectedPrivateKey")!=null)
@@ -115,7 +149,7 @@ final class SshUiProbe {
                 .put("config",owner.getResources().getConfiguration().toString());
             Files.write(new File(owner.getFilesDir(),"ssh-state.json").toPath(),data.toString(2).getBytes(java.nio.charset.StandardCharsets.UTF_8));
             WebView terminal=(WebView)field("terminal");
-            terminal.evaluateJavascript("document.querySelector('.xterm-rows') ? document.querySelector('.xterm-rows').textContent.slice(-16000) : (document.body ? document.body.innerText : '')", value -> {
+            if ((boolean)field("foreground")) terminal.evaluateJavascript("document.querySelector('.xterm-rows') ? document.querySelector('.xterm-rows').textContent.slice(-16000) : (document.body ? document.body.innerText : '')", value -> {
                 try { data.put("terminalDom",value); Files.write(new File(owner.getFilesDir(),"ssh-state.json").toPath(),data.toString(2).getBytes(java.nio.charset.StandardCharsets.UTF_8)); }
                 catch(Exception ex) { failure="snapshot write failed"; }
             });

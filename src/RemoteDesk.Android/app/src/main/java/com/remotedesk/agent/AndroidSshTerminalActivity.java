@@ -48,17 +48,29 @@ public final class AndroidSshTerminalActivity extends Activity {
     private boolean pageReady;
     private AlertDialog trustDialog;
     private volatile CountDownLatch trustWait, outputWait;
-    private volatile boolean trusted;
     private volatile int outputSequence;
     private volatile int inputGeneration;
     private byte[] selectedPrivateKey;
     private int selectionGeneration;
     private boolean identityBusy;
+    private volatile boolean foreground;
+    private boolean sshConnected;
+    private String keepAliveId;
+    private String pendingOutput;
+    private int pendingSequence;
+    private android.window.OnBackInvokedCallback backCallback;
 
     static void launch(Context context, AndroidRelay.Options options, String name) {
-        context.startActivity(new Intent(context, AndroidSshTerminalActivity.class)
+        context.startActivity(recallIntent(context, options, name));
+    }
+
+    private static Intent recallIntent(Context context, AndroidRelay.Options options, String name) {
+        return new Intent(context, AndroidSshTerminalActivity.class)
+            .setData(new android.net.Uri.Builder().scheme("remotedesk-ssh").authority("terminal")
+                .appendPath(AndroidSshProtocol.alias(options)).build())
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
             .putExtra("deviceId", options.deviceId).putExtra("relayPin", options.tlsCertificateSha256)
-            .putExtra("deviceName", name)); // No relay token, device key, SSH account or password.
+            .putExtra("deviceName", name); // No relay token, device key, SSH account or password.
     }
 
     @Override public void onCreate(Bundle state) {
@@ -80,7 +92,13 @@ public final class AndroidSshTerminalActivity extends Activity {
                 .setPositiveButton("返回", (d, w) -> finish()).setOnCancelListener(d -> finish()).show();
             return;
         }
-        try { buildUi(); }
+        try {
+            buildUi();
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                backCallback = this::leaveTerminal;
+                getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
+            }
+        }
         catch (RuntimeException ex) { new AlertDialog.Builder(this).setTitle("终端组件不可用")
             .setMessage("无法启动 Android System WebView。请启用或更新系统 WebView 后重试；尚未连接 SSH。")
             .setPositiveButton("返回", (d, w) -> finish()).setOnCancelListener(d -> finish()).show(); }
@@ -106,7 +124,7 @@ public final class AndroidSshTerminalActivity extends Activity {
         loginPanel = new ScrollView(this);
         LinearLayout form = new LinearLayout(this); form.setOrientation(LinearLayout.VERTICAL);
         int pad = AndroidDisplay.dp(this, 12); form.setPadding(pad, pad, pad, pad);
-        form.addView(label("目标：" + deviceName + "\nSSH 为独立通道，不接管桌面。切到后台或离开本页即断开，不自动重连。"));
+        form.addView(label("目标：" + deviceName + "\nSSH 为独立通道。切到后台或返回列表保持连接，再点同一设备或通知可唤回原终端。断开 / 移除终端任务会结束连接；断网不会自动重放命令。"));
         form.addView(label(savedKey.isEmpty() ? "填写此目标设备的设备密钥，以及目标 SSH 账号密码。" :
             "复用已保存的设备密钥。下面仅填写目标 SSH 账号密码（不是中继 root 密码）。"));
         deviceKey = field("设备密钥", true); deviceKey.setText(savedKey);
@@ -148,6 +166,7 @@ public final class AndroidSshTerminalActivity extends Activity {
             if (code.equals("ctrl")) ctrl = key;
         }
         keys.addView(button("断开", v -> disconnect("SSH 已断开；未发送的输入已丢弃。")));
+        keys.addView(button("返回（保持连接）", v -> moveTaskToBack(true)));
         Button copy = button("复制", v -> terminal.evaluateJavascript("sshCopy()", null));
         copy.setContentDescription("复制终端所选文字；Ctrl+C 是远端中断，不是复制"); keys.addView(copy);
         keys.addView(button("粘贴", v -> pasteClipboard()));
@@ -203,6 +222,18 @@ public final class AndroidSshTerminalActivity extends Activity {
 
     private void startConnection() {
         if (connection != null || !pageReady || identityBusy) return;
+        try {
+            AndroidRelay.Options saved = AndroidRelaySettings.load(this);
+            if (saved == null || !saved.tlsCertificateSha256.equals(target.tlsCertificateSha256))
+                throw new IOException("服务器登录已变化");
+            // An existing document task may outlive logout/re-login. Never
+            // reconnect using credentials cached in that old activity.
+            target = saved.target(target.deviceId);
+            AndroidConnectionHistory.Node node = AndroidConnectionHistoryStore.load(this).findRelay(target);
+            savedKey = node == null ? "" : node.password;
+        } catch (Exception ex) {
+            disconnect("服务器登录已变化，请从在线列表重新打开 SSH。"); return;
+        }
         String user = username.getText().toString().trim();
         String key = deviceKey.length() == 0 ? savedKey : deviceKey.getText().toString();
         if (user.isEmpty() || user.length() > 128 || user.matches(".*[\\p{Cntrl}].*") ||
@@ -210,6 +241,14 @@ public final class AndroidSshTerminalActivity extends Activity {
             status.setText(R.string.ssh_credentials_required); return;
         }
         byte[] secret = password.getText().toString().getBytes(StandardCharsets.UTF_8);
+        String sessionId = java.util.UUID.randomUUID().toString();
+        if (!AndroidSshKeepAliveService.keep(this, sessionId, deviceName, recallIntent(this, target, deviceName),
+                () -> ui.post(() -> { if (sessionId.equals(keepAliveId)) disconnect("SSH 已断开（通知、系统服务或服务器登录状态已变化）。"); }))) {
+            Arrays.fill(secret, (byte) 0);
+            status.setText(R.string.ssh_keepalive_unavailable);
+            return;
+        }
+        keepAliveId = sessionId;
         ++selectionGeneration; // A pending provider read must not replace the chosen authentication mode.
         final int sessionGeneration = ++inputGeneration;
         password.setText(""); deviceKey.setText("");
@@ -218,35 +257,56 @@ public final class AndroidSshTerminalActivity extends Activity {
         AndroidSshConnection next = new AndroidSshConnection(this, new AndroidSshConnection.Listener() {
             private boolean current() { return !destroyed && connection == owner[0]; }
             @Override public boolean confirmHostKey(String fingerprint) throws Exception {
-                CountDownLatch wait = new CountDownLatch(1); trustWait = wait; trusted = false;
+                CountDownLatch wait = new CountDownLatch(1);
+                java.util.concurrent.atomic.AtomicBoolean accepted = new java.util.concurrent.atomic.AtomicBoolean();
                 ui.post(() -> {
                     if (!current()) { wait.countDown(); return; }
+                    trustWait = wait;
                     trustDialog = new AlertDialog.Builder(AndroidSshTerminalActivity.this).setTitle("首次连接 SSH 主机")
                         .setMessage("目标：" + deviceName + "\n设备 ID：" + target.deviceId + "\n\n主机指纹：\n" + fingerprint +
                             "\n\n请通过可信渠道核对目标 sshd 指纹。确认后保存到此中继身份与设备；变化时将拒绝连接。")
                         .setNegativeButton("取消", (d, w) -> wait.countDown())
-                        .setPositiveButton("指纹一致，信任", (d, w) -> { if (current()) trusted = true; wait.countDown(); })
+                        .setPositiveButton("指纹一致，信任", (d, w) -> { if (current()) accepted.set(true); wait.countDown(); })
                         .setOnCancelListener(d -> wait.countDown()).show();
                 });
                 boolean completed = wait.await(60, TimeUnit.SECONDS);
                 ui.post(() -> { if (trustWait == wait && trustDialog != null) { trustDialog.dismiss(); trustDialog = null; } });
-                return completed && trusted && current();
+                return completed && accepted.get() && current();
             }
             @Override public void status(String text) { ui.post(() -> { if (current()) {
                 status.setText(text); terminal.evaluateJavascript("sshEnabled(" + text.startsWith("SSH 已连接") + "," + sessionGeneration + ")", null);
                 if (text.startsWith("SSH 已连接")) {
+                    sshConnected = true;
                     android.content.SharedPreferences accounts = getSharedPreferences("ssh_target_accounts", MODE_PRIVATE);
                     String alias = AndroidSshProtocol.alias(target);
                     if (accounts.contains(alias) || accounts.getAll().size() < 256) accounts.edit().putString(alias, user).apply();
                 }
             } }); }
             @Override public void output(byte[] bytes) throws Exception {
-                CountDownLatch wait = new CountDownLatch(1); outputWait = wait;
-                int sequence = ++outputSequence;
+                CountDownLatch wait = new CountDownLatch(1);
                 String encoded = Base64.getEncoder().encodeToString(bytes);
-                ui.post(() -> { if (!current()) wait.countDown(); else terminal.evaluateJavascript(
-                    "sshOutput('" + encoded + "'," + sequence + ")", null); });
-                if (!wait.await(10, TimeUnit.SECONDS)) throw new IOException("终端显示未响应，SSH 已断开。");
+                Arrays.fill(bytes, (byte) 0);
+                ui.post(() -> {
+                    if (!current()) wait.countDown();
+                    else {
+                        // Publish only on the UI thread after checking this exact
+                        // connection. A late old reader must never replace the
+                        // current session's ACK latch or sequence after reconnect.
+                        outputWait = wait;
+                        pendingOutput = encoded;
+                        pendingSequence = ++outputSequence;
+                        displayPendingOutput();
+                    }
+                });
+                long visibleWait = 0;
+                while (!wait.await(100, TimeUnit.MILLISECONDS) && current()) {
+                    // Background WebViews may stop running JavaScript. Keep one
+                    // bounded chunk under backpressure, not an unbounded log or
+                    // a false 10-second disconnect. SSH keepalives run separately.
+                    visibleWait = foreground ? visibleWait + 100 : 0;
+                    if (visibleWait >= 10000) throw new IOException("终端显示未响应，SSH 已断开。");
+                }
+                ui.post(() -> { if (current() && outputWait == wait) pendingOutput = null; });
             }
             @Override public void ended(String text) { ui.post(() -> { if (current()) disconnect(text); }); }
         });
@@ -257,6 +317,36 @@ public final class AndroidSshTerminalActivity extends Activity {
         password.setHint("目标 SSH 密码（不保存）"); password.setContentDescription("目标 SSH 密码（不保存）");
         next.start(target, key, user, secret, privateKey);
     }
+
+    private void displayPendingOutput() {
+        if (foreground && pageReady && !destroyed && pendingOutput != null && outputWait != null && outputWait.getCount() != 0)
+            terminal.evaluateJavascript("sshOutput('" + pendingOutput + "'," + pendingSequence + ")", null);
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        if (target != null && target.deviceId.equals(intent.getStringExtra("deviceId")) &&
+                target.tlsCertificateSha256.equals(intent.getStringExtra("relayPin"))) setIntent(intent);
+    }
+
+    @Override protected void onStart() {
+        super.onStart(); foreground = true;
+        if (connection != null) {
+            try {
+                AndroidRelay.Options saved = AndroidRelaySettings.load(this);
+                if (!AndroidRelaySettings.sameSshLogin(target, saved)) disconnect("服务器登录已变化，SSH 已断开。");
+            } catch (Exception ex) { disconnect("无法确认服务器登录，SSH 已断开。"); }
+        }
+        if (terminal != null && pageReady) terminal.evaluateJavascript("sshEnabled(" + sshConnected + "," + inputGeneration + ")", null);
+        displayPendingOutput();
+    }
+
+    private void leaveTerminal() {
+        if (connection != null) moveTaskToBack(true);
+        else finish();
+    }
+    @SuppressWarnings("deprecation") // API 26–32 fallback; newer Android uses the registered dispatcher.
+    @Override public void onBackPressed() { leaveTerminal(); }
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
@@ -324,7 +414,7 @@ public final class AndroidSshTerminalActivity extends Activity {
         @JavascriptInterface public void ready() { ui.post(() -> { if (!destroyed) { pageReady = true; connect.setEnabled(true); } }); }
         @JavascriptInterface public void input(String text, int generation) {
             AndroidSshConnection current = connection;
-            if (current == null || generation != inputGeneration || text == null || text.isEmpty()) return;
+            if (!foreground || current == null || generation != inputGeneration || text == null || text.isEmpty()) return;
             if (text.length() > 8192) { ui.post(() -> { if (connection == current) disconnect("SSH 输入过长，未发送；会话已断开。"); }); return; }
             byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
             boolean sent = bytes.length <= 8192 && current.send(bytes);
@@ -332,7 +422,11 @@ public final class AndroidSshTerminalActivity extends Activity {
             if (!sent) ui.post(() -> { if (connection == current) disconnect("SSH 输入未发送（未就绪或队列已满）；为避免缺字误执行，会话已断开。"); });
         }
         @JavascriptInterface public void resize(int cols, int rows) { AndroidSshConnection current = connection; if (current != null) current.resize(cols, rows); }
-        @JavascriptInterface public void ack(int sequence) { CountDownLatch wait = outputWait; if (sequence == outputSequence && wait != null) wait.countDown(); }
+        @JavascriptInterface public void ack(int sequence) { ui.post(() -> {
+            // Sequence and latch are a pair; compare them on the same thread
+            // that publishes the next chunk, including after reconnect.
+            if (sequence == outputSequence && outputWait != null) outputWait.countDown();
+        }); }
         @JavascriptInterface public void ctrl(boolean enabled) { ui.post(() -> { if (!destroyed) ctrl.setText(enabled ? "Ctrl ✓" : "Ctrl"); }); }
         @JavascriptInterface public void copy(String text) { ui.post(() -> {
             if (destroyed || text == null || text.length() > 65536) return;
@@ -371,9 +465,12 @@ public final class AndroidSshTerminalActivity extends Activity {
 
     private void disconnect(String message) {
         AndroidSshConnection current = connection; connection = null;
+        sshConnected = false; pendingOutput = null;
+        String previous = keepAliveId; keepAliveId = null;
+        if (previous != null) AndroidSshKeepAliveService.release(this, previous);
         ++inputGeneration;
-        trusted = false;
-        if (trustWait != null) trustWait.countDown(); if (outputWait != null) outputWait.countDown();
+        if (trustWait != null) { trustWait.countDown(); trustWait = null; }
+        if (outputWait != null) { outputWait.countDown(); outputWait = null; }
         if (trustDialog != null) { trustDialog.dismiss(); trustDialog = null; }
         if (current != null) current.close();
         if (terminal != null && !destroyed && pageReady) terminal.evaluateJavascript("sshEnabled(false," + inputGeneration + ")", null);
@@ -381,17 +478,21 @@ public final class AndroidSshTerminalActivity extends Activity {
         if (loginPanel != null) { loginPanel.setVisibility(View.VISIBLE); terminalPanel.setVisibility(View.GONE); }
     }
     @Override protected void onStop() {
+        foreground = false;
         super.onStop();
         if (password != null) password.setText("");
         if (deviceKey != null) deviceKey.setText("");
         clearPrivateKey();
-        if (connection != null) disconnect("已离开终端前台，SSH 已断开；不会自动重连。");
+        // Established SSH is owned by the visible foreground service, not by
+        // page visibility. Explicit disconnect, task removal or destruction ends it.
     }
     @Override public void onWindowFocusChanged(boolean focused) {
         super.onWindowFocusChanged(focused);
         if (focused) AndroidDisplay.configureEdgeToEdge(this, true);
     }
     @Override protected void onDestroy() {
+        if (android.os.Build.VERSION.SDK_INT >= 33 && backCallback != null)
+            getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);
         destroyed = true; disconnect("SSH 已关闭。"); savedKey = "";
         clearPrivateKey();
         if (terminal != null) { terminal.removeJavascriptInterface("RemoteSsh"); terminal.destroy(); }

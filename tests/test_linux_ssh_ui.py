@@ -141,10 +141,17 @@ class SshUiTests(unittest.TestCase):
             _session, window, label = next(iter(self.ui.ssh_sessions.values()))
             self.root.update()
             window.tk.call(window.protocol("WM_DELETE_WINDOW"))
-            factory.return_value.close.assert_called_once()
+            factory.return_value.close.assert_not_called()
+            self.assertEqual("withdrawn", window.state())
             self.assertIs(self.ui.viewer, desktop)
             desktop.close.assert_not_called()
             self.assertTrue(self.ui.viewer_read_only)
+            self.assertEqual(1, len(self.ui.ssh_sessions))
+            for widget in window.winfo_children()[0].winfo_children():
+                if isinstance(widget, app.ttk.Button) and "断开 SSH" in widget.cget("text"):
+                    widget.invoke()
+                    break
+            factory.return_value.close.assert_called_once()
             self.assertEqual({}, self.ui.ssh_sessions)
             self.assertEqual([], self.errors)
         self.ui.viewer = None
@@ -193,17 +200,99 @@ class SshUiTests(unittest.TestCase):
         self.assertGreaterEqual(entry_width, entry_requested)
         self.assertEqual([], self.errors)
 
-    def test_remembered_username_and_optional_key_are_passed_without_saving_key_path(self):
+    def test_explicit_settings_can_change_username_and_remember_only_identity_path(self):
         self.target(["ssh"])
         app.ssh_terminal.save_username(self.ui.relay_options, "remembered")
         with mock.patch.object(self.ui, "_ask_ssh_login", return_value=("changed", "/tmp/owned key")) as dialog, \
                 mock.patch.object(app.ssh_terminal, "TerminalSession") as factory:
-            self.ui._open_relay_ssh()
-            dialog.assert_called_once_with("remembered")
+            self.ui._open_relay_ssh(configure=True)
+            dialog.assert_called_once_with("remembered", identity_file="")
             self.assertEqual("/tmp/owned key", factory.call_args.kwargs["identity_file"])
             self.assertEqual("changed", app.ssh_terminal.load_username(self.ui.relay_options))
             records = Path(self.temporary.name) / "remotedesk/ssh/logins.json"
-            self.assertNotIn("/tmp/owned key", records.read_text())
+            self.assertIn("/tmp/owned key", records.read_text())
+            self.assertNotIn("owned-device-key", records.read_text())
+
+    def test_one_click_uses_saved_login_and_recalls_existing_session_without_new_connection(self):
+        self.target(["ssh"])
+        app.ssh_terminal.save_username(self.ui.relay_options, "remembered")
+        with mock.patch.object(self.ui, "_ask_ssh_login") as dialog, \
+                mock.patch.object(app.ssh_terminal, "TerminalSession") as factory:
+            factory.return_value.done.is_set.return_value = False
+            factory.return_value.options = self.ui.relay_options
+            self.ui._open_relay_ssh()
+            dialog.assert_not_called()
+            factory.assert_called_once()
+            self.assertEqual("remembered", factory.call_args.args[2])
+            self.ui._open_relay_ssh()
+            factory.assert_called_once()
+            factory.return_value.activate.assert_called_once()
+            factory.return_value.close.assert_not_called()
+
+    def test_repeated_reconnect_does_not_accumulate_finished_hidden_status_windows(self):
+        self.target(["ssh"])
+        app.ssh_terminal.save_username(self.ui.relay_options, "remembered")
+        with mock.patch.object(app.ssh_terminal, "TerminalSession") as factory:
+            for _ in range(20):
+                session = mock.Mock()
+                session.done.is_set.return_value = False
+                session.options = self.ui.relay_options
+                factory.return_value = session
+                old_windows = [row[1] for row in self.ui.ssh_sessions.values()]
+                self.ui._open_relay_ssh()
+                self.assertEqual(1, len(self.ui.ssh_sessions))
+                self.assertTrue(all(not window.winfo_exists() for window in old_windows))
+                current = next(iter(self.ui.ssh_sessions.values()))[1]
+                current.withdraw()
+                session.done.is_set.return_value = True
+            self.assertEqual([], self.errors)
+
+    def test_long_ssh_status_keeps_actions_visible_in_small_large_font_window(self):
+        self.target(["ssh"])
+        style = app.ttk.Style(self.root)
+        original_font = style.lookup(".", "font")
+        self.addCleanup(lambda: style.configure(".", font=original_font))
+        style.configure(".", font=("DejaVu Sans", 20))
+        with mock.patch.object(self.ui, "_ask_ssh_login", return_value=("owned", "")), \
+                mock.patch.object(app.ssh_terminal, "TerminalSession"):
+            self.ui._open_relay_ssh()
+            _, window, label = next(iter(self.ui.ssh_sessions.values()))
+            window.minsize(1, 1)
+            window.geometry("360x220+0+0")
+            label.configure(text="SSH 无法连接，请检查目标服务端和网络。" * 100)
+            self.root.update()
+            def descendants(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from descendants(child)
+            buttons = [w for w in descendants(window) if isinstance(w, app.ttk.Button)]
+            self.assertEqual(2, len(buttons))
+            for button in buttons:
+                self.assertTrue(button.winfo_ismapped(), button.cget("text"))
+                self.assertGreaterEqual(button.winfo_width(), button.winfo_reqwidth())
+                self.assertGreaterEqual(button.winfo_rooty(), window.winfo_rooty())
+                self.assertLessEqual(button.winfo_rooty() + button.winfo_height(),
+                                     window.winfo_rooty() + window.winfo_height())
+            canvas = next(w for w in descendants(window) if isinstance(w, app.tk.Canvas))
+            canvas.yview_moveto(1)
+            self.root.update()
+            self.assertGreater(canvas.yview()[0], 0)
+            self.assertAlmostEqual(1, canvas.yview()[1])
+            if os.environ.get("REMOTEDESK_SSH_UI_OUTPUT"):
+                from PIL import ImageGrab
+                output = Path(os.environ["REMOTEDESK_SSH_UI_OUTPUT"])
+                output.mkdir(parents=True, exist_ok=True)
+                ImageGrab.grab(xdisplay=os.environ["DISPLAY"]).save(output / "ssh-long-status.png")
+            self.assertEqual([], self.errors)
+
+    def test_missing_saved_identity_requires_settings_instead_of_silent_different_login(self):
+        self.target(["ssh"])
+        app.ssh_terminal.save_username(self.ui.relay_options, "remembered", identity_file="/missing/owned/key")
+        with mock.patch.object(self.ui, "_ask_ssh_login", return_value=None) as dialog, \
+                mock.patch.object(app.ssh_terminal, "TerminalSession") as factory:
+            self.ui._open_relay_ssh()
+            dialog.assert_called_once_with("remembered", identity_file="/missing/owned/key")
+            factory.assert_not_called()
 
     def test_username_save_failure_is_explicit_but_does_not_close_launched_terminal(self):
         self.target(["ssh"])

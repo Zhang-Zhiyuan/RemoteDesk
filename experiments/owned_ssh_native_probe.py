@@ -92,6 +92,30 @@ async def run(metadata, output):
                 from PIL import ImageGrab
                 ImageGrab.grab(xdisplay=os.environ["DISPLAY"]).save(output / "native-terminal.png")
                 report["ptyOutput"] = text
+                process_id = session.process.pid
+                subprocess.run(["xdotool", "windowminimize", window], check=True)
+                await asyncio.sleep(.3)
+                session.activate()
+                for _ in range(40):
+                    if any("已唤回原 SSH" in value for value in statuses):
+                        break
+                    await asyncio.sleep(.1)
+                else:
+                    raise AssertionError("Product native terminal recall did not succeed")
+                active = subprocess.check_output(["xdotool", "getactivewindow"], text=True).strip()
+                if int(active) != int(window) or session.process.pid != process_id or task.done():
+                    raise AssertionError("Recall did not preserve the same active terminal and SSH connection")
+                command = "printf 'same-session-after-recall\\n' >> " + shlex.quote(str(result))
+                subprocess.run(["xdotool", "type", "--clearmodifiers", "--", command], check=True)
+                subprocess.run(["xdotool", "key", "Return"], check=True)
+                for _ in range(30):
+                    if "same-session-after-recall" in result.read_text():
+                        break
+                    await asyncio.sleep(.1)
+                else:
+                    raise AssertionError("Existing SSH did not accept input after recall")
+                report["checks"].extend(["minimize then product recall same native window", "original SSH accepts input after recall"])
+                ImageGrab.grab(xdisplay=os.environ["DISPLAY"]).save(output / "native-terminal-recalled.png")
                 session.close()
                 try:
                     await asyncio.wait_for(task, 3)

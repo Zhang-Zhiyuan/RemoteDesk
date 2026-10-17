@@ -42,9 +42,13 @@
             android:theme="@android:style/Theme.Material.Light.NoActionBar" />
 
         <activity android:name=".AndroidSshTerminalActivity" android:exported="false"
+            android:documentLaunchMode="intoExisting"
             android:windowSoftInputMode="adjustResize"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
-            android:theme="@style/ViewerTheme" />
+            android:theme="@style/AppTheme" />
+
+        <service android:name=".AndroidSshKeepAliveService" android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <service
             android:name=".RemoteDeskForegroundService"
