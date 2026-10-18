@@ -2026,7 +2026,7 @@ public sealed partial class MainForm : Form
     }
 
     internal const string ViewerVideoModeDescription =
-        "自动（推荐）：优先使用 H.264，支持时使用硬件加速与清晰增强；不可用时自动回退 JPEG。\n" +
+        "自动（推荐）：优先使用 H.264 硬件加速；解码异常时恢复 H.264，不自动请求切换 JPEG。锁屏或不支持 H.264 的设备仍可显示兼容画面。\n" +
         "清晰（JPEG）：适合静态文字，带宽占用更高，慢速网络可能卡顿。";
 
     internal static void PopulateViewerVideoModes(

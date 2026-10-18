@@ -52,7 +52,8 @@ public sealed class UiClarityTests
         MainForm.PopulateViewerVideoModes(combo);
         Assert.Equal(new[] { "自动（推荐）", "清晰（JPEG）" }, combo.Items.Cast<object>().Select(x => x.ToString()));
         Assert.DoesNotContain("仅 H.264", MainForm.ViewerVideoModeDescription);
-        Assert.Contains("回退 JPEG", MainForm.ViewerVideoModeDescription);
+        Assert.Contains("不自动请求切换 JPEG", MainForm.ViewerVideoModeDescription);
+        Assert.Contains("锁屏", MainForm.ViewerVideoModeDescription);
         Assert.Contains("带宽", MainForm.ViewerVideoModeDescription);
     }
 

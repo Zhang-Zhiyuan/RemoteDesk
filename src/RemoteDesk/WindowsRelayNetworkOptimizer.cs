@@ -16,8 +16,8 @@ internal sealed class WindowsRelayNetworkOptimizer : IDisposable
     private readonly Func<string, CancellationToken, Task<IReadOnlyList<RelayNetworkPath>>> _paths;
     private readonly Func<RelayConnectionOptions, RelayNetworkPath?, CancellationToken, Task<double>> _probe;
     private readonly Func<long> _now;
-    private readonly Func<IPAddress, bool> _recentTraffic;
-    private readonly Action<IPAddress> _disconnect;
+    private readonly Func<RelayNetworkPath, bool> _recentTraffic;
+    private readonly Action<RelayNetworkPath> _disconnect;
     private readonly TimeSpan _probeTimeout;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly CancellationTokenSource _stop = new();
@@ -39,7 +39,7 @@ internal sealed class WindowsRelayNetworkOptimizer : IDisposable
         Func<string, CancellationToken, Task<IReadOnlyList<RelayNetworkPath>>>? paths = null,
         Func<RelayConnectionOptions, RelayNetworkPath?, CancellationToken, Task<double>>? probe = null,
         Func<long>? now = null, bool maintain = true, TimeSpan? probeTimeout = null,
-        Func<IPAddress, bool>? recentTraffic = null, Action<IPAddress>? disconnect = null)
+        Func<RelayNetworkPath, bool>? recentTraffic = null, Action<RelayNetworkPath>? disconnect = null)
     {
         _backend = backend ?? new WindowsRelayRouteBackend();
         _paths = paths ?? RelayNetworkPathSelector.Shared.DiscoverPathsAsync;
@@ -214,12 +214,12 @@ internal sealed class WindowsRelayNetworkOptimizer : IDisposable
                 SetStatus("中继临时线路失效，已回退系统线路并重连");
                 return;
             }
-            if (_recentTraffic(path.RemoteAddress)) { _healthFailures = 0; return; }
+            if (_recentTraffic(path)) { _healthFailures = 0; return; }
             double health;
             try { health = await MeasureAsync(options!, path, token).ConfigureAwait(false); }
             catch (AuthenticationException) { health = double.PositiveInfinity; }
             if (double.IsFinite(health)) _healthFailures = 0;
-            else if (++_healthFailures >= 2 && !_recentTraffic(path.RemoteAddress))
+            else if (++_healthFailures >= 2 && !_recentTraffic(path))
             {
                 ReleaseLease(disconnect: true);
                 _retryAfter = _now() + 60_000;
@@ -241,7 +241,10 @@ internal sealed class WindowsRelayNetworkOptimizer : IDisposable
         lock (_sync) { lease = _lease; _lease = null; _options = null; }
         if (lease is null) return;
         lease.Dispose();
-        if (disconnect) _disconnect(lease.Path.RemoteAddress);
+        // The old Wi-Fi socket may already have failed and reconnected over
+        // Ethernet before lease maintenance runs. Never close that healthy new
+        // socket just because it has the same public relay destination.
+        if (disconnect) _disconnect(lease.Path);
     }
 
     private void SetStatus(string value)

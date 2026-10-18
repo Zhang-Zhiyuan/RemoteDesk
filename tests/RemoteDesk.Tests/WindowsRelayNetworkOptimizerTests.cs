@@ -38,7 +38,7 @@ public sealed class WindowsRelayNetworkOptimizerTests
     }
     private static WindowsRelayNetworkOptimizer Create(Backend backend,
         Func<RelayConnectionOptions, RelayNetworkPath?, CancellationToken, Task<double>>? probe = null,
-        Func<long>? now = null, Action<IPAddress>? disconnect = null, Func<IPAddress, bool>? recent = null,
+        Func<long>? now = null, Action<RelayNetworkPath>? disconnect = null, Func<RelayNetworkPath, bool>? recent = null,
         IReadOnlyList<RelayNetworkPath>? paths = null) => new(backend,
             (_, _) => Task.FromResult(paths ?? (IReadOnlyList<RelayNetworkPath>)[Wifi, Wired]),
             probe ?? ((options, path, _) =>
@@ -254,13 +254,13 @@ public sealed class WindowsRelayNetworkOptimizerTests
     public async Task GatewayOrOwnershipLossClosesOnlyAffectedRelayConnections()
     {
         var backend = new Backend();
-        var disconnected = new List<IPAddress>();
+        var disconnected = new List<RelayNetworkPath>();
         using var optimizer = Create(backend, disconnect: disconnected.Add);
         await optimizer.OptimizeAsync(Options, true, default);
         backend.Leases[0].Healthy = false;
         await optimizer.MaintainAsync(default);
         Assert.Null(optimizer.ActivePath);
-        Assert.Equal(Wifi.RemoteAddress, Assert.Single(disconnected));
+        Assert.Equal(Wifi, Assert.Single(disconnected));
         Assert.Equal(1, backend.Leases[0].Disposals);
     }
 
@@ -283,7 +283,7 @@ public sealed class WindowsRelayNetworkOptimizerTests
     {
         var backend = new Backend();
         bool fail = false;
-        var disconnected = new List<IPAddress>();
+        var disconnected = new List<RelayNetworkPath>();
         using var optimizer = Create(backend, (_, path, _) => fail ? throw new IOException() : Task.FromResult(path is null ? 650d : 60d),
             disconnect: disconnected.Add);
         await optimizer.OptimizeAsync(Options, true, default);
@@ -299,7 +299,7 @@ public sealed class WindowsRelayNetworkOptimizerTests
     public async Task DisablingFeatureRemovesItsRouteAndReconnects()
     {
         var backend = new Backend();
-        var disconnected = new List<IPAddress>();
+        var disconnected = new List<RelayNetworkPath>();
         using var optimizer = Create(backend, disconnect: disconnected.Add);
         await optimizer.OptimizeAsync(Options, true, default);
         await optimizer.OptimizeAsync(Options, false, default);

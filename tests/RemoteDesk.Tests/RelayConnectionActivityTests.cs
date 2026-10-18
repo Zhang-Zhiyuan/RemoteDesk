@@ -8,6 +8,36 @@ namespace RemoteDesk.Tests;
 public sealed class RelayConnectionActivityTests
 {
     [Fact]
+    public async Task RetiringOldPathPreservesAlreadyReconnectedSocketToSameRelay()
+    {
+        var activity = new RelayConnectionActivity();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        using var oldPath = new TcpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        using var newPath = new TcpClient(new IPEndPoint(IPAddress.Parse("127.0.0.2"), 0));
+        await oldPath.ConnectAsync((IPEndPoint)listener.LocalEndpoint, deadline.Token);
+        using var oldPeer = await listener.AcceptTcpClientAsync(deadline.Token);
+        await newPath.ConnectAsync((IPEndPoint)listener.LocalEndpoint, deadline.Token);
+        using var newPeer = await listener.AcceptTcpClientAsync(deadline.Token);
+        activity.Track(oldPath, oldPath.GetStream());
+        activity.Track(newPath, newPath.GetStream());
+        activity.Find(newPath.GetStream())!.Touch();
+        var retired = new RelayNetworkPath("old", "Old path", 1, IPAddress.Loopback, IPAddress.Loopback, "127.0.0.1");
+        var replacement = retired with { LocalAddress = IPAddress.Parse("127.0.0.2") };
+        Assert.False(activity.HasRecentTraffic(retired));
+        Assert.True(activity.HasRecentTraffic(replacement));
+        activity.Disconnect(retired);
+        Assert.False(oldPath.Connected);
+        Assert.True(newPath.Connected);
+        Assert.True(activity.HasRecentTraffic(replacement));
+        await newPath.GetStream().WriteAsync(new byte[] { 73 }, deadline.Token);
+        var received = new byte[1];
+        await newPeer.GetStream().ReadExactlyAsync(received, deadline.Token);
+        Assert.Equal(73, received[0]);
+    }
+
+    [Fact]
     public async Task OnlyReceivedBytesCountAsRecentActivity()
     {
         long tick = 100;

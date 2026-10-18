@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Drawing;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using Vortice.Direct3D;
@@ -460,6 +461,59 @@ public sealed class D3D11HwndVideoPresenterTests
             D3D11HwndVideoPresenterCapabilityStatus
                 .InvalidOptions,
             capability.Status);
+    }
+
+    [HardwareSmokeFact]
+    [Trait("Category", "HardwareSmoke")]
+    public void DisposeReleasesBoundBackBufferBeforeRecreatingSameWindow()
+    {
+        // Never show or activate this window: this regression can run while
+        // the installed host has a real remote-control session in progress.
+        using var window = new Form
+        {
+            ClientSize = new Size(320, 240),
+            ShowInTaskbar = false
+        };
+        nint handle = window.Handle;
+        using ID3D11Device device = D3D11.D3D11CreateDevice(
+            DriverType.Hardware,
+            DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport,
+            [FeatureLevel.Level_11_1, FeatureLevel.Level_11_0]);
+        using ID3D11DeviceContext context = device.ImmediateContext;
+        try
+        {
+            // Keep the device/context alive, as decoder frame leases can do
+            // across an adaptive 4K -> 1080p switch. A context-held reference
+            // must not keep the old flip swap chain associated with the HWND.
+            foreach (Size source in new[]
+            {
+                new Size(3840, 2160), new Size(1920, 1080),
+                new Size(3840, 2160), new Size(1920, 1080)
+            })
+            {
+                Assert.True(D3D11HwndVideoPresenter.TryCreate(
+                    device, new(handle, source.Width, source.Height, 30),
+                    out D3D11HwndVideoPresenter? presenter,
+                    out D3D11HwndVideoPresenterCapability capability),
+                    $"{source}: {capability.Status}: {capability.Detail}");
+                Assert.NotNull(presenter);
+                using (presenter)
+                {
+                    var backBuffer = (ID3D11Texture2D)typeof(D3D11HwndVideoPresenter)
+                        .GetField("_backBuffer", BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .GetValue(presenter)!;
+                    using ID3D11RenderTargetView target = device.CreateRenderTargetView(backBuffer);
+                    context.OMSetRenderTargets(target);
+                }
+                Assert.Equal(handle, window.Handle);
+                Assert.False(window.Visible);
+            }
+        }
+        finally
+        {
+            context.ClearState();
+            context.Flush();
+        }
     }
 
     [Theory]

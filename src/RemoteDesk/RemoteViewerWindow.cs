@@ -51,7 +51,7 @@ internal readonly record struct RemoteViewerFullScreenRestoreState(
 
 internal sealed partial class RemoteViewerWindow : Form
 {
-    private const int H264DecodeMissFallbackThreshold = 8;
+    private const int H264DecodeMissRecoveryThreshold = 8;
     private const int H264KeyFrameRequestInterval = 3;
     private const int DirectH264FramesPerSecond = 60;
     internal const int DirectPresentationQualificationFrames = 3;
@@ -161,7 +161,7 @@ internal sealed partial class RemoteViewerWindow : Form
     private bool _remoteFilePullEnabled;
     private volatile bool _isClosing;
     private bool _closeFromDisconnect;
-    private bool _h264FallbackRequested;
+    private readonly H264DecoderRecovery _h264Recovery = new();
     private bool _waitingForH264RecoveryFrame;
     private bool _waitingForViewerHandle;
     private bool _dragFileTransferInProgress;
@@ -239,7 +239,6 @@ internal sealed partial class RemoteViewerWindow : Form
     private long _directPresentationQualificationAttemptCount;
     private long _directPresentationQualificationSuccessCount;
     private long _directPresentationQualificationFailureCount;
-    private int _jpegFallbackRequested;
     private long _directHardwareDecodeStopwatchTicks;
     private long _directHardwareDecodeToPresentStopwatchTicks;
     private long _directHardwareReceiveToPresentStopwatchTicks;
@@ -2964,9 +2963,7 @@ internal sealed partial class RemoteViewerWindow : Form
             DirectPresentationQualificationFailures:
                 Interlocked.Read(
                     ref _directPresentationQualificationFailureCount),
-            JpegFallbackRequested:
-                Volatile.Read(
-                    ref _jpegFallbackRequested) != 0,
+            JpegFallbackRequested: false,
             TotalDirectHardwareDecodeMilliseconds:
                 Interlocked.Read(
                     ref _directHardwareDecodeStopwatchTicks) *
@@ -3011,9 +3008,16 @@ internal sealed partial class RemoteViewerWindow : Form
     {
         if (!string.IsNullOrWhiteSpace(detail))
         {
-            Volatile.Write(
+            string normalized = detail.Trim();
+            string? previous = Interlocked.Exchange(
                 ref _lastDirectHardwareFailureDetail,
-                detail.Trim());
+                normalized);
+            if (!string.Equals(previous, normalized, StringComparison.Ordinal))
+            {
+                DiagnosticLog.Append(
+                    "VIEWER",
+                    "MF/D3D11 硬解/直显失败：" + TrimDiagnosticDetail(normalized));
+            }
         }
     }
 
@@ -3139,6 +3143,21 @@ internal sealed partial class RemoteViewerWindow : Form
                 }
                 else if (frame.Encoding == RemoteFrameEncoding.H264AnnexB)
                 {
+                    if (_h264Recovery.IsWaiting)
+                    {
+                        if (!_h264Recovery.TryBeginRetry(IsH264RecoveryFrame(frame)))
+                        {
+                            // Drain stale frames instead of building a replay
+                            // queue while the decoder is waiting to recover.
+                            RequestH264KeyFrameIfDue();
+                            continue;
+                        }
+
+                        ResetH264Decoder();
+                        Interlocked.Exchange(ref _mediaFoundationDirectPathDisabled, 0);
+                        _h264DecodeMisses = 0;
+                    }
+
                     bool forceDecoderReset =
                         IsH264RecoveryFrame(frame) &&
                         Interlocked.Exchange(ref _resetH264DecoderOnRecovery, 0) != 0;
@@ -3167,9 +3186,6 @@ internal sealed partial class RemoteViewerWindow : Form
                                 .FrameReady &&
                         directDecode.Frame is not null)
                     {
-                        // A delayed CPU preview must never replace a newer
-                        // directly presented GPU frame after a codec switch.
-                        Interlocked.Increment(ref _softwarePresentationEpoch);
                         _h264DecodeMisses = 0;
                         RemoteFrameMetadata hardwareSourceFrame =
                             directDecode.SourceFrame ??
@@ -3220,6 +3236,19 @@ internal sealed partial class RemoteViewerWindow : Form
                             // path. Do not misclassify its deliberate stale
                             // result as a D3D device failure or overwrite the
                             // capture-target status from a queued UI callback.
+                            continue;
+                        }
+
+                        if (presentResult.Status == D3D11HwndVideoPresenterStatus.SkippedStaleFrame ||
+                            (presentResult.Status == D3D11HwndVideoPresenterStatus.Disposed &&
+                             IsNonFatalRenderThreadPresentationResult(presentResult.Status,
+                                 presentationHandleGeneration, currentHandleGeneration, IsD3DPresentationTargetReady())))
+                        {
+                            // A normal HWND/presenter rebuild can finish between
+                            // decoding and submission, even on the same HWND.
+                            // Drop only the obsolete output; the next frame's
+                            // Ensure call rebuilds against the current target.
+                            RequestH264KeyFrameIfDue();
                             continue;
                         }
 
@@ -3280,6 +3309,7 @@ internal sealed partial class RemoteViewerWindow : Form
                                 hardwareDecodedAt,
                                 hardwarePresentedAt,
                                 presentationGeneration);
+                            _h264Recovery.RecordSuccess();
                             continue;
                         }
 
@@ -3346,32 +3376,10 @@ internal sealed partial class RemoteViewerWindow : Form
                             return;
                         }
 
-                        if (_client.AllowVideoFallback)
-                        {
-                            if (!_h264FallbackRequested)
-                            {
-                                _h264FallbackRequested = true;
-                                Volatile.Write(
-                                    ref _jpegFallbackRequested,
-                                    1);
-                                DiagnosticLog.Append(
-                                    "VIEWER",
-                                    "MF/D3D11 与 ffmpeg 均不可用，已请求 JPEG 回退。");
-                                _ = _client.UpdateViewerVideoCodecsAsync(RemoteVideoCodecs.Jpeg);
-                            }
-
-                            OnUi(() => SetVideoRecoveryStatus(
-                                "MF/D3D11 与 ffmpeg 均不可用，" +
-                                    "正在请求 JPEG 通道",
-                                DangerTextColor));
-                        }
-                        else
-                        {
-                            OnUi(() => SetVideoRecoveryStatus(
-                                "强制 H.264 模式下 MF/D3D11 与 " +
-                                    "ffmpeg 均不可用，且不会回退 JPEG",
-                                DangerTextColor));
-                        }
+                        WindowsFfmpegDependency.StartIfMissing(
+                            message => DiagnosticLog.Append("VIEWER", message));
+                        ScheduleH264DecoderRecovery(
+                            "硬解暂不可用，软件解码组件尚未就绪");
 
                         continue;
                     }
@@ -3427,6 +3435,7 @@ internal sealed partial class RemoteViewerWindow : Form
                     }
 
                     _h264DecodeMisses = 0;
+                    _h264Recovery.RecordSuccess();
                     decoderBackendName = decoder.BackendName;
                     decoderUsesHardwareAcceleration =
                         decoder.UsesHardwareAcceleration;
@@ -3455,7 +3464,7 @@ internal sealed partial class RemoteViewerWindow : Form
             {
                 if (frame.Encoding == RemoteFrameEncoding.H264AnnexB)
                 {
-                    ResetH264Decoder();
+                    ScheduleH264DecoderRecovery(ex.Message);
                 }
 
                 if (_isClosing || IsDisposed)
@@ -3463,7 +3472,10 @@ internal sealed partial class RemoteViewerWindow : Form
                     return;
                 }
 
-                OnUi(() => SetVideoRecoveryStatus($"画面渲染失败，等待下一帧：{ex.Message}", DangerTextColor));
+                if (frame.Encoding != RemoteFrameEncoding.H264AnnexB)
+                {
+                    OnUi(() => SetVideoRecoveryStatus($"画面渲染失败，等待下一帧：{ex.Message}", DangerTextColor));
+                }
             }
             finally
             {
@@ -3486,57 +3498,29 @@ internal sealed partial class RemoteViewerWindow : Form
             (decoderStopped
                 ? FormatDecoderFailure(decoder)
                 : string.Empty);
-        bool fallbackThresholdReached =
-            _h264DecodeMisses >= H264DecodeMissFallbackThreshold;
-        if (!_h264FallbackRequested &&
-            fallbackThresholdReached &&
-            _client.AllowVideoFallback)
+        bool recoveryThresholdReached =
+            _h264DecodeMisses >= H264DecodeMissRecoveryThreshold;
+        if (decoderStopped || recoveryThresholdReached)
         {
-            string fallbackStatus = decoderStopped
-                ? $"H.264 解码反复失步，正在请求回退 JPEG{decoderFailure}"
-                : "H.264 解码连续无画面，正在请求回退 JPEG";
-            _h264FallbackRequested = true;
-            Volatile.Write(
-                ref _jpegFallbackRequested,
-                1);
-            DiagnosticLog.Append(
-                "VIEWER",
-                "H.264 解码连续无画面，已请求 JPEG 回退。");
-            ResetH264Decoder();
-            OnUi(() => SetVideoRecoveryStatus(fallbackStatus, DangerTextColor));
-            _ = _client.UpdateViewerVideoCodecsAsync(
-                RemoteVideoCodecs.Jpeg);
+            ScheduleH264DecoderRecovery("H.264 解码失步" + decoderFailure);
             return;
         }
 
-        if (decoderStopped)
-        {
-            ResetH264Decoder();
-            PrepareForH264DecoderRecovery();
-            if (!_h264FallbackRequested)
-            {
-                RequestH264KeyFrameIfDue();
-            }
-
-            string status = _client.AllowVideoFallback
-                ? $"H.264 解码失步，正在重建并等待关键帧{decoderFailure}"
-                : $"强制 H.264 模式下解码失步，正在重建并等待关键帧{decoderFailure}";
-            OnUi(() => SetVideoRecoveryStatus(status, DangerTextColor));
-            return;
-        }
-
-        if (!_h264FallbackRequested &&
-            (_h264DecodeMisses % H264KeyFrameRequestInterval == 0 ||
-             fallbackThresholdReached))
+        if (_h264DecodeMisses % H264KeyFrameRequestInterval == 0)
         {
             RequestH264KeyFrameIfDue();
-            if (fallbackThresholdReached && !_client.AllowVideoFallback)
-            {
-                OnUi(() => SetVideoRecoveryStatus(
-                    "强制 H.264 模式下连续无画面，已请求关键帧",
-                    DangerTextColor));
-            }
         }
+    }
+
+    private void ScheduleH264DecoderRecovery(string detail)
+    {
+        TimeSpan delay = _h264Recovery.RecordFailure();
+        ResetH264Decoder();
+        PrepareForH264DecoderRecovery();
+        RequestH264KeyFrameIfDue();
+        string status = $"{TrimDiagnosticDetail(detail)}；{delay.TotalSeconds:0} 秒后重试 H.264，不自动切换 JPEG";
+        DiagnosticLog.Append("VIEWER", status);
+        OnUi(() => SetVideoRecoveryStatus(status, DangerTextColor));
     }
 
     private void TrackH264Submission(
@@ -3732,6 +3716,11 @@ internal sealed partial class RemoteViewerWindow : Form
                 .NotAttempted;
         }
 
+        // Retire queued CPU previews BEFORE creating the GPU presenter, not
+        // after DecodeAccessUnit returns. Otherwise a delayed JPEG UI callback
+        // can dispose the new presenter during decoding (same HWND/generation)
+        // and falsely send a healthy H.264 decoder down the failure path.
+        Interlocked.Increment(ref _softwarePresentationEpoch);
         D3D11PresenterEnsureResult presenterResult =
             EnsureD3D11VideoPresenter(
                 decoder,
@@ -4973,7 +4962,7 @@ internal sealed partial class RemoteViewerWindow : Form
                         sourceSize)
                 {
                     return new(
-                        D3D11HwndVideoPresenterStatus.Disposed,
+                        D3D11HwndVideoPresenterStatus.SkippedStaleFrame,
                         HResult: 0,
                         DeviceRemovedReason: null,
                         "The presenter changed before the decoded frame " +
@@ -4989,6 +4978,8 @@ internal sealed partial class RemoteViewerWindow : Form
                         outputSize.Height);
                 if (!resizeResult.IsSuccess)
                 {
+                    if (resizeResult.Status == D3D11HwndVideoPresenterStatus.Disposed && !IsCurrentPresenter())
+                        return resizeResult with { Status = D3D11HwndVideoPresenterStatus.SkippedStaleFrame };
                     return resizeResult;
                 }
             }
@@ -5005,6 +4996,15 @@ internal sealed partial class RemoteViewerWindow : Form
                     captureValidation: true,
                     nativeDetails: nativeDetails,
                     nativeDetailBudget: nativeBudget);
+            bool IsCurrentPresenter()
+            {
+                lock (_d3d11PresenterLock)
+                    return ReferenceEquals(presenter, _d3d11VideoPresenter) &&
+                        _d3d11VideoPresenterDecoderGeneration == decoderGeneration &&
+                        _d3d11VideoPresenterHandleGeneration == handleGeneration;
+            }
+            if (result.Status == D3D11HwndVideoPresenterStatus.Disposed && !IsCurrentPresenter())
+                return result with { Status = D3D11HwndVideoPresenterStatus.SkippedStaleFrame };
             return CanPresentCaptureGeneration(
                     presentationGeneration)
                 ? result
@@ -5347,7 +5347,10 @@ internal sealed partial class RemoteViewerWindow : Form
                     : D3D11HwndVideoValidationResult
                         .NotAttempted;
         }
-        if (!validation.Attempted || !validation.IsValid)
+        // A UI lifecycle transition may retire the just-presented validation
+        // surface. No sample is not the same as sampled invalid pixels.
+        if (!validation.Attempted) return DirectPresentationQualificationDecision.Pending;
+        if (!validation.IsValid)
         {
             Interlocked.Increment(
                 ref _directHardwarePresentationFailureCount);

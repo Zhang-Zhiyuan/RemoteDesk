@@ -1363,7 +1363,8 @@ public final class RemoteDeskViewerActivity extends Activity {
             while (running.get() && isCurrentConnectionOwner(owner)) {
                 RemoteDeskTransport.ProtocolMessage message = RemoteDeskTransport.readMessage(
                     connectedSocket.getInputStream(),
-                    connectedSession);
+                    connectedSession,
+                    owner.receiveProgress);
                 owner.lastInboundNanos.set(System.nanoTime());
                 handleMessage(owner, message);
             }
@@ -2501,10 +2502,22 @@ public final class RemoteDeskViewerActivity extends Activity {
         }
 
         if (owner.fileLiveness.hasInboundTimedOut(now, owner.lastInboundNanos.get())) {
-            AndroidSessionLog.info(
-                "Android viewer authenticated TCP inbound deadline expired; reconnecting.");
-            closeConnectionOwner(owner);
-            return;
+            // Large secure-desktop JPEGs may take longer than a heartbeat on
+            // a slow relay. Partial ciphertext grants only bounded grace; it
+            // does not reset lastInboundNanos or bypass message authentication.
+            if (!owner.receiveProgress.isMakingProgress(now, AndroidViewerHeartbeat.INBOUND_TIMEOUT_NANOS)) {
+                AndroidSessionLog.info(
+                    "Android viewer authenticated TCP inbound deadline expired; reconnecting.");
+                closeConnectionOwner(owner);
+                return;
+            }
+            if (!owner.slowReceiveReported) {
+                AndroidSessionLog.info("Android viewer is receiving a large message; bounded receive grace active.");
+                updateStatus(owner, "画面或数据包仍在接收，等待传输完成…");
+                owner.slowReceiveReported = true;
+            }
+        } else {
+            owner.slowReceiveReported = false;
         }
 
         updateViewerHealth(owner, now);
@@ -3030,6 +3043,8 @@ public final class RemoteDeskViewerActivity extends Activity {
         final AndroidViewerH264Dimensions pendingH264Dimensions =
             new AndroidViewerH264Dimensions();
         final AtomicLong lastInboundNanos;
+        final AndroidMessageReceiveProgress receiveProgress = new AndroidMessageReceiveProgress();
+        boolean slowReceiveReported; // Owned by the watchdog; never shared with a new connection.
         final AtomicLong lastPingNanos;
         final AtomicLong mouseRouteGeneration = new AtomicLong();
         final AtomicLong inputCapabilityGeneration = new AtomicLong();

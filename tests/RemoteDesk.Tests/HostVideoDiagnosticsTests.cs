@@ -54,4 +54,14 @@ public sealed class HostVideoDiagnosticsTests
     [Fact]
     public void DiagnosticReplyCannotBlockInputReadsBehindVideoWrites() =>
         Assert.True(RemoteHostServer.CanInputOvertakeControl(RemoteControlKind.HostVideoDiagnosticsRequest));
+
+    [Fact]
+    public void SupplementalDiagnosticsCannotOverflowTheProtocolLimitOrHideDecoderErrors()
+    {
+        string reply = HostVideoDiagnostics.FormatReply(new string('s', 4096), new string('d', 2000), "MF/D3D11 error" + new string('v', 3000));
+        Assert.Equal(HostVideoDiagnostics.MaximumCharacters, reply.Length);
+        Assert.Contains("MF/D3D11 error", reply);
+        Assert.Equal(reply, RemoteMessageCodec.DecodeControl(RemoteMessageCodec.EncodeHostVideoDiagnostics(reply)).Text);
+        Assert.Equal("session", HostVideoDiagnostics.FormatReply("session", "", ""));
+    }
 }

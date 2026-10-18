@@ -59,7 +59,10 @@ internal enum D3D11HwndVideoPresenterStatus
     DeviceHung,
     DeviceLost,
     Failed,
-    Disposed
+    Disposed,
+    // The decoded frame outlived its window/presenter generation. This is
+    // not a GPU/decoder failure and must not disable the hardware path.
+    SkippedStaleFrame
 }
 
 internal readonly record struct D3D11HwndVideoPresenterResult(
@@ -1359,6 +1362,22 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
             TryCloseHandle(
                 ref _frameLatencyWaitableObject);
             TryDispose(_swapChain);
+            // D3D11 defers destruction even after all of our COM references
+            // have been released. Unbind context-held views and flush once
+            // here before a replacement flip swap chain reuses the same HWND
+            // (for example, when adaptive video switches from 4K to 1080p).
+            // Otherwise CreateSwapChainForHwnd can fail with E_ACCESSDENIED.
+            // This is teardown-only: never flush on the per-frame hot path.
+            // https://learn.microsoft.com/windows/win32/api/d3d11/nf-d3d11-id3d11devicecontext-flush
+            try
+            {
+                _context.ClearState();
+                _context.Flush();
+            }
+            catch
+            {
+                // A removed device must not prevent the remaining releases.
+            }
             TryDispose(_videoContext);
             TryDispose(_videoDevice);
             TryDispose(_context);

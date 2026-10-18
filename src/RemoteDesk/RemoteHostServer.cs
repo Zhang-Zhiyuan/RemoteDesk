@@ -3637,6 +3637,10 @@ internal sealed partial class RemoteHostServer : IDisposable
                         fps,
                         activeSourceFramesPerSecond),
                     activeSourceFramesPerSecond);
+            var reliableFramePacer = new ReliableH264FramePacer(
+                Math.Min(fps, activeSourceFramesPerSecond),
+                enabled: options.GopLength == 1 && ShouldAdaptReliableH264Resolution(
+                    adaptiveQuality, viewerState.Capabilities));
             if (interactiveFrameController.CanBoost)
             {
                 captureLog(
@@ -4101,6 +4105,18 @@ internal sealed partial class RemoteHostServer : IDisposable
                     continue;
                 }
 
+                // Relay TCP cannot retract video already queued in several
+                // socket/TLS hops. Leave headroom by admitting only fresh IDRs
+                // when sustained socket backpressure proves the link is full.
+                // UDP and dependent reference chains retain their own policies.
+                if (!lowLatencyVideo.IsRouteActive &&
+                    !reliableFramePacer.ShouldSendFrame(Stopwatch.GetTimestamp(),
+                        recoveryRequested: awaitingRecoveryHandoff ||
+                            viewerState.KeyFrameRequestVersion != Volatile.Read(ref deliveredKeyFrameRequestVersion)))
+                {
+                    continue;
+                }
+
                 if (!captureState.TryObserveEncodedFrame(
                         sourceTargetVersion,
                         snapshot.Bounds,
@@ -4366,6 +4382,14 @@ internal sealed partial class RemoteHostServer : IDisposable
                         : $"带宽自适应：发送积压已持续缓解，尝试恢复 {nextSize.Width}x{nextSize.Height}；若再次拥塞，本次连接将保持流畅档，避免反复卡顿。");
                     return new H264CaptureLoopResult(H264CaptureLoopExit.ResolutionChanged,
                         Stopwatch.GetElapsedTime(activeRunStartedAt));
+                }
+
+                if (reliableFramePacer.Observe(metricsElapsed, actualFps,
+                        tcpWriteTimings.AverageSocketWriteMilliseconds,
+                        reliableVideo: !lowLatencyVideo.IsRouteActive && tcpWriteTimings.Count == framesInWindow))
+                {
+                    captureLog($"TCP 视频发送档调整为 {reliableFramePacer.FramesPerSecond} FPS：" +
+                        "为输入反馈留出带宽，保留编码画质和分辨率，不重启硬编、不切换 JPEG。");
                 }
 
                 framesInWindow = 0;
@@ -6023,8 +6047,9 @@ internal sealed partial class RemoteHostServer : IDisposable
                 string? diagnostics = viewerState.VideoDiagnostics.TryRead(Environment.TickCount64);
                 if (diagnostics is not null)
                 {
-                    string dependencyStatus = WindowsFfmpegDependency.Status;
-                    if (dependencyStatus.Length != 0) diagnostics += "\n" + dependencyStatus;
+                    diagnostics = HostVideoDiagnostics.FormatReply(diagnostics,
+                        WindowsFfmpegDependency.Status,
+                        WindowsDiagnosticLog.CreateDefault().ReadRecentViewerDecodeFailures());
                     await Protocol.WriteMessageAsync(stream, MessageType.Control,
                         RemoteMessageCodec.EncodeHostVideoDiagnostics(diagnostics), session, writeLock, cancellationToken);
                 }

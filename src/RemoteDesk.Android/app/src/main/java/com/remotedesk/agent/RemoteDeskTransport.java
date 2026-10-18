@@ -214,14 +214,25 @@ final class RemoteDeskTransport {
 
     static ProtocolMessage readMessage(InputStream input, SecureSession session)
         throws IOException, GeneralSecurityException {
+        return readMessage(input, session, null);
+    }
+
+    static ProtocolMessage readMessage(InputStream input, SecureSession session,
+        AndroidMessageReceiveProgress progress) throws IOException, GeneralSecurityException {
         byte[] header = readExact(input, ENCRYPTED_HEADER_LENGTH);
         int encryptedLength = readInt32LittleEndian(header, 0);
         if (encryptedLength < HEADER_LENGTH + AES_TAG_LENGTH || encryptedLength > MAX_ENCRYPTED_BYTES) {
             throw new IOException("RemoteDesk encrypted message length is invalid.");
         }
 
-        byte[] encrypted = readExact(input, encryptedLength);
-        byte[] plain = session.decrypt(encrypted);
+        byte[] plain;
+        try {
+            if (progress != null) progress.begin();
+            byte[] encrypted = readExact(input, encryptedLength, () -> { }, progress);
+            plain = session.decrypt(encrypted);
+        } finally {
+            if (progress != null) progress.end();
+        }
         if (plain.length < HEADER_LENGTH) {
             throw new IOException("RemoteDesk message header is incomplete.");
         }
@@ -999,6 +1010,11 @@ final class RemoteDeskTransport {
         InputStream input,
         int length,
         BeforeAuthenticationRead beforeRead) throws IOException {
+        return readExact(input, length, beforeRead, null);
+    }
+
+    private static byte[] readExact(InputStream input, int length,
+        BeforeAuthenticationRead beforeRead, AndroidMessageReceiveProgress progress) throws IOException {
         byte[] buffer = new byte[length];
         int offset = 0;
         while (offset < length) {
@@ -1009,6 +1025,7 @@ final class RemoteDeskTransport {
             }
 
             offset += read;
+            if (read > 0 && progress != null) progress.advance();
         }
 
         return buffer;

@@ -10,6 +10,16 @@ internal sealed class HostVideoDiagnostics
     private string _metrics = string.Empty;
     private long _lastRequestAt = long.MinValue;
 
+    internal static string FormatReply(string sessionStatus, string dependencyStatus, string viewerFailures)
+    {
+        static string Bound(string value, int limit) => value.Length <= limit ? value : value[..limit];
+        string extra = Bound(dependencyStatus, 600);
+        if (viewerFailures.Length != 0)
+            extra += "\n查看端最近解码错误（历史记录）：\n" + Bound(viewerFailures, 1200);
+        if (extra.Length == 0) return Bound(sessionStatus, MaximumCharacters);
+        return Bound(sessionStatus, MaximumCharacters - extra.Length - 1) + "\n" + extra;
+    }
+
     internal void Record(string message)
     {
         if (string.IsNullOrWhiteSpace(message)) return;

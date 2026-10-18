@@ -200,7 +200,6 @@ internal sealed partial class RemoteViewerClient : IDisposable
     private long _returnedClipboardFileRequestSequence;
     private ReturnedClipboardFileRequestContext? _returnedClipboardFileRequest;
     private bool _returnedClipboardProtocolDesynchronized;
-    private bool _allowVideoFallback = true;
     private RemoteDeviceCapabilities _remoteCapabilities = RemoteDeviceCapabilities.None;
     private int _remoteCapabilitiesInitialized;
     private string? _remoteBuildStamp;
@@ -463,7 +462,6 @@ internal sealed partial class RemoteViewerClient : IDisposable
                     : ConnectTimeout;
     }
 
-    public bool AllowVideoFallback => _allowVideoFallback;
 
     private RemoteScreenAttachment? _screenAttachment;
     private string? _screenSessionToken;
@@ -722,7 +720,6 @@ internal sealed partial class RemoteViewerClient : IDisposable
                     _stream = stream;
                     _session = session;
                     _cancellationTokenSource = cancellationTokenSource;
-                    _allowVideoFallback = true;
                     lock (_returnedClipboardFileRequestLock)
                     {
                         _returnedClipboardProtocolDesynchronized = false;
@@ -771,13 +768,15 @@ internal sealed partial class RemoteViewerClient : IDisposable
                     // UI subscriber while this lock is held. The UI queries connection
                     // state and then deadlocks with the receiver. Queue owned loops
                     // instead; do not cancel their scheduling, since teardown must run.
+                    var receiveProgress = new ProtocolReceiveProgress();
                     receiveLoopTask = Task.Run(() => ReceiveLoopAsync(
                         tcpClient,
                         stream,
                         session,
                         cancellationTokenSource,
                         inputConnectionGeneration,
-                        remoteCapabilitiesReady), CancellationToken.None);
+                        remoteCapabilitiesReady,
+                        receiveProgress), CancellationToken.None);
                     if (!ReferenceEquals(_cancellationTokenSource, cancellationTokenSource))
                     {
                         throw new IOException("连接在后台接收循环启动时已中断。");
@@ -795,7 +794,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
                         tcpClient,
                         stream,
                         session,
-                        cancellationTokenSource), CancellationToken.None);
+                        cancellationTokenSource,
+                        receiveProgress), CancellationToken.None);
                 }
 
                 videoCapabilityLog =
@@ -821,7 +821,6 @@ internal sealed partial class RemoteViewerClient : IDisposable
                     tcpClient,
                     cancellationTokenSource);
                 ClearConnectionState(cancellationTokenSource);
-                _allowVideoFallback = true;
                 TryCancel(cancellationTokenSource);
                 tcpClient?.Close();
                 if (receiveLoopTask is not null)
@@ -858,7 +857,6 @@ internal sealed partial class RemoteViewerClient : IDisposable
                     tcpClient,
                     cancellationTokenSource);
                 ClearConnectionState(cancellationTokenSource);
-                _allowVideoFallback = true;
                 TryCancel(cancellationTokenSource);
                 tcpClient?.Close();
                 if (receiveLoopTask is not null)
@@ -1013,7 +1011,6 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 _inputLoopTask = null;
                 _heartbeatLoopTask = null;
                 _lowLatencyVideoTransport = null;
-                _allowVideoFallback = true;
                 // The notification runs on another thread: retire peer capabilities
                 // and operation reservations before subscribers observe disconnection.
                 ResetRemotePeerState();
@@ -1114,7 +1111,6 @@ internal sealed partial class RemoteViewerClient : IDisposable
             _inputLoopTask = null;
             _heartbeatLoopTask = null;
             _lowLatencyVideoTransport = null;
-            _allowVideoFallback = true;
             ResetRemotePeerState();
             if (ReferenceEquals(_connectedEventOwner, expectedConnection))
             {
@@ -2645,13 +2641,14 @@ internal sealed partial class RemoteViewerClient : IDisposable
         SecureSession ownerSession,
         CancellationTokenSource ownerCancellationTokenSource,
         long inputConnectionGeneration,
-        TaskCompletionSource<bool> remoteCapabilitiesReady)
+        TaskCompletionSource<bool> remoteCapabilitiesReady,
+        ProtocolReceiveProgress receiveProgress)
     {
         try
         {
             while (!ownerCancellationTokenSource.IsCancellationRequested)
             {
-                ProtocolMessage message = await Protocol.ReadMessageAsync(stream, ownerSession, ownerCancellationTokenSource.Token);
+                ProtocolMessage message = await Protocol.ReadMessageAsync(stream, ownerSession, ownerCancellationTokenSource.Token, receiveProgress);
                 MarkMessageReceived();
 
                 switch (message.Type)
@@ -2822,7 +2819,6 @@ internal sealed partial class RemoteViewerClient : IDisposable
                         _inputLoopTask = null;
                         _heartbeatLoopTask = null;
                         _lowLatencyVideoTransport = null;
-                        _allowVideoFallback = true;
                         ResetRemotePeerState();
                         if (ReferenceEquals(_connectedEventOwner, ownerCancellationTokenSource))
                         {
@@ -2915,7 +2911,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
         TcpClient ownerTcpClient,
         NetworkStream stream,
         SecureSession ownerSession,
-        CancellationTokenSource ownerCancellationTokenSource)
+        CancellationTokenSource ownerCancellationTokenSource,
+        ProtocolReceiveProgress receiveProgress)
     {
         Task pingTask = SendPingLoopAsync(
             stream,
@@ -2923,7 +2920,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
             ownerCancellationTokenSource);
         Task watchdogTask = HeartbeatWatchdogLoopAsync(
             ownerTcpClient,
-            ownerCancellationTokenSource);
+            ownerCancellationTokenSource,
+            receiveProgress);
         try
         {
             Task completed = await Task.WhenAny(
@@ -2983,8 +2981,10 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
     private async Task HeartbeatWatchdogLoopAsync(
         TcpClient ownerTcpClient,
-        CancellationTokenSource ownerCancellationTokenSource)
+        CancellationTokenSource ownerCancellationTokenSource,
+        ProtocolReceiveProgress receiveProgress)
     {
+        bool reportedSlowReceive = false;
         while (!ownerCancellationTokenSource.IsCancellationRequested)
         {
             await Task.Delay(
@@ -2998,6 +2998,18 @@ internal sealed partial class RemoteViewerClient : IDisposable
                         IsRemoteClipboardFileRequestPending,
                         IsOutgoingFileTransferPending(ownerCancellationTokenSource))))
             {
+                reportedSlowReceive = false;
+                continue;
+            }
+
+            // A large lock-screen JPEG can take longer than one heartbeat on a
+            // slow relay. Wait only while this connection is actually receiving
+            // bytes, and never beyond the fixed per-message deadline.
+            if (receiveProgress.IsMakingProgress(HeartbeatTimeout))
+            {
+                if (!reportedSlowReceive)
+                    Log?.Invoke("正在接收较大的画面或数据包，等待传输完成…");
+                reportedSlowReceive = true;
                 continue;
             }
 

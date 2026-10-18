@@ -8,6 +8,31 @@ namespace RemoteDesk.Tests;
 public sealed class ViewerRecoveryStatusTests
 {
     [Fact]
+    public async Task RetiredValidationSurfaceDoesNotMarkHealthyHardwareAsFailed()
+    {
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                using var client = new RemoteViewerClient();
+                using var window = new RemoteViewerWindow(client, "validation-race", false, false, false, false, false, false);
+                const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+                object? decision = typeof(RemoteViewerWindow).GetMethod("QualifyDirectPresentation", flags)!
+                    .Invoke(window, [D3D11HwndVideoPresenterStatus.Presented, 1L]);
+                Assert.Equal("Pending", decision!.ToString());
+                Assert.Equal(0, (int)typeof(RemoteViewerWindow).GetField("_mediaFoundationDirectPathDisabled", flags)!.GetValue(window)!);
+                Assert.Equal(0L, (long)typeof(RemoteViewerWindow).GetField("_directHardwarePresentationFailureCount", flags)!.GetValue(window)!);
+                done.TrySetResult();
+            }
+            catch (Exception error) { done.TrySetException(error); }
+        }) { IsBackground = true };
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        await done.Task.WaitAsync(TimeSpan.FromSeconds(15));
+    }
+
+    [Fact]
     public async Task SameBackendRecoveryClearsOnlyItsOwnErrorAndRequestsOneDirectFrameNotification()
     {
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

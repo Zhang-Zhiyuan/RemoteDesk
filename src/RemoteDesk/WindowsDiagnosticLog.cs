@@ -65,6 +65,50 @@ internal sealed class WindowsDiagnosticLog : IDisposable
     public string PreviousLogPath =>
         Path.Combine(_logDirectory, PreviousLogFileName);
 
+    // Explicit authenticated diagnostics only, never the video hot path. Do not
+    // export general log entries (clipboard, paths, credentials, other sessions).
+    // A narrowly allowlisted decoder error survives an app update/restart, so a
+    // failed viewer can be diagnosed without remotely driving its desktop.
+    internal string ReadRecentViewerDecodeFailures()
+    {
+        var failures = new Queue<string>(6);
+        foreach (string path in new[] { PreviousLogPath, CurrentLogPath })
+        {
+            try
+            {
+                using var input = new FileStream(path, FileMode.Open, FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                if (input.Length > 1024 * 1024) continue;
+                // Snapshot the bounded file length; a concurrently growing log
+                // must not turn a diagnostic request into an unbounded read.
+                byte[] bytes = new byte[(int)input.Length];
+                int offset = 0;
+                while (offset < bytes.Length)
+                {
+                    int count = input.Read(bytes, offset, bytes.Length - offset);
+                    if (count == 0) break;
+                    offset += count;
+                }
+                using var lines = new StringReader(Encoding.UTF8.GetString(bytes, 0, offset));
+                while (lines.ReadLine() is { } line)
+                {
+                    line = line.TrimStart('\uFEFF');
+                    // Match the category immediately after our fixed timestamp,
+                    // not a matching substring injected into another message.
+                    if (line.Length < 34 || line[0] != '[' || line[31] != ']') continue;
+                    string message = line[33..];
+                    if (!message.StartsWith("[VIEWER] MF/D3D11 硬解/直显失败：", StringComparison.Ordinal) &&
+                        !message.StartsWith("[VIEWER] H.264 解码失步", StringComparison.Ordinal) &&
+                        !message.StartsWith("[VIEWER] 硬解暂不可用，软件解码组件尚未就绪", StringComparison.Ordinal)) continue;
+                    failures.Enqueue(line.Length <= 192 ? line : line[..191] + "…");
+                    while (failures.Count > 6) failures.Dequeue();
+                }
+            }
+            catch (Exception ex) when (IsLogIoException(ex)) { }
+        }
+        return string.Join("\n", failures);
+    }
+
     public void Append(string category, string message)
     {
         if (string.IsNullOrWhiteSpace(message))

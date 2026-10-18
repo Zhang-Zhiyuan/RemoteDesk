@@ -40,6 +40,8 @@ internal static class Program
         var c = config.RootElement;
         var output = Path.GetFullPath(c.GetProperty("output").GetString()!);
         Directory.CreateDirectory(output);
+        if (args[0] == "reliable-video-pacing") return ReliableVideoPacingProbe.RunAsync(output).GetAwaiter().GetResult();
+        if (args[0] == "relay-video-observe") return RelayVideoObservationProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "ssh-alias-fixture") return SshAliasFixtureProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "ssh-relay-fixture") return SshRelayFixtureProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "multi-screen-loopback") return MultiScreenLoopbackProbe.RunAsync(output).GetAwaiter().GetResult();
@@ -54,6 +56,9 @@ internal static class Program
         if (args[0] == "relay-windows-update") return RelayWindowsUpdateProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "relay-names") return RelayNamesProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "secure-desktop") return WindowsSecureDesktopProbe.Run(c.Clone(), output);
+        if (args[0] == "display-wake") return DisplayWakeProbe.Run(c.Clone(), output);
+        if (args[0] == "relay-screen-observe") return DisplayWakeProbe.ObserveRelayAsync(c.Clone(), output).GetAwaiter().GetResult();
+        if (args[0] == "relay-diagnostic-ui") return RelayDiagnosticUiProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "desktop-status")
         {
             Save(Path.Combine(output, "desktop.json"), new {

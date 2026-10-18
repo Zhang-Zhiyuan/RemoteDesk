@@ -39,6 +39,55 @@ internal readonly record struct ServerAuthenticationResult(SecureSession? Sessio
     public bool IsAuthenticated => Session is not null;
 }
 
+// One instance per connection, shared only by its reader and heartbeat watchdog.
+// Ciphertext progress is NOT authenticated liveness. It only grants bounded time
+// to finish a large message; a stalled/trickling peer must still be disconnected.
+internal sealed class ProtocolReceiveProgress(TimeProvider? clock = null)
+{
+    internal static readonly TimeSpan MaximumMessageDuration = TimeSpan.FromSeconds(90);
+    private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+    private readonly object _sync = new();
+    private long _startedAt, _lastProgressAt;
+    private bool _active, _receivedBytes;
+
+    internal void Begin()
+    {
+        lock (_sync)
+        {
+            _startedAt = _clock.GetTimestamp();
+            _receivedBytes = false;
+            _active = true;
+        }
+    }
+
+    internal void Advance()
+    {
+        lock (_sync)
+        {
+            _lastProgressAt = _clock.GetTimestamp();
+            _receivedBytes = true;
+        }
+    }
+
+    internal void End()
+    {
+        lock (_sync) _active = false;
+    }
+
+    internal bool IsMakingProgress(TimeSpan idleTimeout)
+    {
+        lock (_sync)
+        {
+            if (!_active || !_receivedBytes) return false;
+            long now = _clock.GetTimestamp();
+            TimeSpan elapsed = _clock.GetElapsedTime(_startedAt, now);
+            TimeSpan idle = _clock.GetElapsedTime(_lastProgressAt, now);
+            return elapsed >= TimeSpan.Zero && elapsed < MaximumMessageDuration &&
+                idle >= TimeSpan.Zero && idle <= idleTimeout;
+        }
+    }
+}
+
 internal static class Protocol
 {
     public const int DefaultPort = 56565;
@@ -480,7 +529,8 @@ internal static class Protocol
     public static async Task<ProtocolMessage> ReadMessageAsync(
         NetworkStream stream,
         SecureSession session,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ProtocolReceiveProgress? progress = null)
     {
         byte[] encryptedHeader = ArrayPool<byte>.Shared.Rent(EncryptedHeaderLength);
         int encryptedLength;
@@ -503,11 +553,13 @@ internal static class Protocol
         byte[] plainMessage;
         try
         {
-            await ReadExactAsync(stream, encryptedBuffer.AsMemory(0, encryptedLength), cancellationToken);
+            progress?.Begin();
+            await ReadExactAsync(stream, encryptedBuffer.AsMemory(0, encryptedLength), cancellationToken, progress);
             plainMessage = session.Decrypt(encryptedBuffer.AsSpan(0, encryptedLength));
         }
         finally
         {
+            progress?.End();
             ArrayPool<byte>.Shared.Return(encryptedBuffer);
         }
 
@@ -559,7 +611,8 @@ internal static class Protocol
         return buffer;
     }
 
-    private static async Task ReadExactAsync(NetworkStream stream, Memory<byte> buffer, CancellationToken cancellationToken)
+    private static async Task ReadExactAsync(NetworkStream stream, Memory<byte> buffer, CancellationToken cancellationToken,
+        ProtocolReceiveProgress? progress = null)
     {
         int offset = 0;
 
@@ -572,6 +625,7 @@ internal static class Protocol
             }
 
             offset += read;
+            progress?.Advance();
         }
     }
 

@@ -15,6 +15,10 @@ internal static class RelayWindowsUpdateProbe
             string.IsNullOrWhiteSpace(expectedServer.GetString()) || saved.ServerAddress != expectedServer.GetString() ||
             string.IsNullOrEmpty(saved.SshHostKeySha256))
             throw new InvalidOperationException("Unexpected saved relay identity; nothing changed.");
+        // Unlike MainForm, this isolated tool has not initialized the persisted
+        // device identity. Do so before distinguishing owned-host maintenance
+        // from a different machine; the class default is intentionally random.
+        RemoteDeviceIdentity.LocalId = saved.DeviceId;
         var options = new RelayConnectionOptions(saved.ServerAddress, saved.RelayPort,
             AppSettingsService.UnprotectSecret(saved.ProtectedAccessToken), saved.TlsCertificateSha256!,
             saved.DeviceId).Validate();
@@ -46,6 +50,10 @@ internal static class RelayWindowsUpdateProbe
         if (!config.TryGetProperty("action", out var action) || action.GetString() == "inventory") return 0;
         bool verificationOnly = action.GetString() == "verify";
         if (!verificationOnly && action.GetString() != "apply") throw new InvalidOperationException("Unknown maintenance action.");
+        int transferTimeoutSeconds = config.TryGetProperty("transferTimeoutSeconds", out var transferTimeout)
+            ? transferTimeout.GetInt32() : 600;
+        if (transferTimeoutSeconds is < 60 or > 5400)
+            throw new ArgumentOutOfRangeException(nameof(transferTimeoutSeconds), "Transfer deadline must be between 60 and 5400 seconds.");
 
         string package = Path.GetFullPath(config.GetProperty("package").GetString()!);
         string expectedHash = config.GetProperty("sha256").GetString()!;
@@ -74,13 +82,16 @@ internal static class RelayWindowsUpdateProbe
                 ["beforeBuild"] = device.BuildStamp, ["expectedBuild"] = expectedBuild,
                 ["route"] = "Public relay TLS/TCP only; no IP/direct fallback", ["startedAtUtc"] = DateTimeOffset.UtcNow
             };
+            if (RemoteDeviceIdentity.Same(device.DeviceId, RemoteDeviceIdentity.LocalId))
+                result["route"] = "Authenticated local loopback for owned-host installation; pinned public relay for post-update verification";
             try
             {
                 if (device.Busy && !allowSessionTakeover)
                     throw new InvalidOperationException("Device has an active session; no update sent.");
                 result["sessionTakeoverExplicitlyAllowed"] = allowSessionTakeover;
                 if (credentials.Count == 0) throw new InvalidOperationException("No saved or supplied device key; no authentication attempted.");
-                await ApplyAsync(options with { DeviceId = device.DeviceId }, device, credentials, package, expectedBuild, result, verificationOnly);
+                await ApplyAsync(options with { DeviceId = device.DeviceId }, device, credentials, package, expectedBuild, result,
+                    verificationOnly, TimeSpan.FromSeconds(transferTimeoutSeconds), output);
                 result["success"] = true;
             }
             catch (Exception error)
@@ -101,17 +112,18 @@ internal static class RelayWindowsUpdateProbe
 
     private static async Task ApplyAsync(RelayConnectionOptions target, RelayOnlineDevice device,
         List<(string Source, string Secret)> credentials, string package, string expectedBuild,
-        Dictionary<string, object?> result, bool verificationOnly)
+        Dictionary<string, object?> result, bool verificationOnly, TimeSpan transferTimeout, string output)
     {
         string? authenticatedKey = null;
         RemoteViewerClient? connected = null;
         RemoteDeviceDescriptor? before = null;
         foreach (var credential in credentials.DistinctBy(item => item.Secret).Take(4))
         {
-            var attempt = new RemoteViewerClient();
+            bool ownHost = RemoteDeviceIdentity.Same(target.DeviceId, RemoteDeviceIdentity.LocalId);
+            var attempt = new RemoteViewerClient(allowLocalConnectionsForTesting: ownHost);
             try
             {
-                before = await ConnectAndIdentifyAsync(attempt, target, credential.Secret);
+                before = await ConnectAndIdentifyAsync(attempt, target, credential.Secret, localMaintenance: ownHost);
                 authenticatedKey = credential.Secret;
                 connected = attempt;
                 result["credentialSource"] = credential.Source;
@@ -162,14 +174,58 @@ internal static class RelayWindowsUpdateProbe
                     if (success && message.Contains("正在应用远程更新", StringComparison.Ordinal)) accepted.TrySetResult(true);
                 };
                 Console.WriteLine($"SENDING {device.MachineName}: {before.BuildStamp} -> {expectedBuild}");
+                result["transferDeadlineSeconds"] = transferTimeout.TotalSeconds;
+                long sentBytes = 0;
+                long totalBytes = new FileInfo(package).Length;
+                var transferWatch = Stopwatch.StartNew();
+                long lastProgressMs = 0;
+                void ObserveProgress(RemoteFileTransferTaskSnapshot progress)
+                {
+                    if (progress.Direction != RemoteFileTransferDirection.Upload) return;
+                    long previous = Interlocked.Exchange(ref sentBytes, progress.BytesTransferred);
+                    if (progress.BytesTransferred > previous)
+                        Interlocked.Exchange(ref lastProgressMs, transferWatch.ElapsedMilliseconds);
+                }
+                connected.FileTransferTaskChanged += ObserveProgress;
                 Task sending = connected.SendRemoteUpdateAsync(package);
-                Task first = await Task.WhenAny(sending, failed.Task, Task.Delay(TimeSpan.FromMinutes(10)));
+                Task first;
+                try
+                {
+                    while (true)
+                    {
+                        if (sending.IsCompleted) { first = sending; break; }
+                        TimeSpan remaining = transferTimeout - transferWatch.Elapsed;
+                        if (remaining <= TimeSpan.Zero) { first = Task.CompletedTask; break; }
+                        Task tick = Task.Delay(remaining < TimeSpan.FromSeconds(30) ? remaining : TimeSpan.FromSeconds(30));
+                        first = await Task.WhenAny(sending, failed.Task, disconnected.Task, tick);
+                        if (first != tick) break;
+                        long bytes = Interlocked.Read(ref sentBytes);
+                        double elapsedSeconds = transferWatch.Elapsed.TotalSeconds;
+                        Program.Save(Path.Combine(output, device.DeviceId + "-transfer-progress.json"), new
+                        {
+                            device.DeviceId, device.MachineName, expectedBuild,
+                            locallySentBytes = bytes, totalBytes,
+                            elapsedSeconds, deadlineSeconds = transferTimeout.TotalSeconds,
+                            confirmedInstalled = false,
+                            scope = "Local transport progress only; not remote receipt or installation confirmation"
+                        });
+                        Console.WriteLine($"PROGRESS {device.MachineName}: locally sent {bytes / 1048576d:F1}/{totalBytes / 1048576d:F1} MiB, elapsed {elapsedSeconds:F0}s; installation not yet confirmed");
+                        if (transferWatch.ElapsedMilliseconds - Interlocked.Read(ref lastProgressMs) > 180_000)
+                        {
+                            first = Task.CompletedTask;
+                            break;
+                        }
+                    }
+                }
+                finally { connected.FileTransferTaskChanged -= ObserveProgress; }
                 if (first != sending)
                 {
+                    bool connectionEnded = disconnected.Task.IsCompleted;
                     await connected.DisconnectAsync();
                     try { await sending; } catch { /* teardown terminates the owned transfer */ }
                     if (failed.Task.IsCompletedSuccessfully) throw new IOException(failed.Task.Result);
-                    throw new TimeoutException("Bounded package transfer deadline exceeded.");
+                    if (connectionEnded) throw new IOException("Connection ended before package send completed.");
+                    throw new TimeoutException("Bounded package transfer deadline or 180-second no-progress limit exceeded.");
                 }
                 await sending;
                 result["packageSentAtUtc"] = DateTimeOffset.UtcNow;
@@ -199,7 +255,8 @@ internal static class RelayWindowsUpdateProbe
                 RelayOnlineDevice? current = online.SingleOrDefault(item => item.DeviceId == target.DeviceId);
                 lastBuild = current?.BuildStamp;
                 if (current?.BuildStamp != expectedBuild) continue;
-                using var verifier = new RemoteViewerClient();
+                using var verifier = new RemoteViewerClient(allowLocalConnectionsForTesting:
+                    RemoteDeviceIdentity.Same(target.DeviceId, RemoteDeviceIdentity.LocalId));
                 var recentLog = new System.Collections.Concurrent.ConcurrentQueue<string>();
                 long frames = 0;
                 TimeSpan? lastRtt = null;
@@ -258,7 +315,7 @@ internal static class RelayWindowsUpdateProbe
     }
 
     private static async Task<RemoteDeviceDescriptor> ConnectAndIdentifyAsync(RemoteViewerClient client,
-        RelayConnectionOptions target, string secret)
+        RelayConnectionOptions target, string secret, bool localMaintenance = false)
     {
         var identity = new TaskCompletionSource<RemoteDeviceDescriptor>(TaskCreationOptions.RunContinuationsAsynchronously);
         void Observe(RemoteDeviceDescriptor value)
@@ -269,7 +326,15 @@ internal static class RelayWindowsUpdateProbe
         try
         {
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
-            await client.ConnectViaRelayAsync(target, secret, ViewerVideoMode.Automatic, deadline.Token);
+            if (localMaintenance)
+            {
+                if (!RemoteDeviceIdentity.Same(target.DeviceId, RemoteDeviceIdentity.LocalId))
+                    throw new InvalidOperationException("Loopback maintenance is only for the explicitly selected local device.");
+                await client.ConnectAsync("127.0.0.1", new AppSettingsService().Load().Host.Port,
+                    secret, ViewerVideoMode.StableJpeg, deadline.Token);
+            }
+            else
+                await client.ConnectViaRelayAsync(target, secret, ViewerVideoMode.Automatic, deadline.Token);
             RemoteDeviceDescriptor descriptor = await identity.Task.WaitAsync(TimeSpan.FromSeconds(20), deadline.Token);
             if (descriptor.Platform != RemoteDevicePlatforms.Windows || !RemoteDeviceIdentity.Same(descriptor.DeviceId, target.DeviceId))
                 throw new InvalidOperationException("Authenticated platform/device identity differs from the selected Windows node.");
