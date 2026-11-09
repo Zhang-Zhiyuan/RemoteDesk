@@ -27,7 +27,10 @@ internal sealed partial class RemoteHostServer
         bool supported = viewer.Capabilities.HasFlag(RemoteDeviceCapabilities.NativeDetailV1) &&
             codecs.HasFlag(RemoteVideoCodecs.H264AnnexB) && snapshot.IsAvailable && !snapshot.Target.IsAllScreens &&
             snapshot.Bounds.Width is >= 48 and <= 8192 && snapshot.Bounds.Height is >= 48 and <= 8192 &&
-            (long)snapshot.Bounds.Width * snapshot.Bounds.Height <= 16_777_216;
+            (long)snapshot.Bounds.Width * snapshot.Bounds.Height <= 16_777_216 &&
+            WindowsInteractiveDesktopProbe.InspectCurrent().IsAvailable;
+        // Do not let the worker supervisor restart DDA/MF on the secure
+        // desktop. Those retries can interrupt the working H.264 fallback.
         NativeCaptureProfile? profile = null;
         if (supported && WindowsGraphicsCaptureTargetResolver.TryResolveCandidates(snapshot.Target.Id, snapshot.Bounds,
                 out _, out WindowsDesktopDuplicationTarget? target, out _) && target is not null)
