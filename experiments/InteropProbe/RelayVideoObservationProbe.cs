@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text.Json;
 using RemoteDesk;
 
@@ -37,11 +38,19 @@ internal static class RelayVideoObservationProbe
         var samples = new List<object>();
         var clock = Stopwatch.StartNew();
         long frames = 0, h264 = 0, jpeg = 0, bytes = 0, rttMicroseconds = 0;
+        long identicalH264Frames = 0;
+        byte[]? previousH264Hash = null;
         client.DeviceInfoReceived += value => { if (value.DeviceId is not null) identity.TrySetResult(value); };
         client.FrameReceived += frame =>
         {
             Interlocked.Increment(ref frames);
-            if (frame.Encoding == RemoteFrameEncoding.H264AnnexB) Interlocked.Increment(ref h264);
+            if (frame.Encoding == RemoteFrameEncoding.H264AnnexB)
+            {
+                Interlocked.Increment(ref h264);
+                byte[] hash = SHA256.HashData(frame.EncodedBuffer.AsSpan(frame.EncodedOffset, frame.EncodedLength));
+                if (previousH264Hash?.AsSpan().SequenceEqual(hash) == true) Interlocked.Increment(ref identicalH264Frames);
+                previousH264Hash = hash;
+            }
             else Interlocked.Increment(ref jpeg);
             Interlocked.Add(ref bytes, frame.EncodedLength);
             if (firstFrames.Count < 6) firstFrames.Enqueue(new { atSeconds = clock.Elapsed.TotalSeconds,
@@ -72,7 +81,7 @@ internal static class RelayVideoObservationProbe
             await Task.Delay(1500, deadline.Token);
             Program.Save(Path.Combine(output, "observation.json"), new { deviceId = id, info.BuildStamp,
                 scope = "Authenticated public-relay video receipt and host diagnostics; no hardware rendering or user-input latency measurement",
-                frames, h264, jpeg, samples, firstFrames = firstFrames.ToArray(), logs = logs.ToArray(),
+                frames, h264, jpeg, identicalH264Frames, samples, firstFrames = firstFrames.ToArray(), logs = logs.ToArray(),
                 diagnostics = diagnostics.ToArray(), connectedAtEnd = client.IsConnected });
             return frames > 0 ? 0 : 1;
         }
