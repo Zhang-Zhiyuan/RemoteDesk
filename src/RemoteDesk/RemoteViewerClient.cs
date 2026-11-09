@@ -603,9 +603,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 ref _lastSessionRejection,
                 null);
 
-            string? ffmpegPath = videoMode == ViewerVideoMode.StableJpeg ? null : FfmpegH264Decoder.AvailablePath;
+            string? ffmpegPath = FfmpegH264Decoder.AvailablePath;
             bool hasNativeHardwareDecoder =
-                videoMode != ViewerVideoMode.StableJpeg &&
                 MediaFoundationD3D11H264Decoder
                     .IsPlatformPotentiallySupported;
             RemoteVideoCodecs supportedVideoCodecs =
@@ -613,6 +612,11 @@ internal sealed partial class RemoteViewerClient : IDisposable
                     videoMode,
                     ffmpegPath,
                     hasNativeHardwareDecoder);
+            if (supportedVideoCodecs == RemoteVideoCodecs.None)
+            {
+                WindowsFfmpegDependency.StartIfMissing(message => Log?.Invoke(message));
+                throw new InvalidOperationException("本机缺少 H.264 解码组件，正在准备组件，请稍后重试连接。");
+            }
             TcpClient? tcpClient = null;
             var cancellationTokenSource = new CancellationTokenSource();
             SecureSession? session = null;
@@ -5071,16 +5075,9 @@ internal sealed partial class RemoteViewerClient : IDisposable
         bool hasH264Decoder =
             hasNativeHardwareDecoder ||
             hasFfmpeg;
-        return videoMode switch
-        {
-            ViewerVideoMode.StableJpeg => RemoteVideoCodecs.Jpeg,
-            // The legacy H.264-only setting stranded locked Windows hosts,
-            // whose privileged capture bridge produces JPEG. Codec preference
-            // must never remove that recovery path or reject a JPEG-only peer.
-            _ => hasH264Decoder
-                ? RemoteVideoCodecs.Jpeg | RemoteVideoCodecs.H264AnnexB
-                : RemoteVideoCodecs.Jpeg
-        };
+        // All persisted choices now select H.264. The JPEG decoder is kept
+        // only to read old peers during a rolling upgrade, never requested.
+        return hasH264Decoder ? RemoteVideoCodecs.H264AnnexB : RemoteVideoCodecs.None;
     }
 
     internal static RemoteDeviceCapabilities ResolveLocalViewerCapabilities(
@@ -5120,18 +5117,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
             FormatLocalH264DecoderAvailability(
                 hasNativeHardwareDecoder,
                 ffmpegPath);
-        return videoMode switch
-        {
-            ViewerVideoMode.StableJpeg => $"查看端视频能力：{formattedCodecs}，稳定 JPEG 模式",
-            ViewerVideoMode.ForceH264 =>
-                $"查看端视频能力：{formattedCodecs}，旧 H.264 选项已兼容自动回退，{decoderDetail}",
-            _ => supportedVideoCodecs.HasFlag(
-                    RemoteVideoCodecs.H264AnnexB)
-                ? $"查看端视频能力：{formattedCodecs}，自动低延迟" +
-                    $"模式，{decoderDetail}"
-                : $"查看端视频能力：{formattedCodecs}，自动低延迟" +
-                    "模式，本机无 H.264 解码器，使用 JPEG"
-        };
+        return $"查看端视频能力：{formattedCodecs}，H.264 硬件优先，{decoderDetail}";
     }
 
     private static string FormatLocalH264DecoderAvailability(

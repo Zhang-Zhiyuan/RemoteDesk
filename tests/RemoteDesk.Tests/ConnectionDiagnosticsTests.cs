@@ -59,10 +59,10 @@ public sealed class ConnectionDiagnosticsTests
 
         Assert.Contains("直显 Present=3", report);
         Assert.Contains("目标=10.0.0.5:56565", report);
-        Assert.Contains("模式=自动低延迟（兼容旧 H.264 选项）", report);
+        Assert.Contains("模式=H.264（硬件优先）", report);
         Assert.Contains("范围=窗口生命周期累计", report);
         Assert.Contains("资格窗口 尝试=4，成功=3，失败=1", report);
-        Assert.Contains("JPEG 回退=未请求（旧 H.264 选项：允许锁屏/解码故障时自动兼容）", report);
+        Assert.Contains("JPEG 回退=未请求（旧版遥测字段；新版不自动切换 JPEG）", report);
         Assert.Contains("直显路径=已禁用", report);
         Assert.Contains("实际 decoder=Software", report);
         Assert.Contains("12.5 ms", report);
@@ -110,8 +110,8 @@ public sealed class ConnectionDiagnosticsTests
                 telemetry,
                 IsWindowLifetimeCumulative: true));
 
-        Assert.Contains("视频模式：自动低延迟（兼容旧 H.264 选项）", report);
-        Assert.Contains("模式=自动低延迟", report);
+        Assert.Contains("视频模式：H.264（硬件优先）", report);
+        Assert.Contains("模式=H.264（硬件优先）", report);
         Assert.Contains("JPEG 回退=已请求", report);
         Assert.DoesNotContain(
             "异常：强制 H.264 不应请求 JPEG",
@@ -184,10 +184,10 @@ public sealed class ConnectionDiagnosticsTests
             ["192.0.2.10"],
             []);
 
-        Assert.Contains("视频模式：自动低延迟（兼容旧 H.264 选项）", report);
+        Assert.Contains("视频模式：H.264（硬件优先）", report);
         Assert.Contains("未找到 ffmpeg 回退", report);
-        Assert.Contains("当前可使用 JPEG 正常连接", report);
-        Assert.Contains("更新显卡驱动、安装 ffmpeg", report);
+        Assert.Contains("缺少 H.264 解码组件", report);
+        Assert.DoesNotContain("使用 JPEG 正常连接", report);
     }
 
     [Fact]
@@ -262,7 +262,8 @@ public sealed class ConnectionDiagnosticsTests
 
         Assert.Contains("被控端正在监听", report);
         Assert.Contains("当前状态可连接", report);
-        Assert.Contains("稳定 JPEG 模式不会启用", report);
+        Assert.Contains("H.264 解码", report);
+        Assert.DoesNotContain("稳定 JPEG", report);
     }
 
     [Fact]

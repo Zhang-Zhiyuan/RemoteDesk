@@ -1300,7 +1300,7 @@ public sealed class RemoteViewerClientLoopbackTests
         await client.ConnectAsync(IPAddress.Loopback.ToString(), port, LoopbackPassword, ViewerVideoMode.StableJpeg);
 
         Assert.True(await connectedChanged.Task.WaitAsync(timeout.Token));
-        Assert.Equal(RemoteVideoCodecs.Jpeg, await viewerInfoReceived.Task.WaitAsync(timeout.Token));
+        Assert.Equal(RemoteVideoCodecs.H264AnnexB, await viewerInfoReceived.Task.WaitAsync(timeout.Token));
 
         RemoteDeviceDescriptor device = await deviceReceived.Task.WaitAsync(timeout.Token);
         Assert.Equal("android-loopback", device.MachineName);
@@ -3077,7 +3077,7 @@ public sealed class RemoteViewerClientLoopbackTests
         await client.ReadRemoteClipboardAsync();
 
         LoopbackViewerCommands commands = await receivedCommands.Task.WaitAsync(timeout.Token);
-        Assert.Equal(RemoteVideoCodecs.Jpeg, commands.ViewerCodecs);
+        Assert.Equal(RemoteVideoCodecs.H264AnnexB, commands.ViewerCodecs);
         Assert.Equal(3, textInput.SentCodePoints);
         Assert.False(textInput.Truncated);
         Assert.Contains(commands.Inputs, input => input.Kind == RemoteInputKind.MouseMove && input.X == 30 && input.Y == 40);

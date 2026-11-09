@@ -28,7 +28,7 @@ internal sealed partial class RemoteHostServer : IDisposable
         HardwareH264ProbeExecutionDeadline =
             TimeSpan.FromMilliseconds(16_500);
     internal static readonly TimeSpan InitialViewerInfoGracePeriod =
-        TimeSpan.FromMilliseconds(50);
+        TimeSpan.FromSeconds(20);
     internal static readonly TimeSpan InitialViewerInfoPreviewGracePeriod =
         TimeSpan.FromSeconds(2);
     internal static readonly TimeSpan
@@ -2331,12 +2331,6 @@ internal sealed partial class RemoteHostServer : IDisposable
         bool CanAttemptHardwareH264OnCurrentDesktop(
             RemoteVideoCodecs supportedCodecs)
         {
-            if (!SupportsSecureDesktopJpegRecovery(
-                    supportedCodecs, viewerState.Capabilities))
-            {
-                return true;
-            }
-
             long now = Stopwatch.GetTimestamp();
             if (interactiveDesktopCheckedAt == 0 ||
                 Stopwatch.GetElapsedTime(
@@ -2356,7 +2350,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                         interactiveDesktopAvailability.IsAvailable
                             ? "Windows 交互桌面已恢复，允许重新探测 H.264。"
                             : "Windows 当前为锁屏、UAC 或安全桌面；" +
-                              "已暂停 H.264 编码探测并保留 JPEG 会话，" +
+                              "改用安全桌面采集和 H.264 备用编码，" +
                               "避免后台反复启动编码器。详情：" +
                               interactiveDesktopAvailability.Diagnostic);
                 }
@@ -2368,6 +2362,8 @@ internal sealed partial class RemoteHostServer : IDisposable
         await viewerState.WaitForInitialVideoSelectionAsync(
             InitialViewerInfoGracePeriod,
             cancellationToken);
+        if (!viewerState.IsVideoSelectionReady)
+            throw new TimeoutException("查看端未完成视频协商，请更新查看端后重试。");
         await viewerState.WaitForInitialCapabilitiesAsync(
             InitialViewerCapabilitiesGracePeriod,
             cancellationToken);
@@ -2457,7 +2453,8 @@ internal sealed partial class RemoteHostServer : IDisposable
                 resolutionController ??= new AdaptiveH264ResolutionController(
                     CalculateH264FrameSize(captureState.LastCaptureBounds, scalePercent),
                     effectiveFramesPerSecond,
-                    ShouldAdaptReliableH264Resolution(adaptiveQuality, viewerState.Capabilities));
+                    ShouldAdaptReliableH264Resolution(adaptiveQuality, viewerState.Capabilities),
+                    startReduced: true);
                 H264CaptureLoopResult captureResult =
                     await RunHardwareH264CaptureLoopAsync(
                         stream,
@@ -2567,15 +2564,10 @@ internal sealed partial class RemoteHostServer : IDisposable
                     (long)hardwareRetryDelay
                         .TotalMilliseconds;
                 captureLog(
-                    "当前先使用 JPEG 兼容画面；" +
+                    "当前先使用 H.264 备用编码；" +
                     $"{hardwareRetryDelay.TotalSeconds:0} 秒后将自动重探 GPU H.264，" +
                     "无需断开连接。");
                 codecs = currentSelection.SupportedCodecs;
-                if (!codecs.HasFlag(RemoteVideoCodecs.Jpeg))
-                {
-                    throw new InvalidOperationException(
-                        "查看端仅允许 H.264，但当前 Windows 硬件编码链路不可用。");
-                }
             }
 
             await RunJpegCaptureLoopAsync(
@@ -2633,7 +2625,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                     }
 
                     captureLog(
-                        "JPEG 兼容期结束，正在自动重探 Windows GPU H.264 链路。");
+                        "备用编码期结束，正在自动重探 Windows GPU H.264 链路。");
                     failedTargetVersion =
                         int.MinValue;
                     failedCodecVersion =
@@ -2645,7 +2637,9 @@ internal sealed partial class RemoteHostServer : IDisposable
                 captureLog,
                 cancellationToken,
                 startupPreviewOnly:
-                    !initialVideoSelectionPreviewCompleted && codecVersion == 0);
+                    !initialVideoSelectionPreviewCompleted && codecVersion == 0,
+                encodeH264: codecs.HasFlag(RemoteVideoCodecs.H264AnnexB),
+                keyFrameRequestVersion: () => viewerState.KeyFrameRequestVersion);
 
             if (!initialVideoSelectionPreviewCompleted && codecVersion == 0)
             {
@@ -3491,37 +3485,7 @@ internal sealed partial class RemoteHostServer : IDisposable
         FfmpegDesktopH264CaptureStartResult start;
         try
         {
-            if (sourceSelection.SupportedCodecs.HasFlag(
-                    RemoteVideoCodecs.Jpeg))
-            {
-                captureLog(
-                    "正在后台探测 Windows H.264 硬编码；TCP 先发送一张 JPEG 预览，等待硬编码出图。");
-                await RunJpegCaptureLoopAsync(
-                    stream,
-                    session,
-                    writePriority,
-                    captureState,
-                    captureTargetPublicationCoordinator,
-                    scalePercent,
-                    fps,
-                    jpegQuality,
-                    viewerState.Capabilities,
-                    adaptiveQuality,
-                    lowLatencyVideo,
-                    () =>
-                    {
-                        return startupTask.IsCompleted ||
-                            !IsH264SelectionCurrent(
-                                captureState,
-                                viewerState,
-                                snapshot.Version,
-                                sourceCodecVersion);
-                    },
-                    captureLog,
-                    cancellationToken,
-                    startupPreviewOnly: true);
-            }
-
+            captureLog("正在启动 H.264 编码，首帧直接使用 H.264。");
             start = await startupTask.ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -3561,7 +3525,7 @@ internal sealed partial class RemoteHostServer : IDisposable
         if (start.Capture is not { } capture)
         {
             captureLog(
-                "Windows H.264 硬编码不可用，回退 JPEG：" +
+                "Windows H.264 硬编码不可用，准备备用编码：" +
                 start.FailureDetail);
             return new H264CaptureLoopResult(
                 H264CaptureLoopExit.StartupUnavailable,
@@ -3975,7 +3939,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                             ? "ffmpeg 捕获进程已停止或画面输出超时。"
                             : activeCapture.FailureDetail;
                     captureLog(
-                        "Windows H.264 硬编码中断，回退 JPEG：" +
+                        "Windows H.264 硬编码中断，正在恢复 H.264：" +
                         detail);
                     return CreateH264RuntimeFailureResult(
                         activeCapture,
@@ -4534,7 +4498,9 @@ internal sealed partial class RemoteHostServer : IDisposable
         Func<bool> shouldSwitchToH264,
         Action<string> captureLog,
         CancellationToken cancellationToken,
-        bool startupPreviewOnly = false)
+        bool startupPreviewOnly = false,
+        bool encodeH264 = false,
+        Func<int>? keyFrameRequestVersion = null)
     {
         int initialScalePercent = ChooseInitialAdaptiveScale(
             captureState.CurrentTarget.Bounds,
@@ -4567,8 +4533,11 @@ internal sealed partial class RemoteHostServer : IDisposable
         double frameMillisecondsInWindow = 0;
         var tcpWriteTimings = new ProtocolFrameWriteTimingsWindow();
         long metricsWindowStartedAt = Stopwatch.GetTimestamp();
+        CapturedFrameH264Encoder? fallbackEncoder = null;
+        long encoderRetryAt = 0;
+        int observedKeyFrameRequest = keyFrameRequestVersion?.Invoke() ?? 0;
 
-        if (adaptiveQuality)
+        if (adaptiveQuality && !encodeH264)
         {
             captureLog(
                 $"自适应画质/帧率已开启，目标 {fps} FPS，" +
@@ -4576,7 +4545,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                 $"{ScreenCaptureService.FormatScaleMode(scalePercent)}。");
         }
 
-        if (highQualityJpeg && negotiatedJpegQuality > jpegQuality)
+        if (!encodeH264 && highQualityJpeg && negotiatedJpegQuality > jpegQuality)
         {
             captureLog(
                 $"查看端已启用 JPEG 清晰优先：" +
@@ -4586,7 +4555,8 @@ internal sealed partial class RemoteHostServer : IDisposable
         }
 
         await Task.Yield();
-
+        try
+        {
         while (!cancellationToken.IsCancellationRequested)
         {
             if (shouldSwitchToH264())
@@ -4606,13 +4576,23 @@ internal sealed partial class RemoteHostServer : IDisposable
             bool secureDesktop = WindowsSecureDesktopClient.IsRequired;
             if (secureDesktop && frameInterval < TimeSpan.FromMilliseconds(100))
                 frameInterval = TimeSpan.FromMilliseconds(100);
+            if (encodeH264 && frameInterval < TimeSpan.FromMilliseconds(1000d / 15))
+                frameInterval = TimeSpan.FromMilliseconds(1000d / 15);
+            if (encodeH264 && Environment.TickCount64 < encoderRetryAt)
+            {
+                await Task.Delay(250, cancellationToken);
+                continue;
+            }
             ScreenCaptureResult capture;
             int sourceTargetGeneration;
             try
             {
+                int captureScale = encodeH264 ? CapturedFrameH264Encoder.ResolveCaptureScale(
+                    captureState.LastCaptureBounds, adaptiveController.CurrentScalePercent, adaptiveQuality)
+                    : adaptiveController.CurrentScalePercent;
                 capture = captureState.CaptureJpeg(
-                    adaptiveController.CurrentQuality,
-                    adaptiveController.CurrentScalePercent,
+                    encodeH264 ? 90 : adaptiveController.CurrentQuality,
+                    captureScale,
                     out sourceTargetGeneration);
             }
             catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or OutOfMemoryException or System.ComponentModel.Win32Exception or System.Runtime.InteropServices.ExternalException)
@@ -4709,6 +4689,12 @@ internal sealed partial class RemoteHostServer : IDisposable
             // every changed frame is still sent at its original quality, and
             // the five-second refresh preserves static-session liveness.
             // Leave UDP's negotiated feedback/recovery cadence untouched.
+            int latestKeyFrameRequest = keyFrameRequestVersion?.Invoke() ?? 0;
+            if (latestKeyFrameRequest != observedKeyFrameRequest)
+            {
+                observedKeyFrameRequest = latestKeyFrameRequest;
+                unchangedFrames.Reset();
+            }
             bool gateUnchangedFrame = ShouldGateUnchangedReliableJpeg(lowLatencyVideo.IsRouteActive);
             if (!gateUnchangedFrame)
             {
@@ -4724,6 +4710,18 @@ internal sealed partial class RemoteHostServer : IDisposable
                 continue;
             }
 
+            long encodingStartedAt = Stopwatch.GetTimestamp();
+            using AnnexBH264AccessUnit? encoded = encodeH264
+                ? await EncodeFallbackAsync(capture) : null;
+            if (encodeH264 && encoded is null) continue;
+            double encodeMilliseconds = capture.EncodeMilliseconds +
+                (encodeH264 ? Stopwatch.GetElapsedTime(encodingStartedAt).TotalMilliseconds : 0);
+            Size frameSize = encodeH264 ? fallbackEncoder!.Size : capture.FrameSize;
+            ReadOnlyMemory<byte> videoBytes = encoded?.Bytes ?? capture.JpegBytes;
+            RemoteFrameEncoding encoding = encodeH264 ? RemoteFrameEncoding.H264AnnexB : RemoteFrameEncoding.Jpeg;
+            RemoteFrameFlags flags = encoded?.Flags ?? RemoteFrameFlags.KeyFrame;
+            if (!captureState.TryObserveEncodedFrame(sourceTargetGeneration, capture.Bounds, frameSize,
+                    adaptiveController.CurrentScalePercent, capture.IsSecureDesktop)) continue;
             long sendStartedAt = Stopwatch.GetTimestamp();
             bool frameSent = false;
             bool sentViaTcp = false;
@@ -4734,12 +4732,14 @@ internal sealed partial class RemoteHostServer : IDisposable
                     async token =>
                     {
                         bool queuedForUdp =
-                            lowLatencyVideo.TryQueueJpegFrame(
-                                capture.FrameSize.Width,
-                                capture.FrameSize.Height,
+                            lowLatencyVideo.TryQueueVideoFrame(
+                                frameSize.Width,
+                                frameSize.Height,
+                                encoding,
+                                flags,
                                 capture.CaptureMilliseconds,
-                                capture.EncodeMilliseconds,
-                                capture.JpegBytes,
+                                encodeMilliseconds,
+                                videoBytes,
                                 allowLatencyBudgetDrop:
                                     adaptiveQuality);
                         if (queuedForUdp)
@@ -4756,13 +4756,15 @@ internal sealed partial class RemoteHostServer : IDisposable
                             return;
                         }
 
-                        ProtocolFrameWriteTimings writeTimings = await Protocol.WriteFrameMessageAsync(
+                        ProtocolFrameWriteTimings writeTimings = await Protocol.WriteVideoFrameMessageAsync(
                             stream,
-                            capture.FrameSize.Width,
-                            capture.FrameSize.Height,
+                            frameSize.Width,
+                            frameSize.Height,
+                            encoding,
+                            flags,
                             capture.CaptureMilliseconds,
-                            capture.EncodeMilliseconds,
-                            capture.JpegBytes,
+                            encodeMilliseconds,
+                            videoBytes,
                             session,
                             writePriority.Lock,
                             token);
@@ -4799,9 +4801,9 @@ internal sealed partial class RemoteHostServer : IDisposable
             double sendMilliseconds = Stopwatch.GetElapsedTime(sendStartedAt).TotalMilliseconds;
 
             framesInWindow++;
-            bytesInWindow += capture.JpegBytes.Length;
+            bytesInWindow += videoBytes.Length;
             captureMillisecondsInWindow += capture.CaptureMilliseconds;
-            encodeMillisecondsInWindow += capture.EncodeMilliseconds;
+            encodeMillisecondsInWindow += encodeMilliseconds;
             sendMillisecondsInWindow += sendMilliseconds;
             TimeSpan elapsed = Stopwatch.GetElapsedTime(frameStartedAt);
             frameMillisecondsInWindow += elapsed.TotalMilliseconds;
@@ -4835,7 +4837,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                                 : string.Empty))
                         : string.Empty;
                 captureLog(
-                    $"画面统计：{actualFps:F1} FPS，JPEG {adaptiveController.CurrentQuality}，分辨率 {ScreenCaptureService.FormatScaleMode(adaptiveController.CurrentScalePercent)}，采 {averageCaptureMilliseconds:F1}ms，编 {averageEncodeMilliseconds:F1}ms，{sendMetricName} {averageSendMilliseconds:F1}ms，编码 {megabitsPerSecond:F1}Mbps{networkMetrics}" +
+                    $"画面统计：{actualFps:F1} FPS，{(encodeH264 ? "H.264 备用编码" : $"JPEG {adaptiveController.CurrentQuality}")}，{frameSize.Width}x{frameSize.Height}，采 {averageCaptureMilliseconds:F1}ms，编 {averageEncodeMilliseconds:F1}ms，{sendMetricName} {averageSendMilliseconds:F1}ms，编码 {megabitsPerSecond:F1}Mbps{networkMetrics}" +
                     (suppressedFramesInWindow > 0 ? $"，省略 {suppressedFramesInWindow} 张重复画面" : string.Empty) +
                     tcpWriteTimings.DescribeAverage());
 
@@ -4865,6 +4867,39 @@ internal sealed partial class RemoteHostServer : IDisposable
             if (remaining > TimeSpan.Zero)
             {
                 await Task.Delay(remaining, cancellationToken);
+            }
+        }
+        }
+        finally { fallbackEncoder?.Dispose(); }
+
+        async Task<AnnexBH264AccessUnit?> EncodeFallbackAsync(ScreenCaptureResult capture)
+        {
+            try
+            {
+                Size size = CapturedFrameH264Encoder.ResolveOutputSize(capture.FrameSize, adaptiveQuality);
+                if (fallbackEncoder is null || fallbackEncoder.Size != size)
+                {
+                    fallbackEncoder?.Dispose();
+                    fallbackEncoder = null;
+                    string? ffmpeg = FfmpegH264Decoder.AvailablePath;
+                    if (ffmpeg is null)
+                    {
+                        WindowsFfmpegDependency.StartIfMissing(captureLog);
+                        throw new IOException("等待 H.264 编码组件安装；连接保持，不切换 JPEG。");
+                    }
+                    fallbackEncoder = new CapturedFrameH264Encoder(ffmpeg, size, Math.Min(fps, 15));
+                    captureLog($"H.264 备用编码已启动：{size.Width}x{size.Height}，无 B 帧、无前瞻，网络不发送 JPEG。");
+                }
+                return await fallbackEncoder.EncodeAsync(capture.JpegBytes, cancellationToken);
+            }
+            catch (Exception error) when (error is IOException or InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                fallbackEncoder?.Dispose();
+                fallbackEncoder = null;
+                unchangedFrames.Reset();
+                encoderRetryAt = Environment.TickCount64 + 3000;
+                captureLog("H.264 备用编码暂不可用，将自动重试：" + error.Message);
+                return null;
             }
         }
     }
@@ -7974,7 +8009,8 @@ internal sealed partial class RemoteHostServer : IDisposable
             int expectedTargetVersion,
             Rectangle captureBounds,
             Size frameSize,
-            int scalePercent)
+            int scalePercent,
+            bool secureDesktop = false)
         {
             lock (_syncRoot)
             {
@@ -7986,7 +8022,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                 _lastCaptureBounds = captureBounds;
                 _lastFrameSize = frameSize;
                 _lastScalePercent = Math.Clamp(scalePercent, 25, 100);
-                _lastCaptureWasSecureDesktop = false;
+                _lastCaptureWasSecureDesktop = secureDesktop;
                 _inputCaptureReady = true;
                 return true;
             }

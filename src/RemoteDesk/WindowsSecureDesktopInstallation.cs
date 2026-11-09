@@ -60,12 +60,24 @@ internal static partial class WindowsSecureDesktopInstallation
     internal static async Task<bool> RecoverSharedExecutableAfterUpdateAsync()
     {
         if (!WindowsProcessElevation.IsCurrentProcessElevated()) return false;
+        string executable = Path.GetFullPath(Application.ExecutablePath);
+        // A portable update may have just refreshed the already installed copy.
+        // Run recovery from that protected same-build copy so the existing
+        // helper can safely be upgraded without registering a portable path.
+        PersistentStartupStatus startup = WindowsPersistentStartup.GetStatus();
+        string? currentBuild = RemoteDeskBuildInfo.ReadExecutableBuildStamp(executable);
+        if (currentBuild is not null && startup.IsInstalled && startup.IsEnabled && startup.ExecutablePath is { } managed &&
+            RemoteDeskBuildInfo.ReadExecutableBuildStamp(managed) == currentBuild)
+        {
+            WindowsPersistentStartup.ValidateProtectedFile(managed);
+            executable = managed;
+        }
         // Recovery must outlive a normal parent/UI exit once STOP has been sent.
         // This fixed-purpose child is not a shell and cannot run arbitrary commands.
         // Disposing its Process handle does not terminate the child, and no UI
         // lifetime cancellation token is attached to its bounded SCM/IPC work.
         using Process child = Process.Start(CreateRecoveryStartInfo(
-            Path.GetFullPath(Application.ExecutablePath), WindowsPersistentStartup.UserSid))
+            executable, WindowsPersistentStartup.UserSid))
             ?? throw new InvalidOperationException("无法启动更新后的锁屏辅助恢复程序。");
         await child.WaitForExitAsync().ConfigureAwait(false);
         return InterpretRecoveryExitCode(child.ExitCode);

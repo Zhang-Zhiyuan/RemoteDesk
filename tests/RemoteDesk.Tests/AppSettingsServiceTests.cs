@@ -186,7 +186,7 @@ public sealed class AppSettingsServiceTests
         Assert.Equal(2222, loaded.Relay.SshPort);
         Assert.Equal("relay-admin", loaded.Relay.AdminUsername);
         Assert.False(loaded.Relay.RegisterThisDevice);
-        Assert.Equal(ViewerVideoMode.StableJpeg, loaded.Relay.VideoMode);
+        Assert.Equal(ViewerVideoMode.Automatic, loaded.Relay.VideoMode);
         Assert.Equal(
             "cb798c06-a035-459d-9693-a48f0efbf9db",
             loaded.Relay.DeviceId);
@@ -252,7 +252,7 @@ public sealed class AppSettingsServiceTests
     }
 
     [Fact]
-    public void LoadMigratesLegacyPreferH264FalseToStableJpegMode()
+    public void LoadMigratesLegacyPreferH264FalseToH264()
     {
         using var temp = TemporaryDirectory.Create();
         string settingsPath = Path.Combine(temp.Path, "settings.json");
@@ -269,7 +269,8 @@ public sealed class AppSettingsServiceTests
 
         RemoteDeskSettings settings = service.Load();
 
-        Assert.Equal(ViewerVideoMode.StableJpeg, settings.Viewer.VideoMode);
+        Assert.Equal(ViewerVideoMode.Automatic, settings.Viewer.VideoMode);
+        Assert.True(settings.Viewer.PreferH264);
     }
 
     [Fact]

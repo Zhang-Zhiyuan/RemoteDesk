@@ -10,7 +10,7 @@
 
 - IPv4 / IPv6 直连、局域网设备发现、自建中继与在线设备列表。
 - 接入中继后自动更新本机 IP / 端口，也可手动上报；在线列表可查看最新地址并填入直连。IP 变化不影响按设备 ID 中继连接。
-- H.264 硬件编解码，也可以切换到 JPEG 模式；硬件加速取决于设备和驱动。Windows 缺少 FFmpeg 时会在后台下载校验过的组件（约 104 MB），安装完成自动重试，期间仍可连接。
+- H.264 硬件编解码，硬件加速取决于设备和驱动。Windows 不再提供 JPEG 模式；锁屏时使用 H.264 备用编码。缺少 FFmpeg 时会在后台下载校验过的组件（约 104 MB），安装完成自动重试。
 - 公网带宽不足时，Windows / Linux 被控端可自动降低传输尺寸至最高 1080p，保留硬编；不会改变电脑本身的屏幕分辨率。Windows 查看端提供可选的 GPU 缩放清晰增强。
 - Windows 控制 Windows 时还可开启“原生补清”，空闲时补充鼠标附近的原始文字像素。默认关闭，需要兼容的 GPU；带宽不足时暂停补清。
 - 多屏切换、原始比例显示、文本剪贴板和文件传输。Windows 控制 Windows 时，支持通过“多屏分窗”把远端屏幕各开一个独立窗口（最多 4 块，需两端更新）。
@@ -67,14 +67,14 @@ Windows 被控端可在“被控权限设置”中允许隐私屏，再从远控
 
 ### Windows
 
-安装 .NET SDK **8.0.426**，然后运行：
+安装 .NET SDK **8.0.427**，然后运行：
 
 ```powershell
 dotnet run --project src/RemoteDesk/RemoteDesk.csproj -c Release
 ```
 
 Windows 版包含管理员启动清单，调试运行也请使用管理员终端 / IDE。
-被控端的 H.264 硬件编码需要 FFmpeg。程序会先找现有安装；缺少时下载固定版本到当前用户的 `RemoteDesk/Dependencies` 目录，不修改系统 PATH。离线时可使用随包的 `Install-RemoteDeskFfmpeg.ps1 -ArchivePath <已下载的压缩包>` 安装；下载失败仍可使用 JPEG。
+被控端的 H.264 编码需要 FFmpeg。程序会先找现有安装；缺少时下载固定版本到当前用户的 `RemoteDesk/Dependencies` 目录，不修改系统 PATH。离线时可使用随包的 `Install-RemoteDeskFfmpeg.ps1 -ArchivePath <已下载的压缩包>` 安装。组件尚未就绪时保留连接并重试，不自动切换 JPEG。
 
 ### Linux
 

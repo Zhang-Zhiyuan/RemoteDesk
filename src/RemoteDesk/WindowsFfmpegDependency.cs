@@ -64,7 +64,7 @@ internal static class WindowsFfmpegDependency
                     using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(30));
                     await InstallAsync(InstallDirectory, Report, deadline.Token).ConfigureAwait(false);
                     FfmpegH264Decoder.RefreshAvailablePaths();
-                    Report("FFmpeg 已安装并通过 SHA-256 校验；JPEG 会自动重探 H.264，已有 H.264 会话保持运行。");
+                    Report("FFmpeg 已安装并通过 SHA-256 校验；等待中的会话会自动重探 H.264，已有 H.264 会话保持运行。");
                 }
                 catch (Exception error)
                 {

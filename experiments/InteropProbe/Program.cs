@@ -40,6 +40,8 @@ internal static class Program
         var c = config.RootElement;
         var output = Path.GetFullPath(c.GetProperty("output").GetString()!);
         Directory.CreateDirectory(output);
+        if (args[0] == "captured-h264") return CapturedH264Probe.RunAsync(output).GetAwaiter().GetResult();
+        if (args[0] == "delayed-video-negotiation") return DelayedVideoNegotiationProbe.RunAsync(output).GetAwaiter().GetResult();
         if (args[0] == "reliable-video-pacing") return ReliableVideoPacingProbe.RunAsync(output).GetAwaiter().GetResult();
         if (args[0] == "relay-video-observe") return RelayVideoObservationProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "ssh-alias-fixture") return SshAliasFixtureProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();

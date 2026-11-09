@@ -21,13 +21,14 @@ internal sealed class AdaptiveH264ResolutionController
     private bool _hasRecovered;
     private bool _recoveryFailed;
 
-    public AdaptiveH264ResolutionController(Size requestedSize, int targetFps, bool enabled)
+    public AdaptiveH264ResolutionController(Size requestedSize, int targetFps, bool enabled, bool startReduced = false)
     {
         RequestedSize = requestedSize;
         ReducedSize = FitFullHd(requestedSize);
         OutputSize = requestedSize;
         _targetFps = Math.Clamp(targetFps, 1, 60);
         _enabled = enabled && requestedSize != ReducedSize;
+        if (_enabled && startReduced) OutputSize = ReducedSize;
         _nativeRateGrowth = Math.Max(1d,
             FfmpegDesktopH264Capture.CalculateBitrateBitsPerSecond(requestedSize, _targetFps) /
             (double)FfmpegDesktopH264Capture.CalculateBitrateBitsPerSecond(ReducedSize, _targetFps));

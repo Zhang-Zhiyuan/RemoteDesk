@@ -972,8 +972,11 @@ public sealed partial class MainForm : Form
         AddSettingRow(captureSettings, 0, "捕获屏幕", _captureTargetBox);
         AddSettingRow(captureSettings, 1, "传输缩放", _captureScaleBox);
         AddSettingRow(captureSettings, 2, "帧率", _hostFpsBox);
-        AddSettingRow(captureSettings, 3, "画质", qualityPanel);
-        AddSettingRow(captureSettings, 4, "自适应", _adaptiveQualityBox);
+        // JPEG quality is retained in settings for old peers only. It does not
+        // control H.264, so showing this slider was misleading.
+        qualityPanel.Visible = false;
+        AddSettingRow(captureSettings, 3, "自适应", _adaptiveQualityBox);
+        captureSettings.Controls.Add(qualityPanel, 0, 4); // Hidden, but owned/disposed with the form.
 
         settingsArea.Controls.Add(networkSettings.Parent!, 0, 0);
         settingsArea.Controls.Add(captureSettings.Parent!, 1, 0);
@@ -1647,7 +1650,7 @@ public sealed partial class MainForm : Form
         SetToolTip(_captureScaleBox, "“100%（原生）+ 60 FPS”为 4K60；“最高 1440p + 60 FPS”为精确 1440p60。1440p 模式使用 GPU 表面缩放，低于该分辨率的屏幕保持原生。");
         SetToolTip(_hostFpsBox, "30 FPS 更节省带宽；60 FPS 仅在查看端声明高帧率能力且硬件捕获/编解码链路可用时启用。");
         SetToolTip(_jpegQualityTrack, "JPEG 画质越高越清晰，占用带宽和 CPU 也越高。");
-        SetToolTip(_adaptiveQualityBox, "H.264 传输持续受带宽限制时自动切到最高 1080p，保持高质量硬编；稳定后尝试恢复一次，失败则本次连接保持流畅档。不会修改系统分辨率。关闭后固定所选传输尺寸。JPEG 保留原有自适应策略。");
+        SetToolTip(_adaptiveQualityBox, "中继等 TCP 视频连接先以最高 1080p 启动，避免首屏积压；链路稳定后尝试恢复所选分辨率。不会修改系统分辨率。关闭后固定所选传输尺寸。");
         SetToolTip(_hostToggleButton, "启动或停止本机被控端。");
 
         SetToolTip(_discoveredHostsBox, "选择扫描到的在线设备或最近连接设备。");
@@ -2026,15 +2029,13 @@ public sealed partial class MainForm : Form
     }
 
     internal const string ViewerVideoModeDescription =
-        "自动（推荐）：优先使用 H.264 硬件加速；解码异常时恢复 H.264，不自动请求切换 JPEG。锁屏或不支持 H.264 的设备仍可显示兼容画面。\n" +
-        "清晰（JPEG）：适合静态文字，带宽占用更高，慢速网络可能卡顿。";
+        "使用 H.264，优先硬件加速；锁屏或硬件暂不可用时自动恢复 H.264，不切换 JPEG。";
 
     internal static void PopulateViewerVideoModes(
         ComboBox videoModeBox)
     {
         videoModeBox.Items.Clear();
-        videoModeBox.Items.Add(new ViewerVideoModeItem(ViewerVideoMode.Automatic, "自动（推荐）"));
-        videoModeBox.Items.Add(new ViewerVideoModeItem(ViewerVideoMode.StableJpeg, "清晰（JPEG）"));
+        videoModeBox.Items.Add(new ViewerVideoModeItem(ViewerVideoMode.Automatic, "H.264（硬件优先）"));
         videoModeBox.SelectedIndex = 0;
     }
 
@@ -3946,6 +3947,18 @@ public sealed partial class MainForm : Form
         // The host and relay are already listening. A short-lived child owns
         // the SCM stop/start transaction so closing this UI cannot abandon it.
         if (!_resumeHostAfterUpdate || _isClosing || IsDisposed) return;
+        try
+        {
+            if (await Task.Run(WindowsPersistentStartup.RefreshExistingAfterUpdate))
+                AppendHostLog("已有的登录启动副本已同步更新，下次登录将使用新版。");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or
+            InvalidOperationException or ArgumentException or System.ComponentModel.Win32Exception or
+            System.Security.SecurityException or System.Runtime.InteropServices.COMException)
+        {
+            if (!_isClosing && !IsDisposed)
+                AppendHostLog("登录启动副本未同步（" + error.GetType().Name + "）；继续检查现有锁屏服务。");
+        }
         try
         {
             bool recovered = await WindowsSecureDesktopInstallation

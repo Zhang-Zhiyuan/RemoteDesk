@@ -46,6 +46,30 @@ internal static class WindowsPersistentStartup
         }
     }
 
+    internal static bool ShouldRefreshExistingAfterUpdate(bool elevated, PersistentStartupStatus installed,
+        string currentExecutable, string? installedBuild, string? currentBuild) =>
+        elevated && installed.IsInstalled && installed.IsEnabled && installed.ExecutablePath is not null &&
+        !string.Equals(installed.ExecutablePath, currentExecutable, StringComparison.OrdinalIgnoreCase) &&
+        RemoteDeskBuildInfo.CompareBuildStamps(currentBuild, installedBuild) is > 0;
+
+    // An update can replace a portable copy while an older managed copy remains
+    // registered for next login. Refresh only an existing enabled owned task.
+    // Never create persistence or re-enable a task the user disabled here.
+    internal static bool RefreshExistingAfterUpdate()
+    {
+        PersistentStartupStatus original = GetStatus();
+        if (!original.IsInstalled || !original.IsEnabled || original.ExecutablePath is null) return false;
+        string current = Path.GetFullPath(Application.ExecutablePath);
+        if (!ShouldRefreshExistingAfterUpdate(WindowsProcessElevation.IsCurrentProcessElevated(), original,
+                current, RemoteDeskBuildInfo.ReadExecutableBuildStamp(original.ExecutablePath),
+                RemoteDeskBuildInfo.ReadExecutableBuildStamp(current))) return false;
+        ValidateProtectedFile(original.ExecutablePath!);
+        _ = RemoteUpdateTrust.ValidateUpgrade(original.ExecutablePath!, current);
+        if (GetStatus() != original) throw new IOException("常驻启动配置已变化，未覆盖。");
+        Install(current);
+        return true;
+    }
+
     public static async Task ChangeAsync(string operation)
     {
         if (operation is not (InstallArgument or EnableArgument or DisableArgument))

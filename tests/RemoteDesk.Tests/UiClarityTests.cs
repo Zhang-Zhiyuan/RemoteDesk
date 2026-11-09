@@ -50,11 +50,11 @@ public sealed class UiClarityTests
     {
         using var combo = new ComboBox();
         MainForm.PopulateViewerVideoModes(combo);
-        Assert.Equal(new[] { "自动（推荐）", "清晰（JPEG）" }, combo.Items.Cast<object>().Select(x => x.ToString()));
+        Assert.Equal(new[] { "H.264（硬件优先）" }, combo.Items.Cast<object>().Select(x => x.ToString()));
         Assert.DoesNotContain("仅 H.264", MainForm.ViewerVideoModeDescription);
-        Assert.Contains("不自动请求切换 JPEG", MainForm.ViewerVideoModeDescription);
+        Assert.Contains("不切换 JPEG", MainForm.ViewerVideoModeDescription);
         Assert.Contains("锁屏", MainForm.ViewerVideoModeDescription);
-        Assert.Contains("带宽", MainForm.ViewerVideoModeDescription);
+        Assert.Contains("自动恢复 H.264", MainForm.ViewerVideoModeDescription);
     }
 
     [Fact]

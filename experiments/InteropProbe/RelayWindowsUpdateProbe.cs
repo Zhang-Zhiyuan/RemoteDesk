@@ -344,7 +344,7 @@ internal static class RelayWindowsUpdateProbe
         finally { client.DeviceInfoReceived -= Observe; }
     }
 
-    private static List<(string Source, string Secret)> Credentials(RemoteDeskSettings settings,
+    internal static List<(string Source, string Secret)> Credentials(RemoteDeskSettings settings,
         RelayConnectionOptions options, RelayOnlineDevice device)
     {
         var result = new List<(string Source, string Secret)>();

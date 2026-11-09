@@ -473,24 +473,9 @@ internal sealed class AppSettingsService
 
     private static ViewerVideoMode NormalizeViewerVideoMode(ViewerVideoMode mode, bool legacyPreferH264)
     {
-        // Apply to both direct and relay settings, including current-schema
-        // files. No credentials or other user preferences are changed.
-        if (mode == ViewerVideoMode.ForceH264)
-        {
-            return ViewerVideoMode.Automatic;
-        }
-
-        if (!Enum.IsDefined(mode))
-        {
-            return legacyPreferH264 ? ViewerVideoMode.Automatic : ViewerVideoMode.StableJpeg;
-        }
-
-        if (mode == ViewerVideoMode.Automatic && !legacyPreferH264)
-        {
-            return ViewerVideoMode.StableJpeg;
-        }
-
-        return mode;
+        // Includes explicit JPEG and the oldest PreferH264=false setting, for
+        // both IP and relay connections. Keys and other preferences stay intact.
+        return ViewerVideoMode.Automatic;
     }
 
     private void TryMoveCorruptSettings()

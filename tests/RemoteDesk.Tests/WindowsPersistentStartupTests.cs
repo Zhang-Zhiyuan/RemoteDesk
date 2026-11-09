@@ -8,6 +8,27 @@ namespace RemoteDesk.Tests;
 
 public sealed class WindowsPersistentStartupTests
 {
+    [Fact]
+    public void UpdateRefreshesOnlyEnabledOwnedOlderCopy()
+    {
+        var installed = new PersistentStartupStatus(true, true, Executable);
+        const string current = @"C:\Users\User\RemoteDesk.exe";
+        Assert.True(WindowsPersistentStartup.ShouldRefreshExistingAfterUpdate(true, installed,
+            current, "20261005110714", "20261109000000"));
+        Assert.False(WindowsPersistentStartup.ShouldRefreshExistingAfterUpdate(false, installed,
+            current, "20261005110714", "20261109000000"));
+        Assert.False(WindowsPersistentStartup.ShouldRefreshExistingAfterUpdate(true, installed with { IsEnabled = false },
+            current, "20261005110714", "20261109000000"));
+        Assert.False(WindowsPersistentStartup.ShouldRefreshExistingAfterUpdate(true, default,
+            current, null, "20261109000000"));
+        Assert.False(WindowsPersistentStartup.ShouldRefreshExistingAfterUpdate(true, installed,
+            Executable, "20261005110714", "20261109000000"));
+        Assert.False(WindowsPersistentStartup.ShouldRefreshExistingAfterUpdate(true, installed,
+            current, "20261109000000", "20261005110714"));
+        Assert.False(WindowsPersistentStartup.ShouldRefreshExistingAfterUpdate(true, installed,
+            current, "20261109000000", "20261109000000"));
+    }
+
     private const string Sid = "S-1-5-21-1-2-3-1001";
     private const string Root = @"C:\Program Files\RemoteDesk\Managed\S-1-5-21-1-2-3-1001";
     private static string Executable => Path.Combine(Root, new string('A', 64), "RemoteDesk.exe");

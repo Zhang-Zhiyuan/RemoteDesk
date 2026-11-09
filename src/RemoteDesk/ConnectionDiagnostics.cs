@@ -80,9 +80,7 @@ internal static class ConnectionDiagnostics
             : LimitDiagnosticDetail(value.LastDirectHardwareFailureDetail);
         string fallback = value.JpegFallbackRequested ? "已请求" : "未请求";
         string directState = value.DirectHardwarePathDisabled ? "已禁用" : "仍可用/未禁用";
-        string forceH264Note = report.VideoMode == ViewerVideoMode.ForceH264
-            ? "（旧 H.264 选项：允许锁屏/解码故障时自动兼容）"
-            : string.Empty;
+        string forceH264Note = "（旧版遥测字段；新版不自动切换 JPEG）";
         string captureTime = report.CapturedAtUtc == default
             ? "未记录"
             : report.CapturedAtUtc.ToUniversalTime().ToString(
@@ -134,12 +132,7 @@ internal static class ConnectionDiagnostics
 
     internal static string FormatVideoMode(ViewerVideoMode videoMode)
     {
-        return videoMode switch
-        {
-            ViewerVideoMode.StableJpeg => "稳定 JPEG",
-            ViewerVideoMode.ForceH264 => "自动低延迟（兼容旧 H.264 选项）",
-            _ => "自动低延迟"
-        };
+        return "H.264（硬件优先）";
     }
 
     private static string FormatLocalAddresses(IReadOnlyList<string> localAddresses)
@@ -157,11 +150,6 @@ internal static class ConnectionDiagnostics
         string? ffmpegPath,
         bool hasNativeHardwareDecoder)
     {
-        if (videoMode == ViewerVideoMode.StableJpeg)
-        {
-            return "H.264 解码：稳定 JPEG 模式不会启用";
-        }
-
         string native = hasNativeHardwareDecoder
             ? "MF/D3D11 硬解可运行时探测"
             : "MF/D3D11 硬解不可用";
@@ -220,11 +208,11 @@ internal static class ConnectionDiagnostics
         DiscoveredHost? target,
         IReadOnlyList<RemoteDeskTcpProbeResult> tcpProbeResults)
     {
-        if (videoMode == ViewerVideoMode.ForceH264 &&
-            !hasNativeHardwareDecoder &&
+        if (!hasNativeHardwareDecoder &&
             string.IsNullOrWhiteSpace(ffmpegPath))
         {
-            return "建议：当前可使用 JPEG 正常连接；更新显卡驱动、安装 ffmpeg 后可恢复 H.264。";
+            return "本机缺少 H.264 解码组件，请等待组件准备完成后重试。\n" +
+                FormatNextStep(host, videoMode, ffmpegPath, true, target, tcpProbeResults);
         }
 
         if (string.IsNullOrWhiteSpace(host))
@@ -271,7 +259,7 @@ internal static class ConnectionDiagnostics
             return "建议：可直接点击连接，程序会先尝试远程启动被控端。";
         }
 
-        return "建议：当前状态可连接；内网优先用“自动低延迟”，画面不稳时切到“稳定 JPEG”。";
+        return "建议：当前状态可连接；视频使用 H.264，画面异常时可查看会话诊断。";
     }
 
     private static string FormatTcpProbeLine(

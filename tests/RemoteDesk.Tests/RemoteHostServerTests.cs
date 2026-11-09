@@ -322,7 +322,7 @@ public sealed class RemoteHostServerTests
             CancellationToken.None);
         Assert.False(legacy.IsVideoSelectionReady);
         Assert.Equal(
-            TimeSpan.FromMilliseconds(50),
+            TimeSpan.FromSeconds(20),
             RemoteHostServer.InitialViewerInfoGracePeriod);
         Assert.Equal(
             TimeSpan.FromMilliseconds(10),

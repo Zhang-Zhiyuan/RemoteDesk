@@ -17,7 +17,6 @@ internal static class RelayVideoObservationProbe
         string id = Guid.Parse(config.GetProperty("deviceId").GetString()!).ToString("D");
         RemoteDeviceIdentity.LocalId = saved.DeviceId;
         bool local = RemoteDeviceIdentity.Same(id, RemoteDeviceIdentity.LocalId);
-        string key = local ? AppSettingsService.UnprotectSecret(settings.Host.ProtectedPassword) : config.GetProperty("deviceKey").GetString()!;
         var options = new RelayConnectionOptions(saved.ServerAddress, saved.RelayPort,
             AppSettingsService.UnprotectSecret(saved.ProtectedAccessToken), saved.TlsCertificateSha256!, id).Validate();
         int seconds = config.TryGetProperty("seconds", out var duration) ? duration.GetInt32() : 35;
@@ -25,9 +24,16 @@ internal static class RelayVideoObservationProbe
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(seconds + 35));
         var device = (await RelayTunnelClient.ListDevicesAsync(options, deadline.Token)).Single(x => x.DeviceId == id);
         if (device.Busy) throw new InvalidOperationException("Device is in use; no takeover");
+        string? key = config.TryGetProperty("deviceKey", out var explicitKey)
+            ? explicitKey.GetString()
+            : RelayWindowsUpdateProbe.Credentials(settings, options, device).FirstOrDefault().Secret;
+        if (string.IsNullOrEmpty(key)) throw new InvalidOperationException("No saved or explicitly supplied device key.");
         using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: local);
         var identity = new TaskCompletionSource<RemoteDeviceDescriptor>(TaskCreationOptions.RunContinuationsAsynchronously);
         var diagnostics = new ConcurrentQueue<object>();
+        var logs = new ConcurrentQueue<string>();
+        var firstFrames = new ConcurrentQueue<object>();
+        client.Log += value => { logs.Enqueue(value); while (logs.Count > 30) logs.TryDequeue(out _); };
         var samples = new List<object>();
         var clock = Stopwatch.StartNew();
         long frames = 0, h264 = 0, jpeg = 0, bytes = 0, rttMicroseconds = 0;
@@ -38,6 +44,8 @@ internal static class RelayVideoObservationProbe
             if (frame.Encoding == RemoteFrameEncoding.H264AnnexB) Interlocked.Increment(ref h264);
             else Interlocked.Increment(ref jpeg);
             Interlocked.Add(ref bytes, frame.EncodedLength);
+            if (firstFrames.Count < 6) firstFrames.Enqueue(new { atSeconds = clock.Elapsed.TotalSeconds,
+                encoding = frame.Encoding.ToString(), frame.Width, frame.Height, frame.EncodedLength });
         };
         client.RoundTripUpdated += value => Interlocked.Exchange(ref rttMicroseconds, (long)(value.TotalMilliseconds * 1000));
         client.HostVideoDiagnosticsReceived += value => diagnostics.Enqueue(new { atSeconds = clock.Elapsed.TotalSeconds, message = value });
@@ -64,8 +72,16 @@ internal static class RelayVideoObservationProbe
             await Task.Delay(1500, deadline.Token);
             Program.Save(Path.Combine(output, "observation.json"), new { deviceId = id, info.BuildStamp,
                 scope = "Authenticated public-relay video receipt and host diagnostics; no hardware rendering or user-input latency measurement",
-                frames, h264, jpeg, samples, diagnostics = diagnostics.ToArray(), connectedAtEnd = client.IsConnected });
+                frames, h264, jpeg, samples, firstFrames = firstFrames.ToArray(), logs = logs.ToArray(),
+                diagnostics = diagnostics.ToArray(), connectedAtEnd = client.IsConnected });
             return frames > 0 ? 0 : 1;
+        }
+        catch (Exception error)
+        {
+            Program.Save(Path.Combine(output, "failure.json"), new { deviceId = id,
+                error = error.GetType().Name, message = error.Message, frames, h264, jpeg, samples,
+                firstFrames = firstFrames.ToArray(), logs = logs.ToArray(), diagnostics = diagnostics.ToArray() });
+            throw;
         }
         finally { await client.DisconnectAsync(); }
     }

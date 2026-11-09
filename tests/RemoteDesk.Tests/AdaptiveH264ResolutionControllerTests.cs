@@ -5,6 +5,21 @@ namespace RemoteDesk.Tests;
 
 public sealed class AdaptiveH264ResolutionControllerTests
 {
+    [Theory]
+    [InlineData(3840, 2160, 1920, 1080)]
+    [InlineData(2160, 3840, 1080, 1920)]
+    public void ReliableAdaptiveStartupAvoidsLargeBurstButCanRecover(int width, int height, int outWidth, int outHeight)
+    {
+        var requested = new Size(width, height);
+        var controller = new AdaptiveH264ResolutionController(requested, 30, true, startReduced: true);
+        Assert.Equal(new Size(outWidth, outHeight), controller.OutputSize);
+        Assert.Equal(requested, controller.RequestedSize);
+        for (int i = 0; i < 44; i++) Assert.False(Observe(controller, fps: 30, writeMs: .1));
+        Assert.True(Observe(controller, fps: 30, writeMs: .1));
+        Assert.Equal(requested, controller.OutputSize);
+        Assert.Equal(requested, new AdaptiveH264ResolutionController(requested, 30, false, startReduced: true).OutputSize);
+    }
+
     [Fact]
     public void TcpWarmupOfAnUdpCapableSessionCannotLowerItsSpatialQuality()
     {
