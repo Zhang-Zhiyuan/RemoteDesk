@@ -21,7 +21,9 @@ internal enum MessageType : byte
     NativeDetailFeedback = 10,
     NativeDetailOffer = 11,
     NativeDetailUdpResume = 12,
-    NativeDetailUdpResumeAck = 13
+    NativeDetailUdpResumeAck = 13,
+    TrackedVideoFrame = 14,
+    ReliableVideoFeedback = 15
 }
 
 // Buffer is the dedicated decrypted message array returned by SecureSession.Decrypt; it is never
@@ -417,6 +419,18 @@ internal static class Protocol
             cancellationToken);
     }
 
+    internal static Task<ProtocolFrameWriteTimings> WriteTrackedVideoFrameAsync(
+        NetworkStream stream, long sequence, int width, int height, RemoteFrameFlags flags,
+        double captureMilliseconds, double encodeMilliseconds, ReadOnlyMemory<byte> encodedBytes,
+        SecureSession session, SemaphoreSlim writeLock, CancellationToken cancellationToken)
+    {
+        if (sequence <= 0 || !flags.HasFlag(RemoteFrameFlags.KeyFrame))
+            throw new ArgumentException("Tracked frames must be independent and sequenced.");
+        return WriteFrameMessageCoreAsync(stream, MessageType.TrackedVideoFrame, width, height,
+            RemoteFrameEncoding.H264AnnexB, flags, captureMilliseconds, encodeMilliseconds,
+            encodedBytes, session, writeLock, cancellationToken, sequence);
+    }
+
     private static async Task<ProtocolFrameWriteTimings> WriteFrameMessageCoreAsync(
         NetworkStream stream,
         MessageType messageType,
@@ -429,12 +443,14 @@ internal static class Protocol
         ReadOnlyMemory<byte> encodedBytes,
         SecureSession session,
         SemaphoreSlim writeLock,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        long reliableSequence = 0)
     {
         int frameHeaderLength = messageType switch
         {
             MessageType.Frame => RemoteMessageCodec.FrameHeaderLength,
             MessageType.VideoFrame => RemoteMessageCodec.VideoFrameHeaderLength,
+            MessageType.TrackedVideoFrame => RemoteMessageCodec.VideoFrameHeaderLength + ReliableVideoFeedbackProtocol.SequenceBytes,
             _ => throw new ArgumentOutOfRangeException(
                 nameof(messageType),
                 messageType,
@@ -475,8 +491,11 @@ internal static class Protocol
             }
             else
             {
+                int sequenceBytes = messageType == MessageType.TrackedVideoFrame ? ReliableVideoFeedbackProtocol.SequenceBytes : 0;
+                if (sequenceBytes != 0)
+                    BinaryPrimitives.WriteInt64LittleEndian(plainBuffer.AsSpan(HeaderLength), reliableSequence);
                 RemoteMessageCodec.WriteVideoFrameHeader(
-                    plainBuffer.AsSpan(HeaderLength, frameHeaderLength),
+                    plainBuffer.AsSpan(HeaderLength + sequenceBytes, frameHeaderLength - sequenceBytes),
                     width,
                     height,
                     encoding,
@@ -590,7 +609,8 @@ internal static class Protocol
     {
         return messageType switch
         {
-            MessageType.Frame or MessageType.VideoFrame => MaxFramePayloadBytes,
+            MessageType.Frame or MessageType.VideoFrame or MessageType.TrackedVideoFrame => MaxFramePayloadBytes,
+            MessageType.ReliableVideoFeedback => ReliableVideoFeedbackProtocol.ReceiptBytes,
             MessageType.NativeVideoFrame => NativeDetailSessionProtocol.MaximumBasePayloadBytes,
             MessageType.NativeDetailChunk => NativeDetailSessionProtocol.MaximumChunkPayloadBytes,
             MessageType.NativeDetailRequest => NativeDetailSessionProtocol.RequestBytes,

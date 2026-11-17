@@ -42,7 +42,10 @@ internal static class Program
         Directory.CreateDirectory(output);
         if (args[0] == "captured-h264") return CapturedH264Probe.RunAsync(output).GetAwaiter().GetResult();
         if (args[0] == "delayed-video-negotiation") return DelayedVideoNegotiationProbe.RunAsync(output).GetAwaiter().GetResult();
+        if (args[0] == "delayed-video-feedback") return DelayedVideoNegotiationProbe.RunAsync(output, feedback: true).GetAwaiter().GetResult();
         if (args[0] == "reliable-video-pacing") return ReliableVideoPacingProbe.RunAsync(output).GetAwaiter().GetResult();
+        if (args[0] == "reliable-video-feedback") return ReliableVideoFeedbackProbe.RunAsync(output).GetAwaiter().GetResult();
+        if (args[0] == "reliable-video-feedback-healthy") return ReliableVideoFeedbackProbe.RunAsync(output, healthy: true).GetAwaiter().GetResult();
         if (args[0] == "relay-video-observe") return RelayVideoObservationProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "ssh-alias-fixture") return SshAliasFixtureProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
         if (args[0] == "ssh-relay-fixture") return SshRelayFixtureProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();

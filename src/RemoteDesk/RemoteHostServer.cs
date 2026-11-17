@@ -1784,6 +1784,7 @@ internal sealed partial class RemoteHostServer : IDisposable
             version: 0);
         private int _keyFrameRequestVersion;
         private int _capabilities;
+        internal ReliableVideoSendWindow ReliableVideo { get; } = new();
 
         public RemoteDeviceCapabilities Capabilities
         {
@@ -2639,7 +2640,8 @@ internal sealed partial class RemoteHostServer : IDisposable
                 startupPreviewOnly:
                     !initialVideoSelectionPreviewCompleted && codecVersion == 0,
                 encodeH264: codecs.HasFlag(RemoteVideoCodecs.H264AnnexB),
-                keyFrameRequestVersion: () => viewerState.KeyFrameRequestVersion);
+                keyFrameRequestVersion: () => viewerState.KeyFrameRequestVersion,
+                viewerState: viewerState);
 
             if (!initialVideoSelectionPreviewCompleted && codecVersion == 0)
             {
@@ -4148,21 +4150,12 @@ internal sealed partial class RemoteHostServer : IDisposable
                                     return;
                                 }
 
-                                ProtocolFrameWriteTimings writeTimings = await Protocol
-                                    .WriteVideoFrameMessageAsync(
-                                        stream,
-                                        frame.Width,
-                                        frame.Height,
-                                        RemoteFrameEncoding
-                                            .H264AnnexB,
-                                        frame.Flags,
-                                        captureMilliseconds: 0,
-                                        encodeMilliseconds: 0,
-                                        frame.AnnexBBytes,
-                                        session,
-                                        writePriority.Lock,
-                                        token);
-                                tcpWriteTimings.Record(writeTimings);
+                                ProtocolFrameWriteTimings? writeTimings = await WriteReliableH264Async(
+                                    stream, viewerState, frame.Width, frame.Height, frame.Flags, 0, 0,
+                                    frame.AnnexBBytes, session, writePriority.Lock, token,
+                                    independentFrames: options.GopLength == 1);
+                                if (writeTimings is null) return;
+                                tcpWriteTimings.Record(writeTimings.Value);
                                 frameSent = true;
                             },
                             cancellationToken);
@@ -4334,7 +4327,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                         : string.Empty) +
                     networkMetrics +
                     shortGopMetrics +
-                    tcpWriteTimings.DescribeAverage());
+                    tcpWriteTimings.DescribeAverage() + DescribeReliableVideoWindow(viewerState));
 
                 if (resolutionController.Observe(metricsElapsed, actualFps,
                         tcpWriteTimings.AverageSocketWriteMilliseconds, megabitsPerSecond,
@@ -4500,7 +4493,8 @@ internal sealed partial class RemoteHostServer : IDisposable
         CancellationToken cancellationToken,
         bool startupPreviewOnly = false,
         bool encodeH264 = false,
-        Func<int>? keyFrameRequestVersion = null)
+        Func<int>? keyFrameRequestVersion = null,
+        ViewerSessionState? viewerState = null)
     {
         int initialScalePercent = ChooseInitialAdaptiveScale(
             captureState.CurrentTarget.Bounds,
@@ -4756,19 +4750,14 @@ internal sealed partial class RemoteHostServer : IDisposable
                             return;
                         }
 
-                        ProtocolFrameWriteTimings writeTimings = await Protocol.WriteVideoFrameMessageAsync(
-                            stream,
-                            frameSize.Width,
-                            frameSize.Height,
-                            encoding,
-                            flags,
-                            capture.CaptureMilliseconds,
-                            encodeMilliseconds,
-                            videoBytes,
-                            session,
-                            writePriority.Lock,
-                            token);
-                        tcpWriteTimings.Record(writeTimings);
+                        ProtocolFrameWriteTimings? writeTimings = encodeH264 && viewerState is not null
+                            ? await WriteReliableH264Async(stream, viewerState, frameSize.Width, frameSize.Height,
+                                flags, capture.CaptureMilliseconds, encodeMilliseconds, videoBytes, session, writePriority.Lock, token)
+                            : await Protocol.WriteVideoFrameMessageAsync(stream, frameSize.Width, frameSize.Height,
+                                encoding, flags, capture.CaptureMilliseconds, encodeMilliseconds, videoBytes,
+                                session, writePriority.Lock, token);
+                        if (writeTimings is null) return;
+                        tcpWriteTimings.Record(writeTimings.Value);
                         sentViaTcp = true;
                         frameSent = true;
                     },
@@ -4779,6 +4768,13 @@ internal sealed partial class RemoteHostServer : IDisposable
                     writePriority.HasPendingControlWrite)
                 {
                     await Task.Delay(ControlWritePriorityDelay, cancellationToken);
+                }
+                else if (admitted && encodeH264)
+                {
+                    // A full receipt window must not turn the software/secure
+                    // capture fallback into an uncapped encode-and-drop loop.
+                    TimeSpan wait = frameInterval - Stopwatch.GetElapsedTime(frameStartedAt);
+                    if (wait > TimeSpan.Zero) await Task.Delay(wait, cancellationToken);
                 }
 
                 continue;
@@ -4839,7 +4835,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                 captureLog(
                     $"画面统计：{actualFps:F1} FPS，{(encodeH264 ? "H.264 备用编码" : $"JPEG {adaptiveController.CurrentQuality}")}，{frameSize.Width}x{frameSize.Height}，采 {averageCaptureMilliseconds:F1}ms，编 {averageEncodeMilliseconds:F1}ms，{sendMetricName} {averageSendMilliseconds:F1}ms，编码 {megabitsPerSecond:F1}Mbps{networkMetrics}" +
                     (suppressedFramesInWindow > 0 ? $"，省略 {suppressedFramesInWindow} 张重复画面" : string.Empty) +
-                    tcpWriteTimings.DescribeAverage());
+                    tcpWriteTimings.DescribeAverage() + (viewerState is null ? string.Empty : DescribeReliableVideoWindow(viewerState)));
 
                 string? adaptiveMessage = adaptiveController.Update(
                     actualFps,
@@ -5039,6 +5035,13 @@ internal sealed partial class RemoteHostServer : IDisposable
 
                 switch (message.Type)
                 {
+                    case MessageType.ReliableVideoFeedback:
+                        if (viewerState.Capabilities.HasFlag(RemoteDeviceCapabilities.ReliableVideoFeedback))
+                        {
+                            try { viewerState.ReliableVideo.Observe(ReliableVideoFeedbackProtocol.DecodeReceipt(message.PayloadSpan), Environment.TickCount64); }
+                            catch (InvalidDataException ex) { clipboardLog("已忽略无效收帧反馈：" + ex.Message); }
+                        }
+                        break;
                     case MessageType.NativeDetailRequest:
                         if (viewerState.Capabilities.HasFlag(RemoteDeviceCapabilities.NativeDetailV1))
                         {

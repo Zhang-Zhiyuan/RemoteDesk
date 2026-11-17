@@ -156,6 +156,7 @@ internal sealed partial class RemoteViewerClient
 
     private void ResetNativeConnection()
     {
+        Interlocked.Exchange(ref _reliableFeedbackOwner, null);
         NativeDetails.ResetConnection();
         Interlocked.Exchange(ref _nativeFeedbackOwner, null);
         Volatile.Write(ref _nativeOffer, null);

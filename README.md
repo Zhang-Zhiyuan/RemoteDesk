@@ -67,7 +67,7 @@ Windows 被控端可在“被控权限设置”中允许隐私屏，再从远控
 
 ### Windows
 
-安装 .NET SDK **8.0.427**，然后运行：
+安装 .NET SDK **8.0.428**，然后运行：
 
 ```powershell
 dotnet run --project src/RemoteDesk/RemoteDesk.csproj -c Release

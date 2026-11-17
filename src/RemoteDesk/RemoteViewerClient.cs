@@ -96,6 +96,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
             RemoteDeviceCapabilities.UdpVideoCongestionFeedback |
             RemoteDeviceCapabilities.LowLatencyUdpVideoXorFec;
     private const RemoteDeviceCapabilities LocalViewerBaselineCapabilities =
+        RemoteDeviceCapabilities.ReliableVideoFeedback |
         RemoteDeviceCapabilities.ClipboardText |
         RemoteDeviceCapabilities.ClipboardSnapshotV1 |
         RemoteDeviceCapabilities.FileChecksum |
@@ -2657,6 +2658,9 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
                 switch (message.Type)
                 {
+                    case MessageType.TrackedVideoFrame:
+                        ReceiveTrackedVideoFrame(ownerCancellationTokenSource, message.PayloadMemory);
+                        break;
                     case MessageType.NativeDetailUdpResume:
                         try { ReceiveNativeResume(ownerCancellationTokenSource, message.PayloadSpan); }
                         catch (Exception ex) when (ex is InvalidDataException or ArgumentException)

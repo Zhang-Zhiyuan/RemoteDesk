@@ -6,6 +6,31 @@ This document captures the RemoteDesk protocol surface that Windows, Android, an
 
 ## Transport
 
+### Reliable H.264 receipts
+
+Capability bit 31 (`ReliableVideoFeedback`) is a **signed int32** bit, preserving
+the existing little-endian capability field. Windows advertises it; older
+Windows, Linux and Android peers ignore the unknown bit and keep their existing
+video records. Both endpoints must advertise support before tracked video is
+sent. UDP, native-detail records and dependent H.264 chains keep their own rules.
+
+- Message `14`: positive int64 sequence, followed by the existing 32-byte video
+  header and an independent H.264 access unit. Sequences start at 1 per connection
+  and remain contiguous across capture/encoder/target changes.
+- Message `15`: 32 bytes: uint32 `RVF1` magic, uint32 zero, int64 received sequence,
+  int64 cumulative received wire bytes, int32 local ACK delay (0–500 ms), uint32
+  zero. Wire bytes count only message 14, including its 25-byte encrypted record
+  overhead. Receipts report network delivery, **not successful decoding/display**.
+
+The viewer coalesces receipts outside its receive/render/input loops. The host
+accepts only an exact outstanding sequence/byte boundary and releases cumulative
+credit. Credit bounds pending frames/bytes and learns receiver round-trip growth;
+it discards unsent independent frames instead of queueing them. A missing receipt
+never grants more credit, and unrelated control/heartbeat traffic remains live.
+One larger recovery frame may pass an empty window to avoid a scene-change
+deadlock. Capture, resolution and encoded image bytes are not modified by this
+flow control. Existing write-pressure pacing remains a second limit.
+
 ### Privacy screen
 
 Capability bit 30 (`PrivacyScreen`) negotiates controls 46 and 47. It means

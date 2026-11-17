@@ -43,7 +43,9 @@ internal enum RemoteDeviceCapabilities
     FileReceiveLocation = 1 << 27,
     ClipboardSnapshotV1 = 1 << 28,
     IndependentScreenSessions = 1 << 29,
-    PrivacyScreen = 1 << 30
+    PrivacyScreen = 1 << 30,
+    // Capabilities are a signed little-endian int32 on all three platforms.
+    ReliableVideoFeedback = unchecked((int)0x80000000)
 }
 
 internal static class RemoteDevicePlatforms
@@ -107,6 +109,7 @@ internal static class RemoteDeviceCapabilityInfo
         RemoteDeviceCapabilities capabilities =
             RemoteDeviceCapabilities.DeviceIdentity |
             RemoteDeviceCapabilities.HostVideoDiagnostics |
+            RemoteDeviceCapabilities.ReliableVideoFeedback |
             RemoteDeviceCapabilities.RemoteDesktop |
             RemoteDeviceCapabilities.InputControl |
             RemoteDeviceCapabilities.ClipboardText |

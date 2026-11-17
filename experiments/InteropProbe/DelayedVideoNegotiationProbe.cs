@@ -6,7 +6,7 @@ using RemoteDesk;
 
 internal static class DelayedVideoNegotiationProbe
 {
-    internal static async Task<int> RunAsync(string output)
+    internal static async Task<int> RunAsync(string output, bool feedback = false)
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(55));
         using var host = new RemoteHostServer();
@@ -37,7 +37,8 @@ internal static class DelayedVideoNegotiationProbe
         Task download = Pump(toHost.GetStream(), fromViewer.GetStream(), true);
         using var writeLock = new SemaphoreSlim(1, 1);
         var received = new List<object>();
-        int jpeg = 0, h264 = 0, pongs = 0, decoded = 0;
+        int jpeg = 0, h264 = 0, pongs = 0, decoded = 0, tracked = 0;
+        long receivedBytes = 0;
         double? firstVideoSeconds = null;
         var clock = Stopwatch.StartNew();
         try
@@ -48,7 +49,8 @@ internal static class DelayedVideoNegotiationProbe
             await Protocol.WriteMessageAsync(viewer.GetStream(), MessageType.Control,
                 RemoteMessageCodec.EncodeViewerInfo(RemoteVideoCodecs.H264AnnexB), session, writeLock, deadline.Token);
             await Protocol.WriteMessageAsync(viewer.GetStream(), MessageType.Control,
-                RemoteMessageCodec.EncodeViewerCapabilities(RemoteViewerClient.RelayTransportViewerCapabilities),
+                RemoteMessageCodec.EncodeViewerCapabilities(feedback ? RemoteViewerClient.RelayTransportViewerCapabilities :
+                    RemoteViewerClient.RelayTransportViewerCapabilities & ~RemoteDeviceCapabilities.ReliableVideoFeedback),
                 session, writeLock, deadline.Token);
             Task heartbeat = Task.Run(async () =>
             {
@@ -61,13 +63,24 @@ internal static class DelayedVideoNegotiationProbe
             });
             try
             {
-                while (h264 < 3 || pongs < 2)
+                while (h264 < 5 || pongs < 3)
                 {
                     ProtocolMessage message = await Protocol.ReadMessageAsync(viewer.GetStream(), session, deadline.Token);
                     if (message.Type == MessageType.Pong) { pongs++; continue; }
-                    if (message.Type is not (MessageType.Frame or MessageType.VideoFrame)) continue;
+                    if (message.Type is not (MessageType.Frame or MessageType.VideoFrame or MessageType.TrackedVideoFrame)) continue;
                     if (message.Type == MessageType.Frame) { jpeg++; continue; }
-                    RemoteFrame frame = RemoteMessageCodec.DecodeVideoFrame(message.PayloadMemory);
+                    RemoteFrame frame;
+                    if (message.Type == MessageType.TrackedVideoFrame)
+                    {
+                        if (!feedback) throw new IOException("Tracked frame sent to a legacy peer");
+                        var record = ReliableVideoFeedbackProtocol.DecodeFrame(message.PayloadMemory);
+                        if (record.Sequence != ++tracked) throw new IOException("Non-contiguous tracked frame");
+                        receivedBytes += message.PayloadLength + 25;
+                        await Protocol.WriteMessageAsync(viewer.GetStream(), MessageType.ReliableVideoFeedback,
+                            ReliableVideoFeedbackProtocol.EncodeReceipt(new(record.Sequence, receivedBytes)), session, writeLock, deadline.Token);
+                        frame = record.Frame;
+                    }
+                    else frame = RemoteMessageCodec.DecodeVideoFrame(message.PayloadMemory);
                     if (frame.Encoding == RemoteFrameEncoding.Jpeg) { jpeg++; continue; }
                     h264++;
                     firstVideoSeconds ??= clock.Elapsed.TotalSeconds;
@@ -88,9 +101,9 @@ internal static class DelayedVideoNegotiationProbe
                 deadline.Cancel();
                 try { await heartbeat; } catch (OperationCanceledException) { }
             }
-            Program.Save(Path.Combine(output, "delayed-negotiation.json"), new { firstVideoSeconds, jpeg, h264, pongs, decoded, received,
+            Program.Save(Path.Combine(output, "delayed-negotiation.json"), new { feedback, tracked, firstVideoSeconds, jpeg, h264, pongs, decoded, received,
                 logs = logs.ToArray(), scope = "Actual current desktop + new host over encrypted local TCP limited to 150 KiB/s; 1.2s delayed video negotiation; no input, not a Europe WAN measurement" });
-            return jpeg == 0 && decoded > 0 ? 0 : 1;
+            return jpeg == 0 && decoded > 0 && (!feedback || tracked >= 3) ? 0 : 1;
         }
         finally
         {
