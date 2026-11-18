@@ -23,6 +23,7 @@ internal sealed partial class RemoteViewerClient
             Interlocked.Increment(ref _localInputIntentRevision);
             if (paused)
             {
+                Volatile.Read(ref _idleH264Refresh)?.CancelInput();
                 var releases = new List<RemoteInputCommand>();
                 while (_inputQueue.TryDequeue(out RemoteInputCommand command))
                 {

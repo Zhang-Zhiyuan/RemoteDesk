@@ -719,12 +719,10 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
                         {
                             // Resource creation happens ONLY in explicit async
                             // preparation, never on this presentation path.
-                            if (D3D11NativeDetailCompositor.CanRender(nativeDetails, visibleSource, geometry))
-                            {
-                                NativeDetailActive = _nativeDetailCompositor.Render(nativeDetails, visibleSource, geometry, _nativeDetailRenderTarget!, nativeDetailBudget);
-                                NativeDetailUploadedTiles = _nativeDetailCompositor.UploadedTilesLastRender;
-                            }
-                            else _nativeDetailCompositor?.Clear();
+                            NativeDetailActive = _nativeDetailCompositor.Render(nativeDetails, visibleSource, geometry,
+                                _nativeDetailRenderTarget!, nativeDetailBudget,
+                                ExperimentalUpscalingActive && _options.UpscalingAlgorithm == ExperimentalUpscalingAlgorithm.TextStrokes);
+                            NativeDetailUploadedTiles = _nativeDetailCompositor.UploadedTilesLastRender;
                             NativeDetailStatus = NativeDetailActive ? "原生补清" : "原生补清等待可用区域";
                             if (NativeDetailActive) NativeDetailAfterDrawForTests?.Invoke();
                         }
@@ -1185,6 +1183,13 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
         {
             if (_experimentalUpscaler is null || _experimentalSourceSize != geometry.Source.Size)
             {
+                if (_options.UpscalingAlgorithm == ExperimentalUpscalingAlgorithm.TextStrokes)
+                {
+                    // Draw through the ordinary video processor while the compiler is busy.
+                    var shaders = D3D11ExperimentalUpscaler.PrepareTextShadersAsync();
+                    if (!shaders.IsCompleted) return false;
+                    shaders.GetAwaiter().GetResult();
+                }
                 TryDispose(_experimentalUpscaler);
                 _experimentalUpscaler = null;
                 _experimentalUpscaler = new D3D11ExperimentalUpscaler(

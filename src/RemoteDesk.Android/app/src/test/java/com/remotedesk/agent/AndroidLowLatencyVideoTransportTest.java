@@ -2,6 +2,7 @@ package com.remotedesk.agent;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import java.net.InetAddress;
@@ -155,15 +156,19 @@ public final class AndroidLowLatencyVideoTransportTest {
     @Test
     public void frameSilencePolicyKeepsStaticDesktopButRejectsIncompleteOrDeadRoutes() {
         assertTrue(AndroidLowLatencyVideoTransport.Viewer.shouldFallbackForFrameSilence(
-            false, 2_500, -1, -1, true));
+            false, 2_500, -1, -1, true, 0));
         assertTrue(AndroidLowLatencyVideoTransport.Viewer.shouldFallbackForFrameSilence(
-            true, 2_500, 11, 10, true));
+            true, 2_500, 11, 10, true, 2_500));
         assertTrue(AndroidLowLatencyVideoTransport.Viewer.shouldFallbackForFrameSilence(
-            true, 2_500, 10, 10, false));
+            true, 2_500, 10, 10, false, 0));
         assertTrue(!AndroidLowLatencyVideoTransport.Viewer.shouldFallbackForFrameSilence(
-            true, 2_500, 10, 10, true));
+            true, 2_500, 10, 10, true, Long.MAX_VALUE));
         assertTrue(!AndroidLowLatencyVideoTransport.Viewer.shouldFallbackForFrameSilence(
-            false, 2_499, -1, -1, false));
+            false, 2_499, -1, -1, false, Long.MAX_VALUE));
+        assertFalse(AndroidLowLatencyVideoTransport.Viewer.shouldFallbackForFrameSilence(
+            true, 600_000, 11, 10, true, 40));
+        assertTrue(AndroidLowLatencyVideoTransport.Viewer.shouldFallbackForFrameSilence(
+            true, 602_500, 40, 10, true, 2_500));
     }
 
     @Test

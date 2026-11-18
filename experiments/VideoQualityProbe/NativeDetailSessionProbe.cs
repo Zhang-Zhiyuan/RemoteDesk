@@ -73,6 +73,8 @@ internal static class NativeDetailSessionProbe
             await Protocol.WriteMessageAsync(stream, MessageType.Control, RemoteMessageCodec.EncodeDeviceInfo(
                 new("Native detail test fixture", "Windows", RemoteDeviceCapabilities.RemoteDesktop | RemoteDeviceCapabilities.NativeDetailV1)),
                 session, write, token);
+            await Protocol.WriteMessageAsync(stream, MessageType.NativeDetailOffer,
+                NativeDetailSessionProtocol.EncodeOffer(new(1, original.Size, true)), session, write, token);
             async Task Read()
             {
                 while (true)
@@ -229,6 +231,21 @@ internal static class NativeDetailSessionProbe
             PumpUntil(() => window.CollectRenderTelemetrySnapshot().DirectHardwarePresentedFrames >= baseCutoff);
             Check(nativeDraws == drawCutoff, "Explicit off did not stop GPU overlays.");
             checks.Add("explicit off leaves the base running");
+            phase = "viewer size pause / resume";
+            PumpUntil(() => Volatile.Read(ref request) is { Enabled: false } && client.NativeOffer is { Available: true });
+            var previous = Volatile.Read(ref request);
+            window.ClientSize = new(1000, 700); Application.DoEvents();
+            Await(window.ToggleNativeDetailsAsync());
+            long smallSince = Environment.TickCount64;
+            settle = window.CollectRenderTelemetrySnapshot().DirectHardwarePresentedFrames + 5;
+            PumpUntil(() => Environment.TickCount64 - smallSince > 850 &&
+                window.CollectRenderTelemetrySnapshot().DirectHardwarePresentedFrames >= settle);
+            Check(ReferenceEquals(previous, Volatile.Read(ref request)), "Small viewer sent a new detail request.");
+            window.ClientSize = new(2200, 1360); Application.DoEvents();
+            PumpUntil(() => Volatile.Read(ref request) is { Enabled: true } && client.NativeDetails.IsEnabled);
+            window.ClientSize = new(1000, 700); Application.DoEvents();
+            PumpUntil(() => Volatile.Read(ref request) is { Enabled: false } && !client.NativeDetails.IsEnabled);
+            checks.Add("small viewer sends zero requests; enlargement starts details; shrinking sends an ordered stop");
             Console.WriteLine($"PASS: production viewer over owned encrypted TCP, {sentFrames} frames, {nativeDraws} native GPU draws.");
         }
         catch (Exception ex) { failure = ex.ToString(); throw; }

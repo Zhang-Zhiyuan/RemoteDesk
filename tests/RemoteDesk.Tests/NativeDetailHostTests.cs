@@ -105,6 +105,15 @@ public sealed class NativeDetailHostTests
         Assert.InRange(NativeDetailCaptureWorker.SelectTiles(request).Length, 1, 64);
     }
 
+    [Theory]
+    [InlineData(1920, 1080, true)]
+    [InlineData(3840, 2160, true)]
+    [InlineData(1919, 1080, false)]
+    [InlineData(1920, 1079, false)]
+    [InlineData(0, 0, false)]
+    public void OnlyRequestVisible4kDetail(int width, int height, bool allowed) =>
+        Assert.Equal(allowed, RemoteViewerWindow.CanDisplayNativeDetails(new(3840, 2160), new(width, height)));
+
     [Fact]
     public async Task HostRequestLifecycleRejectsReplayButNeverBlocksOnHardwareInitialization()
     {

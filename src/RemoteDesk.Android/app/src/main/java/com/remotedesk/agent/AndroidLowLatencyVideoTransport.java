@@ -806,6 +806,7 @@ final class AndroidLowLatencyVideoTransport {
         private volatile long startedAtNanos;
         private volatile long lastHeartbeatAtNanos;
         private volatile long lastCompleteFrameAtNanos;
+        private volatile long firstOutstandingFrameAtNanos;
         private volatile long highestAuthenticatedFrameSequence = -1;
         private volatile long highestCompleteFrameSequence = -1;
         private volatile long nextFeedbackAtNanos;
@@ -1090,6 +1091,9 @@ final class AndroidLowLatencyVideoTransport {
                     packet.kind == LowLatencyVideoProtocol.KIND_FRAME_XOR_PARITY)) {
                 if (packet.frameSequence >= 0 &&
                     packet.frameSequence > highestAuthenticatedFrameSequence) {
+                    if (highestAuthenticatedFrameSequence <= highestCompleteFrameSequence) {
+                        firstOutstandingFrameAtNanos = clock.nanoTime();
+                    }
                     highestAuthenticatedFrameSequence = packet.frameSequence;
                 }
                 LowLatencyVideoProtocol.CompleteFrame frame = reassembler.add(packet);
@@ -1222,7 +1226,9 @@ final class AndroidLowLatencyVideoTransport {
                 elapsedMillis(silenceStartedAt, nowNanos),
                 highestAuthenticatedFrameSequence,
                 highestCompleteFrameSequence,
-                hasFreshAuthenticatedHeartbeat());
+                hasFreshAuthenticatedHeartbeat(),
+                firstOutstandingFrameAtNanos > lastCompleteFrameAtNanos
+                    ? elapsedMillis(firstOutstandingFrameAtNanos, nowNanos) : Long.MAX_VALUE);
         }
 
         static boolean shouldFallbackForFrameSilence(
@@ -1230,7 +1236,8 @@ final class AndroidLowLatencyVideoTransport {
             long silenceMillis,
             long highestAuthenticatedFrameSequence,
             long highestCompleteFrameSequence,
-            boolean authenticatedHeartbeatFresh) {
+            boolean authenticatedHeartbeatFresh,
+            long outstandingMillis) {
             if (silenceMillis < FEEDBACK_HARD_TIMEOUT_MILLIS) {
                 return false;
             }
@@ -1239,10 +1246,12 @@ final class AndroidLowLatencyVideoTransport {
             }
             // A changed-frame capture backend may legitimately emit nothing
             // on a static desktop. A fresh authenticated heartbeat plus no
-            // newer frame sequence proves that this is static silence, not an
-            // incomplete access unit or a dead host->viewer path.
+            // newer frame sequence permits static silence. Start the next frame's
+            // assembly budget at its first fragment, not the pre-idle picture;
+            // further incomplete frames never renew this same deadline.
             return !authenticatedHeartbeatFresh ||
-                highestAuthenticatedFrameSequence > highestCompleteFrameSequence;
+                (highestAuthenticatedFrameSequence > highestCompleteFrameSequence &&
+                    outstandingMillis >= FEEDBACK_HARD_TIMEOUT_MILLIS);
         }
 
         private int selectFrameFallbackReason(long nowNanos) {

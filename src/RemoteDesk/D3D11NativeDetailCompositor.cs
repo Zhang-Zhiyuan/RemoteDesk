@@ -15,6 +15,7 @@ internal sealed class D3D11NativeDetailCompositor : IDisposable
     internal const int AtlasBytes = 128 * 128 * 4 * NativeDetailPresentation.MaximumTiles;
     internal const int MapEdge = 64;
     internal const int MaximumUploadsPerFrame = 2;
+    internal const int MaxNativePixelsPerDisplayPixel = 2;
     private static readonly Lazy<byte[]> VertexCode = new(() => D3D11ExperimentalUpscaler.Compile(Shader, "vs", "vs_4_0"));
     private static readonly Lazy<byte[]> PixelCode = new(() => D3D11ExperimentalUpscaler.Compile(Shader, "ps", "ps_4_0"));
     private readonly ID3D11Device _device;
@@ -80,13 +81,16 @@ internal sealed class D3D11NativeDetailCompositor : IDisposable
     }
 
     internal bool Render(NativeDetailPresentation frame, Rectangle baseImage,
-        D3D11HwndVideoPresentationGeometry geometry, ID3D11RenderTargetView renderTarget, NativeDetailRenderBudget budget)
+        D3D11HwndVideoPresentationGeometry geometry, ID3D11RenderTargetView renderTarget, NativeDetailRenderBudget budget,
+        bool usePixelCoverage = false)
     {
-        float[] constants = Constants(frame, baseImage, geometry);
         UploadedTilesLastRender = 0;
+        if (frame.Tiles.IsEmpty) { Clear(); return false; }
+        float[] constants = Constants(frame, baseImage, geometry);
+        constants[12] = usePixelCoverage ? 1 : 0;
         // A >2x native reduction needs a larger reconstruction filter and is
         // deliberately left to the normal base renderer, not aliased point data.
-        if (frame.Tiles.IsEmpty || constants[2] > 2 || constants[3] > 2) { Clear(); return false; }
+        if (!CanRender(constants)) { Clear(); return false; }
         if (!budget.Allows(Stopwatch.GetTimestamp())) return false;
         _multithread!.Enter();
         try
@@ -160,13 +164,8 @@ internal sealed class D3D11NativeDetailCompositor : IDisposable
         finally { _multithread.Leave(); }
     }
 
-    internal static bool CanRender(NativeDetailPresentation frame, Rectangle baseImage,
-        D3D11HwndVideoPresentationGeometry geometry)
-    {
-        if (frame.Tiles.IsEmpty) return false;
-        float[] constants = Constants(frame, baseImage, geometry);
-        return constants[2] <= 2 && constants[3] <= 2;
-    }
+    internal static bool CanRender(ReadOnlySpan<float> constants) =>
+        constants[2] <= MaxNativePixelsPerDisplayPixel && constants[3] <= MaxNativePixelsPerDisplayPixel;
 
     public void Dispose()
     {
@@ -193,7 +192,7 @@ internal sealed class D3D11NativeDetailCompositor : IDisposable
             float4 nativeMapping; // native origin.xy, native pixels per output pixel.zw
             float4 outputMapping; // destination origin.xy, native dimensions.zw
             float4 visibleNative; // left, top, right, bottom
-            float4 reserved;
+            float4 filterOptions; // x = opt-in pixel coverage for native texel enlargement
         };
         float4 vs(uint id : SV_VertexID) : SV_Position {
             float2 uv = float2((id << 1) & 2, id & 2);
@@ -204,6 +203,13 @@ internal sealed class D3D11NativeDetailCompositor : IDisposable
                 float p = center - 0.5;
                 start = (int)floor(p);
                 float f = frac(p);
+                if (filterOptions.x > 0.5) {
+                    f = saturate((f - 0.5) / footprint + 0.5);
+                    // A floating-point sliver at a tile edge must not require
+                    // a missing neighbour for less than 1/4 of one RGB level.
+                    if (f < 1.0/1024) f = 0;
+                    else if (f > 1 - 1.0/1024) f = 1;
+                }
                 value = float4(1-f, f, 0, 0);
             } else {
                 float lo = center - footprint * 0.5, hi = center + footprint * 0.5;

@@ -173,6 +173,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
     private NetworkStream? _stream;
     private SecureSession? _session;
     private CancellationTokenSource? _cancellationTokenSource;
+    private IdleH264Refresh? _idleH264Refresh;
     private TcpClient? _pendingTcpClient;
     private CancellationTokenSource? _pendingConnectionCancellationTokenSource;
     private Task? _receiveLoopTask;
@@ -471,9 +472,13 @@ internal sealed partial class RemoteViewerClient : IDisposable
         _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.IndependentScreenSessions) &&
         Volatile.Read(ref _screenSessionToken) is not null;
 
-    internal Task SetScreenStreamPausedAsync(bool paused) => CanOpenAdditionalScreen
-        ? SendControlAsync(RemoteMessageCodec.EncodeScreenStreamPause(paused), _cancellationTokenSource)
-        : Task.CompletedTask;
+    internal Task SetScreenStreamPausedAsync(bool paused)
+    {
+        if (!CanOpenAdditionalScreen) return Task.CompletedTask;
+        var owner = _cancellationTokenSource;
+        if (paused) ResetIdleVideoTarget(owner);
+        return SendControlAsync(RemoteMessageCodec.EncodeScreenStreamPause(paused), owner);
+    }
 
     internal RemoteViewerClient CreateAdditionalScreenClient(string targetId)
     {
@@ -725,6 +730,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
                     _stream = stream;
                     _session = session;
                     _cancellationTokenSource = cancellationTokenSource;
+                    Volatile.Write(ref _idleH264Refresh, new IdleH264Refresh(cancellationTokenSource));
                     lock (_returnedClipboardFileRequestLock)
                     {
                         _returnedClipboardProtocolDesynchronized = false;
@@ -1237,6 +1243,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
     private void ResetRemotePeerState()
     {
+        Volatile.Write(ref _idleH264Refresh, null);
         Volatile.Write(ref _screenSessionToken, null);
         ResetNativeConnection();
         Interlocked.Exchange(ref _remoteCapabilitiesReady, null)?.TrySetResult(false);
@@ -1393,6 +1400,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
             {
                 _inputQueue.Enqueue(command, MaxQueuedInputs);
             }
+            if (Array.Exists(chord, command => command.Kind == RemoteInputKind.KeyDown)) ObserveVideoInput();
             InvalidateNativeDetails();
         }
 
@@ -1415,6 +1423,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
                     ref _lowLatencyVideoTransport);
             if (transport?.TryQueueMouseMove(command) == true)
             {
+                ObserveVideoInput();
                 ObserveLocalPointerInput(command);
                 ObserveUdpMouseRouteLocked(active: true);
                 // A TCP move queued before UDP activation must not arrive
@@ -1431,7 +1440,11 @@ internal sealed partial class RemoteViewerClient : IDisposable
             _inputQueue.Enqueue(
                 command,
                 MaxQueuedInputs);
-        if (queued) ObserveLocalPointerInput(command);
+        if (queued)
+        {
+            if (!IsLocalInputRelease(command)) ObserveVideoInput();
+            ObserveLocalPointerInput(command);
+        }
         if (queued &&
             IsReliablePointerInput(command))
         {
@@ -1533,6 +1546,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
             InvalidateNativeDetails();
             result = QueueTextInput(_inputQueue, text);
+            if (result.SentCodePoints > 0) ObserveVideoInput();
         }
 
         if (result.SentCodePoints > 0)
@@ -2609,7 +2623,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
         }
 
         byte[] payload = RemoteMessageCodec.EncodeSelectCaptureTarget(targetId);
-        await SendControlAsync(payload);
+        ResetIdleVideoTarget(cancellationTokenSource);
+        await SendControlAsync(payload, cancellationTokenSource);
     }
 
     public void Dispose()
@@ -2993,12 +3008,22 @@ internal sealed partial class RemoteViewerClient : IDisposable
         ProtocolReceiveProgress receiveProgress)
     {
         bool reportedSlowReceive = false;
+        Task lastRefreshWrite = Task.CompletedTask;
         while (!ownerCancellationTokenSource.IsCancellationRequested)
         {
             await Task.Delay(
                     HeartbeatWatchdogInterval,
                     ownerCancellationTokenSource.Token)
                 .ConfigureAwait(false);
+            var refresh = Volatile.Read(ref _idleH264Refresh);
+            int attempt = refresh is not null && ReferenceEquals(refresh.Owner, ownerCancellationTokenSource) &&
+                !IsLocalInputPaused && lastRefreshWrite.IsCompleted ? refresh.TakeDueRequest(Environment.TickCount64) : 0;
+            if (attempt > 0)
+            {
+                // A blocked control write must not block the connection watchdog itself.
+                Log?.Invoke($"空闲后已有输入但未收到新画面，正在请求 H.264 关键帧（{attempt}/2）。");
+                lastRefreshWrite = SendControlAsync(RemoteMessageCodec.EncodeVideoKeyFrameRequest(), ownerCancellationTokenSource);
+            }
             if (!ShouldDisconnectForHeartbeat(
                     GetLastMessageAge(),
                     IsHeartbeatTimeoutSuppressed(
@@ -3205,6 +3230,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
                     Volatile.Write(
                         ref _latestCaptureTargetAvailability,
                         update);
+                    if (!update.IsAvailable) ResetIdleVideoTarget(ownerConnection);
                     CaptureTargetAvailabilityChanged?.Invoke(
                         update);
                 }
@@ -3466,9 +3492,25 @@ internal sealed partial class RemoteViewerClient : IDisposable
             if (!ShouldIgnoreTcpVideoFrames(ownerConnection))
             {
                 if (!nativeEnvelope) NativeDetails.ObserveLegacyBase();
-                FrameReceived?.Invoke(frame);
+                PublishObservedVideoFrame(ownerConnection, frame);
             }
         }
+    }
+
+    private void ObserveVideoInput() => Volatile.Read(ref _idleH264Refresh)?.ObserveInput(Environment.TickCount64);
+
+    private void ResetIdleVideoTarget(CancellationTokenSource? owner)
+    {
+        var refresh = Volatile.Read(ref _idleH264Refresh);
+        if (refresh is not null && ReferenceEquals(refresh.Owner, owner)) refresh.Reset();
+    }
+
+    private void PublishObservedVideoFrame(CancellationTokenSource owner, RemoteFrame frame)
+    {
+        var refresh = Volatile.Read(ref _idleH264Refresh);
+        if (refresh is not null && ReferenceEquals(refresh.Owner, owner))
+            refresh.ObserveFrame(frame.Encoding, Environment.TickCount64);
+        FrameReceived?.Invoke(frame);
     }
 
     private async Task TryStartLowLatencyVideoAsync(
@@ -3637,7 +3679,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
             if (publish)
             {
-                FrameReceived?.Invoke(frame);
+                PublishObservedVideoFrame(ownerConnection, frame);
             }
         }
     }

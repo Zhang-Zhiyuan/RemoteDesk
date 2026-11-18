@@ -592,6 +592,74 @@ public sealed class LowLatencyVideoTransportTests
     }
 
     [Fact]
+    public async Task FirstFragmentsAfterHealthyIdleGetAFreshButBoundedDeliveryDeadline()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(22));
+        using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        socket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        var offer = CreateUnusedLoopbackOffer(((IPEndPoint)socket.LocalEndPoint!).Port);
+        using var cipher = new LowLatencyVideoSendCipher(offer.HostToViewerKey, offer.HostNoncePrefix, offer.ChannelId, offer.Epoch);
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stop = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int frames = 0;
+        await using var viewer = new LowLatencyVideoViewerTransport(offer, IPAddress.Loopback, payload =>
+        {
+            var kind = RemoteMessageCodec.DecodeControl(payload).Kind;
+            if (kind == RemoteControlKind.LowLatencyVideoReady) ready.TrySetResult();
+            if (kind == RemoteControlKind.LowLatencyVideoStop) stop.TrySetResult();
+            return Task.FromResult(true);
+        }, _ => Interlocked.Increment(ref frames), _ => { }, timeout.Token,
+            LowLatencyVideoFeatures.CongestionFeedback | LowLatencyVideoFeatures.AuthenticatedHeartbeat,
+            localAddress: IPAddress.Loopback);
+        async Task Send(byte[] data) => await socket.SendToAsync(data, SocketFlags.None, viewer.LocalEndpoint, timeout.Token);
+        await Send(cipher.Encrypt(LowLatencyVideoDatagramKind.BindAck, 0, offer.Challenge.Length, 0, 0, 1, 0, 0, offer.Challenge));
+        await ready.Task.WaitAsync(timeout.Token);
+        int max = LowLatencyVideoProtocol.GetMaxFragmentPayloadBytes(offer.MaxDatagramBytes);
+        Task SendFrame(ulong seq, bool partial)
+        {
+            byte[] bytes = RemoteMessageCodec.EncodeFrame(1, 1, new byte[partial ? max : 1]);
+            return Send(cipher.Encrypt(LowLatencyVideoDatagramKind.FrameFragment, seq, bytes.Length,
+                0, 0, (ushort)(partial ? 2 : 1), MessageType.Frame, 0, bytes.AsSpan(0, Math.Min(max, bytes.Length))));
+        }
+        async Task Heartbeats()
+        {
+            while (!timeout.IsCancellationRequested)
+            {
+                await Send(cipher.Encrypt(LowLatencyVideoDatagramKind.Heartbeat, 0, 0, 0, 0, 1, 0, 0, []));
+                await Task.Delay(100, timeout.Token);
+            }
+        }
+        Task heartbeats = Heartbeats();
+        try
+        {
+            await SendFrame(1, false);
+            await WaitUntilAsync(() => Volatile.Read(ref frames) == 1, timeout.Token);
+            await Task.Delay(LowLatencyVideoViewerTransport.SteadyFrameTimeout + TimeSpan.FromMilliseconds(450), timeout.Token);
+            Assert.False(stop.Task.IsCompleted);
+            await SendFrame(2, true);
+            // Allow multiple feedback ticks while the pre-idle deadline is already expired.
+            await Task.Delay(450, timeout.Token);
+            Assert.False(stop.Task.IsCompleted, "The first new fragment inherited an expired pre-idle deadline.");
+            await SendFrame(3, false);
+            await WaitUntilAsync(() => Volatile.Read(ref frames) == 2, timeout.Token);
+            await Task.Delay(LowLatencyVideoViewerTransport.SteadyFrameTimeout + TimeSpan.FromMilliseconds(450), timeout.Token);
+            var clock = Stopwatch.StartNew();
+            for (ulong seq = 4; !stop.Task.IsCompleted && clock.Elapsed < TimeSpan.FromSeconds(5); seq++)
+            {
+                await SendFrame(seq, true); // New sequences must not keep renewing the deadline.
+                await Task.Delay(70, timeout.Token);
+            }
+            Assert.True(stop.Task.IsCompleted);
+            Assert.InRange(clock.Elapsed, LowLatencyVideoViewerTransport.SteadyFrameTimeout - TimeSpan.FromMilliseconds(50), TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            timeout.Cancel();
+            try { await heartbeats; } catch (OperationCanceledException) { }
+        }
+    }
+
+    [Fact]
     public async Task AuthenticatedHeartbeatKeepsUdpVideoAcrossStaticSourceAndDetectsLaterRouteLoss()
     {
         using var timeout =

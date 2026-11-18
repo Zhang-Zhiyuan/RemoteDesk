@@ -186,6 +186,9 @@ dotnet run --project experiments/VideoQualityProbe -c Release -- --native-detail
 ```
 
 `--native-detail-gpu` reuses the first probe's edited H.264 and both native PNGs.
+It compares NIS, text-stroke scaling and native tiles on the same decoded sample.
+It also reports compressed wire bytes for 512-byte chunks and checks native
+pixel coverage against a CPU area sampler, including sparse tile boundaries.
 It exercises the Windows presenter with a 4 MiB sparse native atlas, paced uploads
 (at most two tiles per frame), same-sample binding, exact disable/post-draw-fault
 rollback, cache reuse, odd native edges, missing neighbours, crop and fractional

@@ -18,6 +18,7 @@ internal static class UpscaleComparisonProbe
         output = Path.GetFullPath(output);
         if (Directory.Exists(output)) throw new IOException("Preserving previous probe output.");
         Directory.CreateDirectory(output);
+        D3D11ExperimentalUpscaler.PrepareTextShadersAsync().GetAwaiter().GetResult();
         using var device = D3D11.D3D11CreateDevice(DriverType.Hardware,
             DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport);
         using var dxgi = device.QueryInterface<IDXGIDevice>();
@@ -61,11 +62,16 @@ internal static class UpscaleComparisonProbe
             }
             using var convertedReference = reference;
             reference.Save(Path.Combine(output, prefix + "-converted-reference.png"));
-            foreach (string mode in new[] { "legacy", "bicubic", "nis" })
+            foreach (string mode in new[] { "legacy", "bicubic", "nis", "text-strokes" })
             {
                 var options = new D3D11HwndVideoPresenterOptions(window.Handle, sourceSize.Width, sourceSize.Height, 30,
                     EnableExperimentalUpscaling: mode != "legacy",
-                    UpscalingAlgorithm: mode == "nis" ? ExperimentalUpscalingAlgorithm.Nis : ExperimentalUpscalingAlgorithm.CatmullRom);
+                    UpscalingAlgorithm: mode switch
+                    {
+                        "nis" => ExperimentalUpscalingAlgorithm.Nis,
+                        "text-strokes" => ExperimentalUpscalingAlgorithm.TextStrokes,
+                        _ => ExperimentalUpscalingAlgorithm.CatmullRom
+                    });
                 if (!D3D11HwndVideoPresenter.TryCreate(device, options, out var presenter, out var capability))
                     throw new InvalidOperationException(capability.Detail);
                 using (presenter)
@@ -99,18 +105,30 @@ internal static class UpscaleComparisonProbe
                     }
                     if (mode == "nis" && presenter.ExperimentalUpscalingDetail != "NIS")
                         throw new InvalidOperationException("NIS unexpectedly fell back: " + presenter.ExperimentalUpscalingDetail);
+                    if (mode == "text-strokes" && presenter.ExperimentalUpscalingDetail !=
+                        (D3D11ExperimentalUpscaler.ShouldEnhanceStrokes(sourceSize, targetSize) ? "文字笔画" : "双三次"))
+                        throw new InvalidOperationException("Text scaler did not draw.");
                     using var rendered = ReadPixels(device, presenter, targetSize);
                     rendered.Save(Path.Combine(output, prefix + "-" + mode + ".png"));
                     timings.Sort();
                     double mse = 0;
+                    long inkUnion = 0, inkIntersection = 0;
                     // Only the text/line chart region; blank screen area must
                     // not inflate a quality score. PSNR is NOT readability.
                     int areaWidth = Math.Min(targetSize.Width, 1250), areaHeight = 620;
                     for (int y = 12; y < areaHeight; y++)
                         for (int x = 12; x < areaWidth; x++)
                         {
-                            double d = reference.GetPixel(x, y).R - rendered.GetPixel(x, y).R;
+                            int nativeY = reference.GetPixel(x, y).R, outputY = rendered.GetPixel(x, y).R;
+                            double d = nativeY - outputY;
                             mse += d * d;
+                            // Only small dark-on-light text, excluding the inverse-text
+                            // panel, blank background and chart below it. Not an OCR score.
+                            if (y < 105 && (nativeY < 150 || outputY < 150))
+                            {
+                                inkUnion++;
+                                if (nativeY < 150 && outputY < 150) inkIntersection++;
+                            }
                         }
                     mse /= (areaWidth - 12) * (areaHeight - 12);
                     var result = new
@@ -122,6 +140,7 @@ internal static class UpscaleComparisonProbe
                         medianGpuMs = timings[timings.Count / 2],
                         p95GpuMs = timings[(int)(timings.Count * 0.95)],
                         chartPsnr = 10 * Math.Log10(255 * 255 / mse),
+                        smallTextInkIoU = (double)inkIntersection / inkUnion,
                         samples = timings.Count
                     };
                     results.Add(result);

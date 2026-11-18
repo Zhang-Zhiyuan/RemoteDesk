@@ -67,6 +67,11 @@ public sealed class NisUpscalingTests
         using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var viewer = new RemoteViewerWindow(client, "algorithm test", false, false, false, false, false, false);
         bool geometry = viewer.AllowDisplayUpscalingForEntityTests;
+        viewer.SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.TextStrokes);
+        var menu = viewer.ExperimentalUpscaleButtonForEntityTests.ContextMenuStrip!;
+        var algorithms = Assert.Single(menu.Items.OfType<ToolStripMenuItem>(), item => item.Text!.StartsWith("新版放大算法"));
+        Assert.Contains("文字笔画", Assert.Single(algorithms.DropDownItems.OfType<ToolStripMenuItem>(), item => item.Checked).Text);
+        Assert.False(viewer.ExperimentalUpscalingForEntityTests);
         viewer.SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.CatmullRom);
         Assert.False(viewer.ExperimentalUpscalingForEntityTests);
         viewer.ToggleExperimentalUpscaling();

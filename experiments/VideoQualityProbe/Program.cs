@@ -56,8 +56,10 @@ if (args.ElementAtOrDefault(0) == "--native-detail-encoder")
 }
 if (args.ElementAtOrDefault(0) == "--native-detail-pacing")
 {
-    if (args.Length != 4) throw new ArgumentException("Usage: --native-detail-pacing <text-fixtures> <native-detail-run> <new-output-directory>");
-    NativeDetailPacingProbe.Run(args[1], args[2], args[3]);
+    if (args.Length is not (4 or 5) || (args.Length == 5 && args[4] != "text-strokes"))
+        throw new ArgumentException("Usage: --native-detail-pacing <text-fixtures> <native-detail-run> <new-output-directory> [text-strokes]");
+    NativeDetailPacingProbe.Run(args[1], args[2], args[3], args.Length == 5
+        ? ExperimentalUpscalingAlgorithm.TextStrokes : ExperimentalUpscalingAlgorithm.Nis);
     return;
 }
 if (args.ElementAtOrDefault(0) == "--native-detail-live")

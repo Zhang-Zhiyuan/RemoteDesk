@@ -361,23 +361,26 @@ internal static class TextClarityProbe
         return rows;
     }
 
-    private static object TextMetric(Bitmap reference, Bitmap actual)
+    internal static object TextMetric(Bitmap reference, Bitmap actual, bool lightOnDark = false)
     {
         byte[] a = Pixels(reference), b = Pixels(actual);
         long intersection = 0, union = 0, absoluteError = 0, pixels = 0;
-        for (int y = TextRegion.Top; y < TextRegion.Bottom; y++)
-        for (int x = TextRegion.Left; x < TextRegion.Right; x++)
+        Rectangle region = TextRegion;
+        if (lightOnDark) region.Offset(960, 0);
+        for (int y = region.Top; y < region.Bottom; y++)
+        for (int x = region.Left; x < region.Right; x++)
         {
             int offset = (y * Width + x) * 4;
             int first = (a[offset] * 29 + a[offset + 1] * 150 + a[offset + 2] * 77) >> 8;
             int second = (b[offset] * 29 + b[offset + 1] * 150 + b[offset + 2] * 77) >> 8;
-            bool af = first < 150, bf = second < 150;
+            bool af = lightOnDark ? first > 105 : first < 150, bf = lightOnDark ? second > 105 : second < 150;
             if (af && bf) intersection++;
             if (af || bf) { union++; absoluteError += Math.Abs(first - second); pixels++; }
         }
         return new { inkMaskIou = union == 0 ? 1d : intersection / (double)union,
             inkMeanAbsoluteLumaError = pixels == 0 ? 0d : absoluteError / (double)pixels,
-            scope = "Fixed native-pixel text crop, luma threshold 150. Includes scaling/chroma/render conversion. NOT OCR character accuracy."
+            scope = lightOnDark ? "Light text, luma above 105. Ink overlap at native pixels, not OCR." :
+                "Dark text, luma below 150. Ink overlap at native pixels, not OCR."
         };
     }
 

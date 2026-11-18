@@ -3008,7 +3008,8 @@ internal sealed partial class RemoteHostServer : IDisposable
         Action<string> log,
         CancellationToken cancellationToken,
         Func<TimeSpan, CancellationToken, Task>? delayAsync = null,
-        Func<bool>? needsKeyFrameRecovery = null)
+        Func<bool>? needsKeyFrameRecovery = null,
+        Func<bool>? desktopChangedWhileSilent = null)
     {
         ArgumentNullException.ThrowIfNull(refreshCaptureBounds);
         ArgumentNullException.ThrowIfNull(isSelectionCurrent);
@@ -3037,6 +3038,13 @@ internal sealed partial class RemoteHostServer : IDisposable
                 {
                     if (refreshCaptureBounds())
                     {
+                        return;
+                    }
+
+                    if (desktopChangedWhileSilent?.Invoke() == true)
+                    {
+                        CancelStaticH264CaptureSelection(cancelSelection, log,
+                            "静态 WGC 等帧期间交互桌面已切换，重新选择当前桌面的采集路径。");
                         return;
                     }
 
@@ -3625,7 +3633,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                     viewerState.GetVideoSelectionChangeToken(
                         sourceCodecVersion));
             int deliveredKeyFrameRequestVersion = viewerState.KeyFrameRequestVersion;
-            if (options.AllowStaticFrameSilence)
+            if (options.AllowStaticFrameSilence && capture.Backend == FfmpegDesktopCaptureBackend.WindowsGraphicsCaptureMonitor)
             {
                 staticCaptureTargetMonitor =
                     MonitorStaticH264CaptureTargetAsync(
@@ -3639,8 +3647,16 @@ internal sealed partial class RemoteHostServer : IDisposable
                         needsKeyFrameRecovery: () => ShouldRecoverStaticH264KeyFrame(
                             viewerState.KeyFrameRequestVersion,
                             Volatile.Read(ref deliveredKeyFrameRequestVersion),
-                            activeCapture.LastFrameProducedAtTimestamp,
-                            Stopwatch.GetTimestamp()));
+                            capture.LastFrameProducedAtTimestamp,
+                            Stopwatch.GetTimestamp()),
+                        // The regular desktop check runs in the frame loop and cannot run
+                        // while WGC waits indefinitely for a changed desktop surface.
+                        desktopChangedWhileSilent: () =>
+                        {
+                            long last = capture.LastFrameProducedAtTimestamp;
+                            return last > 0 && Stopwatch.GetElapsedTime(last) >= StaticH264CaptureTargetPollInterval &&
+                                !WindowsInteractiveDesktopProbe.InspectCurrent().IsAvailable;
+                        });
             }
             int observedKeyFrameRequestVersion =
                 viewerState.KeyFrameRequestVersion;
@@ -3952,6 +3968,7 @@ internal sealed partial class RemoteHostServer : IDisposable
 
                 using FfmpegDesktopH264Frame ownedFrame =
                     frame;
+                int requestAtFrameAdmission = viewerState.KeyFrameRequestVersion;
                 if (lastSourceProducedAt != 0 &&
                     frame.ProducedAtTimestamp > lastSourceProducedAt)
                 {
@@ -4193,7 +4210,8 @@ internal sealed partial class RemoteHostServer : IDisposable
                 }
 
                 if (recoveryFrame)
-                    Volatile.Write(ref deliveredKeyFrameRequestVersion, viewerState.KeyFrameRequestVersion);
+                    // A request received during the async write still needs a fresh IDR.
+                    Volatile.Write(ref deliveredKeyFrameRequestVersion, requestAtFrameAdmission);
                 awaitingRecoveryHandoff = false;
 
                 double sendMilliseconds =

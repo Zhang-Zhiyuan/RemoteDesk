@@ -3274,6 +3274,7 @@ internal sealed partial class LowLatencyVideoViewerTransport : IAsyncDisposable
     private long _lastAuthenticatedFramePacketAt;
     private long _lastAuthenticatedHeartbeatAt;
     private long _lastCompleteFrameAt;
+    private long _firstOutstandingFramePacketAt;
     private long _authenticatedFramePacketCount;
     private long _highestAuthenticatedFramePacketSequence;
     private long _highestCompleteFrameSequence;
@@ -3805,14 +3806,17 @@ internal sealed partial class LowLatencyVideoViewerTransport : IAsyncDisposable
                             _features.HasFlag(
                                 LowLatencyVideoFeatures.XorFec)))
                     {
-                        Volatile.Write(
-                            ref _lastAuthenticatedFramePacketAt,
-                            Stopwatch.GetTimestamp());
+                        long packetAt = Stopwatch.GetTimestamp();
+                        Volatile.Write(ref _lastAuthenticatedFramePacketAt, packetAt);
                         Interlocked.Increment(
                             ref _authenticatedFramePacketCount);
-                        if (packet.FrameSequence <=
-                            (ulong)long.MaxValue)
+                        long highest = Volatile.Read(ref _highestAuthenticatedFramePacketSequence);
+                        if (packet.FrameSequence > (ulong)highest && packet.FrameSequence <= long.MaxValue)
                         {
+                            // One deadline for the whole incomplete stretch. Later fragments,
+                            // parity and even newer incomplete frames must not refresh it.
+                            if (highest <= Volatile.Read(ref _highestCompleteFrameSequence))
+                                Volatile.Write(ref _firstOutstandingFramePacketAt, packetAt);
                             UpdateMaximum(
                                 ref _highestAuthenticatedFramePacketSequence,
                                 checked((long)packet.FrameSequence));
@@ -4802,15 +4806,17 @@ internal sealed partial class LowLatencyVideoViewerTransport : IAsyncDisposable
                     ? TimeSpan.MaxValue
                     : Stopwatch.GetElapsedTime(
                         lastAuthenticatedHeartbeatAt);
-            return !IsAuthenticatedStaticSourceSilence(
-                Volatile.Read(
-                    ref _highestAuthenticatedFramePacketSequence),
-                Volatile.Read(
-                    ref _highestCompleteFrameSequence),
-                heartbeatAge,
-                _features.HasFlag(
-                    LowLatencyVideoFeatures
-                        .AuthenticatedHeartbeat));
+            long highest = Volatile.Read(ref _highestAuthenticatedFramePacketSequence);
+            long complete = Volatile.Read(ref _highestCompleteFrameSequence);
+            bool authenticated = _features.HasFlag(LowLatencyVideoFeatures.AuthenticatedHeartbeat);
+            if (IsAuthenticatedStaticSourceSilence(highest, complete, heartbeatAge, authenticated))
+                return false;
+
+            // The old picture may be minutes old. A healthy static period must not
+            // consume the very next frame's assembly budget before its first byte.
+            long firstOutstanding = Volatile.Read(ref _firstOutstandingFramePacketAt);
+            return !(authenticated && heartbeatAge < SteadyFrameTimeout && highest > complete &&
+                firstOutstanding > lastCompleteFrameAt && Stopwatch.GetElapsedTime(firstOutstanding) < SteadyFrameTimeout);
         }
 
         long initialFrameWaitStartedAt =

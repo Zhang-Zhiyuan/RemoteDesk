@@ -139,6 +139,7 @@ internal sealed partial class RemoteViewerWindow : Form
     private int _experimentalUpscalingAlgorithm = (int)ExperimentalUpscalingAlgorithm.Nis;
     private readonly ToolStripMenuItem _nisUpscaleMenuItem;
     private readonly ToolStripMenuItem _bicubicUpscaleMenuItem;
+    private readonly ToolStripMenuItem _textUpscaleMenuItem;
     private Size _h264DecoderSize = Size.Empty;
     private Size _mediaFoundationH264DecoderSize = Size.Empty;
     private Size _d3d11VideoPresenterSourceSize = Size.Empty;
@@ -442,14 +443,17 @@ internal sealed partial class RemoteViewerWindow : Form
             (_, _) => SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.Nis)) { Checked = true };
         _bicubicUpscaleMenuItem = new ToolStripMenuItem("双三次＋防光晕（兼容 / 对照）", null,
             (_, _) => SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.CatmullRom));
-        upscaleMenu.DropDownItems.AddRange([_nisUpscaleMenuItem, _bicubicUpscaleMenuItem]);
+        _textUpscaleMenuItem = new ToolStripMenuItem("文字笔画（终端、文档）", null,
+            (_, _) => SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.TextStrokes))
+        { ToolTipText = "视频只加强已有的细笔画；开启原生补清后，收到的原始像素按覆盖面积放大。照片可继续用 NIS。" };
+        upscaleMenu.DropDownItems.AddRange([_nisUpscaleMenuItem, _textUpscaleMenuItem, _bicubicUpscaleMenuItem]);
         _statusMenu.Items.Add(upscaleMenu);
         _statusBar.ContextMenuStrip = _statusMenu;
         _experimentalUpscaleButton.ContextMenuStrip = _statusMenu;
         ConfigureFilePullToolTips();
         UpdateNativeDetailButton();
         _toolTip.SetToolTip(_experimentalUpscaleButton,
-            "实验性 GPU 放大。默认关闭，点击可切回原版；右键选择 NIS / 双三次对照。\n" +
+            "实验性 GPU 放大。默认关闭，点击可切回原版；右键可选文字笔画、NIS 或双三次。\n" +
             "NIS 适用于 1～2 倍，不兼容或超出范围时使用双三次；底部显示实际算法。\n" +
             "只在允许放大且 H.264 GPU 直显画面实际被放大时生效；不改变缩放比例。\n" +
             "JPEG / 软件显示保持原版，不会用 AI 猜测文字。");
@@ -1511,13 +1515,19 @@ internal sealed partial class RemoteViewerWindow : Form
         Volatile.Write(ref _experimentalUpscalingAlgorithm, (int)algorithm);
         _nisUpscaleMenuItem.Checked = algorithm == ExperimentalUpscalingAlgorithm.Nis;
         _bicubicUpscaleMenuItem.Checked = algorithm == ExperimentalUpscalingAlgorithm.CatmullRom;
+        _textUpscaleMenuItem.Checked = algorithm == ExperimentalUpscalingAlgorithm.TextStrokes;
+        if (_textUpscaleMenuItem.Checked) _ = D3D11ExperimentalUpscaler.PrepareTextShadersAsync();
         // Selection alone does not silently enable the opt-in feature.
+        bool enabled = Volatile.Read(ref _experimentalUpscaling);
         lock (_d3d11PresenterLock)
-            _d3d11VideoPresenter?.SetExperimentalUpscaling(Volatile.Read(ref _experimentalUpscaling), algorithm);
-        SetStatus(algorithm == ExperimentalUpscalingAlgorithm.Nis
-            ? "已选择 NIS（实验）；开启新版放大且实际放大 1～2 倍时使用，不支持时自动使用双三次。"
-            : "已选择双三次＋防光晕，可与 NIS 对照；新版放大的开关状态不变。", MutedTextColor);
-        RequestH264KeyFrameIfDue();
+            _d3d11VideoPresenter?.SetExperimentalUpscaling(enabled, algorithm);
+        SetStatus(algorithm switch
+        {
+            ExperimentalUpscalingAlgorithm.TextStrokes => "已选择文字笔画。开启新版放大后，从 1.75 倍起增强笔画，轻度放大使用双三次。",
+            ExperimentalUpscalingAlgorithm.Nis => "已选择 NIS（实验）；开启新版放大且实际放大 1～2 倍时使用，不支持时自动使用双三次。",
+            _ => "已选择双三次＋防光晕，可与 NIS 对照；新版放大的开关状态不变。"
+        }, MutedTextColor);
+        if (enabled) RequestH264KeyFrameIfDue();
         _pictureBox.Focus();
     }
 

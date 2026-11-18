@@ -28,6 +28,23 @@ public sealed class NativeDetailTests
         cache.Reset(manifest.Context, new(0, 0, manifest.Context.Width, manifest.Context.Height));
         Assert.True(cache.Present(manifest)); return cache;
     }
+
+    [Theory]
+    [InlineData(128, 128, false)]
+    [InlineData(127, 73, false)]
+    [InlineData(128, 128, true)]
+    [InlineData(1, 127, true)]
+    public void AdaptiveCompressionPreservesPixelsAndKeepsFastPathForNoise(int width, int height, bool noisy)
+    {
+        var context = new DetailContext(1, 1, width, height);
+        byte[] rgba = Pixels(context, noisy);
+        var transfer = DetailTransfer.Encode(Manifest(context), 0, rgba);
+        using var old = new MemoryStream();
+        using (var zlib = new ZLibStream(old, CompressionLevel.Fastest, leaveOpen: true)) zlib.Write(rgba);
+        if (noisy) Assert.Equal(old.ToArray(), transfer.Encoded.ToArray());
+        else Assert.True(transfer.Encoded.Length < old.Length);
+        Assert.Equal(rgba, DetailWire.DecodeRgba(transfer.Encoded.Span, rgba.Length));
+    }
     private static DetailReceiveResult Deliver(DetailCache cache, DetailTransfer transfer, long now = 300, bool reverse = false)
     {
         var offsets = Enumerable.Range(0, (transfer.Encoded.Length + 4095) / 4096).Select(index => index * 4096);

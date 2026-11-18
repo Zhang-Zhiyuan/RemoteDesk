@@ -7,6 +7,7 @@ internal sealed partial class RemoteViewerWindow
     private Button _nativeDetailButton = null!;
     private System.Windows.Forms.Timer _nativeDetailTimer = null!;
     private bool _nativeDetailWanted, _nativeRequestPending, _nativeStopPending, _nativeStopInFlight;
+    private bool _nativeViewportTooSmall;
     private long _nativeObservedInputRevision, _nativeIdleSince;
     private Rectangle _nativeRequestedViewport;
     private NativeDetailOffer? _nativeRequestedOffer;
@@ -41,6 +42,7 @@ internal sealed partial class RemoteViewerWindow
     {
         if (_isClosing || IsDisposed) return;
         _nativeDetailWanted = !_nativeDetailWanted;
+        _nativeViewportTooSmall = false;
         UpdateNativeDetailButton();
         if (!_nativeDetailWanted)
         {
@@ -68,9 +70,11 @@ internal sealed partial class RemoteViewerWindow
         bool available = _client.NativeOffer is { Available: true };
         _nativeDetailButton.Visible = available || _nativeDetailWanted;
         _nativeDetailButton.Enabled = available || _nativeDetailWanted;
-        _nativeDetailButton.Text = !_nativeDetailWanted ? "原生补清：关" : available ? "原生补清：开" : "原生补清：暂停";
-        _nativeDetailButton.AccessibleName = _nativeDetailWanted ? "原生文字补清，开启" : "原生文字补清，关闭";
+        bool paused = _nativeDetailWanted && (!available || _nativeViewportTooSmall);
+        _nativeDetailButton.Text = !_nativeDetailWanted ? "原生补清：关" : paused ? "原生补清：暂停" : "原生补清：开";
+        _nativeDetailButton.AccessibleName = _nativeViewportTooSmall ? "原生补清已暂停，放大窗口可恢复" : _nativeDetailButton.Text;
         _toolTip?.SetToolTip(_nativeDetailButton,
+            (_nativeViewportTooSmall ? "当前窗口太小。放大到远端分辨率的一半以上，空闲时会自动恢复。\n" : "") +
             "保留流畅 H.264，空闲时补充鼠标附近的原始像素，不猜测文字。\n" +
             "需要新版 Windows 被控端和 GPU 显示。默认关闭，可随时恢复普通画面。\n" +
             "无带宽余量、正在输入或窗口太小时不补清；当前版本仅增强最多 1024×1024 的区域。\n" +
@@ -79,24 +83,40 @@ internal sealed partial class RemoteViewerWindow
 
     private async Task RefreshNativeRequestAsync()
     {
-        if (!_nativeDetailWanted && _nativeStopPending && !_isClosing && !IsDisposed)
+        if (_isClosing || IsDisposed) return;
+        if (_nativeStopPending)
         {
             await SendNativeStopAsync();
             return;
         }
-        if (_isClosing || IsDisposed || !_nativeDetailWanted || _nativeRequestPending ||
+        if (!_nativeDetailWanted || _nativeRequestPending || _nativeStopInFlight ||
             !_client.IsConnected || _client.NativeOffer is not { Available: true } offer) return;
+        Size encoded = GetRemoteImageSize();
+        if (encoded.Width <= 0 || encoded.Height <= 0) return;
+        Rectangle displayed = GetZoomedImageRectangle(encoded);
+        bool tooSmall = !CanDisplayNativeDetails(offer.NativeSize, displayed.Size);
+        if (_nativeViewportTooSmall != tooSmall)
+        {
+            _nativeViewportTooSmall = tooSmall;
+            UpdateNativeDetailButton();
+            _nativeIdleSince = Environment.TickCount64;
+            if (tooSmall && (_nativeRequestedOffer is not null || _client.NativeDetails.IsEnabled))
+            {
+                _nativeRequestedOffer = null;
+                _client.InvalidateNativeDetails();
+                ScheduleNativeDetailPreparation();
+                _nativeStopPending = true;
+                await SendNativeStopAsync();
+            }
+        }
+        if (tooSmall) return;
         long revision = _client.NativeInputRevision, now = Environment.TickCount64;
         if (revision != _nativeObservedInputRevision)
         {
             _nativeObservedInputRevision = revision; _nativeIdleSince = now; return;
         }
         if (now - _nativeIdleSince < 350) return;
-        Size encoded = GetRemoteImageSize();
-        if (encoded.Width <= 0 || encoded.Height <= 0) return;
         Point pointer = _pictureBox.PointToClient(Cursor.Position);
-        Rectangle displayed = GetZoomedImageRectangle(encoded);
-        if (displayed.Width <= 0 || displayed.Height <= 0) return;
         // A local pointer outside the picture should not move the requested
         // region to a toolbar or oscillate the request after every tick.
         if (!displayed.Contains(pointer)) pointer = new(displayed.Left + displayed.Width / 2, displayed.Top + displayed.Height / 2);
@@ -125,12 +145,17 @@ internal sealed partial class RemoteViewerWindow
         try
         {
             bool stopped = !_client.IsConnected || await _client.StopNativeDetailsAsync();
-            if (!_nativeDetailWanted) _nativeStopPending = !stopped;
+            if (!_nativeDetailWanted || _nativeViewportTooSmall) _nativeStopPending = !stopped;
         }
         catch (Exception ex) when (ex is InvalidOperationException or IOException or OperationCanceledException)
         { /* Retry on the idle timer without blocking input or closing the viewer. */ }
         finally { _nativeStopInFlight = false; }
     }
+
+    internal static bool CanDisplayNativeDetails(Size native, Size displayed) =>
+        native.Width > 0 && native.Height > 0 &&
+        native.Width <= (long)displayed.Width * D3D11NativeDetailCompositor.MaxNativePixelsPerDisplayPixel &&
+        native.Height <= (long)displayed.Height * D3D11NativeDetailCompositor.MaxNativePixelsPerDisplayPixel;
 
     internal static Rectangle CalculateNativeDetailViewport(Size size, Point focus)
     {

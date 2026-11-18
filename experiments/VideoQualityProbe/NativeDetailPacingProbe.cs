@@ -13,7 +13,8 @@ internal static class NativeDetailPacingProbe
     private const int FramesPerPhase = 120, Fps = 60;
     private static readonly Rectangle Viewport = new(0,0,960,640);
 
-    internal static void Run(string fixtures, string prior, string output)
+    internal static void Run(string fixtures, string prior, string output,
+        ExperimentalUpscalingAlgorithm algorithm = ExperimentalUpscalingAlgorithm.Nis)
     {
         if (Directory.Exists(output)) throw new IOException("Preserving previous pacing evidence.");
         Directory.CreateDirectory(output);
@@ -33,7 +34,7 @@ internal static class NativeDetailPacingProbe
         window.Show(); Application.DoEvents();
         Check(window.Visible && IsWindowVisible(window.Handle),"The owned preview window was not made visible.");
         if (!D3D11HwndVideoPresenter.TryCreate(device, new(window.Handle,1920,1080,Fps,
-                EnableEdgeEnhancement:false, EnableExperimentalUpscaling:true, UpscalingAlgorithm:ExperimentalUpscalingAlgorithm.Nis),
+                EnableEdgeEnhancement:false, EnableExperimentalUpscaling:true, UpscalingAlgorithm:algorithm),
                 out var candidate, out var presentationCapability)) throw new IOException(presentationCapability.Detail);
         using var presenter = candidate!;
         using var pacingWaiter = new WindowsHighResolutionPacingWaiter();
@@ -143,9 +144,10 @@ internal static class NativeDetailPacingProbe
             File.WriteAllText(Path.Combine(output,"summary.json"),JsonSerializer.Serialize(new
             {
                 functionalPassed = failure is null, failure, fps = Fps, outputSize = original.Size,
+                algorithm = algorithm.ToString(), actualAlgorithm = presenter.ExperimentalUpscalingDetail,
                 pacingDriver = nameof(WindowsHighResolutionPacingWaiter),
                 displayedPreviewSize = new Size(960,600), sourceFrames = serial, summaries, samples,
-                scope = "Actual hardware MF decoding and visible D3D11/NIS/native-atlas submission, 60Hz synthetic driver with a one-frame local deadline. No GPU completion wait/query/Flush/readback added to the measured loop. Input/backlog/congestion flags are synthetic. Fixture native damage/compression is excluded and recorded separately. NOT real host capture, WAN, input ACK, DWM scan-out or photon latency; functionalPassed does NOT authorize release."
+                scope = "Hardware MF decode and D3D11 presentation with a one-frame local deadline. Input, backlog and congestion flags are synthetic. The measured loop excludes GPU readback and fixture preparation. Timings cover local submission only."
             },new JsonSerializerOptions { WriteIndented = true }));
         }
     }

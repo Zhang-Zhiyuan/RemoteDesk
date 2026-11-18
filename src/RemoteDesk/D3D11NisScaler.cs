@@ -8,7 +8,7 @@ using Vortice.DXGI;
 
 namespace RemoteDesk;
 
-internal enum ExperimentalUpscalingAlgorithm { CatmullRom, Nis }
+internal enum ExperimentalUpscalingAlgorithm { CatmullRom, Nis, TextStrokes }
 
 /// <summary>
 /// NVIDIA's pinned MIT-licensed NIS 1.0.3, SDR/FP32 compute path. Borrowed

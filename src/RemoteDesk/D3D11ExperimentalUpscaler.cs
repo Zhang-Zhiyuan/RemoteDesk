@@ -9,7 +9,7 @@ namespace RemoteDesk;
 
 /// <summary>
 /// Opt-in spatial scaler. Convert NV12 to native-size RGB on the GPU, then
-/// apply Catmull-Rom with a local range clamp or optional NIS. No CPU readback,
+/// apply range-clamped Catmull-Rom, text stroke enhancement, or NIS. No CPU readback,
 /// frame history, generated text, driver sharpening, or decoder changes.
 /// The legacy video processor is independent and remains the fallback.
 /// </summary>
@@ -17,11 +17,20 @@ internal sealed class D3D11ExperimentalUpscaler : IDisposable
 {
     private static readonly Lazy<byte[]> VertexCode = new(() => Compile("vs", "vs_4_0"));
     private static readonly Lazy<byte[]> PixelCode = new(() => Compile("ps", "ps_4_0"));
+    private static readonly Lazy<byte[]> TextCode = new(() => Compile("psText", "ps_4_0"));
+    private static readonly Lazy<Task> TextPreparation = new(() => Task.Run(() =>
+    {
+        _ = VertexCode.Value;
+        _ = PixelCode.Value;
+        _ = TextCode.Value;
+    }));
+    internal static Task PrepareTextShadersAsync() => TextPreparation.Value;
     private static readonly Lazy<byte[]> CopyCode = new(() => Compile("psCopy", "ps_4_0"));
     private readonly ID3D11Device _device;
     private readonly ID3D11DeviceContext _context;
     private ID3D11VertexShader? _vertexShader;
     private ID3D11PixelShader? _pixelShader;
+    private ID3D11PixelShader? _textShader;
     private ID3D11PixelShader? _copyShader;
     private D3D11NisScaler? _nis;
     private bool _nisFailed;
@@ -39,6 +48,13 @@ internal sealed class D3D11ExperimentalUpscaler : IDisposable
         destination.Width > 0 && destination.Height > 0 &&
         (destination.Width > source.Width || destination.Height > source.Height);
 
+    // At mild magnification, accenting already well-sampled strokes thickens
+    // small print. Near 2x the loss of contrast from interpolation dominates.
+    internal static bool ShouldEnhanceStrokes(Size source, Size destination) =>
+        source.Width > 0 && source.Height > 0 &&
+        (long)destination.Width * 4 >= (long)source.Width * 7 &&
+        (long)destination.Height * 4 >= (long)source.Height * 7;
+
     internal D3D11ExperimentalUpscaler(
         ID3D11Device device, ID3D11DeviceContext context,
         ID3D11VideoDevice videoDevice, ID3D11VideoProcessorEnumerator enumerator,
@@ -53,6 +69,8 @@ internal sealed class D3D11ExperimentalUpscaler : IDisposable
             _multithread = context.QueryInterface<ID3D11Multithread>();
             _vertexShader = device.CreateVertexShader(VertexCode.Value);
             _pixelShader = device.CreatePixelShader(PixelCode.Value);
+            if (algorithm == ExperimentalUpscalingAlgorithm.TextStrokes)
+                _textShader = device.CreatePixelShader(TextCode.Value);
             _nativeRgb = device.CreateTexture2D(new Texture2DDescription(
                 Format.B8G8R8A8_UNorm, (uint)sourceSize.Width, (uint)sourceSize.Height,
                 1, 1, BindFlags.RenderTarget | BindFlags.ShaderResource));
@@ -107,6 +125,11 @@ internal sealed class D3D11ExperimentalUpscaler : IDisposable
             ID3D11ShaderResourceView source = _sourceView!;
             ID3D11PixelShader shader = _pixelShader!;
             ActiveAlgorithm = "双三次";
+            if (_textShader is not null && ShouldEnhanceStrokes(_sourceSize, geometry.Destination.Size))
+            {
+                shader = _textShader;
+                ActiveAlgorithm = "文字笔画";
+            }
             if (_algorithm == ExperimentalUpscalingAlgorithm.Nis)
             {
                 ActiveAlgorithm = _nisFailed ? "双三次（NIS 回退）" : "双三次（NIS 限 1～2 倍）";
@@ -174,6 +197,7 @@ internal sealed class D3D11ExperimentalUpscaler : IDisposable
         _sourceView?.Dispose(); _sourceView = null;
         _nativeRgb?.Dispose(); _nativeRgb = null;
         _processor?.Dispose(); _processor = null;
+        _textShader?.Dispose(); _textShader = null;
         _pixelShader?.Dispose(); _pixelShader = null;
         _vertexShader?.Dispose(); _vertexShader = null;
         _multithread?.Dispose(); _multithread = null;
@@ -238,7 +262,7 @@ internal sealed class D3D11ExperimentalUpscaler : IDisposable
             int2 p = clamp(int2(v.uv * float2(width, height)), 0, int2(width, height)-1);
             return float4(source.Load(int3(p,0)).rgb, 1);
         }
-        float4 ps(Vertex v) : SV_Target {
+        float4 reconstruct(Vertex v, bool text) {
             uint width, height;
             source.GetDimensions(width, height);
             int2 size = int2(width, height);
@@ -246,16 +270,47 @@ internal sealed class D3D11ExperimentalUpscaler : IDisposable
             int2 base = int2(floor(p));
             float4 wx = weights(frac(p.x)), wy = weights(frac(p.y));
             float3 color = 0, lo = 1, hi = 0;
+            float3 surrounding = 0;
+            float outerLo = 1, outerHi = 0;
             [unroll] for (int y = 0; y < 4; ++y) {
                 [unroll] for (int x = 0; x < 4; ++x) {
                     float3 tap = source.Load(int3(clamp(base + int2(x-1,y-1), 0, size-1),0)).rgb;
                     color += tap * wx[x] * wy[y];
+                    if (text) {
+                        float luma = dot(tap, float3(0.2126, 0.7152, 0.0722));
+                        surrounding += tap;
+                        outerLo = min(outerLo, luma); outerHi = max(outerHi, luma);
+                    }
                     if (x >= 1 && x <= 2 && y >= 1 && y <= 2) {
                         lo = min(lo, tap); hi = max(hi, tap);
                     }
                 }
             }
-            return float4(clamp(color, lo, hi), 1);
+            color = clamp(color, lo, hi);
+            if (text) {
+                float3 lumaWeights = float3(0.2126, 0.7152, 0.0722);
+                float luma = dot(color, lumaWeights);
+                float background = dot(surrounding * (1.0 / 16.0), lumaWeights);
+                float contrast = outerHi - outerLo;
+                // The mean tends towards the background of thin light OR dark
+                // strokes. Only strengthen contrasting ink, not flat noise,
+                // coloured edges or a broad response beside a single step.
+                float ink = luma - background;
+                float side = ink >= 0 ? outerHi - background : background - outerLo;
+                float weight = smoothstep(0.09, 0.28, contrast) *
+                    smoothstep(0.50, 0.72, side / max(contrast, 0.001));
+                float chroma = max(color.r, max(color.g, color.b)) - min(color.r, min(color.g, color.b));
+                weight *= 1 - smoothstep(0.08, 0.22, chroma);
+                float delta = clamp(ink * (0.65 * weight), -0.12, 0.12);
+                // A luminance-only correction, bounded by evidence in the
+                // source footprint and by the RGB gamut. Do not invent contours.
+                float lower = min(0, max(outerLo - luma, -min(color.r, min(color.g, color.b))));
+                float upper = max(0, min(outerHi - luma, 1 - max(color.r, max(color.g, color.b))));
+                color += clamp(delta, lower, upper);
+            }
+            return float4(color, 1);
         }
+        float4 ps(Vertex v) : SV_Target { return reconstruct(v, false); }
+        float4 psText(Vertex v) : SV_Target { return reconstruct(v, true); }
         """;
 }

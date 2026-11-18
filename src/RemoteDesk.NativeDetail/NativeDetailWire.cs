@@ -74,10 +74,29 @@ public sealed class DetailTransfer
     {
         var rect = manifest.Context.Tile(tile);
         if (rgba.Length != rect.Width * rect.Height * 4) throw new InvalidDataException("RGBA size mismatch.");
+        // Text and terminal backgrounds have long flat runs. Spend a little
+        // more time on the bounded compression worker, not on the input,
+        // capture or display thread. Photos/noise keep the old fast path.
         using var output = new MemoryStream();
-        using (var zlib = new ZLibStream(output, CompressionLevel.Fastest, leaveOpen: true)) zlib.Write(rgba);
+        using (var zlib = new ZLibStream(output, CompressionFor(rgba, rect.Width, rect.Height), leaveOpen: true)) zlib.Write(rgba);
         if (output.Length > DetailWire.MaxCompressedBytes) throw new InvalidDataException("Compressed tile exceeds limit.");
         return new(manifest.Context, manifest.Sequence, tile, manifest[tile], output.ToArray());
+    }
+    private static CompressionLevel CompressionFor(ReadOnlySpan<byte> rgba, int width, int height)
+    {
+        if (width < 2 || rgba.Length < 4096) return CompressionLevel.Fastest;
+        var pixels = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(rgba);
+        int samples = 0, equal = 0;
+        // Bounded, allocation-free sample of neighbouring RGBA pixels in the
+        // same row. A misclassification only changes zlib effort, never pixels.
+        for (int y = 0; y < height; y += Math.Max(1, height / 8))
+            for (int x = (y / 8) % Math.Min(8, width - 1); x < width - 1; x += Math.Max(1, width / 8))
+            {
+                int index = y * width + x;
+                samples++;
+                if (pixels[index] == pixels[index + 1]) equal++;
+            }
+        return equal * 2 >= samples ? CompressionLevel.Optimal : CompressionLevel.Fastest;
     }
     public byte[] Chunk(int offset, int chunkBytes = DetailWire.ChunkBytes) => DetailWire.EncodeChunk(this, offset, chunkBytes);
 }

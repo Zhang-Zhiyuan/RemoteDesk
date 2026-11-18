@@ -65,9 +65,12 @@ public sealed class ExperimentalUpscalingTests
     [Trait("Category", "HardwareSmoke")]
     [InlineData(ExperimentalUpscalingAlgorithm.CatmullRom)]
     [InlineData(ExperimentalUpscalingAlgorithm.Nis)]
-    internal void HardwareUpscalingPreservesOrientationAndPixelsAcrossToggleResizeAndCrop(ExperimentalUpscalingAlgorithm algorithm)
+    [InlineData(ExperimentalUpscalingAlgorithm.TextStrokes)]
+    internal async Task HardwareUpscalingPreservesOrientationAndPixelsAcrossToggleResizeAndCrop(ExperimentalUpscalingAlgorithm algorithm)
     {
         if (Environment.GetEnvironmentVariable("REMOTEDESK_RUN_HARDWARE_SMOKE") != "1") return;
+        if (algorithm == ExperimentalUpscalingAlgorithm.TextStrokes)
+            await D3D11ExperimentalUpscaler.PrepareTextShadersAsync();
         using var window = new Form { ClientSize = new Size(128, 128), ShowInTaskbar = false };
         using var device = D3D11.D3D11CreateDevice(DriverType.Hardware,
             DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport);
@@ -87,7 +90,7 @@ public sealed class ExperimentalUpscalingTests
             context.UpdateSubresource(nv12, texture, 0, 64, (uint)nv12.Length);
             var failures = new List<string>();
             presenter.ExperimentalUpscalingFailed += (_, reason) => failures.Add(reason);
-            foreach (int size in new[] { 96, 128, 224, 127 })
+            foreach (int size in new[] { 96, 111, 112, 128, 224, 127 })
             {
                 Assert.True(presenter.Resize(size, size).IsSuccess);
                 foreach (bool enabled in new[] { true, false, true, false })
@@ -98,9 +101,13 @@ public sealed class ExperimentalUpscalingTests
                     Assert.Empty(failures);
                     Assert.Equal(enabled, presenter.ExperimentalUpscalingActive);
                     if (enabled)
-                        Assert.Equal(algorithm == ExperimentalUpscalingAlgorithm.Nis && size <= 128 ? "NIS" :
-                            algorithm == ExperimentalUpscalingAlgorithm.Nis ? "双三次（NIS 限 1～2 倍）" : "双三次",
-                            presenter.ExperimentalUpscalingDetail);
+                        Assert.Equal(algorithm switch
+                        {
+                            ExperimentalUpscalingAlgorithm.Nis when size <= 128 => "NIS",
+                            ExperimentalUpscalingAlgorithm.Nis => "双三次（NIS 限 1～2 倍）",
+                            ExperimentalUpscalingAlgorithm.TextStrokes when size >= 112 => "文字笔画",
+                            _ => "双三次"
+                        }, presenter.ExperimentalUpscalingDetail);
                     // Inspect the copy made BEFORE flip-model Present, not a
                     // rotated/uninitialized back buffer. Test-only GPU readback.
                     var source = (ID3D11Texture2D?)typeof(D3D11HwndVideoPresenter).GetField(

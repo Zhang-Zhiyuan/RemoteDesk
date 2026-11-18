@@ -48,6 +48,27 @@ public sealed class StaticH264RecoveryTests
     }
 
     [Fact]
+    public async Task SilentCaptureRechecksInputDesktopWithoutAFrameOrViewerRequest()
+    {
+        using var session = new CancellationTokenSource();
+        using var capture = CancellationTokenSource.CreateLinkedTokenSource(session.Token);
+        async ValueTask<object?> SilentRead(CancellationToken token)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            return null;
+        }
+        var pending = RemoteHostServer.ReadH264FrameUntilSelectionChangesAsync<object>(SilentRead, capture.Token, session.Token).AsTask();
+        int checks = 0;
+        var logs = new List<string>();
+        await RemoteHostServer.MonitorStaticH264CaptureTargetAsync(() => false, () => true,
+            capture.Cancel, logs.Add, capture.Token, (_, _) => Task.CompletedTask,
+            needsKeyFrameRecovery: () => false, desktopChangedWhileSilent: () => ++checks == 3);
+        Assert.True((await pending.WaitAsync(TimeSpan.FromSeconds(1))).SelectionChanged);
+        Assert.False(session.IsCancellationRequested);
+        Assert.Contains("交互桌面已切换", Assert.Single(logs));
+    }
+
+    [Fact]
     public async Task ObsoleteTargetNeverStartsRecoveryForAnotherScreen()
     {
         await RemoteHostServer.MonitorStaticH264CaptureTargetAsync(() => false, () => false,

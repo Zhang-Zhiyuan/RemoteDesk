@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Drawing.Imaging;
+using System.IO.Compression;
 using System.Text.Json;
 using RemoteDesk;
 using RemoteDesk.NativeDetail;
@@ -16,6 +17,7 @@ internal static class NativeDetailGpuProbe
         if (Directory.Exists(output)) throw new IOException("Preserving previous GPU detail evidence.");
         Directory.CreateDirectory(output);
         WindowsFormsSynchronizationContext.AutoInstall = false;
+        D3D11ExperimentalUpscaler.PrepareTextShadersAsync().GetAwaiter().GetResult();
         var rows = new List<object>();
         NativeText(fixtures, priorDetailRun, output, rows);
         Geometry(output, rows);
@@ -39,6 +41,7 @@ internal static class NativeDetailGpuProbe
         var cache = new DetailCache(); cache.Reset(context, new(0, 0, 960, 640));
         var first = source.Observe(NativeDetailProbe.Rgba(native), 0); cache.Present(first);
         Fill(source, cache, first, viewport, 250);
+        rows.Add(MeasureTileCompression(first, cache));
         var adapter = new Adapter();
         if (!MediaFoundationD3D11H264Decoder.TryCreate(new(1920, 1080, 30, AllSamplesIndependent: true), out var created, out var capability))
             throw new IOException(capability.Detail);
@@ -51,6 +54,10 @@ internal static class NativeDetailGpuProbe
         Check(frame.HasExplicitSampleTime && frame.SampleTime100Nanoseconds == 1_000_000, "No exact decoder PTS.");
         Rectangle baseImage = new(0, 0, 1920, 1080);
         using var baseline = Draw(device, presenter, frame, baseImage, size, null);
+        presenter.SetExperimentalUpscaling(true, ExperimentalUpscalingAlgorithm.TextStrokes);
+        using var strokes = Draw(device, presenter, frame, baseImage, size, null);
+        Check(presenter.ExperimentalUpscalingDetail == "文字笔画", "Expected the text shader on the decoded frame.");
+        presenter.SetExperimentalUpscaling(true, ExperimentalUpscalingAlgorithm.Nis);
         var batch = adapter.Convert(cache, first, viewport, frame.SampleTime100Nanoseconds);
         using (var notReady = Draw(device, presenter, frame, baseImage, size, batch)) ExactImage(baseline, notReady);
         Check(presenter.NativeDetailAtlasBytes == 0, "Present lazily created an atlas.");
@@ -61,7 +68,12 @@ internal static class NativeDetailGpuProbe
         Check(presenter.NativeDetailUploadedTiles == 0, "Expected reuse after the paced initial uploads.");
         ExactViewport(native, baseline, detailed, viewport);
         detailed.Save(Path.Combine(output, "native-gpu.png"));
-        SaveComparison(native, baseline, detailed, output);
+        SaveComparison(native, baseline, strokes, detailed, output);
+        rows.Add(new { test = "same-h264-sample-small-text", nis = TextClarityProbe.TextMetric(native, baseline),
+            strokes = TextClarityProbe.TextMetric(native, strokes), nativeTiles = TextClarityProbe.TextMetric(native, detailed) });
+        rows.Add(new { test = "same-h264-sample-light-on-dark",
+            nis = TextClarityProbe.TextMetric(native, baseline, lightOnDark: true),
+            strokes = TextClarityProbe.TextMetric(native, strokes, lightOnDark: true) });
         using (var repeat = Draw(device, presenter, frame, baseImage, size, batch))
         {
             Check(presenter.NativeDetailUploadedTiles == 0, "Unchanged tiles were uploaded again.");
@@ -150,9 +162,11 @@ internal static class NativeDetailGpuProbe
             ("crop", new Size(700,400), D3D11HwndVideoScaleMode.Fill),
             ("native-base", new Size(514,518), D3D11HwndVideoScaleMode.FitWithoutUpscaling) };
         foreach (var (name, size, mode) in cases)
+        foreach (bool pixelCoverage in new[] { false, true })
         using (var window = new Form { ClientSize = size, ShowInTaskbar = false })
         using (var presenter = CreatePresenter(device, window, baseImage.Size, size, mode, nis: false))
         {
+            if (pixelCoverage) presenter.SetExperimentalUpscaling(true, ExperimentalUpscalingAlgorithm.TextStrokes);
             Rectangle viewport = name == "native" ? new(Point.Empty, nativeSize) : new(19, 23, 211, 221);
             var frameTiles = tiles.Where(tile => tile.Bounds.IntersectsWith(viewport)).ToArray();
             var full = new NativeDetailPresentation(2, 1, 1, 77, nativeSize, viewport, frameTiles);
@@ -160,23 +174,26 @@ internal static class NativeDetailGpuProbe
             using var baseline = UpscaleComparisonProbe.ReadPixels(device, presenter, size);
             Prepare(presenter);
             var geometry = D3D11HwndVideoPresenter.CalculateGeometry(baseImage, size, mode);
+            var constants = D3D11NativeDetailCompositor.Constants(full, baseImage, geometry);
             Populate(presenter, () => presenter.Present(texture, 0, baseImage, false, full, 77, CorrectnessBudget()),
-                D3D11NativeDetailCompositor.CanRender(full, baseImage, geometry) ? frameTiles.Length : 0);
+                D3D11NativeDetailCompositor.CanRender(constants) ? frameTiles.Length : 0);
             Check(presenter.Present(texture, 0, baseImage, true, full, 77, CorrectnessBudget()).IsSuccess, presenter.NativeDetailStatus);
             using var composed = UpscaleComparisonProbe.ReadPixels(device, presenter, size);
-            var error = CheckReference(bytes, baseline, composed, full, baseImage, geometry);
+            bool coverage = pixelCoverage && presenter.ExperimentalUpscalingActive;
+            var error = CheckReference(bytes, baseline, composed, full, baseImage, geometry, coverage);
             var sparse = new NativeDetailPresentation(2, 1, 2, 78, nativeSize, viewport,
                 frameTiles.Where(tile => tile.Bounds.Location != new Point(128, 128)).ToArray());
             Check(presenter.Present(texture, 0, baseImage, true, sparse, 78, CorrectnessBudget()).IsSuccess, presenter.NativeDetailStatus);
             using var holes = UpscaleComparisonProbe.ReadPixels(device, presenter, size);
-            var sparseError = CheckReference(bytes, baseline, holes, sparse, baseImage, geometry);
-            composed.Save(Path.Combine(output, name + ".png")); holes.Save(Path.Combine(output, name + "-sparse.png"));
-            rows.Add(new { test = name, size, maxRgbError = error, maxSparseRgbError = sparseError, noStaleOrUninitializedPixels = true });
+            var sparseError = CheckReference(bytes, baseline, holes, sparse, baseImage, geometry, coverage);
+            var label = pixelCoverage ? name + "-text" : name;
+            composed.Save(Path.Combine(output, label + ".png")); holes.Save(Path.Combine(output, label + "-sparse.png"));
+            rows.Add(new { test = label, size, coverage, maxRgbError = error, maxSparseRgbError = sparseError, noStaleOrUninitializedPixels = true });
         }
     }
 
     private static int CheckReference(byte[] native, Bitmap baseline, Bitmap actual, NativeDetailPresentation frame,
-        Rectangle baseImage, D3D11HwndVideoPresentationGeometry geometry)
+        Rectangle baseImage, D3D11HwndVideoPresentationGeometry geometry, bool pixelCoverage)
     {
         var c = D3D11NativeDetailCompositor.Constants(frame, baseImage, geometry);
         var present = frame.Tiles.ToArray().Select(tile => tile.Bounds.Location).ToHashSet();
@@ -193,8 +210,8 @@ internal static class NativeDetailGpuProbe
             double[] color = new double[3];
             if (applies)
             {
-                foreach (var (py, wy) in Weights(cy, c[3]))
-                foreach (var (px, wx) in Weights(cx, c[2]))
+                foreach (var (py, wy) in Weights(cy, c[3], pixelCoverage))
+                foreach (var (px, wx) in Weights(cx, c[2], pixelCoverage))
                 {
                     int nx = Math.Clamp(px, 0, frame.NativeSize.Width - 1), ny = Math.Clamp(py, 0, frame.NativeSize.Height - 1);
                     if (!present.Contains(new Point(nx / 128 * 128, ny / 128 * 128))) applies = false;
@@ -206,15 +223,15 @@ internal static class NativeDetailGpuProbe
             {
                 int expected = applies ? (int)Math.Round(color[channel]) : low[offset + channel];
                 int error = Math.Abs(got[offset + channel] - expected); maxError = Math.Max(maxError, error);
-                if (error > (applies ? 1 : 0)) throw new IOException($"GPU detail pixel mismatch at {x},{y}, channel {channel}: {got[offset+channel]} != {expected}, native={applies}.");
+                if (error > (applies ? 1 : 0)) throw new IOException($"GPU detail pixel mismatch at {x},{y}, channel {channel}: {got[offset+channel]} != {expected}, native={applies}, coverage={pixelCoverage}, center=({cx:R},{cy:R}), footprint=({c[2]:R},{c[3]:R}).");
             }
             Check(got[offset + 3] == 255, "Non-opaque GPU output.");
         }
         return maxError;
     }
-    private static IEnumerable<(int Pixel, double Weight)> Weights(double center, double footprint)
+    private static IEnumerable<(int Pixel, double Weight)> Weights(double center, double footprint, bool pixelCoverage)
     {
-        if (footprint <= 1)
+        if (footprint <= 1 && !pixelCoverage)
         {
             int start = (int)Math.Floor(center - .5); double fraction = center - .5 - start;
             if (1 - fraction > 0) yield return (start, 1 - fraction);
@@ -226,6 +243,11 @@ internal static class NativeDetailGpuProbe
             for (int p = (int)Math.Floor(lo); p < Math.Ceiling(hi); p++)
             {
                 double weight = Math.Max(0, Math.Min(p + 1, hi) - Math.Max(p, lo)) / footprint;
+                if (pixelCoverage && footprint <= 1)
+                {
+                    if (weight < 1d/1024) continue;
+                    if (weight > 1 - 1d/1024) weight = 1;
+                }
                 if (weight > 0) yield return (p, weight);
             }
         }
@@ -336,11 +358,40 @@ internal static class NativeDetailGpuProbe
         }
     }
     private static void ExactImage(Bitmap expected, Bitmap actual) => Check(NativeDetailProbe.Rgba(expected).AsSpan().SequenceEqual(NativeDetailProbe.Rgba(actual)), "Not an exact base rollback.");
-    private static void SaveComparison(Bitmap native, Bitmap baseline, Bitmap detailed, string output)
+    private static object MeasureTileCompression(DetailManifest manifest, DetailCache cache)
     {
-        using var result = new Bitmap(720, 696); using var graphics = Graphics.FromImage(result); graphics.Clear(Color.LightGray);
+        const int payload = 512;
+        int oldWireBytes = 0, wireBytes = 0;
+        var encodeMs = new List<double>();
+        var patches = cache.Patches.ToArray();
+        foreach (var patch in patches)
+        {
+            using var previous = new MemoryStream();
+            using (var zlib = new ZLibStream(previous, CompressionLevel.Fastest, leaveOpen: true)) zlib.Write(patch.Rgba.Span);
+            int oldBytes = checked((int)previous.Length);
+            oldWireBytes += oldBytes + ((oldBytes + payload - 1) / payload) * (DetailWire.ChunkHeaderBytes + DetailWire.OuterRecordBytes);
+            DetailTransfer encoded = DetailTransfer.Encode(manifest, patch.Tile, patch.Rgba.Span);
+            for (int repeat = 0; repeat < 5; repeat++)
+            {
+                long start = Stopwatch.GetTimestamp();
+                encoded = DetailTransfer.Encode(manifest, patch.Tile, patch.Rgba.Span);
+                encodeMs.Add(Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+            }
+            for (int offset = 0; offset < encoded.Encoded.Length; offset += payload)
+                wireBytes += encoded.Chunk(offset, payload).Length + DetailWire.OuterRecordBytes;
+            Check(DetailWire.DecodeRgba(encoded.Encoded.Span, patch.Rgba.Length).AsSpan().SequenceEqual(patch.Rgba.Span),
+                "Compressed text tile differs from original RGBA.");
+        }
+        encodeMs.Sort();
+        return new { test = "lossless-text-compression", tiles = patches.Length, oldWireBytes, wireBytes,
+            encodeMedianMs = encodeMs[encodeMs.Count / 2], encodeP95Ms = encodeMs[(int)(encodeMs.Count * .95)],
+            exact = true, chunkPayloadBytes = payload };
+    }
+    private static void SaveComparison(Bitmap native, Bitmap baseline, Bitmap strokes, Bitmap detailed, string output)
+    {
+        var rows = new[] { ("Native source",native), ("H.264 / NIS",baseline), ("H.264 / Text strokes",strokes), ("H.264 + original tiles",detailed) };
+        using var result = new Bitmap(720, rows.Length * 232); using var graphics = Graphics.FromImage(result); graphics.Clear(Color.LightGray);
         using var font = new Font("Segoe UI", 16, GraphicsUnit.Pixel);
-        var rows = new[] { ("Native source",native), ("Actual MF/D3D11/NIS base",baseline), ("Same decoded sample + GPU native atlas",detailed) };
         for (int i = 0; i < rows.Length; i++)
         {
             graphics.DrawString(rows[i].Item1, font, Brushes.Black, 12, i * 232 + 4);
