@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Drawing;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using SharpGen.Runtime;
 using Vortice;
 using Vortice.Direct3D11;
@@ -187,7 +188,8 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
     private readonly IDXGISwapChain1 _swapChain;
     private readonly PresentFlags _presentFlags;
     private readonly SwapChainFlags _swapChainFlags;
-    private nint _frameLatencyWaitableObject;
+    private readonly SafeWaitHandle _frameLatencyWaitableObject;
+    private int _unusedFrameSlot;
     private ID3D11VideoProcessorEnumerator? _enumerator;
     private ID3D11VideoProcessor? _processor;
     private ID3D11Texture2D? _backBuffer;
@@ -255,8 +257,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
         _outputView = outputView;
         _presentFlags = presentFlags;
         _swapChainFlags = swapChainFlags;
-        _frameLatencyWaitableObject =
-            frameLatencyWaitableObject;
+        _frameLatencyWaitableObject = new SafeWaitHandle(frameLatencyWaitableObject, ownsHandle: true);
         _outputWidth = outputWidth;
         _outputHeight = outputHeight;
         _scaleMode = options.ScaleMode;
@@ -523,7 +524,8 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
         bool captureValidation = false,
         NativeDetailPresentation? nativeDetails = null,
         NativeDetailRenderBudget nativeDetailBudget = default,
-        bool useDriverVideoColors = false)
+        bool useDriverVideoColors = false,
+        bool frameSlotReserved = false)
     {
         // Any attempted Present supersedes the previous validation snapshot,
         // including a rejected or unavailable decoded frame.
@@ -546,7 +548,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
                 captureValidation,
                 nativeDetails,
                 frame.HasExplicitSampleTime ? frame.SampleTime100Nanoseconds : null,
-                nativeDetailBudget, frame.ColorSpace.ForPresentation(useDriverVideoColors));
+                nativeDetailBudget, frame.ColorSpace.ForPresentation(useDriverVideoColors), frameSlotReserved);
         }
         catch (Exception ex)
         {
@@ -569,7 +571,8 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
         NativeDetailPresentation? nativeDetails = null,
         long? explicitSampleTime100Nanoseconds = null,
         NativeDetailRenderBudget nativeDetailBudget = default,
-        SdrVideoColorSpace? colorSpace = null)
+        SdrVideoColorSpace? colorSpace = null,
+        bool frameSlotReserved = false)
     {
         lock (_sync)
         {
@@ -647,30 +650,8 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
                             "D3D11 device.");
                 }
 
-                uint frameLatencyWait =
-                    WaitForSingleObject(
-                        _frameLatencyWaitableObject,
-                        CalculateFrameLatencyWaitTimeoutMilliseconds(
-                            _options.FramesPerSecond));
-                if (frameLatencyWait == WaitTimeout)
-                {
-                    return CreateResult(
-                        D3D11HwndVideoPresenterStatus.Occluded,
-                        detail:
-                            "The frame-latency wait timed out; the stale " +
-                            "decoded frame was skipped.");
-                }
-
-                if (frameLatencyWait != WaitObject0)
-                {
-                    int error =
-                        frameLatencyWait == WaitFailed
-                            ? Marshal.GetHRForLastWin32Error()
-                            : unchecked((int)frameLatencyWait);
-                    return CreateFailureResult(
-                        error,
-                        "Waiting for the DXGI frame-latency object failed.");
-                }
+                if (!frameSlotReserved && WaitForFrameSlot() is { } waitFailure)
+                    return waitFailure;
 
                 D3D11HwndVideoPresentationGeometry geometry =
                     CalculateGeometry(
@@ -1372,6 +1353,34 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
         }
     }
 
+    // Waiting does not need the HWND, D3D context or presenter lock. The interop
+    // call holds the SafeHandle alive if the UI retires this swap chain mid-wait.
+    internal D3D11HwndVideoPresenterResult? WaitForFrameSlot()
+    {
+        if (Interlocked.Exchange(ref _unusedFrameSlot, 0) != 0) return null;
+        try
+        {
+            uint result = WaitForSingleObject(_frameLatencyWaitableObject,
+                CalculateFrameLatencyWaitTimeoutMilliseconds(_options.FramesPerSecond));
+            if (result == WaitObject0) return null;
+            if (result == WaitTimeout)
+                return CreateResult(D3D11HwndVideoPresenterStatus.Occluded,
+                    detail: "The frame-latency wait timed out; the stale decoded frame was skipped.");
+            return CreateResult(D3D11HwndVideoPresenterStatus.Failed,
+                result == WaitFailed ? Marshal.GetHRForLastWin32Error() : unchecked((int)result),
+                detail: "Waiting for the DXGI frame-latency object failed.");
+        }
+        catch (ObjectDisposedException)
+        {
+            return CreateResult(D3D11HwndVideoPresenterStatus.Disposed,
+                detail: "The presenter was retired before the frame-latency wait.");
+        }
+    }
+
+    // A window can minimize after the wait and before the flip. Without a
+    // Present, DXGI owes us no new signal when this same window is restored.
+    internal void ReturnUnusedFrameSlot() => Interlocked.Exchange(ref _unusedFrameSlot, 1);
+
     public void Dispose()
     {
         lock (_sync)
@@ -1383,8 +1392,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
 
             _disposed = true;
             ReleaseVideoProcessorResources();
-            TryCloseHandle(
-                ref _frameLatencyWaitableObject);
+            _frameLatencyWaitableObject.Dispose();
             TryDispose(_swapChain);
             // D3D11 defers destruction even after all of our COM references
             // have been released. Unbind context-held views and flush once
@@ -2417,7 +2425,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint WaitForSingleObject(
-        nint handle,
+        SafeWaitHandle handle,
         uint milliseconds);
 
     [DllImport("kernel32.dll")]

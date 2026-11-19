@@ -122,6 +122,25 @@ public sealed class ViewerPresenterRecoveryHardwareTests
                     Assert.Equal(0, (int)Field("_mediaFoundationDirectPathDisabled")!);
                     Assert.False(window.Visible);
                 }
+                // A window message to retire the old screen is already queued when
+                // the decoder finishes. A worker-side DXGI Present can overtake it.
+                using (var inFlight = Decode())
+                using (var started = new ManualResetEventSlim())
+                {
+                    window.BeginInvoke((Action)(() => Call("DisposeD3D11VideoPresenter")));
+                    var submission = Task.Run(() =>
+                    {
+                        started.Set();
+                        return Present(inFlight);
+                    });
+                    Assert.True(started.Wait(TimeSpan.FromSeconds(2)));
+                    bool finishedAheadOfWindow = submission.Wait(TimeSpan.FromMilliseconds(250));
+                    var deadline = Stopwatch.StartNew();
+                    do { Application.DoEvents(); } while (!submission.IsCompleted && deadline.ElapsedMilliseconds < 3000);
+                    Assert.True(submission.IsCompleted);
+                    Assert.False(finishedAheadOfWindow, "GPU output overtook the pending screen change on the window thread.");
+                    Assert.Equal(D3D11HwndVideoPresenterStatus.SkippedStaleFrame, submission.GetAwaiter().GetResult().Status);
+                }
                 complete.TrySetResult();
             }
             catch (Exception error) { complete.TrySetException(error); }

@@ -41,6 +41,7 @@ internal static class Program
         var output = Path.GetFullPath(c.GetProperty("output").GetString()!);
         Directory.CreateDirectory(output);
         if (args[0] == "captured-h264") return CapturedH264Probe.RunAsync(output).GetAwaiter().GetResult();
+        if (args[0] == "viewer-screen-switch") return ViewerScreenSwitchProbe.Run(c.Clone(), output);
         if (args[0] == "delayed-video-negotiation") return DelayedVideoNegotiationProbe.RunAsync(output).GetAwaiter().GetResult();
         if (args[0] == "delayed-video-feedback") return DelayedVideoNegotiationProbe.RunAsync(output, feedback: true).GetAwaiter().GetResult();
         if (args[0] == "reliable-video-pacing") return ReliableVideoPacingProbe.RunAsync(output).GetAwaiter().GetResult();

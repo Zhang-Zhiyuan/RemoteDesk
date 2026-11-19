@@ -2342,21 +2342,23 @@ internal sealed partial class RemoteViewerWindow : Form
         bool presentationChanged = false;
         _capturePresentationTransitionGate.Run(() =>
         {
-            if (!ShouldAdvanceCapturePresentationForStatus(
+            bool advance = ShouldAdvanceCapturePresentationForStatus(
                     _captureTargetStatusConnectionGeneration,
                     _captureTargetHostGeneration,
                     _captureTargetId,
                     Volatile.Read(
                         ref _captureTargetAvailable) != 0,
-                    update))
+                    update);
+            // The first available status acknowledges the selection we already
+            // cleared. Remember its generation even when it needs no second clear.
+            _captureTargetHostGeneration = update.TargetGeneration;
+            if (!advance)
             {
                 return;
             }
 
             _captureTargetStatusConnectionGeneration =
                 update.ConnectionGeneration;
-            _captureTargetHostGeneration =
-                update.TargetGeneration;
             _captureTargetId = update.Target.Id;
             Volatile.Write(
                 ref _captureTargetAvailable,
@@ -2445,10 +2447,7 @@ internal sealed partial class RemoteViewerWindow : Form
 
             _captureTargetStatusConnectionGeneration =
                 update.ConnectionGeneration;
-            if (connectionChanged)
-            {
-                _captureTargetHostGeneration = int.MinValue;
-            }
+            _captureTargetHostGeneration = int.MinValue;
             _captureTargetId = update.Target.Id;
             Volatile.Write(
                 ref _captureTargetAvailable,
@@ -2557,8 +2556,8 @@ internal sealed partial class RemoteViewerWindow : Form
         ArgumentNullException.ThrowIfNull(update);
         return currentConnectionGeneration !=
                 update.ConnectionGeneration ||
-            currentTargetGeneration !=
-                update.TargetGeneration ||
+            (currentTargetGeneration != int.MinValue &&
+                currentTargetGeneration != update.TargetGeneration) ||
             currentAvailability != update.IsAvailable ||
             ShouldAdvanceCapturePresentationForTarget(
                 currentTargetId,
@@ -4966,120 +4965,80 @@ internal sealed partial class RemoteViewerWindow : Form
     }
 
     /// <summary>
-    /// Submits an already-decoded GPU frame immediately on the serial decode
-    /// worker. The presenter is created on the UI thread and activated only
-    /// after pixel qualification; its own lock serializes this
-    /// call with UI-driven resize/disposal. Avoiding a per-frame BeginInvoke
-    /// keeps mouse and window messages from becoming an extra display queue.
+    /// The serial decoder waits for GPU capacity off the UI thread. Only the
+    /// final blit and flip run on the HWND owner, in order with resize and
+    /// teardown. The synchronous handoff permits at most one decoded GPU frame
+    /// in flight and keeps its borrowed texture alive until submission finishes.
     /// </summary>
-    private D3D11HwndVideoPresenterResult
-        PresentHardwareFrameFromRenderThread(
-            MediaFoundationD3D11DecodedFrame frame,
-            long decoderGeneration,
-            Size sourceSize,
-            long presentationGeneration,
-            RemoteFrameMetadata sourceMetadata = default)
+    private D3D11HwndVideoPresenterResult PresentHardwareFrameFromRenderThread(
+        MediaFoundationD3D11DecodedFrame frame,
+        long decoderGeneration,
+        Size sourceSize,
+        long presentationGeneration,
+        RemoteFrameMetadata sourceMetadata = default)
     {
-        return _capturePresentationTransitionGate.Run(() =>
+        static D3D11HwndVideoPresenterResult Stale() =>
+            new(D3D11HwndVideoPresenterStatus.SkippedStaleFrame, 0, null,
+                "The decoded frame belongs to a retired screen or presenter.");
+
+        if (!IsD3DPresentationTargetReady() || !CanPresentCaptureGeneration(presentationGeneration))
+            return Stale();
+
+        long handleGeneration = Interlocked.Read(ref _pictureBoxHandleGeneration);
+        D3D11HwndVideoPresenter? presenter;
+        lock (_d3d11PresenterLock)
         {
-            if (!CanPresentCaptureGeneration(
-                    presentationGeneration) ||
-                !IsCurrentMediaFoundationDecoderGeneration(
-                    decoderGeneration))
-            {
-                return new(
-                    D3D11HwndVideoPresenterStatus.Disposed,
-                    HResult: 0,
-                    DeviceRemovedReason: null,
-                    "The decoded GPU frame belongs to an obsolete " +
-                    "capture-target presentation generation.");
-            }
+            presenter = _d3d11VideoPresenter;
+            if (presenter is null || _d3d11VideoPresenterDecoderGeneration != decoderGeneration ||
+                _d3d11VideoPresenterHandleGeneration != handleGeneration || _d3d11VideoPresenterSourceSize != sourceSize)
+                return Stale();
+        }
 
-            Size outputSize =
-                new(
-                    Volatile.Read(
-                        ref _pictureBoxClientWidth),
-                    Volatile.Read(
-                        ref _pictureBoxClientHeight));
+        if (presenter.WaitForFrameSlot() is { } waitFailure)
+            return waitFailure.Status == D3D11HwndVideoPresenterStatus.Disposed ? Stale() : waitFailure;
+
+        bool submitting = false;
+        D3D11HwndVideoPresenterResult Submit() => _capturePresentationTransitionGate.Run(() =>
+        {
+            if (!CanPresentCaptureGeneration(presentationGeneration) ||
+                !IsCurrentMediaFoundationDecoderGeneration(decoderGeneration) ||
+                handleGeneration != Interlocked.Read(ref _pictureBoxHandleGeneration) ||
+                !ReferenceEquals(presenter, _d3d11VideoPresenter))
+                return Stale();
+
+            Size outputSize = _pictureBox.ClientSize;
             if (!IsD3DClientAreaReady(outputSize))
-            {
-                return new(
-                    D3D11HwndVideoPresenterStatus.SkippedMinimized,
-                    HResult: 0,
-                    DeviceRemovedReason: null,
-                    "The viewer is minimized.");
-            }
-
-            D3D11HwndVideoPresenter? presenter;
-            long handleGeneration =
-                Interlocked.Read(
-                    ref _pictureBoxHandleGeneration);
-            lock (_d3d11PresenterLock)
-            {
-                presenter = _d3d11VideoPresenter;
-                if (presenter is null ||
-                    _d3d11VideoPresenterDecoderGeneration !=
-                        decoderGeneration ||
-                    _d3d11VideoPresenterHandleGeneration !=
-                        handleGeneration ||
-                    _d3d11VideoPresenterSourceSize !=
-                        sourceSize)
-                {
-                    return new(
-                        D3D11HwndVideoPresenterStatus.SkippedStaleFrame,
-                        HResult: 0,
-                        DeviceRemovedReason: null,
-                        "The presenter changed before the decoded frame " +
-                        "could be submitted.");
-                }
-            }
-
+                return new D3D11HwndVideoPresenterResult(D3D11HwndVideoPresenterStatus.SkippedMinimized,
+                    0, null, "The viewer is minimized.");
             if (presenter.OutputSize != outputSize)
             {
-                D3D11HwndVideoPresenterResult resizeResult =
-                    presenter.Resize(
-                        outputSize.Width,
-                        outputSize.Height);
-                if (!resizeResult.IsSuccess)
-                {
-                    if (resizeResult.Status == D3D11HwndVideoPresenterStatus.Disposed && !IsCurrentPresenter())
-                        return resizeResult with { Status = D3D11HwndVideoPresenterStatus.SkippedStaleFrame };
-                    return resizeResult;
-                }
+                var resize = presenter.Resize(outputSize.Width, outputSize.Height);
+                if (!resize.IsSuccess) return resize;
             }
 
             var (nativeDetails, nativeBudget) = NativePresentationForFrame(sourceMetadata, frame);
-            D3D11HwndVideoPresenterResult result =
-                presenter.Present(
-                    frame,
-                    new Rectangle(
-                        Point.Empty,
-                        new Size(
-                            frame.VisibleWidth,
-                            frame.VisibleHeight)),
-                    captureValidation: Volatile.Read(ref _directPresentationQualified) == 0 || CaptureDirectSnapshotsForTests,
-                    nativeDetails: nativeDetails,
-                    nativeDetailBudget: nativeBudget,
-                    useDriverVideoColors: sourceMetadata.UseDriverVideoColors);
-            bool IsCurrentPresenter()
-            {
-                lock (_d3d11PresenterLock)
-                    return ReferenceEquals(presenter, _d3d11VideoPresenter) &&
-                        _d3d11VideoPresenterDecoderGeneration == decoderGeneration &&
-                        _d3d11VideoPresenterHandleGeneration == handleGeneration;
-            }
-            if (result.Status == D3D11HwndVideoPresenterStatus.Disposed && !IsCurrentPresenter())
-                return result with { Status = D3D11HwndVideoPresenterStatus.SkippedStaleFrame };
-            return CanPresentCaptureGeneration(
-                    presentationGeneration)
-                ? result
-                : new(
-                    D3D11HwndVideoPresenterStatus.Disposed,
-                    HResult: 0,
-                    DeviceRemovedReason: null,
-                    "The capture-target presentation generation changed " +
-                    "during direct presentation.");
+            submitting = true;
+            return presenter.Present(frame, new Rectangle(0, 0, frame.VisibleWidth, frame.VisibleHeight),
+                captureValidation: Volatile.Read(ref _directPresentationQualified) == 0 || CaptureDirectSnapshotsForTests,
+                nativeDetails: nativeDetails, nativeDetailBudget: nativeBudget,
+                useDriverVideoColors: sourceMetadata.UseDriverVideoColors, frameSlotReserved: true);
         });
+
+        // DXGI may synchronously send window messages during a flip or resize.
+        // Never enter the presentation gate before dispatching to its HWND.
+        try
+        {
+            if (!IsHandleCreated || _isClosing || IsDisposed) return Stale();
+            return InvokeRequired ? (D3D11HwndVideoPresenterResult)Invoke(Submit) : Submit();
+        }
+        catch (InvalidOperationException) when (_isClosing || !IsHandleCreated || IsDisposed)
+        {
+            return Stale();
+        }
+        finally
+        {
+            if (!submitting) presenter.ReturnUnusedFrameSlot();
+        }
     }
 
     private D3D11HwndVideoPresenterResult PresentHardwareFrame(
@@ -5460,7 +5419,12 @@ internal sealed partial class RemoteViewerWindow : Form
                 "VIEWER",
                 "MF/D3D11 直显已通过像素资格检查：" +
                     validation.Detail);
-            OnUiSynchronous(ActivateD3D11Presentation);
+            OnUiSynchronous(() =>
+            {
+                if (Volatile.Read(ref _directPresentationQualified) != 0 &&
+                    IsCurrentMediaFoundationDecoderGeneration(decoderGeneration))
+                    ActivateD3D11Presentation();
+            });
         }
 
         return DirectPresentationQualificationDecision

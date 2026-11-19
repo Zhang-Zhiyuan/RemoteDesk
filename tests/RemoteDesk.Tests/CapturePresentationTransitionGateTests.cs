@@ -105,6 +105,20 @@ public sealed class CapturePresentationTransitionGateTests
     }
 
     [Fact]
+    public void FirstAvailableStatusAfterSelectionKeepsTheNewScreensFirstFrame()
+    {
+        var status = new CaptureTargetAvailabilityUpdate(4, true,
+            new CaptureTargetInfo("screen-1", "屏幕 1"), 9, "已恢复");
+
+        Assert.False(RemoteViewerWindow.ShouldAdvanceCapturePresentationForStatus(
+            4, int.MinValue, "SCREEN-1", true, status));
+        Assert.True(RemoteViewerWindow.ShouldAdvanceCapturePresentationForStatus(
+            4, int.MinValue, "screen-1", true, status with { IsAvailable = false }));
+        Assert.True(RemoteViewerWindow.ShouldAdvanceCapturePresentationForStatus(
+            3, int.MinValue, "screen-1", true, status));
+    }
+
+    [Fact]
     public void TargetIdentityChangeAdvancesButDuplicateDoesNot()
     {
         Assert.True(
