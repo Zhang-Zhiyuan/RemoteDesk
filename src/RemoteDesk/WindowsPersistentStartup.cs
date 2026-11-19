@@ -14,6 +14,8 @@ internal static class WindowsPersistentStartup
     internal const string InstallArgument = "--install-persistent-startup";
     internal const string EnableArgument = "--enable-persistent-startup";
     internal const string DisableArgument = "--disable-persistent-startup";
+    internal static readonly string[] LicenseFileNames =
+        ["DOTNET-RUNTIME-LICENSE.TXT", "DOTNET-RUNTIME-THIRD-PARTY-NOTICES.TXT", "THIRD-PARTY-NOTICES.md"];
     private const string Marker = "RemoteDesk/InteractiveStartup/v1";
     private static readonly XNamespace TaskNamespace = "http://schemas.microsoft.com/windows/2004/02/mit/task";
     private static readonly SecurityIdentifier Administrators = new(WellKnownSidType.BuiltinAdministratorsSid, null);
@@ -160,7 +162,7 @@ internal static class WindowsPersistentStartup
             finally { if (File.Exists(staging)) File.Delete(staging); }
         }
         // License files are copied, never scripts or DLLs from an untrusted search directory.
-        foreach (string name in new[] { "DOTNET-RUNTIME-LICENSE.TXT", "DOTNET-RUNTIME-THIRD-PARTY-NOTICES.TXT", "THIRD-PARTY-NOTICES.md" })
+        foreach (string name in LicenseFileNames)
         {
             string license = Path.Combine(Path.GetDirectoryName(sourceExecutable)!, name);
             string installed = Path.Combine(package, name);

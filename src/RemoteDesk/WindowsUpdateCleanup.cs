@@ -28,6 +28,7 @@ internal static class WindowsUpdateCleanup
         WindowsPersistentStartup.ValidateProtectedFile(current);
         string? build = RemoteDeskBuildInfo.ReadExecutableBuildStamp(current);
         if (build is null || !IsRegisteredCurrent(current)) return 0;
+        string? currentVersion = FileVersionInfo.GetVersionInfo(current).ProductVersion;
 
         int removed = 0;
         var now = DateTime.UtcNow;
@@ -37,15 +38,25 @@ internal static class WindowsUpdateCleanup
             string executable = Path.Combine(directory.FullName, "RemoteDesk.exe");
             if (!WindowsPersistentStartup.IsManagedExecutable(executable, root)) continue;
             foreach (var old in directory.EnumerateFiles("RemoteDesk.exe.*.old"))
-                if (IsRetiredRollback(old.Name, now) && DeleteOlderProgram(old.FullName, build)) removed++;
+                if (IsRetiredRollback(old.Name, now) && DeleteOlderProgram(old.FullName, build, currentVersion)) removed++;
 
             if (string.Equals(current, executable, StringComparison.OrdinalIgnoreCase) || !File.Exists(executable)) continue;
             // Re-read both registrations, including a disabled lock-screen service, before retiring a package.
             if (!IsRegisteredCurrent(current) || !WindowsSecureDesktopInstallation.CanRetirePackage(
                     WindowsPersistentStartup.UserSid, executable) || MayBeRunning(executable)) continue;
-            if (!DeleteOlderProgram(executable, build)) continue;
+            if (!DeleteOlderProgram(executable, build, currentVersion)) continue;
             removed++;
-            // Other files in a former installation can belong to its owner.
+            foreach (string name in WindowsPersistentStartup.LicenseFileNames)
+            {
+                string license = Path.Combine(directory.FullName, name);
+                if (!File.Exists(license)) continue;
+                try
+                {
+                    WindowsPersistentStartup.ValidateProtectedFile(license);
+                    File.Delete(license);
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or SecurityException) { }
+            }
             if (!directory.EnumerateFileSystemInfos().Any()) directory.Delete(recursive: false);
         }
         return removed;
@@ -74,15 +85,27 @@ internal static class WindowsUpdateCleanup
         finally { foreach (var process in processes) process.Dispose(); }
     }
 
-    private static bool DeleteOlderProgram(string path, string currentBuild)
+    internal static bool IsOlderLegacyVersion(string? candidate, string? current)
+    {
+        static Version? ReadVersion(string? productVersion)
+        {
+            int marker = productVersion?.IndexOf("+remotedesk.", StringComparison.OrdinalIgnoreCase) ?? -1;
+            if (marker <= 0 || !Version.TryParse(productVersion![..marker], out var version)) return null;
+            return new Version(version.Major, version.Minor, Math.Max(version.Build, 0), Math.Max(version.Revision, 0));
+        }
+        return ReadVersion(candidate) is Version previous && ReadVersion(current) is Version installed && previous < installed;
+    }
+
+    private static bool DeleteOlderProgram(string path, string currentBuild, string? currentVersion)
     {
         try
         {
             WindowsPersistentStartup.ValidateProtectedFile(path);
             var version = FileVersionInfo.GetVersionInfo(path);
-            if (!string.Equals(version.ProductName, "RemoteDesk", StringComparison.OrdinalIgnoreCase) ||
-                RemoteDeskBuildInfo.CompareBuildStamps(RemoteDeskBuildInfo.ReadExecutableBuildStamp(path), currentBuild) is not < 0)
-                return false;
+            if (!string.Equals(version.ProductName, "RemoteDesk", StringComparison.OrdinalIgnoreCase)) return false;
+            int? order = RemoteDeskBuildInfo.CompareBuildStamps(RemoteDeskBuildInfo.ReadExecutableBuildStamp(path), currentBuild);
+            bool older = order.HasValue ? order.Value < 0 : IsOlderLegacyVersion(version.ProductVersion, currentVersion);
+            if (!older) return false;
             File.Delete(path);
             return true;
         }

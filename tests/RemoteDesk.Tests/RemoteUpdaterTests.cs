@@ -21,6 +21,15 @@ public sealed class RemoteUpdaterTests
     }
 
     [Theory]
+    [InlineData("1.0.0+remotedesk.20260910-lockscreen-a5", true)]
+    [InlineData("1.0.54+remotedesk.20260910-test", false)]
+    [InlineData("1.0.55+remotedesk.20260910-test", false)]
+    [InlineData("1.0.0+other.20260910-test", false)]
+    [InlineData(null, false)]
+    public void LegacyPackagesUseOnlyAnOlderRemoteDeskProductVersion(string? candidate, bool retired) =>
+        Assert.Equal(retired, WindowsUpdateCleanup.IsOlderLegacyVersion(candidate, "1.0.54+remotedesk.20261119210000"));
+
+    [Theory]
     [InlineData("RemoteDesk.exe")]
     [InlineData(@"C:\tools\RemoteDesk.exe")]
     public void ValidateRemoteUpdatePackageNameAcceptsRemoteDeskExe(string fileName)
