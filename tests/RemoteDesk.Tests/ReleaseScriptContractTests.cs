@@ -1091,7 +1091,7 @@ public sealed class ReleaseScriptContractTests
             publisher,
             StringComparison.Ordinal);
         Assert.Contains(
-            "New-LinuxHostArtifact -Root $root -Artifacts $artifacts -Version $releaseVersion -Distro $LinuxDistro",
+            "New-LinuxHostArtifact -Root $root -Artifacts $artifacts -DebianPackage $linuxDebPackage -Distro $LinuxDistro",
             publisher,
             StringComparison.Ordinal);
         Assert.Contains(
@@ -1126,6 +1126,17 @@ public sealed class ReleaseScriptContractTests
         Assert.Equal(
             1,
             completion.Split("            return", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public void RollbackOwnsTheNewDebEvenWhenNoPreviousDebExists()
+    {
+        string script = ReadRepositoryFile("scripts", "Publish-RemoteDesk.ps1");
+        int start = script.IndexOf("$linuxDebPackage = Get-UbuntuDebPackage", StringComparison.Ordinal);
+        int transaction = script.IndexOf("$transaction = Start-PublishArtifactTransaction", start, StringComparison.Ordinal);
+        Assert.Contains("$linuxDebPackage.Path,", script[start..transaction]);
+        Assert.Contains("-DebianPackage $linuxDebPackage -Distro $LinuxDistro", script[transaction..]);
+        Assert.Contains("$debPath = $Package.Path", script);
     }
 
     private static string ReadRepositoryFile(params string[] segments)

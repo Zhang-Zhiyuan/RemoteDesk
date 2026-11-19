@@ -1518,18 +1518,29 @@ PY
     return $zipPath
 }
 
+function Get-UbuntuDebPackage {
+    param([string]$Artifacts, [string]$Version, [string]$Distro)
+    $safeVersion = if ([string]::IsNullOrWhiteSpace($Version)) { "0.1.0" } else { $Version -replace "[^0-9A-Za-z.+~-]", "-" }
+    $architecture = Get-WslDpkgArchitecture -Distro $Distro
+    return [pscustomobject]@{
+        Version = $safeVersion
+        Architecture = $architecture
+        Path = (Join-Path $Artifacts "remotedesk-linux-host_${safeVersion}_${architecture}.deb")
+    }
+}
+
 function New-UbuntuDebArtifact {
     param(
         [string]$Root,
         [string]$Artifacts,
-        [string]$Version,
+        [psobject]$Package,
         [string]$PortableStaging,
         [string]$Distro
     )
 
-    $safeVersion = if ([string]::IsNullOrWhiteSpace($Version)) { "0.1.0" } else { $Version -replace "[^0-9A-Za-z.+~-]", "-" }
-    $architecture = Get-WslDpkgArchitecture -Distro $Distro
-    $debPath = Join-Path $Artifacts "remotedesk-linux-host_${safeVersion}_${architecture}.deb"
+    $safeVersion = $Package.Version
+    $architecture = $Package.Architecture
+    $debPath = $Package.Path
     $packageRoot = Join-Path $Artifacts "remotedesk-linux-host-deb"
     Assert-UnderRoot -Path $debPath -Root $Root
     Assert-UnderRoot -Path $packageRoot -Root $Root
@@ -1618,7 +1629,7 @@ function New-LinuxHostArtifact {
     param(
         [string]$Root,
         [string]$Artifacts,
-        [string]$Version,
+        [psobject]$DebianPackage,
         [string]$Distro
     )
 
@@ -1644,7 +1655,7 @@ function New-LinuxHostArtifact {
         -Staging $staging `
         -Distro $Distro
     $linuxHostTarGz = New-LinuxHostTarGz -Root $Root -Artifacts $Artifacts -Staging $staging -Distro $Distro
-    $ubuntuDeb = New-UbuntuDebArtifact -Root $Root -Artifacts $Artifacts -Version $Version -PortableStaging $staging -Distro $Distro
+    $ubuntuDeb = New-UbuntuDebArtifact -Root $Root -Artifacts $Artifacts -Package $DebianPackage -PortableStaging $staging -Distro $Distro
     Remove-Item -LiteralPath $staging -Recurse -Force
     return @(($linuxHostZip, $linuxHostTarGz, $ubuntuDeb) | Where-Object { $null -ne $_ })
 }
@@ -2027,9 +2038,11 @@ if (-not $LinuxOnly) {
     }
 }
 if (-not $WindowsOnly) {
+    $linuxDebPackage = Get-UbuntuDebPackage -Artifacts $artifacts -Version $releaseVersion -Distro $LinuxDistro
     foreach ($path in @(
         $linuxZip,
         $linuxTarGz,
+        $linuxDebPackage.Path,
         (Join-Path $artifacts "RemoteDesk-linux-host"),
         (Join-Path $artifacts "remotedesk-linux-host-deb"),
         (Join-Path $artifacts "remotedesk-build-runtime.sh"),
@@ -2181,7 +2194,7 @@ else {
 
 if (-not $WindowsOnly) {
     Write-Step "Creating Linux host helper artifacts"
-    $linuxHostArtifacts = @(New-LinuxHostArtifact -Root $root -Artifacts $artifacts -Version $releaseVersion -Distro $LinuxDistro)
+    $linuxHostArtifacts = @(New-LinuxHostArtifact -Root $root -Artifacts $artifacts -DebianPackage $linuxDebPackage -Distro $LinuxDistro)
 }
 else {
     Write-Step "Skipping Linux package for Windows-only publish"
