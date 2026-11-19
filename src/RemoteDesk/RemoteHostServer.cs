@@ -3633,7 +3633,10 @@ internal sealed partial class RemoteHostServer : IDisposable
                     viewerState.GetVideoSelectionChangeToken(
                         sourceCodecVersion));
             int deliveredKeyFrameRequestVersion = viewerState.KeyFrameRequestVersion;
-            if (options.AllowStaticFrameSilence && capture.Backend == FfmpegDesktopCaptureBackend.WindowsGraphicsCaptureMonitor)
+            // WGC can stop delivering changed surfaces on either transport.
+            // An explicit key-frame request must wake the blocked read on TCP
+            // too, before its separate six-second FFmpeg stall timeout.
+            if (capture.Backend == FfmpegDesktopCaptureBackend.WindowsGraphicsCaptureMonitor)
             {
                 staticCaptureTargetMonitor =
                     MonitorStaticH264CaptureTargetAsync(

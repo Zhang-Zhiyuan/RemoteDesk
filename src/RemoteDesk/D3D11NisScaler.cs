@@ -8,7 +8,7 @@ using Vortice.DXGI;
 
 namespace RemoteDesk;
 
-internal enum ExperimentalUpscalingAlgorithm { CatmullRom, Nis, TextStrokes }
+internal enum ExperimentalUpscalingAlgorithm { CatmullRom, Nis, TextStrokes, PixelGrid }
 
 /// <summary>
 /// NVIDIA's pinned MIT-licensed NIS 1.0.3, SDR/FP32 compute path. Borrowed
@@ -30,6 +30,13 @@ internal sealed class D3D11NisScaler : IDisposable
     private ID3D11Texture2D? _scaleTexture, _sharpenTexture, _output;
     private ID3D11UnorderedAccessView? _outputUav;
     private Size _outputSize, _configuredSource;
+
+    internal static void PrepareResources()
+    {
+        _ = Code.Value;
+        _ = ScaleCoefficients.Value;
+        _ = SharpenCoefficients.Value;
+    }
 
     internal static bool Supports(Size source, Size destination) =>
         source.Width > 0 && source.Height > 0 &&

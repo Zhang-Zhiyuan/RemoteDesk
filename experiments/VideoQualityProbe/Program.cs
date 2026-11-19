@@ -110,6 +110,12 @@ if (args.ElementAtOrDefault(0) == "--text-comparison")
     TextClarityProbe.RefreshComparison(args[1]);
     return;
 }
+if (args.ElementAtOrDefault(0) == "--native-grid")
+{
+    if (args.Length != 2) throw new ArgumentException("Usage: --native-grid <new-output-directory>");
+    NativeGridProbe.Run(args[1]);
+    return;
+}
 if (args.ElementAtOrDefault(0) == "--upscale")
 {
     if (args.Length != 2) throw new ArgumentException("Usage: --upscale <new-output-directory>");

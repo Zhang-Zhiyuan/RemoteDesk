@@ -520,7 +520,7 @@ public sealed class D3D11HwndVideoPresenterTests
     [InlineData(false)]
     [InlineData(true)]
     [Trait("Category", "HardwareSmoke")]
-    public void Nv12TexturePresentsWhenHardwareSmokeIsEnabled(bool experimental)
+    public async Task Nv12TexturePresentsWhenHardwareSmokeIsEnabled(bool experimental)
     {
         if (!string.Equals(
             Environment.GetEnvironmentVariable(
@@ -532,6 +532,8 @@ public sealed class D3D11HwndVideoPresenterTests
             return;
         }
 
+        if (experimental)
+            await D3D11ExperimentalUpscaler.PrepareShadersAsync(ExperimentalUpscalingAlgorithm.CatmullRom);
         using var window =
             new Form
             {
@@ -661,6 +663,9 @@ public sealed class D3D11HwndVideoPresenterTests
             Assert.Equal(
                 D3D11HwndVideoValidationResult.NotAttempted,
                 presenter.ValidatePresentedFrame());
+
+            foreach (string field in new[] { "_validationSource", "_validationReadback" })
+                Assert.Null(typeof(D3D11HwndVideoPresenter).GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(presenter));
 
             D3D11HwndVideoPresenterResult invalidPresent =
                 presenter.Present(

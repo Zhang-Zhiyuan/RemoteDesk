@@ -46,7 +46,9 @@ public sealed class MediaFoundationD3D11H264DecoderTests
     [Theory]
     [InlineData(48, 48)]
     [InlineData(4096, 2304)]
-    public void OptionsAcceptDocumentedDecoderDimensionBoundaries(
+    [InlineData(2304, 4096)]
+    [InlineData(2160, 3840)]
+    public void OptionsAcceptBoundedSizesForRuntimeNegotiation(
         int width,
         int height)
     {
@@ -59,10 +61,11 @@ public sealed class MediaFoundationD3D11H264DecoderTests
     }
 
     [Theory]
-    [InlineData(0, 1080, 60, 1024, "widths")]
-    [InlineData(46, 1080, 60, 1024, "widths")]
-    [InlineData(4098, 1080, 60, 1024, "widths")]
-    [InlineData(1920, 2306, 60, 1024, "heights")]
+    [InlineData(0, 1080, 60, 1024, "Dimensions")]
+    [InlineData(46, 1080, 60, 1024, "Dimensions")]
+    [InlineData(4098, 1080, 60, 1024, "Dimensions")]
+    [InlineData(1920, 4098, 60, 1024, "Dimensions")]
+    [InlineData(2306, 2306, 60, 1024, "Dimensions")]
     [InlineData(1921, 1080, 60, 1024, "even")]
     [InlineData(1920, 1079, 60, 1024, "even")]
     [InlineData(1920, 1080, 0, 1024, "Frame rate")]

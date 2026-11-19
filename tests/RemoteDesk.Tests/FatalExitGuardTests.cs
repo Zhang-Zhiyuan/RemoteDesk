@@ -101,6 +101,24 @@ public sealed class FatalExitGuardTests
     }
 
     [Fact]
+    public async Task FatalWatchdogRunsWhileWindowShutdownIsBlocked()
+    {
+        int exitStarted = 0;
+        using var unblock = new ManualResetEventSlim();
+        var closing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var terminated = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task request = Task.Run(() => FatalExitGuard.BeginFatalExit(
+            () => { closing.SetResult(); unblock.Wait(); },
+            code => terminated.TrySetResult(code), TimeSpan.FromMilliseconds(20), ref exitStarted));
+        try
+        {
+            await closing.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(1, await terminated.Task.WaitAsync(TimeSpan.FromSeconds(2)));
+        }
+        finally { unblock.Set(); await request; }
+    }
+
+    [Fact]
     public void BeginFatalExitSwallowsApplicationExitCoordinationErrors()
     {
         int exitStarted = 0;

@@ -140,6 +140,7 @@ internal sealed partial class RemoteViewerWindow : Form
     private readonly ToolStripMenuItem _nisUpscaleMenuItem;
     private readonly ToolStripMenuItem _bicubicUpscaleMenuItem;
     private readonly ToolStripMenuItem _textUpscaleMenuItem;
+    private readonly ToolStripMenuItem _gridUpscaleMenuItem;
     private Size _h264DecoderSize = Size.Empty;
     private Size _mediaFoundationH264DecoderSize = Size.Empty;
     private Size _d3d11VideoPresenterSourceSize = Size.Empty;
@@ -164,6 +165,7 @@ internal sealed partial class RemoteViewerWindow : Form
     private bool _closeFromDisconnect;
     private readonly H264DecoderRecovery _h264Recovery = new();
     private bool _waitingForH264RecoveryFrame;
+    private IdleH264Refresh? _decoderWaitOwner;
     private bool _waitingForViewerHandle;
     private bool _dragFileTransferInProgress;
     private bool _remoteFilePullInProgress;
@@ -202,6 +204,7 @@ internal sealed partial class RemoteViewerWindow : Form
     private int _deferredRendererRetryPending;
     private int _d3d11TargetRetryCount;
     private int _directPresentationQualified;
+    internal volatile bool CaptureDirectSnapshotsForTests;
     private int _directPresentationQualificationCount;
     // Fit large desktops, but do not stretch small desktops' text by default.
     private int _allowDisplayUpscaling;
@@ -446,17 +449,18 @@ internal sealed partial class RemoteViewerWindow : Form
         _textUpscaleMenuItem = new ToolStripMenuItem("文字笔画（终端、文档）", null,
             (_, _) => SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.TextStrokes))
         { ToolTipText = "视频只加强已有的细笔画；开启原生补清后，收到的原始像素按覆盖面积放大。照片可继续用 NIS。" };
-        upscaleMenu.DropDownItems.AddRange([_nisUpscaleMenuItem, _textUpscaleMenuItem, _bicubicUpscaleMenuItem]);
+        _gridUpscaleMenuItem = new ToolStripMenuItem("原像素（低分辨率桌面）", null,
+            (_, _) => SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.PixelGrid))
+        { ToolTipText = "按远端视频的像素放大，小字和单像素线条边界清楚。整数倍最清晰。" };
+        upscaleMenu.DropDownItems.AddRange([_nisUpscaleMenuItem, _textUpscaleMenuItem, _gridUpscaleMenuItem, _bicubicUpscaleMenuItem]);
         _statusMenu.Items.Add(upscaleMenu);
         _statusBar.ContextMenuStrip = _statusMenu;
         _experimentalUpscaleButton.ContextMenuStrip = _statusMenu;
         ConfigureFilePullToolTips();
         UpdateNativeDetailButton();
         _toolTip.SetToolTip(_experimentalUpscaleButton,
-            "实验性 GPU 放大。默认关闭，点击可切回原版；右键可选文字笔画、NIS 或双三次。\n" +
-            "NIS 适用于 1～2 倍，不兼容或超出范围时使用双三次；底部显示实际算法。\n" +
-            "只在允许放大且 H.264 GPU 直显画面实际被放大时生效；不改变缩放比例。\n" +
-            "JPEG / 软件显示保持原版，不会用 AI 猜测文字。");
+            "点击开关 GPU 放大，右键选择算法。低分辨率桌面可选“原像素”，照片可选 NIS（1～2 倍）。\n" +
+            "先开启“允许放大”。H.264 硬件显示时，底部会显示实际生效的算法。");
         _experimentalUpscaleButton.Click += (_, _) => ToggleExperimentalUpscaling();
 
         Controls.Add(_pictureBox);
@@ -1489,15 +1493,15 @@ internal sealed partial class RemoteViewerWindow : Form
         if (_isClosing || IsDisposed) return;
         bool enabled = !Volatile.Read(ref _experimentalUpscaling);
         Volatile.Write(ref _experimentalUpscaling, enabled);
+        var algorithm = (ExperimentalUpscalingAlgorithm)Volatile.Read(ref _experimentalUpscalingAlgorithm);
         UpdateExperimentalUpscaleButton();
         lock (_d3d11PresenterLock)
-            _d3d11VideoPresenter?.SetExperimentalUpscaling(enabled,
-                (ExperimentalUpscalingAlgorithm)Volatile.Read(ref _experimentalUpscalingAlgorithm));
+            _d3d11VideoPresenter?.SetExperimentalUpscaling(enabled, algorithm);
         SetStatus(!enabled ? "已关闭新版放大，恢复原版显示路径。" :
             "新版放大（实验）已开启；仅在允许放大且 H.264 GPU 画面实际放大时生效，其他情况保持原版。",
             MutedTextColor);
         _pictureBox.Invalidate();
-        RequestH264KeyFrameIfDue();
+        _ = RefreshUpscalingFrameAsync(enabled, algorithm);
         _pictureBox.Focus();
     }
 
@@ -1516,19 +1520,40 @@ internal sealed partial class RemoteViewerWindow : Form
         _nisUpscaleMenuItem.Checked = algorithm == ExperimentalUpscalingAlgorithm.Nis;
         _bicubicUpscaleMenuItem.Checked = algorithm == ExperimentalUpscalingAlgorithm.CatmullRom;
         _textUpscaleMenuItem.Checked = algorithm == ExperimentalUpscalingAlgorithm.TextStrokes;
-        if (_textUpscaleMenuItem.Checked) _ = D3D11ExperimentalUpscaler.PrepareTextShadersAsync();
+        _gridUpscaleMenuItem.Checked = algorithm == ExperimentalUpscalingAlgorithm.PixelGrid;
         // Selection alone does not silently enable the opt-in feature.
         bool enabled = Volatile.Read(ref _experimentalUpscaling);
         lock (_d3d11PresenterLock)
             _d3d11VideoPresenter?.SetExperimentalUpscaling(enabled, algorithm);
         SetStatus(algorithm switch
         {
+            ExperimentalUpscalingAlgorithm.PixelGrid => "已选择原像素。开启新版放大后，保留低分辨率桌面的像素边界。",
             ExperimentalUpscalingAlgorithm.TextStrokes => "已选择文字笔画。开启新版放大后，从 1.75 倍起增强笔画，轻度放大使用双三次。",
             ExperimentalUpscalingAlgorithm.Nis => "已选择 NIS（实验）；开启新版放大且实际放大 1～2 倍时使用，不支持时自动使用双三次。",
             _ => "已选择双三次＋防光晕，可与 NIS 对照；新版放大的开关状态不变。"
         }, MutedTextColor);
-        if (enabled) RequestH264KeyFrameIfDue();
+        if (enabled) _ = RefreshUpscalingFrameAsync(true, algorithm);
         _pictureBox.Focus();
+    }
+
+    // A static desktop can send exactly one frame in response to a refresh.
+    // Request it when the selected shader can actually display that frame.
+    private async Task RefreshUpscalingFrameAsync(bool enabled, ExperimentalUpscalingAlgorithm algorithm)
+    {
+        long connection = _client.InputConnectionGeneration;
+        if (!_client.IsConnected) return;
+        if (enabled)
+        {
+            try { await D3D11ExperimentalUpscaler.PrepareShadersAsync(algorithm).ConfigureAwait(false); }
+            catch (Exception) { /* Present the ordinary fallback on the refreshed frame. */ }
+        }
+        long previous = Interlocked.Read(ref _lastH264KeyFrameRequestAt);
+        long delay = H264KeyFrameRequestMinIntervalMs - (Environment.TickCount64 - previous);
+        if (previous != 0 && delay > 0) await Task.Delay((int)delay).ConfigureAwait(false);
+        if (!_isClosing && _client.IsConnected && connection == _client.InputConnectionGeneration &&
+            enabled == Volatile.Read(ref _experimentalUpscaling) &&
+            (!enabled || (int)algorithm == Volatile.Read(ref _experimentalUpscalingAlgorithm)))
+            RequestH264KeyFrameIfDue();
     }
 
     private void OnExperimentalUpscalingFailed(D3D11HwndVideoPresenter presenter, string reason)
@@ -1565,12 +1590,18 @@ internal sealed partial class RemoteViewerWindow : Form
             return;
         }
 
+        // Retire in-flight decode completions before disposing their decoder.
+        // The window survives reconnection and may already own a new stream
+        // when an old asynchronous FFmpeg read finishes.
+        _capturePresentationTransitionGate.Run(() => { Interlocked.Increment(ref _capturePresentationGeneration); });
         ReleaseAllRemoteInputs();
         CancelPendingClipboardPull();
         CancelRemoteDragOut(status: null, cancelTransfer: true);
         SetRemoteFilePullPending(false);
         SetInputEnabled(false);
         ClearPendingVideoFramesForShutdown();
+        _h264Recovery.RecordSuccess();
+        Interlocked.Exchange(ref _mediaFoundationDirectPathDisabled, 0);
         ResetH264Decoder();
         SetStatus("连接中断，正在等待自动重连…", MutedTextColor);
     }
@@ -2557,6 +2588,8 @@ internal sealed partial class RemoteViewerWindow : Form
             ClearPendingVideoFramesForShutdown();
             _decodedFrameMailbox.TakeLatest()?.Dispose();
             _softwarePreparationMailbox.TakeLatest()?.Dispose();
+            _h264Recovery.RecordSuccess();
+            Interlocked.Exchange(ref _mediaFoundationDirectPathDisabled, 0);
             ResetH264Decoder();
             DeactivateD3D11Presentation(
                 disposePresenter: true);
@@ -2692,6 +2725,14 @@ internal sealed partial class RemoteViewerWindow : Form
         long presentationGeneration =
             Interlocked.Read(
                 ref _capturePresentationGeneration);
+        if (Volatile.Read(ref _waitingForH264RecoveryFrame) &&
+            frame.Encoding == RemoteFrameEncoding.H264AnnexB && !IsH264RecoveryFrame(frame))
+        {
+            // A missing reference makes this AU unusable. Avoid renting and
+            // copying it while the heartbeat is already requesting recovery.
+            lock (_pendingFrameLock)
+                if (_waitingForH264RecoveryFrame) return;
+        }
         PooledRemoteFrame ownedFrame =
             PooledRemoteFrame.CopyFrom(
                 frame,
@@ -2720,7 +2761,7 @@ internal sealed partial class RemoteViewerWindow : Form
                 else
                 {
                     ClearH264FramesLocked();
-                    _waitingForH264RecoveryFrame = false;
+                    SetH264RecoveryWaitLocked(false);
                     Interlocked.Exchange(ref _resetH264DecoderOnRecovery, 0);
                     _pendingFrame?.Dispose();
                     _pendingFrame = ownedFrame;
@@ -2776,7 +2817,7 @@ internal sealed partial class RemoteViewerWindow : Form
 
     private bool CanPresentCaptureGeneration(
         long presentationGeneration) =>
-        CanPresentCaptureFrame(
+        !_isClosing && CanPresentCaptureFrame(
             Volatile.Read(
                 ref _captureTargetAvailable) != 0,
             Volatile.Read(
@@ -2808,7 +2849,7 @@ internal sealed partial class RemoteViewerWindow : Form
             _pendingFrame?.Dispose();
             _pendingFrame = null;
             ClearH264FramesLocked();
-            _waitingForH264RecoveryFrame = false;
+            SetH264RecoveryWaitLocked(false);
             _waitingForViewerHandle = false;
             Interlocked.Exchange(
                 ref _resetH264DecoderOnRecovery,
@@ -3159,6 +3200,7 @@ internal sealed partial class RemoteViewerWindow : Form
                         {
                             // Drain stale frames instead of building a replay
                             // queue while the decoder is waiting to recover.
+                            PrepareForH264DecoderRecovery();
                             RequestH264KeyFrameIfDue();
                             continue;
                         }
@@ -3173,6 +3215,7 @@ internal sealed partial class RemoteViewerWindow : Form
                         Interlocked.Exchange(ref _resetH264DecoderOnRecovery, 0) != 0;
                     bool dimensionChanged =
                         ShouldResetH264Decoder(frame);
+                    if (dimensionChanged) Interlocked.Exchange(ref _mediaFoundationDirectPathDisabled, 0);
                     if (dimensionChanged ||
                         (forceDecoderReset &&
                          !TryResetMediaFoundationDecoderForRecovery(
@@ -3191,6 +3234,11 @@ internal sealed partial class RemoteViewerWindow : Form
                         TryDecodeWithMediaFoundationD3D11(
                             frame,
                             decodeStartedAt);
+                    if (!CanPresentCaptureGeneration(presentationGeneration))
+                    {
+                        directDecode.Frame?.Dispose();
+                        continue;
+                    }
                     if (directDecode.Disposition ==
                             MediaFoundationDirectDecodeDisposition
                                 .FrameReady &&
@@ -3404,6 +3452,12 @@ internal sealed partial class RemoteViewerWindow : Form
                         await decoder.DecodeAsync(
                             submissionId,
                             GetFramePayload(frame));
+                    if (!CanPresentCaptureGeneration(presentationGeneration))
+                    {
+                        decodeResult.Bitmap?.Dispose();
+                        RemoveH264Submission(submissionId);
+                        continue;
+                    }
                     if (decodeResult.Status == FfmpegH264DecodeStatus.Failed)
                     {
                         RemoveH264Submission(
@@ -3472,17 +3526,16 @@ internal sealed partial class RemoteViewerWindow : Form
             }
             catch (Exception ex)
             {
-                if (frame.Encoding == RemoteFrameEncoding.H264AnnexB)
-                {
-                    ScheduleH264DecoderRecovery(ex.Message);
-                }
-
                 if (_isClosing || IsDisposed)
                 {
                     return;
                 }
-
-                if (frame.Encoding != RemoteFrameEncoding.H264AnnexB)
+                if (!CanPresentCaptureGeneration(presentationGeneration)) continue;
+                if (frame.Encoding == RemoteFrameEncoding.H264AnnexB)
+                {
+                    ScheduleH264DecoderRecovery(ex.Message);
+                }
+                else
                 {
                     OnUi(() => SetVideoRecoveryStatus($"画面渲染失败，等待下一帧：{ex.Message}", DangerTextColor));
                 }
@@ -3908,20 +3961,7 @@ internal sealed partial class RemoteViewerWindow : Form
         out MediaFoundationD3D11H264Decoder decoder,
         out string? failureDetail)
     {
-        if (frame.Width <
-                MediaFoundationD3D11H264DecoderOptions
-                    .MinimumDimension ||
-            frame.Width >
-                MediaFoundationD3D11H264DecoderOptions
-                    .MaximumWidth ||
-            frame.Height <
-                MediaFoundationD3D11H264DecoderOptions
-                    .MinimumDimension ||
-            frame.Height >
-                MediaFoundationD3D11H264DecoderOptions
-                    .MaximumHeight ||
-            (frame.Width & 1) != 0 ||
-            (frame.Height & 1) != 0)
+        if (MediaFoundationD3D11H264DecoderOptions.ValidateDimensions(frame.Width, frame.Height) is not null)
         {
             decoder = null!;
             failureDetail =
@@ -4358,7 +4398,7 @@ internal sealed partial class RemoteViewerWindow : Form
         {
             PooledRemoteFrame[] queuedFrames =
                 _h264Frames.ToArray();
-            int recoveryIndex = Array.FindLastIndex(
+            int recoveryIndex = _h264Recovery.RemainingDelay > TimeSpan.Zero ? -1 : Array.FindLastIndex(
                 queuedFrames,
                 queuedFrame =>
                     IsH264RecoveryFrame(
@@ -4373,7 +4413,7 @@ internal sealed partial class RemoteViewerWindow : Form
                     queuedFrame.Dispose();
                 }
 
-                _waitingForH264RecoveryFrame = true;
+                SetH264RecoveryWaitLocked(true);
                 return;
             }
 
@@ -4384,11 +4424,25 @@ internal sealed partial class RemoteViewerWindow : Form
                 queuedFrames[index].Dispose();
             }
 
-            _waitingForH264RecoveryFrame = false;
+            SetH264RecoveryWaitLocked(false);
             for (int index = recoveryIndex; index < queuedFrames.Length; index++)
             {
                 _h264Frames.Enqueue(queuedFrames[index]);
             }
+        }
+    }
+
+    private void SetH264RecoveryWaitLocked(bool waiting)
+    {
+        Volatile.Write(ref _waitingForH264RecoveryFrame, waiting);
+        if (waiting)
+        {
+            _decoderWaitOwner = _client.BeginH264DecoderWait(_h264Recovery.RemainingDelay);
+        }
+        else
+        {
+            _decoderWaitOwner?.EndDecoderWait();
+            _decoderWaitOwner = null;
         }
     }
 
@@ -4401,12 +4455,12 @@ internal sealed partial class RemoteViewerWindow : Form
         bool recoveryFrame = IsH264RecoveryFrame(frame);
         if (_waitingForH264RecoveryFrame)
         {
-            if (!recoveryFrame)
+            if (!recoveryFrame || _h264Recovery.RemainingDelay > TimeSpan.Zero)
             {
                 return false;
             }
 
-            _waitingForH264RecoveryFrame = false;
+            SetH264RecoveryWaitLocked(false);
             ClearH264FramesLocked();
         }
         else if (ShouldClearH264QueueForIncomingFrame(
@@ -4448,7 +4502,7 @@ internal sealed partial class RemoteViewerWindow : Form
         if (!startsAtRecoveryFrame)
         {
             ClearH264FramesLocked();
-            _waitingForH264RecoveryFrame = true;
+            SetH264RecoveryWaitLocked(true);
             Interlocked.Exchange(ref _resetH264DecoderOnRecovery, 1);
             RequestH264KeyFrameIfDue();
         }
@@ -5003,7 +5057,7 @@ internal sealed partial class RemoteViewerWindow : Form
                         new Size(
                             frame.VisibleWidth,
                             frame.VisibleHeight)),
-                    captureValidation: true,
+                    captureValidation: Volatile.Read(ref _directPresentationQualified) == 0 || CaptureDirectSnapshotsForTests,
                     nativeDetails: nativeDetails,
                     nativeDetailBudget: nativeBudget);
             bool IsCurrentPresenter()

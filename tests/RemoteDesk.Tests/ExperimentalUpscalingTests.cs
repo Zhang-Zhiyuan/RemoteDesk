@@ -35,6 +35,7 @@ public sealed class ExperimentalUpscalingTests
     [InlineData("vs", "vs_4_0")]
     [InlineData("ps", "ps_4_0")]
     [InlineData("psCopy", "ps_4_0")]
+    [InlineData("psGrid", "ps_4_0")]
     public void ShaderCompilesWithSystemCompiler(string entry, string profile) =>
         Assert.NotEmpty(D3D11ExperimentalUpscaler.Compile(entry, profile));
 
@@ -66,11 +67,11 @@ public sealed class ExperimentalUpscalingTests
     [InlineData(ExperimentalUpscalingAlgorithm.CatmullRom)]
     [InlineData(ExperimentalUpscalingAlgorithm.Nis)]
     [InlineData(ExperimentalUpscalingAlgorithm.TextStrokes)]
+    [InlineData(ExperimentalUpscalingAlgorithm.PixelGrid)]
     internal async Task HardwareUpscalingPreservesOrientationAndPixelsAcrossToggleResizeAndCrop(ExperimentalUpscalingAlgorithm algorithm)
     {
         if (Environment.GetEnvironmentVariable("REMOTEDESK_RUN_HARDWARE_SMOKE") != "1") return;
-        if (algorithm == ExperimentalUpscalingAlgorithm.TextStrokes)
-            await D3D11ExperimentalUpscaler.PrepareTextShadersAsync();
+        await D3D11ExperimentalUpscaler.PrepareShadersAsync(algorithm);
         using var window = new Form { ClientSize = new Size(128, 128), ShowInTaskbar = false };
         using var device = D3D11.D3D11CreateDevice(DriverType.Hardware,
             DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport);
@@ -103,6 +104,7 @@ public sealed class ExperimentalUpscalingTests
                     if (enabled)
                         Assert.Equal(algorithm switch
                         {
+                            ExperimentalUpscalingAlgorithm.PixelGrid => "原像素",
                             ExperimentalUpscalingAlgorithm.Nis when size <= 128 => "NIS",
                             ExperimentalUpscalingAlgorithm.Nis => "双三次（NIS 限 1～2 倍）",
                             ExperimentalUpscalingAlgorithm.TextStrokes when size >= 112 => "文字笔画",
@@ -136,6 +138,18 @@ public sealed class ExperimentalUpscalingTests
                             Assert.Equal(255, Marshal.ReadByte(mapped.DataPointer, offset + 3));
                             Assert.True(red > previous, $"Blank/flipped output: size={size}, enabled={enabled}, quadrant={quadrant}, red={red}, previous={previous}");
                             previous = red;
+                        }
+                        if (enabled && algorithm == ExperimentalUpscalingAlgorithm.PixelGrid)
+                        {
+                            // A vertical texel boundary halfway through an odd-sized
+                            // viewport covers half of each colour. At even sizes its
+                            // two neighbours remain intact, including at 1.5x zoom.
+                            int offset = checked((int)mapped.RowPitch) * (size / 4);
+                            int Read(int x) => Marshal.ReadByte(mapped.DataPointer, offset + x * 4 + 2);
+                            int left = Read(0), right = Read(size - 1), middle = size / 2;
+                            Assert.InRange(Math.Abs(Read(middle - 1) - left), 0, 1);
+                            Assert.InRange(Math.Abs(Read(middle) - (size % 2 == 0 ? right : (left + right) / 2)), 0, 1);
+                            Assert.InRange(Math.Abs(Read(middle + 1) - right), 0, 1);
                         }
                     }
                     finally { context.Unmap(readback, 0); }

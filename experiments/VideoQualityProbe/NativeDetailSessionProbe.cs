@@ -59,6 +59,7 @@ internal static class NativeDetailSessionProbe
         NativeDetailRequest? request = null;
         int paused = 0, inputs = 0;
         long sentFrames = 0, nativeDraws = 0, nativeReceived = 0;
+        int respondToOneRefresh = 0;
         async Task Host()
         {
             using TcpClient peer = await listener.AcceptTcpClientAsync(token);
@@ -83,6 +84,10 @@ internal static class NativeDetailSessionProbe
                     if (message.Type == MessageType.NativeDetailRequest)
                         Volatile.Write(ref request, NativeDetailSessionProtocol.DecodeRequest(message.PayloadSpan));
                     else if (message.Type == MessageType.Input) Interlocked.Increment(ref inputs);
+                    else if (message.Type == MessageType.Control && message.PayloadSpan.Length == 1 &&
+                        message.PayloadSpan[0] == (byte)RemoteControlKind.VideoKeyFrameRequest &&
+                        Interlocked.CompareExchange(ref respondToOneRefresh, 0, 1) == 1)
+                        await Protocol.WriteMessageAsync(stream, MessageType.VideoFrame, legacy, session, write, token);
                     else if (message.Type == MessageType.Ping)
                         await Protocol.WriteMessageAsync(stream, MessageType.Pong, ReadOnlyMemory<byte>.Empty, session, write, token);
                 }
@@ -165,18 +170,24 @@ internal static class NativeDetailSessionProbe
         D3D11HwndVideoPresenter Presenter() => (D3D11HwndVideoPresenter)Field(window, "_d3d11VideoPresenter");
         void Save(string name)
         {
-            Volatile.Write(ref paused, 1);
-            long stableAt = Stopwatch.GetTimestamp();
-            PumpUntil(() => Stopwatch.GetElapsedTime(stableAt).TotalMilliseconds > 180);
-            var gate = (CapturePresentationTransitionGate)Field(window, "_capturePresentationTransitionGate");
-            gate.Run(() =>
+            window.CaptureDirectSnapshotsForTests = true;
+            try
             {
-                var presenter = Presenter();
-                using var device = ((ID3D11Device)Field(presenter, "_device")).QueryInterface<ID3D11Device>();
-                using var bitmap = UpscaleComparisonProbe.ReadPixels(device, presenter, presenter.OutputSize);
-                bitmap.Save(Path.Combine(output, name));
-            });
-            Volatile.Write(ref paused, 0);
+                long previous = window.CollectRenderTelemetrySnapshot().DirectHardwarePresentedFrames;
+                PumpUntil(() => window.CollectRenderTelemetrySnapshot().DirectHardwarePresentedFrames >= previous + 2);
+                Volatile.Write(ref paused, 1);
+                long stableAt = Stopwatch.GetTimestamp();
+                PumpUntil(() => Stopwatch.GetElapsedTime(stableAt).TotalMilliseconds > 180);
+                var gate = (CapturePresentationTransitionGate)Field(window, "_capturePresentationTransitionGate");
+                gate.Run(() =>
+                {
+                    var presenter = Presenter();
+                    using var device = ((ID3D11Device)Field(presenter, "_device")).QueryInterface<ID3D11Device>();
+                    using var bitmap = UpscaleComparisonProbe.ReadPixels(device, presenter, presenter.OutputSize);
+                    bitmap.Save(Path.Combine(output, name));
+                });
+            }
+            finally { window.CaptureDirectSnapshotsForTests = false; Volatile.Write(ref paused, 0); }
         }
         void Enable(bool enabled = true)
         {
@@ -194,6 +205,22 @@ internal static class NativeDetailSessionProbe
                 password, ViewerVideoMode.Automatic, token));
             PumpUntil(() => window.CollectRenderTelemetrySnapshot().DirectHardwarePresentedFrames >= 12);
             Check(!window.CollectRenderTelemetrySnapshot().JpegFallbackRequested, "Unexpected decoder fallback.");
+            var activePresenter = Presenter();
+            foreach (string field in new[] { "_validationSource", "_validationReadback" })
+                Check(activePresenter.GetType().GetField(field, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(activePresenter) is null,
+                    "The qualified production viewer retained a full-frame validation texture.");
+            checks.Add("qualified GPU viewer released both validation textures");
+            Volatile.Write(ref paused, 1);
+            window.ToggleDisplayScaleMode();
+            long idleAt = Stopwatch.GetTimestamp();
+            PumpUntil(() => Stopwatch.GetElapsedTime(idleAt).TotalMilliseconds > RemoteViewerWindow.H264KeyFrameRequestMinIntervalMs + 100);
+            Volatile.Write(ref respondToOneRefresh, 1);
+            window.ToggleExperimentalUpscaling();
+            PumpUntil(() => Volatile.Read(ref respondToOneRefresh) == 0 && Presenter().ExperimentalUpscalingDetail == "NIS");
+            checks.Add("cold NIS toggle on an idle desktop succeeded with one H.264 response");
+            window.ToggleExperimentalUpscaling();
+            window.ToggleDisplayScaleMode();
+            Volatile.Write(ref paused, 0);
             Save("base.png");
             Presenter().NativeDetailAfterDrawForTests = () => Interlocked.Increment(ref nativeDraws);
             phase = "native";

@@ -274,6 +274,7 @@ internal static class TextClarityProbe
         // This is an unshown HWND with no Application.Run message loop. Never
         // install a WinForms synchronization context on the probe's async worker.
         WindowsFormsSynchronizationContext.AutoInstall = false;
+        if (experimental) D3D11ExperimentalUpscaler.PrepareShadersAsync(ExperimentalUpscalingAlgorithm.Nis).GetAwaiter().GetResult();
         if (!MediaFoundationD3D11H264Decoder.TryCreate(new(size.Width, size.Height, Fps,
             AllSamplesIndependent: units.Items.All(unit => unit.IsIdr)), out var created, out var capability))
             throw new InvalidOperationException(capability.Detail);
@@ -442,7 +443,7 @@ internal static class TextClarityProbe
         if (i < 0) arguments.AddRange([key, value]); else arguments[i + 1] = value;
     }
 
-    private static async Task RunFfmpegAsync(string ffmpeg, List<string> arguments, string log)
+    internal static async Task RunFfmpegAsync(string ffmpeg, List<string> arguments, string log)
     {
         using var child = new Process { StartInfo = new(ffmpeg) { UseShellExecute = false,
             CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true } };

@@ -15,6 +15,18 @@ internal sealed class H264DecoderRecovery(TimeProvider? clock = null)
 
     internal bool IsWaiting { get { lock (_gate) return _waiting; } }
 
+    internal TimeSpan RemainingDelay
+    {
+        get
+        {
+            lock (_gate)
+            {
+                TimeSpan remaining = _waiting ? _delay - _clock.GetElapsedTime(_failedAt) : TimeSpan.Zero;
+                return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+            }
+        }
+    }
+
     internal TimeSpan RecordFailure()
     {
         lock (_gate)

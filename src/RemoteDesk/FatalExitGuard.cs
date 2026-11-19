@@ -65,17 +65,12 @@ internal static class FatalExitGuard
 
     private static void RequestFatalExit(Exception? exception, string source)
     {
-        TryReport($"{source}; application exiting; ", exception, ReportDiagnostic);
         BeginFatalExit(
             () =>
             {
-                try
-                {
-                    Application.Exit();
-                }
-                catch (Exception ex) when (IsExitCoordinationException(ex))
-                {
-                }
+                TryReport($"{source}; application exiting; ", exception, summary =>
+                    WindowsDiagnosticLog.CreateDefault().RecordFatalExit(summary));
+                Application.Exit();
             },
             exitCode => Environment.Exit(exitCode),
             ProcessExitDelay,
@@ -93,14 +88,8 @@ internal static class FatalExitGuard
             return false;
         }
 
-        try
-        {
-            requestApplicationExit();
-        }
-        catch (Exception ex) when (IsExitCoordinationException(ex))
-        {
-        }
-
+        // Closing a form may wait on an already stalled UI or graphics driver.
+        // The fallback must be armed before entering any shutdown callbacks.
         _ = Task.Run(async () =>
         {
             try
@@ -115,6 +104,14 @@ internal static class FatalExitGuard
             {
             }
         });
+
+        try
+        {
+            requestApplicationExit();
+        }
+        catch (Exception ex) when (IsExitCoordinationException(ex))
+        {
+        }
 
         return true;
     }

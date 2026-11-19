@@ -216,15 +216,31 @@ public sealed class DetailSendQueue
         if (interacting) { Clear(); return null; }
         if (sendQueueMilliseconds >= 50 || availableBitsPerSecond <= 0)
         { _credit = 0; return null; }
-        _credit = Math.Min(DetailWire.MaxWireChunkBytes, _credit + elapsed * (Math.Min(availableBitsPerSecond, 1_000_000_000) / 8000d));
+        double bytesPerMillisecond = Math.Min(availableBitsPerSecond, 1_000_000_000) / 8000d;
+        _credit = Math.Min(DetailWire.MaxWireChunkBytes, _credit + elapsed * bytesPerMillisecond);
         // Let priority control go first, but keep at most one chunk's credit.
         // Erasing credit on every small control message starves detail forever
         // when the timer quantum exceeds the gap between control messages.
         if (controlPending) return null;
-        while (_queue.TryPeek(out var item))
+        for (int left = _queue.Count; left > 0; left--)
         {
-            if (!isCurrent(item.Transfer) || nowMilliseconds - item.CreatedAt > DetailCache.AssemblyLifetimeMilliseconds)
+            Pending item = _queue.Peek();
+            long timeLeft = DetailCache.AssemblyLifetimeMilliseconds - (nowMilliseconds - item.CreatedAt);
+            if (!isCurrent(item.Transfer) || timeLeft < 0)
             { ExpiredTiles++; Remove(); continue; }
+            if (item.Offset == 0)
+            {
+                int length = item.Transfer.Encoded.Length;
+                int chunks = (length + _chunkBytes - 1) / _chunkBytes;
+                int wireLength = length + chunks * (DetailWire.ChunkHeaderBytes + DetailWire.OuterRecordBytes);
+                // An incomplete tile displays no pixels. Let a smaller tile go
+                // first and reconsider the unopened one if the budget recovers.
+                if (wireLength > _credit + timeLeft * bytesPerMillisecond)
+                {
+                    _queue.Enqueue(_queue.Dequeue());
+                    continue;
+                }
+            }
             int wireBytes = DetailWire.ChunkHeaderBytes + Math.Min(_chunkBytes, item.Transfer.Encoded.Length - item.Offset) + DetailWire.OuterRecordBytes;
             if (_credit < wireBytes) return null;
             byte[] chunk = item.Transfer.Chunk(item.Offset, _chunkBytes); _credit -= wireBytes;

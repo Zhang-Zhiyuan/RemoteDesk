@@ -17,7 +17,8 @@ internal static class NativeDetailGpuProbe
         if (Directory.Exists(output)) throw new IOException("Preserving previous GPU detail evidence.");
         Directory.CreateDirectory(output);
         WindowsFormsSynchronizationContext.AutoInstall = false;
-        D3D11ExperimentalUpscaler.PrepareTextShadersAsync().GetAwaiter().GetResult();
+        Task.WhenAll(D3D11ExperimentalUpscaler.PrepareShadersAsync(ExperimentalUpscalingAlgorithm.TextStrokes),
+            D3D11ExperimentalUpscaler.PrepareShadersAsync(ExperimentalUpscalingAlgorithm.Nis)).GetAwaiter().GetResult();
         var rows = new List<object>();
         NativeText(fixtures, priorDetailRun, output, rows);
         Geometry(output, rows);

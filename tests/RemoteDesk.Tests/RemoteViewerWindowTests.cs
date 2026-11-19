@@ -2448,7 +2448,21 @@ public sealed class RemoteViewerWindowTests
     }
 
     [Fact]
-    public void RecoveryWaitDropReturnsViewerPoolLease()
+    public void ReconnectingRetiresOldDecodeCompletionsAndClearsPreviousHardwareFailure()
+    {
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
+        using var window = new RemoteViewerWindow(client, "reconnect", false, false, false, false, false, false);
+        long generation = (long)typeof(RemoteViewerWindow)
+            .GetField("_capturePresentationGeneration", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(window)!;
+        SetPrivateField(window, "_mediaFoundationDirectPathDisabled", 1);
+        Assert.Equal(true, InvokePrivate(window, "CanPresentCaptureGeneration", generation));
+        window.PrepareForReconnect();
+        Assert.Equal(false, InvokePrivate(window, "CanPresentCaptureGeneration", generation));
+        Assert.False(window.CollectRenderTelemetrySnapshot().DirectHardwarePathDisabled);
+    }
+
+    [Fact]
+    public void RecoveryWaitDropsDependentFramesWithoutRentingTheirPayload()
     {
         var pool = new TrackingByteArrayPool();
         using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
@@ -2478,8 +2492,8 @@ public sealed class RemoteViewerWindowTests
                 RemoteFrameEncoding.H264AnnexB,
                 [0, 0, 0, 1, 0x41]));
 
-        Assert.Equal(1, pool.RentCount);
-        Assert.Equal(1, pool.ReturnCount);
+        Assert.Equal(0, pool.RentCount);
+        Assert.Equal(0, pool.ReturnCount);
         Assert.Equal(0, pool.ActiveCount);
     }
 

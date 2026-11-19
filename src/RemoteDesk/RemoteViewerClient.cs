@@ -2756,7 +2756,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
                         break;
                     case MessageType.Pong:
-                        MarkPongReceived();
+                        MarkPongReceived(ownerCancellationTokenSource);
                         break;
                 }
             }
@@ -3016,13 +3016,19 @@ internal sealed partial class RemoteViewerClient : IDisposable
                     ownerCancellationTokenSource.Token)
                 .ConfigureAwait(false);
             var refresh = Volatile.Read(ref _idleH264Refresh);
-            int attempt = refresh is not null && ReferenceEquals(refresh.Owner, ownerCancellationTokenSource) &&
-                !IsLocalInputPaused && lastRefreshWrite.IsCompleted ? refresh.TakeDueRequest(Environment.TickCount64) : 0;
-            if (attempt > 0)
+            if (refresh is not null && ReferenceEquals(refresh.Owner, ownerCancellationTokenSource) && lastRefreshWrite.IsCompleted)
             {
-                // A blocked control write must not block the connection watchdog itself.
-                Log?.Invoke($"空闲后已有输入但未收到新画面，正在请求 H.264 关键帧（{attempt}/2）。");
-                lastRefreshWrite = SendControlAsync(RemoteMessageCodec.EncodeVideoKeyFrameRequest(), ownerCancellationTokenSource);
+                long now = Environment.TickCount64;
+                bool decoderRetry = refresh.TakeDueDecoderRetry(now);
+                int idleAttempt = !decoderRetry && !IsLocalInputPaused
+                    ? refresh.TakeDueRequest(now, receiveProgress.IsMakingProgress(HeartbeatWatchdogInterval)) : 0;
+                if (decoderRetry || idleAttempt > 0)
+                {
+                    Log?.Invoke(decoderRetry ? "查看端仍在等待可解码的 H.264 关键帧，正在重新请求。"
+                        : $"空闲后已有输入但未收到新画面，正在请求 H.264 关键帧（{idleAttempt}/2）。");
+                    // A blocked control write must not block the connection watchdog itself.
+                    lastRefreshWrite = SendControlAsync(RemoteMessageCodec.EncodeVideoKeyFrameRequest(), ownerCancellationTokenSource);
+                }
             }
             if (!ShouldDisconnectForHeartbeat(
                     GetLastMessageAge(),
@@ -3498,6 +3504,13 @@ internal sealed partial class RemoteViewerClient : IDisposable
     }
 
     private void ObserveVideoInput() => Volatile.Read(ref _idleH264Refresh)?.ObserveInput(Environment.TickCount64);
+
+    internal IdleH264Refresh? BeginH264DecoderWait(TimeSpan remainingBackoff)
+    {
+        var refresh = Volatile.Read(ref _idleH264Refresh);
+        refresh?.BeginDecoderWait(Environment.TickCount64, remainingBackoff);
+        return refresh;
+    }
 
     private void ResetIdleVideoTarget(CancellationTokenSource? owner)
     {
@@ -4980,8 +4993,9 @@ internal sealed partial class RemoteViewerClient : IDisposable
         Interlocked.Exchange(ref _pingAwaitingPong, 1);
     }
 
-    private void MarkPongReceived()
+    private void MarkPongReceived(CancellationTokenSource owner)
     {
+        if (!IsCurrentConnection(owner)) return;
         if (Interlocked.Exchange(ref _pingAwaitingPong, 0) != 1)
         {
             return;
@@ -4993,7 +5007,11 @@ internal sealed partial class RemoteViewerClient : IDisposable
             return;
         }
 
-        RoundTripUpdated?.Invoke(Stopwatch.GetElapsedTime(sentTicks));
+        TimeSpan elapsed = Stopwatch.GetElapsedTime(sentTicks);
+        var refresh = Volatile.Read(ref _idleH264Refresh);
+        if (refresh is not null && ReferenceEquals(refresh.Owner, owner))
+            refresh.ObserveRoundTrip(elapsed, Environment.TickCount64);
+        RoundTripUpdated?.Invoke(elapsed);
     }
 
     private TimeSpan GetLastMessageAge()

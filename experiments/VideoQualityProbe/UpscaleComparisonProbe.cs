@@ -18,7 +18,8 @@ internal static class UpscaleComparisonProbe
         output = Path.GetFullPath(output);
         if (Directory.Exists(output)) throw new IOException("Preserving previous probe output.");
         Directory.CreateDirectory(output);
-        D3D11ExperimentalUpscaler.PrepareTextShadersAsync().GetAwaiter().GetResult();
+        Task.WhenAll(Enum.GetValues<ExperimentalUpscalingAlgorithm>()
+            .Select(D3D11ExperimentalUpscaler.PrepareShadersAsync)).GetAwaiter().GetResult();
         using var device = D3D11.D3D11CreateDevice(DriverType.Hardware,
             DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport);
         using var dxgi = device.QueryInterface<IDXGIDevice>();
@@ -156,7 +157,7 @@ internal static class UpscaleComparisonProbe
         }, new JsonSerializerOptions { WriteIndented = true }));
     }
 
-    private static Bitmap Fixture(Size size)
+    internal static Bitmap Fixture(Size size)
     {
         var b = new Bitmap(size.Width, size.Height, PixelFormat.Format32bppArgb);
         using var g = Graphics.FromImage(b);

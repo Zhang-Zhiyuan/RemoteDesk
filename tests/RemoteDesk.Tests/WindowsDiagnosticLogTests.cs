@@ -19,6 +19,23 @@ public sealed class WindowsDiagnosticLogTests
     }
 
     [Fact]
+    public void FatalRecordIsVisibleImmediatelyAndSurvivesNormalLogRotation()
+    {
+        using var temp = TemporaryDirectory.Create();
+        using var log = new WindowsDiagnosticLog(temp.Path, maxLogBytes: 1024);
+        log.RecordFatalExit("ui-thread fixture");
+        log.RecordFatalExit("runtime fixture");
+        string last = File.ReadAllText(log.LastFatalLogPath);
+        Assert.Contains("runtime fixture", last);
+        Assert.DoesNotContain("ui-thread fixture", last);
+        for (int i = 0; i < 3; i++) log.Append("viewer", new string('x', 1200));
+        string export = Path.Combine(temp.Path, "export.txt");
+        log.ExportTo(export);
+        Assert.DoesNotContain("runtime fixture", File.ReadAllText(log.PreviousLogPath));
+        Assert.Contains(last.Trim(), File.ReadAllText(export));
+    }
+
+    [Fact]
     public void AppendRotatesCurrentLogWhenItExceedsLimit()
     {
         using var temp = TemporaryDirectory.Create();

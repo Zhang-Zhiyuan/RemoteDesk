@@ -9,7 +9,7 @@ namespace RemoteDesk;
 
 /// <summary>
 /// Opt-in spatial scaler. Convert NV12 to native-size RGB on the GPU, then
-/// apply range-clamped Catmull-Rom, text stroke enhancement, or NIS. No CPU readback,
+/// apply pixel coverage, range-clamped Catmull-Rom, text enhancement, or NIS. No CPU readback,
 /// frame history, generated text, driver sharpening, or decoder changes.
 /// The legacy video processor is independent and remains the fallback.
 /// </summary>
@@ -18,14 +18,32 @@ internal sealed class D3D11ExperimentalUpscaler : IDisposable
     private static readonly Lazy<byte[]> VertexCode = new(() => Compile("vs", "vs_4_0"));
     private static readonly Lazy<byte[]> PixelCode = new(() => Compile("ps", "ps_4_0"));
     private static readonly Lazy<byte[]> TextCode = new(() => Compile("psText", "ps_4_0"));
-    private static readonly Lazy<Task> TextPreparation = new(() => Task.Run(() =>
+    private static readonly Lazy<byte[]> GridCode = new(() => Compile("psGrid", "ps_4_0"));
+    private static readonly Lazy<byte[]> CopyCode = new(() => Compile("psCopy", "ps_4_0"));
+    private static readonly Lazy<Task> BicubicPreparation = Prepare(PixelCode);
+    private static readonly Lazy<Task> TextPreparation = Prepare(PixelCode, () => _ = TextCode.Value);
+    private static readonly Lazy<Task> GridPreparation = Prepare(GridCode);
+    private static readonly Lazy<Task> NisPreparation = Prepare(PixelCode, () =>
+    {
+        _ = CopyCode.Value;
+        D3D11NisScaler.PrepareResources();
+    });
+
+    private static Lazy<Task> Prepare(Lazy<byte[]> pixel, Action? additional = null) => new(() => Task.Run(() =>
     {
         _ = VertexCode.Value;
-        _ = PixelCode.Value;
-        _ = TextCode.Value;
+        _ = pixel.Value;
+        additional?.Invoke();
     }));
-    internal static Task PrepareTextShadersAsync() => TextPreparation.Value;
-    private static readonly Lazy<byte[]> CopyCode = new(() => Compile("psCopy", "ps_4_0"));
+
+    internal static Task PrepareShadersAsync(ExperimentalUpscalingAlgorithm algorithm) => algorithm switch
+    {
+        ExperimentalUpscalingAlgorithm.CatmullRom => BicubicPreparation.Value,
+        ExperimentalUpscalingAlgorithm.TextStrokes => TextPreparation.Value,
+        ExperimentalUpscalingAlgorithm.Nis => NisPreparation.Value,
+        ExperimentalUpscalingAlgorithm.PixelGrid => GridPreparation.Value,
+        _ => throw new ArgumentOutOfRangeException(nameof(algorithm))
+    };
     private readonly ID3D11Device _device;
     private readonly ID3D11DeviceContext _context;
     private ID3D11VertexShader? _vertexShader;
@@ -58,7 +76,7 @@ internal sealed class D3D11ExperimentalUpscaler : IDisposable
     internal D3D11ExperimentalUpscaler(
         ID3D11Device device, ID3D11DeviceContext context,
         ID3D11VideoDevice videoDevice, ID3D11VideoProcessorEnumerator enumerator,
-        Size sourceSize, ExperimentalUpscalingAlgorithm algorithm = ExperimentalUpscalingAlgorithm.CatmullRom)
+        Size sourceSize, ExperimentalUpscalingAlgorithm algorithm, Exception? nisPreparationFailure)
     {
         _device = device;
         _context = context;
@@ -68,7 +86,7 @@ internal sealed class D3D11ExperimentalUpscaler : IDisposable
         {
             _multithread = context.QueryInterface<ID3D11Multithread>();
             _vertexShader = device.CreateVertexShader(VertexCode.Value);
-            _pixelShader = device.CreatePixelShader(PixelCode.Value);
+            _pixelShader = device.CreatePixelShader(algorithm == ExperimentalUpscalingAlgorithm.PixelGrid ? GridCode.Value : PixelCode.Value);
             if (algorithm == ExperimentalUpscalingAlgorithm.TextStrokes)
                 _textShader = device.CreatePixelShader(TextCode.Value);
             _nativeRgb = device.CreateTexture2D(new Texture2DDescription(
@@ -83,6 +101,7 @@ internal sealed class D3D11ExperimentalUpscaler : IDisposable
                 });
             // A separate processor keeps all legacy filter settings untouched.
             _processor = videoDevice.CreateVideoProcessor(enumerator, 0);
+            if (nisPreparationFailure is not null) DisableNis(nisPreparationFailure);
         }
         catch
         {
@@ -124,7 +143,7 @@ internal sealed class D3D11ExperimentalUpscaler : IDisposable
 
             ID3D11ShaderResourceView source = _sourceView!;
             ID3D11PixelShader shader = _pixelShader!;
-            ActiveAlgorithm = "双三次";
+            ActiveAlgorithm = _algorithm == ExperimentalUpscalingAlgorithm.PixelGrid ? "原像素" : "双三次";
             if (_textShader is not null && ShouldEnhanceStrokes(_sourceSize, geometry.Destination.Size))
             {
                 shader = _textShader;
@@ -261,6 +280,21 @@ internal sealed class D3D11ExperimentalUpscaler : IDisposable
             source.GetDimensions(width, height);
             int2 p = clamp(int2(v.uv * float2(width, height)), 0, int2(width, height)-1);
             return float4(source.Load(int3(p,0)).rgb, 1);
+        }
+        // Average the source texels covered by this output pixel. At integer
+        // enlargement a pixel lies inside one texel, even next to a thin stroke.
+        float4 psGrid(Vertex v) : SV_Target {
+            uint width, height;
+            source.GetDimensions(width, height);
+            int2 last = int2(width, height) - 1;
+            float2 p = v.uv * float2(width, height) - 0.5;
+            int2 base = int2(floor(p));
+            float2 f = saturate((frac(p) - 0.5) / max(fwidth(p), 0.00001) + 0.5);
+            float3 a = source.Load(int3(clamp(base, 0, last), 0)).rgb;
+            float3 b = source.Load(int3(clamp(base + int2(1,0), 0, last), 0)).rgb;
+            float3 c = source.Load(int3(clamp(base + int2(0,1), 0, last), 0)).rgb;
+            float3 d = source.Load(int3(clamp(base + 1, 0, last), 0)).rgb;
+            return float4(lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y), 1);
         }
         float4 reconstruct(Vertex v, bool text) {
             uint width, height;

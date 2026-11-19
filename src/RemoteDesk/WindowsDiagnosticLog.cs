@@ -65,6 +65,18 @@ internal sealed class WindowsDiagnosticLog : IDisposable
     public string PreviousLogPath =>
         Path.Combine(_logDirectory, PreviousLogFileName);
 
+    internal string LastFatalLogPath => Path.Combine(_logDirectory, "remotedesk-windows-last-fatal.log");
+
+    // The runtime can terminate immediately after an unhandled-exception
+    // callback. Keep the already redacted summary independently of the queue.
+    internal void RecordFatalExit(string summary)
+    {
+        string message = $"build={RemoteDeskBuildInfo.BuildStamp} pid={Environment.ProcessId} {summary}";
+        Append("FAULT", message);
+        Directory.CreateDirectory(_logDirectory);
+        File.WriteAllText(LastFatalLogPath, FormatLine("FAULT", message), Encoding.UTF8);
+    }
+
     // Explicit authenticated diagnostics only, never the video hot path. Do not
     // export general log entries (clipboard, paths, credentials, other sessions).
     // A narrowly allowlisted decoder error survives an app update/restart, so a
@@ -344,6 +356,7 @@ internal sealed class WindowsDiagnosticLog : IDisposable
         output.WriteLine();
         WriteLogFile(output, PreviousLogPath, "previous");
         WriteLogFile(output, CurrentLogPath, "current");
+        if (File.Exists(LastFatalLogPath)) WriteLogFile(output, LastFatalLogPath, "last fatal");
     }
 
     private static void WriteLogFile(

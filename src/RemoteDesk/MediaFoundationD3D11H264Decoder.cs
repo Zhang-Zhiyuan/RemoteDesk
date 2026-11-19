@@ -71,28 +71,27 @@ internal sealed record MediaFoundationD3D11H264DecoderOptions(
     bool AllSamplesIndependent = false)
 {
     internal const int MinimumDimension = 48;
-    internal const int MaximumWidth = 4096;
-    internal const int MaximumHeight = 2304;
+    private const int MaximumLongEdge = 4096;
+    private const int MaximumShortEdge = 2304;
     internal const int MaximumFramesPerSecond = 120;
     internal const int MaximumAccessUnitBytes = 64 * 1024 * 1024;
 
+    internal static string? ValidateDimensions(int width, int height)
+    {
+        // Bound the allocation in either orientation. The MFT must still
+        // negotiate this exact, unrotated size and return an NV12 GPU surface.
+        if (Math.Min(width, height) < MinimumDimension || Math.Min(width, height) > MaximumShortEdge ||
+            Math.Max(width, height) > MaximumLongEdge)
+        {
+            return $"Dimensions must fit within {MaximumLongEdge} by {MaximumShortEdge} pixels in either orientation, with both edges at least {MinimumDimension} pixels.";
+        }
+
+        return ((width | height) & 1) != 0 ? "NV12 dimensions must be even." : null;
+    }
+
     internal string? Validate()
     {
-        if (Width < MinimumDimension ||
-            Width > MaximumWidth ||
-            Height < MinimumDimension ||
-            Height > MaximumHeight)
-        {
-            return $"The inbox H.264 decoder supports widths from " +
-                $"{MinimumDimension} to {MaximumWidth} and heights from " +
-                $"{MinimumDimension} to {MaximumHeight} pixels.";
-        }
-
-        if ((Width & 1) != 0 || (Height & 1) != 0)
-        {
-            return "NV12 dimensions must be even.";
-        }
-
+        if (ValidateDimensions(Width, Height) is { } dimensionsError) return dimensionsError;
         if (FramesPerSecond is < 1 or > MaximumFramesPerSecond)
         {
             return $"Frame rate must be between 1 and " +

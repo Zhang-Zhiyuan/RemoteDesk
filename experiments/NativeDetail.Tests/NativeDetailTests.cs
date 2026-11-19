@@ -311,6 +311,42 @@ public sealed class NativeDetailTests
     }
 
     [Fact]
+    public void SlowLinkCompletesSmallTextBehindANoisyTileAndResumesItWhenBudgetRises()
+    {
+        var manifest = Manifest(new(1, 1, 256, 128));
+        var noisy = Transfer(manifest, 0, random: true);
+        byte[] pixels = Pixels(new(1, 1, 128, 128));
+        // Repeated dark one-pixel stems on a light tile.
+        for (int y = 9; y < 20; y++)
+            for (int x = 4; x < 120; x += 6)
+                Array.Clear(pixels, (y * 128 + x) * 4, 3);
+        var text = DetailTransfer.Encode(manifest, 1, pixels);
+        var queue = new DetailSendQueue(chunkBytes: 512);
+        var cache = new DetailCache();
+        cache.Reset(manifest.Context, new(0, 0, 256, 128));
+        cache.Present(manifest);
+        Assert.True(queue.Enqueue(noisy, 0));
+        Assert.True(queue.Enqueue(text, 0));
+        for (int now = 0; now <= 200; now += 2)
+        {
+            var chunk = queue.TryTake(now, 80_000, false, false, 0, _ => true);
+            if (chunk is null) continue;
+            Assert.Equal(1, DetailWire.DecodeChunk(chunk).Tile);
+            cache.Receive(chunk, now);
+        }
+        Assert.Equal(pixels, Assert.Single(cache.Patches).Rgba.ToArray());
+        Assert.True(queue.ContainsTile(0));
+        for (int now = 202; now < 1000 && queue.Count > 0; now += 2)
+        {
+            var chunk = queue.TryTake(now, 4_000_000, false, false, 0, _ => true);
+            if (chunk is not null) cache.Receive(chunk, now);
+        }
+        Assert.Equal(2, cache.Patches.Count);
+        Assert.Equal(0, queue.Count);
+        Assert.Equal(0, queue.ExpiredTiles);
+    }
+
+    [Fact]
     public void FrequentPriorityControlWithCoarseTimersCannotStarveDetails()
     {
         var queue = new DetailSendQueue(); queue.Enqueue(Transfer(Manifest(Context), random: true), 0);

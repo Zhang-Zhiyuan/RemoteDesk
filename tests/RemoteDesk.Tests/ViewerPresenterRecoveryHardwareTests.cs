@@ -10,6 +10,61 @@ public sealed class ViewerPresenterRecoveryHardwareTests
 {
     [HardwareSmokeFact]
     [Trait("Category", "HardwareSmoke")]
+    public async Task ResolutionChangeReprobesHardwareAfterSoftwareFallback()
+    {
+        Assert.NotNull(FfmpegH264Decoder.AvailablePath);
+        var complete = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                using var client = new RemoteViewerClient();
+                using var window = new RemoteViewerWindow(client, "size-change", false, false, false, false, false, false);
+                const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+                var type = typeof(RemoteViewerWindow);
+                object? Field(string name) => type.GetField(name, flags)!.GetValue(window);
+                _ = window.Handle;
+                _ = ((Control)Field("_pictureBox")!).Handle;
+                void Send(int size, string data)
+                {
+                    var bytes = Convert.FromBase64String(data);
+                    var frame = new RemoteFrame(size, size, RemoteFrameEncoding.H264AnnexB,
+                        RemoteFrameFlags.KeyFrame | RemoteFrameFlags.CodecConfig, bytes, 0, bytes.Length, 0, 0);
+                    type.GetMethod("OnFrameReceived", flags)!.Invoke(window, [frame]);
+                }
+                void PumpUntil(Func<bool> done)
+                {
+                    var elapsed = Stopwatch.StartNew();
+                    while (!done() && elapsed.Elapsed < TimeSpan.FromSeconds(8))
+                    {
+                        Application.DoEvents();
+                        Thread.Sleep(5);
+                    }
+                    Assert.True(done());
+                }
+                // 16x16 is legal on the wire but below the MFT's 48-pixel minimum.
+                Send(16, "AAAAAWdCwArd7ARAAAADAEAAAAMAo8SJ4AAAAAFozg/IAAABZYiEOhGKAAIGUcAAQlY4AAhj4A==");
+                PumpUntil(() => Field("_currentImage") is Bitmap);
+                Assert.True(window.CollectRenderTelemetrySnapshot().DirectHardwarePathDisabled);
+                Send(64, "AAAAAQkQAAAAAWdCwArcQmwEQAAAAwBAAAAPI8SJ4AAAAAFozg/IAAABZYiEOhGKAAIxccAAQ8o4AAgFycnJ1111111111114A==");
+                PumpUntil(() =>
+                {
+                    var telemetry = window.CollectRenderTelemetrySnapshot();
+                    return telemetry.DirectHardwarePresentedFrames + telemetry.DirectHardwareOccludedFrames > 0;
+                });
+                Assert.False(window.CollectRenderTelemetrySnapshot().DirectHardwarePathDisabled);
+                Assert.Null(Field("_h264Decoder"));
+                complete.TrySetResult();
+            }
+            catch (Exception ex) { complete.TrySetException(ex); }
+        }) { IsBackground = true };
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        await complete.Task.WaitAsync(TimeSpan.FromSeconds(30));
+    }
+
+    [HardwareSmokeFact]
+    [Trait("Category", "HardwareSmoke")]
     public async Task SameWindowPresenterRetirementDropsOldOutputAndKeepsHardwareDecoder()
     {
         var complete = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

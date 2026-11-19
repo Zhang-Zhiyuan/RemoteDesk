@@ -585,6 +585,9 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
                     detail: "The presenter is disposed.");
             }
 
+            // Qualification snapshots are consumed before the next submission.
+            // A full-size GPU copy and staging surface can now both be retired.
+            if (!captureValidation && _validationSource is not null) ClearValidationResources();
             if (_targetMinimized)
             {
                 return CreateResult(
@@ -721,7 +724,8 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
                             // preparation, never on this presentation path.
                             NativeDetailActive = _nativeDetailCompositor.Render(nativeDetails, visibleSource, geometry,
                                 _nativeDetailRenderTarget!, nativeDetailBudget,
-                                ExperimentalUpscalingActive && _options.UpscalingAlgorithm == ExperimentalUpscalingAlgorithm.TextStrokes);
+                                ExperimentalUpscalingActive && _options.UpscalingAlgorithm is
+                                    ExperimentalUpscalingAlgorithm.TextStrokes or ExperimentalUpscalingAlgorithm.PixelGrid);
                             NativeDetailUploadedTiles = _nativeDetailCompositor.UploadedTilesLastRender;
                             NativeDetailStatus = NativeDetailActive ? "原生补清" : "原生补清等待可用区域";
                             if (NativeDetailActive) NativeDetailAfterDrawForTests?.Invoke();
@@ -1073,6 +1077,15 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
                     "were opaque after VideoProcessorBlt.");
     }
 
+    private void ClearValidationResources()
+    {
+        _validationSourceReady = false;
+        TryDispose(_validationReadback);
+        _validationReadback = null;
+        TryDispose(_validationSource);
+        _validationSource = null;
+    }
+
     private void EnsureValidationReadback()
     {
         uint width = checked((uint)_outputWidth);
@@ -1087,11 +1100,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
             return;
         }
 
-        TryDispose(_validationSource);
-        _validationSource = null;
-        TryDispose(_validationReadback);
-        _validationReadback = null;
-        _validationSourceReady = false;
+        ClearValidationResources();
 
         _validationSource =
             _device.CreateTexture2D(
@@ -1161,6 +1170,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
                 EnableExperimentalUpscaling = enabled,
                 UpscalingAlgorithm = algorithm ?? _options.UpscalingAlgorithm
             };
+            if (enabled) _ = D3D11ExperimentalUpscaler.PrepareShadersAsync(_options.UpscalingAlgorithm);
             _experimentalUpscalingFailed = false;
             ExperimentalUpscalingActive = false;
             ExperimentalUpscalingDetail = string.Empty;
@@ -1183,17 +1193,22 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
         {
             if (_experimentalUpscaler is null || _experimentalSourceSize != geometry.Source.Size)
             {
-                if (_options.UpscalingAlgorithm == ExperimentalUpscalingAlgorithm.TextStrokes)
+                // Keep presenting video during a cold compile, including when
+                // the first frame arrives before the UI has selected a scaler.
+                var shaders = D3D11ExperimentalUpscaler.PrepareShadersAsync(_options.UpscalingAlgorithm);
+                if (!shaders.IsCompleted) return false;
+                Exception? nisPreparationFailure = null;
+                try { shaders.GetAwaiter().GetResult(); }
+                catch (Exception ex) when (_options.UpscalingAlgorithm == ExperimentalUpscalingAlgorithm.Nis)
                 {
-                    // Draw through the ordinary video processor while the compiler is busy.
-                    var shaders = D3D11ExperimentalUpscaler.PrepareTextShadersAsync();
-                    if (!shaders.IsCompleted) return false;
-                    shaders.GetAwaiter().GetResult();
+                    // Keep the selected renderer's bicubic fallback. Failure
+                    // of a shared mandatory shader will also fail construction.
+                    nisPreparationFailure = ex;
                 }
                 TryDispose(_experimentalUpscaler);
                 _experimentalUpscaler = null;
                 _experimentalUpscaler = new D3D11ExperimentalUpscaler(
-                    _device, _context, _videoDevice, _enumerator!, geometry.Source.Size, _options.UpscalingAlgorithm);
+                    _device, _context, _videoDevice, _enumerator!, geometry.Source.Size, _options.UpscalingAlgorithm, nisPreparationFailure);
                 _experimentalSourceSize = geometry.Source.Size;
             }
             _experimentalUpscaler.Render(_videoContext, input, _backBuffer!, geometry);
@@ -2226,11 +2241,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
         TryDispose(_experimentalUpscaler);
         _experimentalUpscaler = null;
         ExperimentalUpscalingActive = false;
-        _validationSourceReady = false;
-        TryDispose(_validationReadback);
-        _validationReadback = null;
-        TryDispose(_validationSource);
-        _validationSource = null;
+        ClearValidationResources();
         _edgeEnhancementEnabled = false;
         TryDispose(_outputView);
         _outputView = null;

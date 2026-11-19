@@ -57,7 +57,7 @@ internal static class NativeDetailHostProbe
         if (source.RectangleToScreen(source.ClientRectangle) != sourceScreen.Bounds)
             throw new IOException("Source does not completely cover its monitor.");
         using var host = new RemoteHostServer();
-        using var client = new RemoteViewerClient();
+        using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var connector = expectedRelay is null ? null : new RelayHostConnector(addressProvider: () => []);
         RelayConnectionOptions? relay = expectedRelay is null ? null : ReadRelayOptions(expectedRelay);
         var logs = new ConcurrentQueue<string>();
