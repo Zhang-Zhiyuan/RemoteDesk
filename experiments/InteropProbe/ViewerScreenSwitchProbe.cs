@@ -24,7 +24,9 @@ internal static class ViewerScreenSwitchProbe
         using var client = new RemoteViewerClient();
         client.SetLocalInputPaused(true);
         using var viewer = new RemoteViewerWindow(client, "RemoteDesk 双屏切换测试（仅观看）", false, false, false, false, false, false);
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(105));
+        int idleSeconds = config.TryGetProperty("idleSeconds", out var duration) ? duration.GetInt32() : 30;
+        if (idleSeconds is < 10 or > 180) throw new ArgumentOutOfRangeException(nameof(idleSeconds));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(idleSeconds + 75));
         using var heartbeat = new System.Windows.Forms.Timer { Interval = 50 };
         var identity = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         var screens = new TaskCompletionSource<CaptureTargetInfo[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -32,7 +34,8 @@ internal static class ViewerScreenSwitchProbe
         long videoFrames = 0, otherFrames = 0;
         int orientation = 0, ticks = 0;
         var clock = Stopwatch.StartNew();
-        long lastTick = 0, longestTick = 0;
+        long lastTick = 0, longestTick = 0, longestIdleTick = 0;
+        bool observingIdle = false;
         var stages = new List<object>();
         bool passed = false;
         string? failure = null;
@@ -49,6 +52,7 @@ internal static class ViewerScreenSwitchProbe
         {
             long now = clock.ElapsedMilliseconds;
             longestTick = Math.Max(longestTick, now - lastTick);
+            if (observingIdle) longestIdleTick = Math.Max(longestIdleTick, now - lastTick);
             lastTick = now;
             ticks++;
         };
@@ -100,7 +104,9 @@ internal static class ViewerScreenSwitchProbe
                     await Task.Delay(350, deadline.Token);
                     viewer.WindowState = FormWindowState.Normal;
                     await SwitchAndMeasure(landscape, 1);
-                    await Task.Delay(TimeSpan.FromSeconds(30), deadline.Token);
+                    observingIdle = true;
+                    await Task.Delay(TimeSpan.FromSeconds(idleSeconds), deadline.Token);
+                    observingIdle = false;
                     await SwitchAndMeasure(portrait, -1);
                 }
                 finally
@@ -116,9 +122,10 @@ internal static class ViewerScreenSwitchProbe
             finally
             {
                 heartbeat.Stop();
-                var render = viewer.CollectRenderTelemetrySnapshot();
+                var render = viewer.CollectRenderTelemetrySnapshot(includeLatencyDistributions: true);
                 Program.Save(Path.Combine(output, "screen-switch.json"), new { passed, failure, via = address == null ? "relay" : "direct",
                     seconds = clock.Elapsed.TotalSeconds, stages, ticks, longestUiTickMs = longestTick, videoFrames, otherFrames,
+                    idleSeconds, longestIdleUiTickMs = longestIdleTick,
                     render.DirectHardwarePresentedFrames, render.DirectHardwarePresentationFailures, render.LastRenderedDecoderBackend,
                     latency = render.DirectHardwareDecodeToPresentLatency.SummarizeSince(default) });
                 await client.DisconnectAsync();
