@@ -858,7 +858,9 @@ internal sealed partial class RemoteHostServer : IDisposable
             TcpClient client;
             try
             {
-                client = await listener.AcceptTcpClientAsync(cancellationToken);
+                // StartAsync can run on the WinForms thread. New clients must
+                // still receive the handshake while that thread is busy.
+                client = await listener.AcceptTcpClientAsync(cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -871,14 +873,23 @@ internal sealed partial class RemoteHostServer : IDisposable
             catch (SocketException ex) when (!cancellationToken.IsCancellationRequested)
             {
                 Log?.Invoke($"接受客户端连接失败：{ex.Message}");
-                await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
+                await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken).ConfigureAwait(false);
                 continue;
             }
 
-            string remoteEndpoint = client.Client.RemoteEndPoint?.ToString() ?? "未知地址";
+            EndPoint? peer;
+            try
+            {
+                peer = client.Client.RemoteEndPoint;
+            }
+            catch (SocketException)
+            {
+                client.Dispose();
+                continue;
+            }
             if (!clientAdmissionGate.TryEnter())
             {
-                Log?.Invoke($"认证队列已满，已拒绝 {remoteEndpoint}。");
+                Log?.Invoke($"认证队列已满，已拒绝 {peer?.ToString() ?? "未知地址"}。");
                 client.Dispose();
                 continue;
             }
@@ -890,6 +901,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                 {
                     await HandleClientAsync(
                         client,
+                        peer,
                         password,
                         fps,
                         jpegQuality,
@@ -911,6 +923,7 @@ internal sealed partial class RemoteHostServer : IDisposable
 
     private async Task HandleClientAsync(
         TcpClient client,
+        EndPoint? peer,
         string password,
         int fps,
         int jpegQuality,
@@ -920,7 +933,7 @@ internal sealed partial class RemoteHostServer : IDisposable
         ActiveClientGate<ActiveClientConnection> activeClientGate,
         CancellationToken serverCancellationToken)
     {
-        string remoteEndpoint = client.Client.RemoteEndPoint?.ToString() ?? "未知地址";
+        string remoteEndpoint = peer?.ToString() ?? "未知地址";
         ActiveClientConnection? activeClientOwner = null;
         IDisposable? remoteControlLease = null;
 
@@ -930,7 +943,7 @@ internal sealed partial class RemoteHostServer : IDisposable
             NetworkUtils.ConfigureLowLatencyTcpClient(
                 client,
                 InputReceiveBufferBytes,
-                RelayLoopbackPolicy.HostSendBufferBytes(client.Client.RemoteEndPoint, FrameSendBufferBytes));
+                RelayLoopbackPolicy.HostSendBufferBytes(peer, FrameSendBufferBytes));
 
             try
             {

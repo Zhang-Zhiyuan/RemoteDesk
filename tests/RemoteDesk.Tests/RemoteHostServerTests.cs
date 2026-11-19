@@ -8,6 +8,56 @@ namespace RemoteDesk.Tests;
 
 public sealed class RemoteHostServerTests
 {
+    [Fact]
+    public async Task BusyWindowsInterfaceStillAcceptsNewDesktopConnections()
+    {
+        var listening = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var releaseUi = new ManualResetEventSlim();
+        var ui = new Thread(() =>
+        {
+            try
+            {
+                using var context = new WindowsFormsSynchronizationContext();
+                SynchronizationContext.SetSynchronizationContext(context);
+                using var host = new RemoteHostServer();
+                var target = new ScreenCaptureTarget("test", "test", new Rectangle(0, 0, 1280, 720));
+                host.StartAsync(0, "test-session", 30, 80, 100, target, true).GetAwaiter().GetResult();
+                listening.SetResult(host.ListeningPort);
+                releaseUi.Wait(TimeSpan.FromSeconds(10));
+
+                Task stop = host.StopAsync();
+                while (!stop.IsCompleted)
+                {
+                    Application.DoEvents();
+                    Thread.Sleep(1);
+                }
+                stop.GetAwaiter().GetResult();
+                stopped.SetResult();
+            }
+            catch (Exception error)
+            {
+                listening.TrySetException(error);
+                stopped.TrySetException(error);
+            }
+        }) { IsBackground = true };
+        ui.SetApartmentState(ApartmentState.STA);
+        ui.Start();
+        try
+        {
+            int port = await listening.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var client = new TcpClient();
+            await client.ConnectAsync(IPAddress.Loopback, port, timeout.Token);
+            Assert.True(await Protocol.ReadServerMagicAsync(client.GetStream(), timeout.Token));
+        }
+        finally
+        {
+            releaseUi.Set();
+            await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
     [Theory]
     [InlineData(false, true)]
     [InlineData(true, false)]
