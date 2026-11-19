@@ -139,10 +139,14 @@ internal static class NativeDetailHostProbe
                 Pump(() => sample.Task.IsCompleted && viewer.CollectRenderTelemetrySnapshot().DirectHardwarePresentedFrames >= start + 3);
                 string stream = Path.Combine(output, name + ".h264");
                 string reference = Path.Combine(output, name + "-reference.png");
-                File.WriteAllBytes(stream, sample.Task.GetAwaiter().GetResult());
+                byte[] encoded = sample.Task.GetAwaiter().GetResult();
+                File.WriteAllBytes(stream, encoded);
                 Await(TextClarityProbe.RunFfmpegAsync("ffmpeg", ["-v", "error", "-i", stream, "-frames:v", "1",
                     "-pix_fmt", "rgb24", reference], reference + ".log"));
                 using var decoded = new Bitmap(reference);
+                // The live window may already display a later access unit with
+                // different quantization. Compare decoders on the very same IDR.
+                using var sameFrame = DesktopColorProbe.RenderCapturedFrame(encoded, decoded.Size);
                 const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
                 var gate = (CapturePresentationTransitionGate)typeof(RemoteViewerWindow)
                     .GetField("_capturePresentationTransitionGate", fields)!.GetValue(viewer)!;
@@ -181,12 +185,13 @@ internal static class NativeDetailHostProbe
                         static int Difference(Color a, Color b) => Math.Max(Math.Abs(a.R - b.R),
                             Math.Max(Math.Abs(a.G - b.G), Math.Abs(a.B - b.B)));
                         largest = Math.Max(largest, Difference(pixel, DesktopColorProbe.Swatches[i]));
-                        decoderDifference = Math.Max(decoderDifference, Difference(pixel, independent));
+                        var rendered = Swatch(sameFrame, new Rectangle(Point.Empty, sameFrame.Size));
+                        decoderDifference = Math.Max(decoderDifference, Difference(rendered, independent));
                     }
                     File.WriteAllText(Path.Combine(output, name + ".json"), JsonSerializer.Serialize(new { actual, largest, decoderDifference }));
                     if (largest > 12 || decoderDifference > 4)
                         throw new IOException($"{name}: RGB difference from the source {largest}, from independent decoding {decoderDifference}.");
-                    checks.Add($"{name}: ten live swatches, max RGB difference from source {largest}, from FFmpeg {decoderDifference}");
+                    checks.Add($"{name}: ten live swatches differ from the source by at most {largest}. GPU and FFmpeg differ by at most {decoderDifference} on the same IDR.");
                 });
             }
             finally { client.FrameReceived -= RecordFixture; viewer.CaptureDirectSnapshotsForTests = false; }

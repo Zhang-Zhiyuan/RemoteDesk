@@ -116,6 +116,26 @@ internal static class DesktopColorProbe
         File.WriteAllText(Path.Combine(output, "results.json"), JsonSerializer.Serialize(rows, new JsonSerializerOptions { WriteIndented = true }));
     }
 
+    internal static Bitmap RenderCapturedFrame(byte[] encoded, Size size)
+    {
+        if (!MediaFoundationD3D11H264Decoder.TryCreate(new(size.Width, size.Height, 30, AllSamplesIndependent: true),
+            out var created, out var capability)) throw new IOException(capability.Detail);
+        using var decoder = created!;
+        var decoded = decoder.DecodeAccessUnit(encoded, 1_000_000);
+        using var frame = decoded.Frame ?? throw new IOException(decoded.Detail);
+        using var device = decoder.AcquireDeviceLease();
+        using var window = new Form { ShowInTaskbar = false, ClientSize = size };
+        if (!D3D11HwndVideoPresenter.TryCreate(device, new(window.Handle, size.Width, size.Height, 30),
+            out var made, out var status)) throw new IOException(status.Detail);
+        using var presenter = made!;
+        var resized = presenter.Resize(size.Width, size.Height);
+        if (!resized.IsSuccess) throw new IOException(resized.Detail);
+        var result = presenter.Present(frame, new(Point.Empty, size), captureValidation: true,
+            useDriverVideoColors: new WindowsH264VideoSignal().UsesDriverDefaults(encoded));
+        if (!result.IsSuccess) throw new IOException(result.Detail);
+        return UpscaleComparisonProbe.ReadPixels(device, presenter, size);
+    }
+
     private static void EncodeNativeDesktop(Bitmap original, string path)
     {
         using var device = D3D11.D3D11CreateDevice(DriverType.Hardware, DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport);
