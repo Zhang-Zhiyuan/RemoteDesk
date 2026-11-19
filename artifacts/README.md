@@ -16,6 +16,11 @@ Linux 系统 Python/ARM64 安装见 [Linux-SystemPackage](../docs/Linux-SystemPa
 需要发布时，先在最终源码上重新构建、验证，再将 Windows EXE 及必要附带文件、
 Android APK 和 Linux 安装包整理到 `release/`。该目录不放日志、中间产物和旧版备份。
 
+完整正式包通过校验后，打包脚本会删除更早版本的本地安装包。仍在发布清单中引用的包会保留到新清单生效。
+Windows 更新器会在新版启动并通过握手后删除旧程序。常驻安装还会在被控端启动后重试清理旧版残留。
+人工替换时也在核对新版后直接删除这次替换的旧副本。
+最后运行 `./scripts/Clear-RemoteDeskReleaseCache.ps1 -CompletedRollout`，清理刚退役的安装包和本轮实测的探针、临时 ZIP。需要预览时可加 `-WhatIf`。
+
 ## 发布清单
 
 随包更新的 [发布清单](RemoteDesk-release-manifest.json) 记录构建所用的源码提交、
@@ -23,4 +28,4 @@ Android APK 和 Linux 安装包整理到 `release/`。该目录不放日志、�
 不以文件修改时间判断。发布后的开发提交不代表下载包已经更新。
 
 旧文档中的 `artifacts/...` 是本地历史证据路径，不是公开下载链接。
-原始测试证据和旧开发历史保留在本地，不上传含个人设备信息的目录。
+测试报告、截图和版本清单保留在本地，不上传含个人设备信息的目录。

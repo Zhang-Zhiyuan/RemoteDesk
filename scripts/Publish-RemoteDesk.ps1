@@ -2309,6 +2309,11 @@ $manifestEntries = Write-ArtifactManifest `
     Complete-PublishArtifactTransaction -Transaction $transaction
     $transaction = $null
 
+    if ($publishScopeKind -eq "Full" -and $AndroidRelease -and -not $SkipTests -and
+        $ReleaseName -match ('^release-' + [regex]::Escape($releaseVersion) + '(?:-r[0-9]+|-final)?$')) {
+        & (Join-Path $PSScriptRoot "Clear-RemoteDeskReleaseCache.ps1") -ReleaseName $ReleaseName
+    }
+
 Write-Step "Artifacts"
 Get-Item -LiteralPath (@($artifactPaths) + @($manifestPath)) -ErrorAction SilentlyContinue |
     Select-Object Name, Length, LastWriteTime |

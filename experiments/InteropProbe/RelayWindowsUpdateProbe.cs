@@ -55,15 +55,23 @@ internal static class RelayWindowsUpdateProbe
         if (transferTimeoutSeconds is < 60 or > 5400)
             throw new ArgumentOutOfRangeException(nameof(transferTimeoutSeconds), "Transfer deadline must be between 60 and 5400 seconds.");
 
-        string package = Path.GetFullPath(config.GetProperty("package").GetString()!);
-        string expectedHash = config.GetProperty("sha256").GetString()!;
-        string expectedBuild = config.GetProperty("buildStamp").GetString()!;
-        RemoteUpdater.ValidateRemoteUpdatePackageName(package);
-        using (var input = File.OpenRead(package))
-            if (!string.Equals(Convert.ToHexString(SHA256.HashData(input)), expectedHash, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("Package differs from the verified release hash.");
-        if (RemoteDeskBuildInfo.ReadExecutableBuildStamp(package) != expectedBuild || !RemoteUpdateTrust.CanUseAsCurrentPackage(package))
-            throw new InvalidOperationException("Package build identity is invalid.");
+        string expectedBuild = RemoteDeskBuildInfo.NormalizeBuildStamp(config.GetProperty("buildStamp").GetString())
+            ?? throw new InvalidOperationException("The release manifest must specify a valid build stamp.");
+        string? package = null;
+        if (verificationOnly && !config.TryGetProperty("package", out _) && config.TryGetProperty("sha256", out _))
+            throw new InvalidOperationException("A package is required to verify its SHA-256.");
+        // Read-only verification also works from the retained release manifest after retiring its installer.
+        if (!verificationOnly || config.TryGetProperty("package", out _))
+        {
+            package = Path.GetFullPath(config.GetProperty("package").GetString()!);
+            string expectedHash = config.GetProperty("sha256").GetString()!;
+            RemoteUpdater.ValidateRemoteUpdatePackageName(package);
+            using (var input = File.OpenRead(package))
+                if (!string.Equals(Convert.ToHexString(SHA256.HashData(input)), expectedHash, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Package differs from the verified release hash.");
+            if (RemoteDeskBuildInfo.ReadExecutableBuildStamp(package) != expectedBuild || !RemoteUpdateTrust.CanUseAsCurrentPackage(package))
+                throw new InvalidOperationException("Package build identity is invalid.");
+        }
         string[] selectedIds = config.GetProperty("devices").EnumerateArray().Select(value => Guid.Parse(value.GetString()!).ToString("D")).Distinct().ToArray();
         RelayOnlineDevice[] selected = selectedIds.Select(id => devices.Single(device => device.DeviceId == id)).ToArray();
         if (selected.Any(device => device.Platform != RemoteDevicePlatforms.Windows))
@@ -111,7 +119,7 @@ internal static class RelayWindowsUpdateProbe
     }
 
     private static async Task ApplyAsync(RelayConnectionOptions target, RelayOnlineDevice device,
-        List<(string Source, string Secret)> credentials, string package, string expectedBuild,
+        List<(string Source, string Secret)> credentials, string? package, string expectedBuild,
         Dictionary<string, object?> result, bool verificationOnly, TimeSpan transferTimeout, string output)
     {
         string? authenticatedKey = null;
@@ -161,6 +169,7 @@ internal static class RelayWindowsUpdateProbe
                     await VerifyUpdatedEndpointAsync(target, device, authenticatedKey, expectedBuild, result);
                     return;
                 }
+                ArgumentNullException.ThrowIfNull(package);
                 if (!before.Capabilities.HasFlag(RemoteDeviceCapabilities.RemoteUpdate))
                     throw new InvalidOperationException("Device does not support authenticated self-update.");
                 var accepted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);

@@ -45,6 +45,14 @@ internal static partial class WindowsSecureDesktopInstallation
         return key.GetValue("ImagePath") is string command ? ReadOwnedExecutable(command, sid) : null;
     }
 
+    internal static bool CanRetirePackage(string sid, string executable)
+    {
+        using RegistryKey? key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\" + ServiceName(sid));
+        if (key is null) return true;
+        return key.GetValue("ImagePath") is string command && ReadOwnedExecutable(command, sid) is string installed &&
+            !string.Equals(installed, executable, StringComparison.OrdinalIgnoreCase);
+    }
+
     internal static bool RecoverSharedExecutableAfterUpdate()
     {
         string sid = WindowsPersistentStartup.UserSid;

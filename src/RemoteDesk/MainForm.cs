@@ -334,6 +334,7 @@ public sealed partial class MainForm : Form
             await ApplyRelayHostRegistrationAsync();
             await RecoverLockScreenAfterUpdateAsync();
             await MigrateLegacyStartupAsync();
+            if (_hostServer.IsRunning) _ = CleanRetiredPackagesAsync();
             await DiscoverHostsAsync(silent: true);
             await RefreshRelayDevicesAsync(silent: true);
             _relayRefreshTimer.Start();
@@ -3939,6 +3940,21 @@ public sealed partial class MainForm : Form
             {
                 _hostToggleButton.Enabled = true;
             }
+        }
+    }
+
+    private async Task CleanRetiredPackagesAsync()
+    {
+        try
+        {
+            int removed = await Task.Run(WindowsUpdateCleanup.CleanManagedInstallation);
+            if (removed > 0 && !_isClosing && !IsDisposed)
+                AppendHostLog($"已清理 {removed} 个旧版程序文件。");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or
+            System.Security.SecurityException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            _diagnosticLog.Append("UPDATE", $"旧版文件清理将在下次启动时重试（{error.GetType().Name}）。");
         }
     }
 

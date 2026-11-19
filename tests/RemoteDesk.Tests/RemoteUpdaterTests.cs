@@ -7,6 +7,20 @@ namespace RemoteDesk.Tests;
 public sealed class RemoteUpdaterTests
 {
     [Theory]
+    [InlineData("RemoteDesk.exe.20261119010500000.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.old", true)]
+    [InlineData("RemoteDesk.exe.20261119090000000.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.old", false)]
+    [InlineData("RemoteDesk.exe.20261119100100000.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.old", false)]
+    [InlineData("RemoteDesk.exe.20260230000000000.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.old", false)]
+    [InlineData("Other.exe.20261119010500000.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.old", false)]
+    [InlineData("RemoteDesk.exe.20261119010500000.other.old", false)]
+    [InlineData("RemoteDesk.exe.20261119010500000.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.old.txt", false)]
+    public void RetiredRollbackRequiresAnOldUpdaterTransaction(string name, bool expected)
+    {
+        var now = new DateTime(2026, 11, 19, 10, 0, 0, DateTimeKind.Utc);
+        Assert.Equal(expected, WindowsUpdateCleanup.IsRetiredRollback(name, now));
+    }
+
+    [Theory]
     [InlineData("RemoteDesk.exe")]
     [InlineData(@"C:\tools\RemoteDesk.exe")]
     public void ValidateRemoteUpdatePackageNameAcceptsRemoteDeskExe(string fileName)

@@ -203,6 +203,7 @@ internal static class RemoteUpdater
         $ErrorActionPreference = 'Stop'
         $installedUpdate = $false
         $started = $null
+        $rollbackHandle = $null
         # Rollback needs this even when package verification fails before installation.
         $targetDirectory = Split-Path -Parent $TargetPath
         $effectiveRestartArgument = @($RestartArgument)
@@ -509,15 +510,21 @@ internal static class RemoteUpdater
                 return
             }
 
-            try {
-                Remove-Item -LiteralPath $Path -Force
-                Write-RemoteDeskUpdateLog "$Description removed: $Path"
-            }
-            catch {
-                Write-RemoteDeskUpdateLog (
-                    "$Description retained because cleanup failed: {0}; {1}" -f
-                        $Path,
-                        $_.Exception.Message)
+            for ($attempt = 1; $attempt -le 12; $attempt++) {
+                try {
+                    Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+                    Write-RemoteDeskUpdateLog "$Description removed: $Path"
+                    return
+                }
+                catch [System.Management.Automation.ItemNotFoundException] { return }
+                catch {
+                    if ($attempt -lt 12) {
+                        Start-Sleep -Milliseconds 500
+                    }
+                    else {
+                        Write-RemoteDeskUpdateLog "$Description cleanup pending: $Path ($($_.Exception.Message))"
+                    }
+                }
             }
         }
 
@@ -575,6 +582,8 @@ internal static class RemoteUpdater
             # A same-volume move retains the received file's ACL. Preserve the installed
             # executable's permissions, including the protected administrator-startup copy.
             $targetFileSecurity = Get-Acl -LiteralPath $BackupPath
+            try { $rollbackHandle = [IO.File]::Open($BackupPath, 'Open', 'Read', 'Read') }
+            catch [IO.IOException] { Write-RemoteDeskUpdateLog "old executable is already in use" }
             Move-RemoteDeskFileWithRetry `
                 -Source $PackagePath `
                 -Destination $TargetPath
@@ -601,6 +610,8 @@ internal static class RemoteUpdater
             Write-RemoteDeskUpdateLog (
                 "updated RemoteDesk is healthy: PID=$($started.Id), " +
                 "path=$TargetPath, port=$HealthPort, handshake=RDK1")
+            if ($null -ne $rollbackHandle) { $rollbackHandle.Dispose() }
+            $rollbackHandle = $null
             Remove-RemoteDeskUpdateFile `
                 -Path $BackupPath `
                 -Description "old executable backup"
@@ -611,6 +622,7 @@ internal static class RemoteUpdater
         }
         catch {
             Write-RemoteDeskUpdateLog "remote update failed: $($_.Exception.Message)"
+            if ($null -ne $rollbackHandle) { $rollbackHandle.Dispose() }
             $failedUpdatePath = $null
             $rollbackHealthy = $false
             try {
