@@ -12,6 +12,12 @@ using RemoteDesk;
 // mode requires an explicitly selected server. No installed-settings changes
 // or replacement of a running release executable.
 // --native-details uses only its own authenticated ephemeral loopback endpoint.
+if (args.ElementAtOrDefault(0) == "--desktop-colors")
+{
+    if (args.Length is not (2 or 3)) throw new ArgumentException("Usage: --desktop-colors <new-output-directory> [legacy-native-720p.h264]");
+    DesktopColorProbe.Run(args[1], args.ElementAtOrDefault(2));
+    return;
+}
 if (args.ElementAtOrDefault(0) == "--native-detail-vectors")
 {
     if (args.Length != 2) throw new ArgumentException("Usage: --native-detail-vectors <new-output-file>");

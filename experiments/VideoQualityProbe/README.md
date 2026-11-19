@@ -1,5 +1,9 @@
 # Synthetic hardware video quality probe
 
+`dotnet run --project experiments/VideoQualityProbe -c Release -- --desktop-colors <new-directory>` saves a 720p text desktop and actual 1:1 and 2× GPU output. It switches BT.601, BT.709, full-range and studio-range H.264 on one decoder, then feeds the same desktop through the native-detail hardware encoder. The test compares ten RGB swatches with the source. An optional final argument replays the same fixture encoded by an older native-detail host.
+
+The `--native-detail-host` and `--native-detail-host-relay` checks also compare ten swatches from the full-monitor test canvas with the actual viewer and an independent FFmpeg decode of a captured keyframe. Each run keeps that fixture keyframe and its reference PNG.
+
 For the viewer-only NIS / bicubic / legacy GPU comparison:
 
 ```powershell

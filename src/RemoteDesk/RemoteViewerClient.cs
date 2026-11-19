@@ -206,6 +206,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
     private int _remoteCapabilitiesInitialized;
     private string? _remoteBuildStamp;
     private RemoteDeviceDescriptor? _remoteDeviceInfo;
+    private readonly WindowsH264VideoSignal _windowsVideoSignal = new();
     private bool _deviceIdentityRequested;
     private TaskCompletionSource<bool>? _remoteCapabilitiesReady;
     private RemoteSessionRejectedException? _lastSessionRejection;
@@ -3498,7 +3499,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
             if (!ShouldIgnoreTcpVideoFrames(ownerConnection))
             {
                 if (!nativeEnvelope) NativeDetails.ObserveLegacyBase();
-                PublishObservedVideoFrame(ownerConnection, frame);
+                PublishObservedVideoFrame(ownerConnection, frame, nativeEnvelope);
             }
         }
     }
@@ -3518,8 +3519,14 @@ internal sealed partial class RemoteViewerClient : IDisposable
         if (refresh is not null && ReferenceEquals(refresh.Owner, owner)) refresh.Reset();
     }
 
-    private void PublishObservedVideoFrame(CancellationTokenSource owner, RemoteFrame frame)
+    private void PublishObservedVideoFrame(CancellationTokenSource owner, RemoteFrame frame, bool nativeEnvelope = false)
     {
+        if (frame.Encoding == RemoteFrameEncoding.H264AnnexB &&
+            (nativeEnvelope || _remoteDeviceInfo?.Platform == RemoteDevicePlatforms.Windows))
+        {
+            frame = frame with { UseDriverVideoColors = _windowsVideoSignal.UsesDriverDefaults(
+                frame.EncodedBuffer.AsSpan(frame.EncodedOffset, frame.EncodedLength)) };
+        }
         var refresh = Volatile.Read(ref _idleH264Refresh);
         if (refresh is not null && ReferenceEquals(refresh.Owner, owner))
             refresh.ObserveFrame(frame.Encoding, Environment.TickCount64);

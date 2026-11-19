@@ -5059,7 +5059,8 @@ internal sealed partial class RemoteViewerWindow : Form
                             frame.VisibleHeight)),
                     captureValidation: Volatile.Read(ref _directPresentationQualified) == 0 || CaptureDirectSnapshotsForTests,
                     nativeDetails: nativeDetails,
-                    nativeDetailBudget: nativeBudget);
+                    nativeDetailBudget: nativeBudget,
+                    useDriverVideoColors: sourceMetadata.UseDriverVideoColors);
             bool IsCurrentPresenter()
             {
                 lock (_d3d11PresenterLock)
@@ -5187,7 +5188,8 @@ internal sealed partial class RemoteViewerWindow : Form
                 frame,
                 visibleSource,
                 nativeDetails: nativeDetails,
-                nativeDetailBudget: nativeBudget);
+                nativeDetailBudget: nativeBudget,
+                useDriverVideoColors: sourceMetadata.UseDriverVideoColors);
         if (result.Status !=
             D3D11HwndVideoPresenterStatus.WrongDevice)
         {
@@ -5213,7 +5215,8 @@ internal sealed partial class RemoteViewerWindow : Form
                 frame,
                 visibleSource,
                 nativeDetails: nativeDetails,
-                nativeDetailBudget: nativeBudget) ??
+            nativeDetailBudget: nativeBudget,
+            useDriverVideoColors: sourceMetadata.UseDriverVideoColors) ??
             new(
                 D3D11HwndVideoPresenterStatus.Failed,
                 HResult: 0,

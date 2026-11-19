@@ -336,7 +336,8 @@ internal sealed class MediaFoundationD3D11DecodedFrame : IDisposable
         int visibleWidth,
         int visibleHeight,
         long sampleTime100Nanoseconds,
-        bool hasExplicitSampleTime)
+        bool hasExplicitSampleTime,
+        SdrVideoColorSpace colorSpace)
     {
         _sample = sample;
         _device = device;
@@ -347,6 +348,7 @@ internal sealed class MediaFoundationD3D11DecodedFrame : IDisposable
         VisibleHeight = visibleHeight;
         SampleTime100Nanoseconds = sampleTime100Nanoseconds;
         HasExplicitSampleTime = hasExplicitSampleTime;
+        ColorSpace = colorSpace;
 
         Texture2DDescription description = texture.Description;
         TextureWidth = checked((int)description.Width);
@@ -369,6 +371,7 @@ internal sealed class MediaFoundationD3D11DecodedFrame : IDisposable
     public long SampleTime100Nanoseconds { get; }
 
     public bool HasExplicitSampleTime { get; }
+    internal SdrVideoColorSpace ColorSpace { get; }
 
     internal ID3D11Device AcquireDeviceLease()
     {
@@ -483,6 +486,7 @@ internal sealed class MediaFoundationD3D11H264Decoder : IDisposable
     private MediaFoundationD3D11ReferenceState _referenceState;
     private int _acceptedInputsWithoutOutput;
     private bool _markNextInputDiscontinuity;
+    private SdrVideoColorSpace? _outputColorSpace;
 
     private MediaFoundationD3D11H264Decoder(
         MediaFoundationD3D11H264DecoderOptions options,
@@ -1243,6 +1247,7 @@ internal sealed class MediaFoundationD3D11H264Decoder : IDisposable
             TMessageType.MessageNotifyStartOfStream,
             UIntPtr.Zero);
         _markNextInputDiscontinuity = true;
+        _outputColorSpace = null;
         TransitionTo(
             MediaFoundationD3D11DecoderState.Streaming);
     }
@@ -1284,6 +1289,7 @@ internal sealed class MediaFoundationD3D11H264Decoder : IDisposable
                         _transform,
                         _options.Width,
                         _options.Height);
+                    _outputColorSpace = null;
                     EnsureDecoderProvidesOutputSamples(
                         _transform);
                     continue;
@@ -1714,7 +1720,8 @@ internal sealed class MediaFoundationD3D11H264Decoder : IDisposable
                 _options.Width,
                 _options.Height,
                 sampleTime,
-                hasExplicitSampleTime);
+                hasExplicitSampleTime,
+                _outputColorSpace ??= SdrVideoColorSpace.ReadDecoderOutput(_transform));
             decodedSample = null!;
             textureDevice = null;
             texture = null;

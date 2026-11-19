@@ -554,6 +554,21 @@ public sealed class FfmpegDesktopH264CaptureTests
     }
 
     [Fact]
+    public void MeasuredDesktopRangeIsInBothPipeAndRtpBitstreams()
+    {
+        var options = CreateOptions(FfmpegDesktopCaptureBackend.DesktopDuplicationOutput0) with
+        {
+            DesktopDuplicationColors = SdrVideoColorSpace.NativeDesktop
+        };
+        const string filter = "dump_extra=freq=keyframe,h264_metadata=aud=insert:video_full_range_flag=1:" +
+            "matrix_coefficients=1:colour_primaries=1:transfer_characteristics=13";
+        AssertArgumentValue(FfmpegDesktopH264Capture.BuildArguments(options, FfmpegH264Encoder.MediaFoundation),
+            "-bsf:v", filter);
+        AssertArgumentValue(FfmpegDesktopH264Capture.BuildLoopbackRtpArguments(options, FfmpegH264Encoder.MediaFoundation, 13680),
+            "-bsf:v", filter);
+    }
+
+    [Fact]
     public void DdaNvencArgumentsBindOwningAdapterAndOutput()
     {
         FfmpegDesktopH264CaptureOptions options = CreateOptions(
@@ -1057,7 +1072,7 @@ public sealed class FfmpegDesktopH264CaptureTests
         AssertArgumentValue(
             arguments,
             "-vf",
-            "scale=1280:720:flags=bicubic+accurate_rnd,format=nv12");
+            "scale=1280:720:flags=bicubic+accurate_rnd:in_range=pc:out_range=tv:out_color_matrix=bt709,format=nv12");
         AssertArgumentValue(arguments, "-c:v", "h264_amf");
         AssertArgumentValue(
             arguments,
@@ -1085,12 +1100,11 @@ public sealed class FfmpegDesktopH264CaptureTests
         AssertArgumentValue(
             arguments,
             "-vf",
-            "format=nv12");
-        Assert.DoesNotContain(
+            "scale=3840:2160:flags=bicubic+accurate_rnd:in_range=pc:out_range=tv:out_color_matrix=bt709,format=nv12");
+        AssertArgumentValue(
             arguments,
-            argument => argument.Contains(
-                "scale=",
-                StringComparison.Ordinal));
+            "-bsf:v",
+            "dump_extra=freq=keyframe,h264_metadata=aud=insert:video_full_range_flag=0:matrix_coefficients=1:colour_primaries=1:transfer_characteristics=13");
     }
 
     [Fact]

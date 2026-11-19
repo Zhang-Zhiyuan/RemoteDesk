@@ -151,7 +151,11 @@ internal sealed class MediaFoundationD3D11H264Encoder : IDisposable
                     {
                         name = activation.GetString(TransformAttributeKeys.MftFriendlyNameAttribute);
                         candidate = activation.ActivateObject<IMFTransform>();
-                        ConfigureTransform(candidate, manager, options);
+                        if (ConfigureTransform(candidate, manager, options))
+                        {
+                            videoContext.VideoProcessorSetStreamColorSpace(processor, 0, SdrVideoColorSpace.FullRgb);
+                            videoContext.VideoProcessorSetOutputColorSpace(processor, SdrVideoColorSpace.NativeDesktop.Yuv);
+                        }
                         Own(activation); Own(candidate);
                         selected = activation;
                         transform = candidate;
@@ -334,7 +338,7 @@ internal sealed class MediaFoundationD3D11H264Encoder : IDisposable
         finally { output.Events?.Dispose(); output.Sample?.Dispose(); }
     }
 
-    private static void ConfigureTransform(IMFTransform transform, IMFDXGIDeviceManager manager,
+    private static bool ConfigureTransform(IMFTransform transform, IMFDXGIDeviceManager manager,
         MediaFoundationD3D11H264EncoderOptions options)
     {
         using (IMFAttributes attributes = transform.Attributes)
@@ -349,20 +353,39 @@ internal sealed class MediaFoundationD3D11H264Encoder : IDisposable
         SetCodecOption(transform, GopSize, 1u);
         transform.ProcessMessage(TMessageType.MessageSetD3DManager,
             new UIntPtr(unchecked((ulong)manager.NativePointer.ToInt64())));
-        using (IMFMediaType output = CreateType(options, VideoFormatGuids.H264))
+        bool explicitColor = true;
+        try
+        {
+            SetVideoTypes(transform, options, explicitColor);
+        }
+        catch (SharpGenException error) when (error.HResult == Vortice.MediaFoundation.ResultCode.Invalidmediatype.Code ||
+                                             error.HResult == unchecked((int)0x80070057)) // E_INVALIDARG
+        {
+            // Keep the original RGB conversion and bitstream contract paired
+            // on hardware that only accepts the original media types.
+            explicitColor = false;
+            SetVideoTypes(transform, options, explicitColor);
+        }
+        // Sample allocation is driver-owned in an asynchronous hardware MFT.
+        if ((((OutputStreamInfoFlags)transform.GetOutputStreamInfo(0).Flags) &
+            OutputStreamInfoFlags.OutputStreamProvidesSamples) == 0)
+            throw new NotSupportedException("Hardware encoder does not provide its own output samples.");
+        return explicitColor;
+    }
+
+    private static void SetVideoTypes(IMFTransform transform, MediaFoundationD3D11H264EncoderOptions options, bool explicitColor)
+    {
+        using (IMFMediaType output = CreateType(options, VideoFormatGuids.H264, explicitColor))
         {
             output.Set(MediaTypeAttributeKeys.AvgBitrate, (uint)options.BitrateBitsPerSecond).CheckError();
             output.Set(MediaTypeAttributeKeys.Mpeg2Profile, 100u).CheckError();
             transform.SetOutputType(0, output, 0);
         }
-        using (IMFMediaType input = CreateType(options, VideoFormatGuids.NV12)) transform.SetInputType(0, input, 0);
-        // Sample allocation is driver-owned in an asynchronous hardware MFT.
-        if ((((OutputStreamInfoFlags)transform.GetOutputStreamInfo(0).Flags) &
-            OutputStreamInfoFlags.OutputStreamProvidesSamples) == 0)
-            throw new NotSupportedException("Hardware encoder does not provide its own output samples.");
+        using IMFMediaType input = CreateType(options, VideoFormatGuids.NV12, explicitColor);
+        transform.SetInputType(0, input, 0);
     }
 
-    private static IMFMediaType CreateType(MediaFoundationD3D11H264EncoderOptions options, Guid subtype)
+    private static IMFMediaType CreateType(MediaFoundationD3D11H264EncoderOptions options, Guid subtype, bool explicitColor)
     {
         IMFMediaType type = MediaFactory.MFCreateMediaType();
         try
@@ -373,6 +396,13 @@ internal sealed class MediaFoundationD3D11H264Encoder : IDisposable
             type.Set(MediaTypeAttributeKeys.FrameRate, ((ulong)options.FramesPerSecond << 32) | 1).CheckError();
             type.Set(MediaTypeAttributeKeys.PixelAspectRatio, (1ul << 32) | 1).CheckError();
             type.Set(MediaTypeAttributeKeys.InterlaceMode, (uint)VideoInterlaceMode.Progressive).CheckError();
+            if (explicitColor)
+            {
+                type.Set(MediaTypeAttributeKeys.VideoNominalRange, (uint)NominalRange.Range0_255).CheckError();
+                type.Set(MediaTypeAttributeKeys.YuvMatrix, (uint)SdrVideoColorSpace.NativeDesktop.Matrix).CheckError();
+                type.Set(MediaTypeAttributeKeys.VideoPrimaries, (uint)VideoPrimaries.Bt709).CheckError();
+                type.Set(MediaTypeAttributeKeys.TransferFunction, (uint)VideoTransferFunction.FuncSRGB).CheckError();
+            }
             return type;
         }
         catch { type.Dispose(); throw; }

@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using RemoteDesk;
 using RemoteDesk.NativeDetail;
+using Vortice.Direct3D11;
 
 // Actual RemoteHostServer, desktop duplication, hardware encoding, encrypted
 // loopback (or an explicitly selected public relay), production receive/decode/present and the UI switch. The source
@@ -47,6 +48,14 @@ internal static class NativeDetailHostProbe
         using var original = new Bitmap(Path.Combine(fixtures, "native-reference.png"));
         if (sourceScreen.Bounds.Width > original.Width || sourceScreen.Bounds.Height > original.Height)
             throw new IOException("Fixture does not cover the source monitor.");
+        using (var graphics = Graphics.FromImage(original))
+        {
+            for (int i = 0; i < DesktopColorProbe.Swatches.Length; i++)
+            {
+                using var brush = new SolidBrush(DesktopColorProbe.Swatches[i]);
+                graphics.FillRectangle(brush, 32 + i * 128, 320, 128, 128);
+            }
+        }
         using var source = new Canvas(original)
         {
             AutoScaleMode = AutoScaleMode.None, FormBorderStyle = FormBorderStyle.None,
@@ -113,6 +122,75 @@ internal static class NativeDetailHostProbe
             Application.DoEvents();
         }
         void Await(Task task) { Pump(() => task.IsCompleted); task.GetAwaiter().GetResult(); }
+        void CheckLiveColors(string name)
+        {
+            var sample = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+            void RecordFixture(RemoteFrame frame)
+            {
+                if (!sample.Task.IsCompleted && frame.Encoding == RemoteFrameEncoding.H264AnnexB &&
+                    frame.Flags.HasFlag(RemoteFrameFlags.KeyFrame))
+                    sample.TrySetResult(frame.EncodedBuffer.AsSpan(frame.EncodedOffset, frame.EncodedLength).ToArray());
+            }
+            viewer.CaptureDirectSnapshotsForTests = true;
+            client.FrameReceived += RecordFixture;
+            try
+            {
+                long start = viewer.CollectRenderTelemetrySnapshot().DirectHardwarePresentedFrames;
+                Pump(() => sample.Task.IsCompleted && viewer.CollectRenderTelemetrySnapshot().DirectHardwarePresentedFrames >= start + 3);
+                string stream = Path.Combine(output, name + ".h264");
+                string reference = Path.Combine(output, name + "-reference.png");
+                File.WriteAllBytes(stream, sample.Task.GetAwaiter().GetResult());
+                Await(TextClarityProbe.RunFfmpegAsync("ffmpeg", ["-v", "error", "-i", stream, "-frames:v", "1",
+                    "-pix_fmt", "rgb24", reference], reference + ".log"));
+                using var decoded = new Bitmap(reference);
+                const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
+                var gate = (CapturePresentationTransitionGate)typeof(RemoteViewerWindow)
+                    .GetField("_capturePresentationTransitionGate", fields)!.GetValue(viewer)!;
+                gate.Run(() =>
+                {
+                    var presenter = Presenter()!;
+                    var options = (D3D11HwndVideoPresenterOptions)typeof(D3D11HwndVideoPresenter)
+                        .GetField("_options", fields)!.GetValue(presenter)!;
+                    var mode = (D3D11HwndVideoScaleMode)typeof(D3D11HwndVideoPresenter)
+                        .GetField("_scaleMode", fields)!.GetValue(presenter)!;
+                    var dest = D3D11HwndVideoPresenter.CalculateGeometry(
+                        new(0, 0, options.SourceWidth, options.SourceHeight), presenter.OutputSize, mode).Destination;
+                    var borrowed = (ID3D11Device)typeof(D3D11HwndVideoPresenter).GetField("_device", fields)!.GetValue(presenter)!;
+                    using var device = borrowed.QueryInterface<ID3D11Device>();
+                    using var shot = UpscaleComparisonProbe.ReadPixels(device, presenter, presenter.OutputSize);
+                    var actual = new List<string>();
+                    int largest = 0, decoderDifference = 0;
+                    for (int i = 0; i < DesktopColorProbe.Swatches.Length; i++)
+                    {
+                        Color Swatch(Bitmap image, Rectangle bounds)
+                        {
+                            int x = bounds.Left + (96 + i * 128) * bounds.Width / sourceScreen.Bounds.Width;
+                            int y = bounds.Top + 384 * bounds.Height / sourceScreen.Bounds.Height;
+                            int r = 0, g = 0, b = 0;
+                            for (int dy = -4; dy <= 4; dy += 2)
+                                for (int dx = -4; dx <= 4; dx += 2)
+                                {
+                                    var c = image.GetPixel(x + dx, y + dy);
+                                    r += c.R; g += c.G; b += c.B;
+                                }
+                            return Color.FromArgb((r + 12) / 25, (g + 12) / 25, (b + 12) / 25);
+                        }
+                        var pixel = Swatch(shot, dest);
+                        var independent = Swatch(decoded, new Rectangle(Point.Empty, decoded.Size));
+                        actual.Add($"{pixel.R:X2}{pixel.G:X2}{pixel.B:X2}");
+                        static int Difference(Color a, Color b) => Math.Max(Math.Abs(a.R - b.R),
+                            Math.Max(Math.Abs(a.G - b.G), Math.Abs(a.B - b.B)));
+                        largest = Math.Max(largest, Difference(pixel, DesktopColorProbe.Swatches[i]));
+                        decoderDifference = Math.Max(decoderDifference, Difference(pixel, independent));
+                    }
+                    File.WriteAllText(Path.Combine(output, name + ".json"), JsonSerializer.Serialize(new { actual, largest, decoderDifference }));
+                    if (largest > 12 || decoderDifference > 4)
+                        throw new IOException($"{name}: RGB difference from the source {largest}, from independent decoding {decoderDifference}.");
+                    checks.Add($"{name}: ten live swatches, max RGB difference from source {largest}, from FFmpeg {decoderDifference}");
+                });
+            }
+            finally { client.FrameReceived -= RecordFixture; viewer.CaptureDirectSnapshotsForTests = false; }
+        }
         void MeasureInput(string label, bool enhanced)
         {
             phase = label;
@@ -177,6 +255,7 @@ internal static class NativeDetailHostProbe
             Pump(() => legacyBases >= 15 && client.NativeOffer is { Available: true });
             if (nativeBases != 0 || client.NativeDetails.IsEnabled) throw new IOException("Off-by-default feature changed base negotiation.");
             checks.Add("ordinary default session delivers frames; no native activation");
+            CheckLiveColors("ordinary-colors");
             MeasureInput("ordinary input", enhanced: false);
             phase = "native via actual UI toggle";
             Await(viewer.ToggleNativeDetailsAsync());
@@ -189,6 +268,7 @@ internal static class NativeDetailHostProbe
             int exact = ValidateReceivedPixels(client, original, output);
             if (exact < 3) throw new IOException("Insufficient exact native patches reached the production receiver.");
             checks.Add($"12-second steady run, {nativeDraws - steadyDraws} native GPU draws, {exact} received patches match original RGBA exactly");
+            CheckLiveColors("native-colors");
             MeasureInput("native input", enhanced: true);
             phase = "input cutoff";
             long applied = client.NativeDetails.AppliedChunks;

@@ -53,6 +53,7 @@ internal sealed class D3D11ExperimentalUpscaler : IDisposable
     private D3D11NisScaler? _nis;
     private bool _nisFailed;
     private readonly ExperimentalUpscalingAlgorithm _algorithm;
+    private VideoProcessorColorState _colorState;
     internal string ActiveAlgorithm { get; private set; } = "双三次";
     private ID3D11Texture2D? _nativeRgb;
     private ID3D11ShaderResourceView? _sourceView;
@@ -112,7 +113,7 @@ internal sealed class D3D11ExperimentalUpscaler : IDisposable
 
     internal void Render(ID3D11VideoContext videoContext,
         ID3D11VideoProcessorInputView input, ID3D11Texture2D target,
-        D3D11HwndVideoPresentationGeometry geometry)
+        D3D11HwndVideoPresentationGeometry geometry, SdrVideoColorSpace? colorSpace)
     {
         if (geometry.Source.Size != _sourceSize)
             throw new InvalidOperationException("Upscaler source geometry changed.");
@@ -136,6 +137,7 @@ internal sealed class D3D11ExperimentalUpscaler : IDisposable
         _multithread!.Enter();
         try
         {
+            _colorState.Apply(videoContext, _processor!, colorSpace);
             D3D11HwndVideoPresenter.ConfigureVideoProcessor(videoContext, _processor!,
                 new(geometry.Source, new Rectangle(Point.Empty, _sourceSize), _sourceSize));
             videoContext.VideoProcessorBlt(_processor!, _rgbOutput!, 0,

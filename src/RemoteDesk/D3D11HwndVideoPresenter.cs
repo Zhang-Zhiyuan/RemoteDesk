@@ -179,6 +179,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
 
     private readonly object _sync = new();
     private D3D11HwndVideoPresenterOptions _options;
+    private VideoProcessorColorState _colorState;
     private readonly ID3D11Device _device;
     private readonly ID3D11DeviceContext _context;
     private readonly ID3D11VideoDevice _videoDevice;
@@ -521,7 +522,8 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
         Rectangle visibleSource,
         bool captureValidation = false,
         NativeDetailPresentation? nativeDetails = null,
-        NativeDetailRenderBudget nativeDetailBudget = default)
+        NativeDetailRenderBudget nativeDetailBudget = default,
+        bool useDriverVideoColors = false)
     {
         // Any attempted Present supersedes the previous validation snapshot,
         // including a rejected or unavailable decoded frame.
@@ -544,7 +546,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
                 captureValidation,
                 nativeDetails,
                 frame.HasExplicitSampleTime ? frame.SampleTime100Nanoseconds : null,
-                nativeDetailBudget);
+                nativeDetailBudget, frame.ColorSpace.ForPresentation(useDriverVideoColors));
         }
         catch (Exception ex)
         {
@@ -566,7 +568,8 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
         bool captureValidation = false,
         NativeDetailPresentation? nativeDetails = null,
         long? explicitSampleTime100Nanoseconds = null,
-        NativeDetailRenderBudget nativeDetailBudget = default)
+        NativeDetailRenderBudget nativeDetailBudget = default,
+        SdrVideoColorSpace? colorSpace = null)
     {
         lock (_sync)
         {
@@ -705,7 +708,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
                         inputViewDescription);
 
                 if (RenderTimingQueriesForTests is { } startTiming) _context.End(startTiming.Begin);
-                var baseFailure = RenderBase(inputView, geometry);
+                var baseFailure = RenderBase(inputView, geometry, colorSpace);
                 if (baseFailure is { } failure) return failure;
 
                 if (nativeDetails is not null && !_nativeDetailFailed)
@@ -740,7 +743,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
                             // Failure can happen AFTER part of a GPU overlay was
                             // drawn. Redraw this SAME base before Present; never
                             // expose a partial native layer or reset the decoder.
-                            baseFailure = RenderBase(inputView, geometry);
+                            baseFailure = RenderBase(inputView, geometry, colorSpace);
                             if (baseFailure is { } rollbackFailure) return rollbackFailure;
                         }
                     }
@@ -929,9 +932,10 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
     }
 
     private D3D11HwndVideoPresenterResult? RenderBase(
-        ID3D11VideoProcessorInputView inputView, D3D11HwndVideoPresentationGeometry geometry)
+        ID3D11VideoProcessorInputView inputView, D3D11HwndVideoPresentationGeometry geometry, SdrVideoColorSpace? colorSpace)
     {
-        if (TryPresentExperimental(inputView, geometry)) return null;
+        if (TryPresentExperimental(inputView, geometry, colorSpace)) return null;
+        _colorState.Apply(_videoContext, _processor!, colorSpace);
         ConfigureVideoProcessor(_videoContext, _processor!, geometry);
         var stream = new VideoProcessorStream { Enable = true, InputSurface = inputView };
         Result blitResult = _videoContext.VideoProcessorBlt(_processor!, _outputView!, 0, [stream]);
@@ -1183,7 +1187,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
     }
 
     private bool TryPresentExperimental(ID3D11VideoProcessorInputView input,
-        D3D11HwndVideoPresentationGeometry geometry)
+        D3D11HwndVideoPresentationGeometry geometry, SdrVideoColorSpace? colorSpace)
     {
         ExperimentalUpscalingDetail = string.Empty;
         if (_experimentalUpscalingFailed || !D3D11ExperimentalUpscaler.ShouldApply(
@@ -1211,7 +1215,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
                     _device, _context, _videoDevice, _enumerator!, geometry.Source.Size, _options.UpscalingAlgorithm, nisPreparationFailure);
                 _experimentalSourceSize = geometry.Source.Size;
             }
-            _experimentalUpscaler.Render(_videoContext, input, _backBuffer!, geometry);
+            _experimentalUpscaler.Render(_videoContext, input, _backBuffer!, geometry, colorSpace);
             ExperimentalUpscalingActive = true;
             ExperimentalUpscalingDetail = _experimentalUpscaler.ActiveAlgorithm;
             return true;
@@ -2249,6 +2253,7 @@ internal sealed class D3D11HwndVideoPresenter : IDisposable
         _backBuffer = null;
         TryDispose(_processor);
         _processor = null;
+        _colorState = default;
         TryDispose(_enumerator);
         _enumerator = null;
     }

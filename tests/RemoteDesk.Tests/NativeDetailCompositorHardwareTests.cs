@@ -17,6 +17,42 @@ namespace RemoteDesk.Tests;
 #pragma warning disable xUnit1031
 public sealed class NativeDetailCompositorHardwareTests
 {
+    [HardwareSmokeFact]
+    [Trait("Category", "HardwareSmoke")]
+    public void SwitchingVideoRangeOnAnExistingSurfacePreservesGrayLevelsAndRestoresLegacyOutput()
+    {
+        const int side = 128;
+        using var window = new Form { ClientSize = new(side, side), ShowInTaskbar = false };
+        using var device = D3D11.D3D11CreateDevice(DriverType.Hardware, DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport);
+        using var texture = device.CreateTexture2D(new Texture2DDescription(Format.NV12, side, side, 1, 1, BindFlags.Decoder));
+        var nv12 = new byte[side * side * 3 / 2];
+        Array.Fill(nv12, (byte)128);
+        Array.Fill(nv12, (byte)16, 0, side * side / 2);
+        Array.Fill(nv12, (byte)235, side * side / 2, side * side / 2);
+        device.ImmediateContext.UpdateSubresource(nv12, texture, 0, side, (uint)nv12.Length);
+        Assert.True(D3D11HwndVideoPresenter.TryCreate(device, new(window.Handle, side, side, 30),
+            out var made, out var capability), capability.Detail);
+        using var presenter = made!;
+        Assert.True(presenter.Resize(side, side).IsSuccess);
+        byte[] Render(SdrVideoColorSpace? colors)
+        {
+            Assert.True(presenter.Present(texture, 0, new(0, 0, side, side), captureValidation: true, colorSpace: colors).IsSuccess);
+            return Pixels(device, presenter);
+        }
+
+        byte[] legacy = Render(null);
+        var studio = new SdrVideoColorSpace(false, Vortice.MediaFoundation.VideoTransferMatrix.Bt709);
+        byte[] expanded = Render(studio);
+        byte[] full = Render(SdrVideoColorSpace.NativeDesktop);
+        int dark = 4 * (side * 30 + 20), bright = 4 * (side * 90 + 20);
+        Assert.InRange((int)expanded[dark], 0, 2);
+        Assert.InRange((int)expanded[bright], 253, 255);
+        Assert.InRange((int)full[dark], 14, 18);
+        Assert.InRange((int)full[bright], 233, 237);
+        Assert.Equal(expanded, Render(studio));
+        Assert.Equal(legacy, Render(studio.ForPresentation(useDriverVideoColors: true)));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

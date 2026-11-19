@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using Xunit;
 
 namespace RemoteDesk.Tests;
@@ -60,18 +61,20 @@ public sealed class FixedLatencyHistogramTests
     public void RecordingPathDoesNotAllocatePerSample()
     {
         var histogram = new FixedLatencyHistogram();
-        histogram.RecordStopwatchTicks(1);
-        long allocatedBefore =
-            GC.GetAllocatedBytesForCurrentThread();
+        _ = MeasureRecordingAllocations(histogram, 0);
+        Assert.Equal(0, MeasureRecordingAllocations(histogram, 10_000));
+    }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static long MeasureRecordingAllocations(FixedLatencyHistogram histogram, long start)
+    {
+        long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
         for (int index = 0; index < 10_000; index++)
         {
-            histogram.RecordStopwatchTicks(index + 1);
+            histogram.RecordStopwatchTicks(start + index + 1);
         }
 
-        long allocatedAfter =
-            GC.GetAllocatedBytesForCurrentThread();
-        Assert.Equal(allocatedBefore, allocatedAfter);
+        return GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
     }
 
     private static void RecordRepeated(

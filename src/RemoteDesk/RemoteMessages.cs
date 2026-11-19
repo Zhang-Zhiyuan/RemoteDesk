@@ -72,7 +72,8 @@ internal readonly record struct RemoteFrame(
     double CaptureMilliseconds,
     double EncodeMilliseconds,
     long ReceivedAtTimestamp = 0,
-    NativeDetailFrameIdentity? NativeDetails = null);
+    NativeDetailFrameIdentity? NativeDetails = null,
+    bool UseDriverVideoColors = false);
 
 internal readonly record struct RemoteFrameMetadata(
     int Width,
@@ -83,7 +84,8 @@ internal readonly record struct RemoteFrameMetadata(
     double CaptureMilliseconds,
     double EncodeMilliseconds,
     long ReceivedAtTimestamp,
-    NativeDetailFrameIdentity? NativeDetails = null)
+    NativeDetailFrameIdentity? NativeDetails = null,
+    bool UseDriverVideoColors = false)
 {
     public static RemoteFrameMetadata FromFrame(
         RemoteFrame frame) =>
@@ -96,7 +98,8 @@ internal readonly record struct RemoteFrameMetadata(
             frame.CaptureMilliseconds,
             frame.EncodeMilliseconds,
             frame.ReceivedAtTimestamp,
-            frame.NativeDetails);
+            frame.NativeDetails,
+            frame.UseDriverVideoColors);
 }
 
 internal enum RemoteControlKind : byte

@@ -33,7 +33,8 @@ internal sealed record FfmpegDesktopH264CaptureOptions(
     int? BitrateFramesPerSecond = null,
     WindowsGraphicsCaptureTarget? GraphicsCaptureTarget = null,
     WindowsDesktopDuplicationTarget? DesktopDuplicationTarget = null,
-    bool AllowStaticFrameSilence = false);
+    bool AllowStaticFrameSilence = false,
+    SdrVideoColorSpace? DesktopDuplicationColors = null);
 
 internal sealed class FfmpegDesktopH264Frame : IDisposable
 {
@@ -306,7 +307,7 @@ internal static class WindowsKillOnCloseJob
         nint processHandle);
 }
 
-internal sealed class FfmpegDesktopH264Capture : IDisposable
+internal sealed partial class FfmpegDesktopH264Capture : IDisposable
 {
     internal static readonly TimeSpan DefaultStartupTimeout =
         TimeSpan.FromMilliseconds(750);
@@ -604,6 +605,8 @@ internal sealed class FfmpegDesktopH264Capture : IDisposable
     {
         ArgumentNullException.ThrowIfNull(options);
         cancellationToken.ThrowIfCancellationRequested();
+        if (ValidateOptions(options) is { } invalid)
+            return new FfmpegDesktopH264CaptureStartResult(Capture: null, invalid);
         IReadOnlyList<string> ffmpegPaths =
             FfmpegH264Decoder.AvailablePaths;
         if (ffmpegPaths.Count == 0)
@@ -619,6 +622,12 @@ internal sealed class FfmpegDesktopH264Capture : IDisposable
         foreach (string ffmpegPath in ffmpegPaths)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (options.Backend == FfmpegDesktopCaptureBackend.DesktopDuplicationOutput0 &&
+                options.DesktopDuplicationTarget is { } dda)
+            {
+                options = options with { DesktopDuplicationColors = await GetDesktopDuplicationColorsAsync(
+                    ffmpegPath, dda, options.OutputSize, cancellationToken).ConfigureAwait(false) };
+            }
             if (options.Backend ==
                 FfmpegDesktopCaptureBackend
                     .WindowsGraphicsCaptureMonitor)
@@ -1720,12 +1729,8 @@ internal sealed class FfmpegDesktopH264Capture : IDisposable
         }
         else
         {
-            string conversionFilter =
-                options.OutputSize == options.TargetBounds.Size
-                    ? "format=nv12"
-                    : string.Create(
-                        CultureInfo.InvariantCulture,
-                        $"scale={options.OutputSize.Width}:{options.OutputSize.Height}:flags=bicubic+accurate_rnd,format=nv12");
+            string conversionFilter = string.Create(CultureInfo.InvariantCulture,
+                $"scale={options.OutputSize.Width}:{options.OutputSize.Height}:flags=bicubic+accurate_rnd:in_range=pc:out_range=tv:out_color_matrix=bt709,format=nv12");
             arguments.AddRange(
             [
                 "-f",
@@ -1780,7 +1785,7 @@ internal sealed class FfmpegDesktopH264Capture : IDisposable
             // Repeat SPS/PPS on every recovery point. In negotiated GOP=2
             // mode this makes each IDR/P pair independently disposable, while
             // legacy GOP=1 peers retain the previous all-IDR contract.
-            "dump_extra=freq=keyframe,h264_metadata=aud=insert",
+            GetH264MetadataFilter(options),
             "-flush_packets",
             "1"
         ]);

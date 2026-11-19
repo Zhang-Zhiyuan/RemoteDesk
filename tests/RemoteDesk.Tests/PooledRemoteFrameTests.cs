@@ -20,7 +20,8 @@ public sealed class PooledRemoteFrameTests
             EncodedLength: 4,
             CaptureMilliseconds: 1.25,
             EncodeMilliseconds: 2.5,
-            ReceivedAtTimestamp: 1234);
+            ReceivedAtTimestamp: 1234,
+            UseDriverVideoColors: true);
         var pool = new TrackingByteArrayPool();
 
         PooledRemoteFrame owned =
@@ -32,6 +33,7 @@ public sealed class PooledRemoteFrameTests
         Assert.NotSame(transportBuffer, copied.EncodedBuffer);
         Assert.Equal(0, copied.EncodedOffset);
         Assert.Equal(4, copied.EncodedLength);
+        Assert.True(copied.UseDriverVideoColors);
         Assert.True(
             copied.EncodedBuffer.Length >
             copied.EncodedLength);
