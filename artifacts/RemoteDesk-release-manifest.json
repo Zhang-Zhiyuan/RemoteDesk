@@ -1,14 +1,14 @@
 {
-  "generatedAtUtc": "2026-11-20T03:05:02.1067695+08:00",
-  "buildStamp": "20261119185254",
+  "generatedAtUtc": "2026-11-20T03:39:46.8822467+08:00",
+  "buildStamp": "20261119192736",
   "scope": "Windows host/viewer; Android; Linux host/viewer package",
   "androidReleaseRequested": true,
-  "sourceRevision": "75aeb082dfef64d3c2fc6a260523c2db14367ef3",
+  "sourceRevision": "eb9c489f3750df637e5ed62e6fe6c6aa1572b8c1",
   "sourceDirty": false,
   "internalCandidate": false,
   "sourceFingerprintVersion": 1,
   "sourceFingerprintAlgorithm": "SHA256",
-  "sourceFingerprint": "2d0ba4baf1f8f6a514cf670feead4a4d3c5afe558eba8e7e91f2fa311f9cd6bd",
+  "sourceFingerprint": "6cc71a75d5ccb730b22cfe014e39dcdc7dc291660774617fae38ef84725d8560",
   "sourceFileCount": 1056,
   "toolchain": {
     "dotnetSdk": "8.0.428",
@@ -28,8 +28,8 @@
   },
   "windowsSshProxy": {
     "resourceName": "RemoteDesk.SshProxy.exe",
-    "sha256": "6fda1a74bd92620e2ecafbcb6882446be9ce3445c3710cca63b993571acdfb14",
-    "length": 37152322,
+    "sha256": "c19dedd341da7cb9dfeee30f2158f33e118e70e9b1bdc9c6fd1a2fffcb68035f",
+    "length": 37152321,
     "executionLevel": "asInvoker",
     "authenticode": {
       "status": "NotSigned",
@@ -44,60 +44,60 @@
   "artifacts": [
     {
       "name": "RemoteDesk.exe",
-      "path": "artifacts\\release-1.0.51\\RemoteDesk-win-x64\\RemoteDesk.exe",
-      "length": 128715303,
-      "sha256": "474a6f0a320a61ac600bc3a41232b21a1fe1cb49e9f36610bdf5eecce5e36423",
-      "lastWriteTimeUtc": "2026-11-19T18:58:45.2526778Z"
+      "path": "artifacts\\release-1.0.52\\RemoteDesk-win-x64\\RemoteDesk.exe",
+      "length": 128717424,
+      "sha256": "a4fb52e696a2870b319cd6182be781dcaa92187513a65ac6c236610ff458384f",
+      "lastWriteTimeUtc": "2026-11-19T19:33:16.796728Z"
     },
     {
       "name": "RemoteDesk-win-x64.zip",
-      "path": "artifacts\\release-1.0.51\\RemoteDesk-win-x64.zip",
-      "length": 116306126,
-      "sha256": "ec1bd96b36dc742e9c75eb88714185770e6267859acb9a5e0404f46361aa5506",
-      "lastWriteTimeUtc": "2026-11-19T18:58:49.9349139Z"
+      "path": "artifacts\\release-1.0.52\\RemoteDesk-win-x64.zip",
+      "length": 116310575,
+      "sha256": "f95cf0781b1b55c0b29f48534496bba1b2ad93118585e4532568e4c83ae59cd1",
+      "lastWriteTimeUtc": "2026-11-19T19:33:20.7549513Z"
     },
     {
       "name": "RemoteDesk-linux-host.zip",
-      "path": "artifacts\\release-1.0.51\\RemoteDesk-linux-host.zip",
+      "path": "artifacts\\release-1.0.52\\RemoteDesk-linux-host.zip",
       "length": 11813605,
-      "sha256": "8d3a4f49dfc60bac4f5540e7403110ac26232cea6eae5e0d9c19a5ac729f5488",
-      "lastWriteTimeUtc": "2026-11-19T19:02:10.1759928Z"
+      "sha256": "df418965ea92a035a3320257aacf60774756e8f7e9d525a1b2e0cd24f54e009d",
+      "lastWriteTimeUtc": "2026-11-19T19:35:55.117904Z"
     },
     {
       "name": "RemoteDesk-linux-host.tar.gz",
-      "path": "artifacts\\release-1.0.51\\RemoteDesk-linux-host.tar.gz",
-      "length": 11313560,
-      "sha256": "19fa92fbdbdf880b011b328074b51a0346d65776c66fa073dca3c09fb7533598",
-      "lastWriteTimeUtc": "2026-11-19T19:02:20.7679036Z"
+      "path": "artifacts\\release-1.0.52\\RemoteDesk-linux-host.tar.gz",
+      "length": 11312728,
+      "sha256": "59e02049cd0b5fa26c54bdcdfa0b1bedb0a27942effbe430e05506e5f0932062",
+      "lastWriteTimeUtc": "2026-11-19T19:36:03.8462761Z"
     },
     {
-      "name": "remotedesk-linux-host_1.0.51_amd64.deb",
-      "path": "artifacts\\release-1.0.51\\remotedesk-linux-host_1.0.51_amd64.deb",
-      "length": 6588080,
-      "sha256": "91763581cfffcc39c668ab6c913645c48c8a26c5b4411cd3c95565c529928820",
-      "lastWriteTimeUtc": "2026-11-19T19:04:58.912938Z"
+      "name": "remotedesk-linux-host_1.0.52_amd64.deb",
+      "path": "artifacts\\release-1.0.52\\remotedesk-linux-host_1.0.52_amd64.deb",
+      "length": 6588228,
+      "sha256": "be5d43ee7b017796d2e98cfa492f410c2cc3f480ae75b45738f218dc7f587186",
+      "lastWriteTimeUtc": "2026-11-19T19:39:02.285736Z"
     },
     {
       "name": "RemoteDesk-android-release.apk",
-      "path": "artifacts\\release-1.0.51\\RemoteDesk-android-release.apk",
-      "length": 2910274,
-      "sha256": "816c4323cafdadfcd8202a16a315a510910e1a095ec0ae506b0729007675b375",
-      "lastWriteTimeUtc": "2026-11-19T18:57:16.2896022Z"
+      "path": "artifacts\\release-1.0.52\\RemoteDesk-android-release.apk",
+      "length": 2910270,
+      "sha256": "cf51d6d5e08bd4cbe798e3b9f5394edb850132c691e959851f017e875a325335",
+      "lastWriteTimeUtc": "2026-11-19T19:31:49.4112942Z"
     },
     {
       "name": "RemoteDesk-linux-system-python.tar.gz",
-      "path": "artifacts\\release-1.0.51\\RemoteDesk-linux-system-python.tar.gz",
-      "length": 242557,
-      "sha256": "9aac43e32757ccd8b6273270839fe0591d5fa5de359aa3d83b45bc402853a2b8",
-      "lastWriteTimeUtc": "2026-11-19T18:52:52.5806639Z"
+      "path": "artifacts\\release-1.0.52\\RemoteDesk-linux-system-python.tar.gz",
+      "length": 242552,
+      "sha256": "02e2d72defc2418843c1357957f25610458adb9cdbda13c926f264a95003376e",
+      "lastWriteTimeUtc": "2026-11-19T19:27:34.3327806Z"
     }
   ],
-  "version": "1.0.51",
+  "version": "1.0.52",
   "distribution": [
     {
       "path": "release/windows-x64/RemoteDesk.exe",
-      "length": 128715303,
-      "sha256": "474a6f0a320a61ac600bc3a41232b21a1fe1cb49e9f36610bdf5eecce5e36423"
+      "length": 128717424,
+      "sha256": "a4fb52e696a2870b319cd6182be781dcaa92187513a65ac6c236610ff458384f"
     },
     {
       "path": "release/windows-x64/Install-RemoteDeskFfmpeg.ps1",
@@ -121,23 +121,23 @@
     },
     {
       "path": "release/RemoteDesk-Android.apk",
-      "length": 2910274,
-      "sha256": "816c4323cafdadfcd8202a16a315a510910e1a095ec0ae506b0729007675b375"
+      "length": 2910270,
+      "sha256": "cf51d6d5e08bd4cbe798e3b9f5394edb850132c691e959851f017e875a325335"
     },
     {
       "path": "release/RemoteDesk-linux-amd64.deb",
-      "length": 6588080,
-      "sha256": "91763581cfffcc39c668ab6c913645c48c8a26c5b4411cd3c95565c529928820"
+      "length": 6588228,
+      "sha256": "be5d43ee7b017796d2e98cfa492f410c2cc3f480ae75b45738f218dc7f587186"
     },
     {
       "path": "release/RemoteDesk-linux-amd64.tar.gz",
-      "length": 11313560,
-      "sha256": "19fa92fbdbdf880b011b328074b51a0346d65776c66fa073dca3c09fb7533598"
+      "length": 11312728,
+      "sha256": "59e02049cd0b5fa26c54bdcdfa0b1bedb0a27942effbe430e05506e5f0932062"
     },
     {
       "path": "release/RemoteDesk-linux-system-python.tar.gz",
-      "length": 242557,
-      "sha256": "9aac43e32757ccd8b6273270839fe0591d5fa5de359aa3d83b45bc402853a2b8"
+      "length": 242552,
+      "sha256": "02e2d72defc2418843c1357957f25610458adb9cdbda13c926f264a95003376e"
     }
   ]
 }
