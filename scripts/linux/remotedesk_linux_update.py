@@ -187,6 +187,7 @@ def install_deb_admin(source):
     platform, version = installed()
     if os.geteuid() != 0 or platform != "linux-deb-amd64":
         raise PermissionError("需要系统安装的 RemoteDesk 和管理员授权。")
+    print("REMOTEDESK_INSTALL_READY", flush=True)
     line = source.readline(4097)
     if len(line) > 4096 or not line.endswith(b"\n"):
         raise ValueError("更新清单无效。")
@@ -209,7 +210,7 @@ def install_deb_admin(source):
                   for field in ("Package", "Version", "Architecture")]
         if fields != ["remotedesk-linux-host", ticket["version"], "amd64"]:
             raise ValueError("系统包身份不匹配。")
-        subprocess.run(["/usr/bin/dpkg", "--install", str(deb)], check=True)
+        subprocess.run(["/usr/bin/dpkg", "--install", str(deb)], stdout=sys.stderr, check=True)
 
 
 def apply(options, ticket, idle):
@@ -222,19 +223,29 @@ def apply(options, ticket, idle):
             raise BlockingIOError("本机正在使用。")
         if platform != "linux-deb-amd64":
             return install_portable(path, ticket, idle)
-        with activity_lock(exclusive=True):
-            with subprocess.Popen(["/usr/bin/pkexec", "/usr/bin/python3", "-I", str(APP / "remotedesk_linux_update.py"),
-                                   "--install-deb"], stdin=subprocess.PIPE) as installer:
-                try:
+        # The desktop remains available while the OS displays its password dialog.
+        import select
+        with subprocess.Popen(["/usr/bin/pkexec", "/usr/bin/python3", "-I", str(APP / "remotedesk_linux_update.py"),
+                               "--install-deb"], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as installer:
+            try:
+                readable, _, _ = select.select([installer.stdout], [], [], 120)
+                if not readable or installer.stdout.readline(100) != b"REMOTEDESK_INSTALL_READY\n":
+                    raise RuntimeError("系统尚未授权安装。")
+                if not idle():
+                    raise BlockingIOError("本机正在使用。")
+                with activity_lock(exclusive=True):
                     installer.stdin.write(json.dumps(ticket, separators=(",", ":")).encode("ascii") + b"\n")
                     with path.open("rb") as package:
                         shutil.copyfileobj(package, installer.stdin)
                     installer.stdin.close()
-                finally:
-                    if not installer.stdin.closed:
-                        installer.stdin.close()
-                if installer.wait() != 0:
-                    raise RuntimeError("系统安装未获授权或失败。")
+                    if installer.wait() != 0:
+                        raise RuntimeError("系统安装失败。")
+            finally:
+                if not installer.stdin.closed:
+                    installer.stdin.close()
+                    if installer.poll() is None:
+                        with contextlib.suppress(ProcessLookupError, PermissionError):
+                            installer.terminate()
         return "/usr/bin/remotedesk-linux-app"
 
 
