@@ -961,6 +961,19 @@ def publish_updates(directory, source):
         if source.read(1):
             raise ValueError("更新包长度有误。")
         current = {ticket["sha256"] + ".bin" for ticket in candidate.tickets.values()}
+        retirement = directory / ".retire.json"
+        known = {ticket["sha256"] + ".bin" for ticket in previous.tickets.values()}
+        if retirement.exists():
+            with retirement.open("rb") as journal:
+                entries = json.loads(journal.read(16385))
+            if not isinstance(entries, list) or any(not isinstance(n, str) or not re.fullmatch(r"[0-9a-f]{64}\.bin", n) for n in entries):
+                raise ValueError("清理记录无效，原文件已保留。")
+            known.update(entries)
+        # If publication stops between moving a package and switching the pointer,
+        # a later successful publication can retire only these recorded payloads.
+        planned = stage / ".retire.json"
+        planned.write_text(json.dumps(sorted(known | current)), encoding="ascii")
+        os.replace(planned, retirement)
         for name in current:
             os.replace(stage / name, directory / name)
         pointer.chmod(0o644)
@@ -970,10 +983,10 @@ def publish_updates(directory, source):
         fd = os.open(directory, os.O_DIRECTORY)
         try:
             os.fsync(fd)
-            for path in directory.iterdir():
-                if re.fullmatch(r"[0-9a-f]{64}\.bin", path.name) and path.name not in current and path.is_file():
-                    path.unlink()
+            for name in known - current:
+                (directory / name).unlink(missing_ok=True)
             os.fsync(fd)
+            retirement.unlink()
         finally:
             os.close(fd)
         print(f"已发布 {ticket['version']}，在线设备将在下次心跳收到更新。", flush=True)

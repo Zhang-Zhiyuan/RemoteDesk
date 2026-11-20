@@ -59,6 +59,8 @@ class FleetTests(unittest.IsolatedAsyncioTestCase):
         server.publish_updates(self.channel, io.BytesIO(stream))
         preserved = self.channel / "operator-notes.txt"
         preserved.write_text("keep")
+        unrelated_bin = self.channel / ("f" * 64 + ".bin")
+        unrelated_bin.write_bytes(b"not a RemoteDesk release")
         original = (self.channel / "current.json").read_bytes()
         second, _, stream = self.release("1.0.56")
         for bad in (stream[:-1], stream[:-1] + bytes([stream[-1] ^ 1])):
@@ -69,7 +71,8 @@ class FleetTests(unittest.IsolatedAsyncioTestCase):
         server.publish_updates(self.channel, io.BytesIO(stream))
         server.publish_updates(self.channel, io.BytesIO(stream))
         self.assertEqual("keep", preserved.read_text())
-        self.assertEqual({t["sha256"] + ".bin" for t in second.values()}, {p.name for p in self.channel.glob("*.bin")})
+        self.assertEqual({t["sha256"] + ".bin" for t in second.values()} | {unrelated_bin.name},
+                         {p.name for p in self.channel.glob("*.bin")})
         ticket = second["linux-python"]
         update.verify(ticket, "linux-python", "1.0.55", self.cert)
         for field, value in [("version", "1.0.57"), ("build", "20261120000001"), ("sha256", "0" * 64), ("size", 2)]:
