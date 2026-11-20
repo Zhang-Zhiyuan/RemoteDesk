@@ -107,11 +107,14 @@ internal static class RemoteUpdater
         int processId,
         int healthPort,
         Action<string> log,
-        Action<int> exitProcess)
+        Action<int> exitProcess,
+        string? publisherSha256 = null,
+        string? publisherBuild = null,
+        Func<bool>? canApply = null)
     {
         ArgumentNullException.ThrowIfNull(log);
         ArgumentNullException.ThrowIfNull(exitProcess);
-        if (healthPort is < 1 or > 65535)
+        if (healthPort is < 0 or > 65535 || (healthPort == 0 && publisherSha256 is null))
         {
             throw new ArgumentOutOfRangeException(nameof(healthPort));
         }
@@ -121,6 +124,12 @@ internal static class RemoteUpdater
         ValidatePackagePath(packageFullPath, targetFullPath);
         TrustedRemoteUpdatePackage trustedPackage =
             RemoteUpdateTrust.ValidateUpgrade(targetFullPath, packageFullPath);
+        if (publisherSha256 is not null &&
+            (!string.Equals(trustedPackage.FileSha256, publisherSha256, StringComparison.OrdinalIgnoreCase) ||
+             trustedPackage.BuildStamp != publisherBuild))
+            throw new InvalidDataException("程序与发布者签名的版本或摘要不一致。");
+        if (canApply is not null && !canApply())
+            throw new OperationCanceledException("设备正在使用或自动更新已关闭。");
 
         string targetDirectory = Path.GetDirectoryName(targetFullPath)
             ?? throw new InvalidOperationException("无法定位当前程序目录，不能执行远程更新。");
@@ -178,7 +187,7 @@ internal static class RemoteUpdater
 
         _ = Task.Run(async () =>
         {
-            await Task.Delay(ExitDelayMilliseconds).ConfigureAwait(false);
+            if (publisherSha256 is null) await Task.Delay(ExitDelayMilliseconds).ConfigureAwait(false);
             exitProcess(0);
         });
     }
@@ -193,7 +202,7 @@ internal static class RemoteUpdater
             [Parameter(Mandatory=$true)][string]$LogPath,
             [Parameter(Mandatory=$true)][Alias('PackageSha256')][ValidatePattern('^[0-9A-Fa-f]{64}$')][string]$ExpectedPackageSha256,
             [Parameter(Mandatory=$true)][Alias('SignerSha256')][ValidatePattern('^[0-9A-Fa-f]{64}$')][string]$ExpectedSignerCertificateSha256,
-            [Parameter(Mandatory=$true)][ValidateRange(1, 65535)][int]$HealthPort,
+            [Parameter(Mandatory=$true)][ValidateRange(0, 65535)][int]$HealthPort,
             [ValidateRange(5, 120)][int]$HealthTimeoutSeconds = 35,
             [switch]$AllowUnsignedPersonalUpdate,
             [switch]$ResumeHostAfterUpdate,
@@ -207,6 +216,7 @@ internal static class RemoteUpdater
         # Rollback needs this even when package verification fails before installation.
         $targetDirectory = Split-Path -Parent $TargetPath
         $effectiveRestartArgument = @($RestartArgument)
+        $healthMode = if ($HealthPort -gt 0) { 'RDK1' } else { 'relay-registration' }
         if ($ResumeHostAfterUpdate) {
             $effectiveRestartArgument += '--resume-host-after-update'
         }
@@ -409,7 +419,15 @@ internal static class RemoteUpdater
                     return $false
                 }
 
-                if ((Test-RemoteDeskTargetProcess `
+                if ($TcpPort -eq 0 -and (Test-RemoteDeskTargetProcess $CandidateProcessId $ExpectedPath)) {
+                    $event = $null
+                    try {
+                        $event = [Threading.EventWaitHandle]::OpenExisting("Local\RemoteDesk.RelayOnline.$CandidateProcessId")
+                        if ($event.WaitOne(0)) { return $true }
+                    } catch [Threading.WaitHandleCannotBeOpenedException] {
+                    } finally { if ($event) { $event.Dispose() } }
+                }
+                if ($TcpPort -gt 0 -and (Test-RemoteDeskTargetProcess `
                         -CandidateProcessId $CandidateProcessId `
                         -ExpectedPath $ExpectedPath) -and
                     (Test-RemoteDeskPortOwner `
@@ -609,7 +627,7 @@ internal static class RemoteUpdater
 
             Write-RemoteDeskUpdateLog (
                 "updated RemoteDesk is healthy: PID=$($started.Id), " +
-                "path=$TargetPath, port=$HealthPort, handshake=RDK1")
+                "path=$TargetPath, port=$HealthPort, handshake=$healthMode")
             if ($null -ne $rollbackHandle) { $rollbackHandle.Dispose() }
             $rollbackHandle = $null
             Remove-RemoteDeskUpdateFile `
@@ -682,7 +700,7 @@ internal static class RemoteUpdater
 
                 Write-RemoteDeskUpdateLog (
                     "rollback RemoteDesk is healthy: PID=$($rollback.Id), " +
-                    "path=$TargetPath, port=$HealthPort, handshake=RDK1")
+                    "path=$TargetPath, port=$HealthPort, handshake=$healthMode")
                 Remove-RemoteDeskUpdateFile `
                     -Path $BackupPath `
                     -Description "rollback backup"
@@ -811,7 +829,7 @@ internal static class RemoteUpdater
             startInfo.ArgumentList.Add("-AllowUnsignedPersonalUpdate");
         }
 
-        startInfo.ArgumentList.Add("-ResumeHostAfterUpdate");
+        if (healthPort > 0) startInfo.ArgumentList.Add("-ResumeHostAfterUpdate");
         startInfo.ArgumentList.Add("-RestartArgument");
         startInfo.ArgumentList.Add("--tray");
 

@@ -21,6 +21,7 @@ public final class AndroidSshKeepAliveService extends Service {
     private static final int NOTIFICATION = 56569;
     private static final String STOP = "com.remotedesk.agent.STOP_SSH";
     private static final ConcurrentHashMap<String, Entry> sessions = new ConcurrentHashMap<>();
+    static boolean hasSessions() { return !sessions.isEmpty(); }
     private static final class Entry {
         final String name;
         final Intent recall;

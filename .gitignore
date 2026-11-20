@@ -53,6 +53,7 @@ TestResults/
 !/release/windows-x64/DOTNET-RUNTIME-LICENSE.TXT
 !/release/windows-x64/DOTNET-RUNTIME-THIRD-PARTY-NOTICES.TXT
 !/release/RemoteDesk-Android.apk
+!/release/RemoteDesk-fleet-update.json
 !/release/RemoteDesk-linux-amd64.deb
 !/release/RemoteDesk-linux-amd64.tar.gz
 !/release/RemoteDesk-linux-system-python.tar.gz

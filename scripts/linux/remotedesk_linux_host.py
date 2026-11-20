@@ -35,6 +35,7 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 from remotedesk_linux_control_notice import HostControlNotice
+from remotedesk_linux_update import activity_lock
 
 # CLI help must not probe the desktop, prompt for installation or require sudo.
 if (__name__ == "__main__" and sys.platform.startswith("linux")
@@ -5329,6 +5330,7 @@ def run_admitted_client(
     active_owner = False
     session_closed = threading.Event()
     notice_token = None
+    activity = None
     try:
         configure_low_latency_socket(client, SOCKET_RECEIVE_BUFFER_BYTES, host_send_buffer_bytes(address[0]))
         client.settimeout(args.auth_timeout)
@@ -5353,6 +5355,15 @@ def run_admitted_client(
         if activation != "activated":
             return
         active_owner = True
+        lock = activity_lock()
+        try:
+            lock.__enter__()
+            activity = lock
+        except BlockingIOError:
+            raise
+        except OSError as error:
+            # A read-only home also disables the updater's exclusive lock.
+            log(f"update coordination unavailable: {error}")
         if control_notice is not None:
             notice_token = control_notice.begin(lambda: replace_authenticated_client(
                 client, session, write_lock, session_stop, session_closed,
@@ -5389,6 +5400,8 @@ def run_admitted_client(
         if control_notice is not None and notice_token is not None:
             control_notice.end(notice_token)
         session_closed.set()
+        if activity is not None:
+            activity.__exit__(None, None, None)
 
 
 def create_host_listener(host: str, port: int):

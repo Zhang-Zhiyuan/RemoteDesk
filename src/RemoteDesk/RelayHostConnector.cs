@@ -54,6 +54,15 @@ internal sealed class RelayHostConnector : IDisposable
     }
 
     public event Action<string>? StatusChanged;
+    public event Action? Registered;
+    public event Action<RelayConnectionOptions, JsonElement, CancellationToken>? UpdateOffered;
+    public bool HasActiveBridges => !_dataBridges.IsEmpty || !_sshBridges.IsEmpty;
+
+    private void NotifyUpdate(RelayConnectionOptions options, JsonElement message, CancellationToken token)
+    {
+        if (message.TryGetProperty("update", out var update) && update.ValueKind == JsonValueKind.Object)
+            UpdateOffered?.Invoke(options, update.Clone(), token);
+    }
 
     public bool IsRunning => _runTask is { IsCompleted: false };
 
@@ -223,6 +232,8 @@ internal sealed class RelayHostConnector : IDisposable
                     deviceId = options.DeviceId,
                     machineName = Environment.MachineName,
                     platform = "Windows",
+                    updatePlatform = "win-x64",
+                    appVersion = FleetUpdate.InstalledVersion.ToString(3),
                     buildStamp = RemoteDeskBuildInfo.BuildStamp,
                     directAddresses = registeredAddresses,
                     directPort = localHostPort,
@@ -240,6 +251,7 @@ internal sealed class RelayHostConnector : IDisposable
                .ConfigureAwait(false))
             {
                 RelayTls.EnsureSuccess(response.RootElement);
+                NotifyUpdate(options, response.RootElement, connectionToken);
                 heartbeatAcknowledged = response.RootElement.TryGetProperty("heartbeatAck", out JsonElement ack) &&
                     ack.ValueKind == JsonValueKind.True;
                 addressReporting = response.RootElement.TryGetProperty("addressReporting", out var reportAck) &&
@@ -249,6 +261,7 @@ internal sealed class RelayHostConnector : IDisposable
             }
 
             registered();
+            Registered?.Invoke();
             PublishStatus(
                 $"已上线到中继 {options.ServerAddress}:{options.Port} · 本地端点 " +
                 RelayNetworkPathSelector.DescribeLocalEndpoint(relayClient.Client.LocalEndPoint) +
@@ -278,6 +291,7 @@ internal sealed class RelayHostConnector : IDisposable
                     using JsonDocument message = await pendingRead.ConfigureAwait(false);
                     pendingRead = null;
                     JsonElement root = message.RootElement;
+                    NotifyUpdate(options, root, connectionToken);
                     string? type = root.TryGetProperty(
                             "type",
                             out JsonElement typeValue) &&

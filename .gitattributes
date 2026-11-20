@@ -18,6 +18,7 @@ src/RemoteDesk/ThirdParty/NIS/* text eol=lf whitespace=-blank-at-eol
 *.jar binary
 *.exe binary
 *.apk binary
+*.cer binary
 *.deb binary
 *.tar.gz binary
 *.zip binary

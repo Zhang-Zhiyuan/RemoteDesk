@@ -3,7 +3,8 @@
 param(
     [string]$SigningVault = (Join-Path $env:LOCALAPPDATA "RemoteDesk\Signing"),
     [string]$LinuxDistro = "Ubuntu-24.04",
-    [string]$ReleaseName = ""
+    [string]$ReleaseName = "",
+    [string]$RelayServer = $env:REMOTEDESK_RELEASE_RELAY
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,6 +39,8 @@ try {
     }
     # No dirty-source or test-skipping bypasses in the local final-release path.
     & (Join-Path $PSScriptRoot "Publish-RemoteDesk.ps1") -AndroidRelease -LinuxDistro $LinuxDistro -ReleaseName $ReleaseName
+    & (Join-Path $PSScriptRoot "Complete-RelayUpdateRelease.ps1") -ReleaseName $ReleaseName -LinuxDistro $LinuxDistro -SigningVault $SigningVault
+    if ($RelayServer) { & (Join-Path $PSScriptRoot "Publish-RelayUpdate.ps1") -Server $RelayServer }
 } finally {
     foreach ($name in $previous.Keys) {
         [Environment]::SetEnvironmentVariable($name, $previous[$name], "Process")

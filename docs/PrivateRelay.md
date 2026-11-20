@@ -348,3 +348,17 @@ sudo systemctl daemon-reload
 `/etc/remotedesk-relay/config.json` 含共享访问密钥，权限限制为 root 与专用服务组可读。
 删除配置目录会让旧客户端失去访问能力；重新配置后需在每台客户端再次配置以取得
 新的密钥和 TLS 指纹。
+
+## 统一更新设备
+
+中继和设备首次安装 1.0.55 或更新版本后，管理员可以把同一版 Windows、Linux 和 Android 包一次发布到自己的服务器。从包含完整仓库和发行文件的电脑执行下面的命令，将 `my-relay` 换成已核对主机密钥的 SSH 管理账号别名。账号需要有权写入服务器的 `/etc/remotedesk-relay/updates` 目录。SSH 支持现有密钥、代理和交互式密码登录。
+
+```powershell
+./scripts/Publish-RelayUpdate.ps1 -Server my-relay
+```
+
+在持有发布签名的开发机上，运行 `./scripts/Publish-LocalRelease.ps1 -RelayServer my-relay` 可一次完成打包、签名和中继发布。
+
+上传完全部平台包并核对摘要后，中继一次切换版本，随即清理自己管理的旧包。设备在注册或下一次心跳收到通知，通常在十秒内。Windows 的“公网中继 → 更新在线设备”可立即提醒旧版设备。已装同版、已关闭本机自动更新的设备会跳过；远控或 SSH 使用期间等待空闲。设备会独立验证发布者签名和文件摘要。
+
+Windows 会在新程序恢复监听后清除旧 EXE，启动失败时恢复原版。Linux 便携版验证新启动器、替换整个程序目录，带自定义文件的目录会保留并提示；系统安装的 deb 由系统提示管理员授权。Android 走系统覆盖安装，首次可能需要点“允许 RemoteDesk 安装新版”，系统要求确认时从更新通知或应用内继续。三端均保留原有设备密钥和设置。

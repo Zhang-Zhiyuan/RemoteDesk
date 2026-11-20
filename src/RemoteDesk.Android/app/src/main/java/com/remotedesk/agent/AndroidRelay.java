@@ -499,6 +499,7 @@ final class AndroidRelay {
         private final ScheduledExecutorService timers = Executors.newSingleThreadScheduledExecutor(r -> thread("RelayHeartbeat", r));
         private final Thread worker;
         private volatile Runnable addressHeartbeat;
+        java.util.function.BooleanSupplier updateIdle = () -> false;
         private final AtomicBoolean addressRefreshQueued = new AtomicBoolean();
 
         HostConnector(Options options, int localPort, String name, Consumer<String> status) {
@@ -581,7 +582,9 @@ final class AndroidRelay {
             try {
                 track(socket);
                 JSONObject registered = exchange(socket, AndroidRelayAddresses.attach(request(options, "host-control")
-                    .put("deviceId", options.deviceId).put("machineName", name).put("platform", "Android"), localPort, addressProvider.get()));
+                    .put("deviceId", options.deviceId).put("machineName", name).put("platform", "Android")
+                    .put("updatePlatform", context != null && !BuildConfig.DEBUG ? "android" : "")
+                    .put("appVersion", BuildConfig.VERSION_NAME), localPort, addressProvider.get()));
                 socket.setSoTimeout(45000);
                 report("已上线到中转 " + options.serverAddress + ":" + options.port + " · 本地地址 " + socket.getLocalAddress().getHostAddress() +
                     (registered.optBoolean("addressReporting", false) ? " · IP / 端口自动更新已启用" : " · 服务器需更新才能显示 IP"));
@@ -591,9 +594,13 @@ final class AndroidRelay {
                     catch (Exception ex) { AndroidRelay.close(socket); }
                 };
                 addressHeartbeat = beat;
+                java.util.function.BooleanSupplier idle = () -> !stopped.get() && !controlClosed.get() &&
+                    updateIdle.getAsBoolean() && bridges.availablePermits() == 8;
+                AndroidFleetUpdate.offer(context, options, registered.optJSONObject("update"), idle, this::report);
                 heartbeat = timers.scheduleWithFixedDelay(beat, 10, 10, TimeUnit.SECONDS);
                 while (!stopped.get()) {
                     JSONObject message = read(socket.getInputStream());
+                    AndroidFleetUpdate.offer(context, options, message.optJSONObject("update"), idle, this::report);
                     if (!"open".equals(message.optString("type"))) continue;
                     String id;
                     try { id = UUID.fromString(message.optString("sessionId")).toString(); }

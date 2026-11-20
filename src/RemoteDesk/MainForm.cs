@@ -255,6 +255,9 @@ public sealed partial class MainForm : Form
         _relayHostConnector = new RelayHostConnector(prepareConnection: (options, token) =>
             _relayNetworkOptimizer.OptimizeAsync(options, _settings.Relay.OptimizeNetworkRoute, token),
             sshOptionsProvider: () => Volatile.Read(ref _sshHostOptions));
+        _relayHostConnector.UpdateOffered += (options, ticket, token) =>
+            OnUi(() => _ = HandleFleetOfferAsync(options, ticket, token));
+        _relayHostConnector.Registered += FleetUpdate.SignalRelayReady;
         _settings.Relay.DeviceId = RemoteDeviceIdentity.Normalize(_settings.Relay.DeviceId) ?? Guid.NewGuid().ToString("D");
         RemoteDeviceIdentity.LocalId = _settings.Relay.DeviceId;
         long settingsLoadedAt = Stopwatch.GetTimestamp();
@@ -1452,6 +1455,8 @@ public sealed partial class MainForm : Form
         _relayLogoutButton = CreateSecondaryButton("退出服务器");
         _relayConfigureButton = CreateSecondaryButton("部署 / 更新服务器");
         _relayRefreshButton = CreateSecondaryButton("刷新在线设备");
+        _fleetCheck = CreateSecondaryButton("更新在线设备");
+        _fleetCheck.Click += async (_, _) => await CheckFleetAsync();
         _relayReportAddressButton = CreateSecondaryButton("立即上报本机 IP");
         _relayAddressButton = CreateSecondaryButton("查看 / 使用 IP");
         _relayConnectButton = CreatePrimaryButton("连接所选设备");
@@ -1467,6 +1472,7 @@ public sealed partial class MainForm : Form
         configurationActions.Controls.Add(_relayConfigureButton);
         configurationActions.Controls.Add(_relayLogoutButton);
         configurationActions.Controls.Add(_relayRefreshButton);
+        configurationActions.Controls.Add(_fleetCheck);
         configurationActions.Controls.Add(_relayReportAddressButton);
 
         var configuration = CreateSection(
@@ -1480,6 +1486,7 @@ public sealed partial class MainForm : Form
         AddSettingRow(configuration, 4, "网络", networkOptions);
         AddSettingRow(configuration, 5, "管理", configurationActions);
         AddSettingRow(configuration, 6, "本机 SSH", CreateSshHostSettings());
+        AddSettingRow(configuration, 7, "软件更新", _fleetAutoUpdate);
         ConfigureWrappedActionRow(configurationActions);
 
         _relayDevicesList = new ListView
@@ -2473,6 +2480,19 @@ public sealed partial class MainForm : Form
                 return;
             }
             await ApplyRelayHostRegistrationAsync();
+        };
+        _fleetAutoUpdate.CheckedChanged += (_, _) =>
+        {
+            if (_applyingSettings) return;
+            _settings.Relay.AutoUpdate = _fleetAutoUpdate.Checked;
+            if (!TrySaveSettings())
+            {
+                _settings.Relay.AutoUpdate = !_fleetAutoUpdate.Checked;
+                _applyingSettings = true;
+                try { _fleetAutoUpdate.Checked = _settings.Relay.AutoUpdate; }
+                finally { _applyingSettings = false; }
+                SetRelayStatus("软件更新设置保存失败，已恢复原设置。", DangerColor);
+            }
         };
         _relayOptimizeNetworkBox.CheckedChanged += async (_, _) =>
         {
@@ -6660,6 +6680,7 @@ public sealed partial class MainForm : Form
             _relayRegisterHostBox.Checked =
                 _settings.Relay.RegisterThisDevice;
             _relayOptimizeNetworkBox.Checked = _settings.Relay.OptimizeNetworkRoute;
+            _fleetAutoUpdate.Checked = _settings.Relay.AutoUpdate;
             ApplySshSettingsToUi();
             _allowPrivacyScreenBox.Checked = _settings.Host.AllowPrivacyScreen;
             _ = _hostServer.SetPrivacyScreenAllowedAsync(_settings.Host.AllowPrivacyScreen);
@@ -7081,6 +7102,7 @@ public sealed partial class MainForm : Form
             !_relayOperationInProgress &&
             !_relayRefreshInProgress;
         _relayReportAddressButton.Enabled = configured && !_relayOperationInProgress;
+        _fleetCheck.Enabled = configured && !_relayOperationInProgress;
         _relayRenameButton.Enabled = _relayRefreshButton.Enabled && GetSelectedRelayDevice() is not null;
         _relayAddressButton.Enabled = _relayRefreshButton.Enabled &&
             !_viewerActionInProgress && !_viewerClient.IsConnected && !IsViewerReconnecting() &&

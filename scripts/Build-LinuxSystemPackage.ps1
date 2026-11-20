@@ -29,12 +29,15 @@ try {
     foreach ($name in @("remotedesk_linux_app.py", "remotedesk_linux_host.py",
         "remotedesk_linux_dependencies.py", "remotedesk_linux_relay.py", "remotedesk_linux_relay_login.py", "remotedesk_protocol_probe.py",
         "remotedesk_linux_startup.py", "remotedesk_linux_devices.py", "remotedesk_linux_device_panel.py",
-        "remotedesk_linux_control_notice.py", "remotedesk_linux_transfers.py", "remotedesk_linux_ssh.py")) {
+        "remotedesk_linux_control_notice.py", "remotedesk_linux_transfers.py", "remotedesk_linux_ssh.py", "remotedesk_linux_update.py")) {
         Copy-Item -LiteralPath (Join-Path $repoRoot "scripts/linux/$name") -Destination (Join-Path $staging "app/$name")
     }
     Copy-Item -LiteralPath (Join-Path $repoRoot 'scripts/relay/read_remotedesk_relay_config.py') -Destination (Join-Path $staging 'app/read_remotedesk_relay_config.py')
     Copy-Item -LiteralPath (Join-Path $repoRoot "src/RemoteDesk/Assets/RemoteDesk.png") -Destination (Join-Path $staging "app/RemoteDesk.png")
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts/linux/remotedesk-linux-app") -Destination $staging
+    Copy-Item -LiteralPath (Join-Path $repoRoot "src/RemoteDesk.Android/app/src/main/assets/fleet-publisher.cer") -Destination (Join-Path $staging "app")
+    [xml]$project = Get-Content -LiteralPath (Join-Path $repoRoot "src/RemoteDesk/RemoteDesk.csproj") -Raw
+    [IO.File]::WriteAllText((Join-Path $staging "app/fleet-version"), [string]$project.Project.PropertyGroup.Version)
     $runtimeSource = [IO.File]::ReadAllText((Join-Path $repoRoot "scripts/linux/remotedesk_linux_runtime.sh"))
     [IO.File]::WriteAllText((Join-Path $staging "app/remotedesk_linux_runtime.sh"),
         $runtimeSource.Replace("`r`n", "`n").Replace("`r", "`n"), [Text.UTF8Encoding]::new($false))
@@ -42,6 +45,8 @@ try {
     Copy-Item -LiteralPath (Join-Path $repoRoot "THIRD-PARTY-NOTICES.md") -Destination $staging
     $wslStaging = Convert-LocalDrivePathToWsl $staging
     $wslPackage = Convert-LocalDrivePathToWsl $package
+    & wsl.exe -d $LinuxDistro --exec python3 "$wslStaging/app/remotedesk_linux_update.py" --inventory $wslStaging
+    if ($LASTEXITCODE -ne 0) { throw "Could not record portable package contents." }
     & wsl.exe -d $LinuxDistro --exec tar --create --gzip --file $wslPackage --directory $wslStaging --mode=u=rwX,go=rX .
     if ($LASTEXITCODE -ne 0) { throw "System Python package creation failed." }
     Get-FileHash -LiteralPath $package -Algorithm SHA256

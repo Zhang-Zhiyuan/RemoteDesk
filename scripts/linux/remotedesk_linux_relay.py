@@ -975,8 +975,9 @@ def connect_viewer(options, stop_event=None):
 
 class RelayHostConnector:
     def __init__(self, options, local_port, machine_name="Linux", status=lambda value: None,
-                 *, ssh_enabled=False, ssh_port=22, device_key="", desktop_enabled=True):
+                 *, ssh_enabled=False, ssh_port=22, device_key="", desktop_enabled=True, update_offer=None):
         self.options = options.validate()
+        self.update_offer = update_offer
         self.local_port = int(local_port)
         if not 1 <= self.local_port <= 65535:
             raise ValueError("本机被控端口无效。")
@@ -1087,9 +1088,14 @@ class RelayHostConnector:
         heartbeat = None
         pending = set()
         try:
+            from remotedesk_linux_update import installed
+            update_platform, version = installed() if self.update_offer else ("", "")
             registered = await hello(reader, writer, self.options, "host-control", deviceId=self.options.device_id,
-                        machineName=self.machine_name, platform="Linux", **self._address_report())
+                        machineName=self.machine_name, platform="Linux", updatePlatform=update_platform, appVersion=version,
+                        **self._address_report())
             self.online.set()
+            if self.update_offer and isinstance(registered.get("update"), dict):
+                self.update_offer(registered["update"])
             source = writer.get_extra_info("sockname")
             self._status(f"已上线到中转 {self.options.server_address}:{self.options.port}" +
                          (f" · 本地地址 {source[0]}" if source else "") +
@@ -1116,6 +1122,8 @@ class RelayHostConnector:
                     reading.cancel()
                     await asyncio.gather(reading, return_exceptions=True)
                 kind = message.get("type")
+                if self.update_offer and isinstance(message.get("update"), dict):
+                    self.update_offer(message["update"])
                 ssh = kind == "open-ssh"
                 if (kind not in ("open", "open-ssh") or
                         (ssh and (registered.get("sshTunneling") is not True or "ssh" not in self._services()

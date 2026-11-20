@@ -17,6 +17,7 @@ internal sealed record RelayOnlineDevice(
     public bool CanRename { get; init; }
     public bool SupportsSsh { get; init; }
     public bool SupportsDesktop { get; init; } = true;
+    public string? AppVersion { get; init; }
     public string NamingUnavailableReason { get; init; } = RelayDeviceName.UnsupportedMessage;
     public string AddressDisplay => DirectAddresses.Count > 0
         ? string.Join(" / ", DirectAddresses.Select(address => NetworkUtils.FormatEndpoint(address, DirectPort)))
@@ -26,6 +27,7 @@ internal sealed record RelayOnlineDevice(
         : Busy ? "使用中（可挤下线）" : "在线";
 
     public string BuildDisplay =>
+        Version.TryParse(AppVersion, out var version) && version.Build >= 0 ? version.ToString(3) :
         RemoteDeskBuildInfo.FormatShortBuildStamp(BuildStamp);
 
     public string LastSeenDisplay => LastSeenSeconds <= 1

@@ -15,7 +15,9 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 import signal
+import stat
 import socket
 import ssl
 import sys
@@ -28,7 +30,7 @@ from typing import Optional
 from pathlib import Path
 
 
-RELAY_RELEASE_VERSION = "1.0.40"
+RELAY_RELEASE_VERSION = "1.0.55"
 # Capture once when this process loads, not when an installer replaces the file.
 RELAY_SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
@@ -47,6 +49,97 @@ MAX_DIRECT_ADDRESSES = 8
 MAX_DEVICE_NAMES = 4096
 MAX_DEVICE_NAMES_BYTES = 1024 * 1024
 MAX_SSH_SESSIONS_PER_HOST = 4
+UPDATE_PLATFORMS = frozenset(("win-x64", "linux-deb-amd64", "linux-amd64", "linux-python", "android"))
+MAX_UPDATE_SIZE = 256 * 1024 * 1024
+
+
+def update_version(value):
+    if isinstance(value, str) and re.fullmatch(r"(?:0|[1-9][0-9]{0,4})(?:\.(?:0|[1-9][0-9]{0,4})){2}", value):
+        return tuple(map(int, value.split(".")))
+    return ()
+
+
+class UpdateChannel:
+    """Only the system administrator can publish into this read-only directory."""
+    def __init__(self, directory):
+        self.directory = directory
+        self.revision = None
+        self.tickets = {}
+        self.next_read = 0.0
+        self.slots = asyncio.Semaphore(3)
+
+    def refresh(self, force=False):
+        now = time.monotonic()
+        if now < self.next_read and not force:
+            return
+        self.next_read = now + 5
+        path = self.directory / "current.json"
+        try:
+            info = path.lstat()
+            revision = (info.st_ino, info.st_size, info.st_mtime_ns)
+            if revision == self.revision:
+                return
+            if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 16384:
+                raise ValueError("invalid release manifest")
+            with path.open("rb") as stream:
+                data = json.loads(stream.read(16385))
+            tickets = data["tickets"]
+            if not isinstance(tickets, dict) or not tickets or tickets.keys() - UPDATE_PLATFORMS:
+                raise ValueError("invalid release platforms")
+            for platform, ticket in tickets.items():
+                if (not isinstance(ticket, dict) or set(ticket) != {"platform", "version", "build", "size", "sha256", "signature"}
+                        or ticket["platform"] != platform or not update_version(ticket["version"])
+                        or not re.fullmatch(r"[0-9]{14}", ticket["build"])
+                        or type(ticket["size"]) is not int or not 0 < ticket["size"] <= MAX_UPDATE_SIZE
+                        or not re.fullmatch(r"[0-9a-f]{64}", ticket["sha256"])
+                        or not re.fullmatch(r"[A-Za-z0-9+/]{682}==|[A-Za-z0-9+/]{683}=", ticket["signature"])):
+                    raise ValueError("invalid release ticket")
+            self.revision, self.tickets = revision, tickets
+        except (OSError, KeyError, TypeError, ValueError):
+            self.revision, self.tickets = None, {}
+
+    def offer(self, hello):
+        platform = hello.get("updatePlatform")
+        installed = update_version(hello.get("appVersion"))
+        if not isinstance(platform, str) or platform not in UPDATE_PLATFORMS or not installed:
+            return {}
+        self.refresh()
+        candidate = self.tickets.get(platform)
+        if candidate and update_version(candidate["version"]) > installed:
+            return {"update": candidate}
+        return {}
+
+    async def download(self, writer, hello):
+        self.refresh()
+        platform = hello.get("updatePlatform")
+        ticket = self.tickets.get(platform) if isinstance(platform, str) else None
+        if not ticket or ticket["sha256"] != hello.get("sha256"):
+            await write_error(writer, "更新版本已变更，请等待下一次通知。")
+            return
+        if self.slots.locked():
+            await write_error(writer, "更新下载繁忙，请稍后重试。")
+            return
+        async with self.slots:
+            path = self.directory / (ticket["sha256"] + ".bin")
+            try:
+                fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            except OSError:
+                await write_error(writer, "服务器上缺少此版本的更新包。")
+                return
+            with os.fdopen(fd, "rb") as source:
+                info = os.fstat(source.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size != ticket["size"]:
+                    await write_error(writer, "服务器上的更新包不完整。")
+                    return
+                await write_json(writer, {"ok": True, "size": ticket["size"]})
+                remaining = info.st_size
+                while remaining:
+                    chunk = await asyncio.to_thread(source.read, min(128 * 1024, remaining))
+                    if not chunk:
+                        return
+                    writer.write(chunk)
+                    await asyncio.wait_for(writer.drain(), 15)
+                    remaining -= len(chunk)
 
 
 def normalize_services(value):
@@ -147,6 +240,8 @@ class HostConnection:
     address_reported_at: Optional[float] = None
     services: frozenset = field(default_factory=lambda: frozenset(("desktop",)))
     active_ssh_sessions: int = 0
+    update_platform: str = ""
+    app_version: str = ""
 
     def update_addresses(self, message):
         # Missing fields mean a legacy heartbeat; an explicit empty/invalid
@@ -178,6 +273,9 @@ class RelayServer:
         self.port = int(config.get("port", 56567))
         self.cert_file = config["cert_file"]
         self.key_file = config["key_file"]
+        self.updates = UpdateChannel(Path(self.cert_file).parent / "updates")
+        self.next_update_check = 0.0
+        self.last_notified = 0
         self.tcp_congestion_control = validate_congestion_control(config.get("tcp_congestion_control", ""))
         self.hosts: dict[str, HostConnection] = {}
         self.pending: dict[str, PendingSession] = {}
@@ -255,6 +353,22 @@ class RelayServer:
                 await self.handle_host_control(reader, writer, hello)
             elif role == "directory":
                 await self.handle_directory(writer, hello)
+            elif role == "update-package":
+                await asyncio.wait_for(self.updates.download(writer, hello), 600)
+            elif role == "update-check":
+                if time.monotonic() >= self.next_update_check:
+                    self.next_update_check = time.monotonic() + 5
+                    self.updates.refresh(force=True)
+                    notices = []
+                    for active in tuple(self.hosts.values()):
+                        offered = self.updates.offer({"updatePlatform": active.update_platform, "appVersion": active.app_version})
+                        if offered:
+                            notices.append(asyncio.wait_for(self._write_host(active, {"type": "update", **offered}), 2))
+                    results = await asyncio.gather(*notices, return_exceptions=True)
+                    self.last_notified = sum(not isinstance(item, BaseException) for item in results)
+                await write_json(writer, {"ok": True, "online": len(self.hosts),
+                                          "notified": self.last_notified,
+                                          "versions": {key: value["version"] for key, value in self.updates.tickets.items()}})
             elif role == "rename-device":
                 await self.handle_rename_device(writer, hello)
             elif role == "viewer":
@@ -313,6 +427,8 @@ class RelayServer:
         )
         host.update_addresses(hello)
         host.update_services(hello)
+        if isinstance(hello.get("updatePlatform"), str) and hello["updatePlatform"] in UPDATE_PLATFORMS and update_version(hello.get("appVersion")):
+            host.update_platform, host.app_version = hello["updatePlatform"], hello["appVersion"]
 
         old_host = None
         async with self.state_lock:
@@ -322,7 +438,8 @@ class RelayServer:
             old_host.writer.close()
         try:
             await self._write_host(
-                host, {"ok": True, "type": "registered", "heartbeatAck": True, "addressReporting": True, "sshTunneling": True}
+                host, {"ok": True, "type": "registered", "heartbeatAck": True, "addressReporting": True, "sshTunneling": True,
+                       **self.updates.offer(hello)}
             )
             while True:
                 message = await asyncio.wait_for(
@@ -334,7 +451,7 @@ class RelayServer:
                 host.last_seen = time.monotonic()
                 host.update_addresses(message)
                 host.update_services(message)
-                await self._write_host(host, {"type": "heartbeat", "addressReporting": True})
+                await self._write_host(host, {"type": "heartbeat", "addressReporting": True, **self.updates.offer(hello)})
         finally:
             async with self.state_lock:
                 if self.hosts.get(device_id) is host:
@@ -370,6 +487,7 @@ class RelayServer:
                     "sharedName": self.device_names.get(host.device_id, ""),
                     "platform": host.platform,
                     "buildStamp": host.build_stamp,
+                    "appVersion": host.app_version,
                     "busy": host.active_sessions > 0
                     or any(
                         item.device_id == host.device_id and item.service == "desktop"
@@ -783,11 +901,82 @@ def main() -> int:
         )
     )
     try:
+        if sys.argv[1:] == ["--publish-updates"]:
+            publish_updates(Path("/etc/remotedesk-relay/updates"), sys.stdin.buffer)
+            return 0
         asyncio.run(run(config_path))
         return 0
     except Exception as exc:
         print(f"fatal: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
+
+
+def publish_updates(directory, source):
+    """Local admin/SSH entry point. No write operation is exposed on the relay protocol."""
+    import fcntl
+    try:
+        directory.mkdir(mode=0o755)
+    except FileExistsError:
+        pass
+    else:
+        directory.chmod(0o755)
+    if directory.is_symlink() or directory.stat().st_uid != os.geteuid() or directory.stat().st_mode & 0o022:
+        raise ValueError("更新目录必须归发布账户所有，且其他账户不能写入。")
+    with (directory / ".publish.lock").open("a+b") as lock, tempfile.TemporaryDirectory(dir=directory) as staging:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        length = int.from_bytes(source.read(4), "big")
+        if not 0 < length <= 16384:
+            raise ValueError("更新清单长度无效。")
+        manifest = source.read(length)
+        stage = Path(staging)
+        pointer = stage / "current.json"
+        pointer.write_bytes(manifest)
+        candidate = UpdateChannel(stage)
+        candidate.refresh()
+        previous = UpdateChannel(directory)
+        previous.refresh()
+        if (set(candidate.tickets) != UPDATE_PLATFORMS or
+                len({(t["version"], t["build"]) for t in candidate.tickets.values()}) != 1):
+            raise ValueError("发布必须包含同一版本的全部平台包。")
+        for platform, ticket in sorted(candidate.tickets.items()):
+            old = previous.tickets.get(platform)
+            if old and (update_version(old["version"]) > update_version(ticket["version"]) or
+                        old["version"] == ticket["version"] and old != ticket):
+                raise ValueError("不能降级或覆盖已发布的同版本。")
+            size = ticket["size"]
+            digest = hashlib.sha256()
+            with (stage / (ticket["sha256"] + ".bin")).open("wb") as dest:
+                while size:
+                    data = source.read(min(size, 128 * 1024))
+                    if not data:
+                        raise ValueError("更新包传输中断。")
+                    dest.write(data)
+                    digest.update(data)
+                    size -= len(data)
+                dest.flush()
+                os.fsync(dest.fileno())
+                os.fchmod(dest.fileno(), 0o644)
+            if not hmac.compare_digest(digest.hexdigest(), ticket["sha256"]):
+                raise ValueError("更新包内容与发布清单不符。")
+        if source.read(1):
+            raise ValueError("更新包长度有误。")
+        current = {ticket["sha256"] + ".bin" for ticket in candidate.tickets.values()}
+        for name in current:
+            os.replace(stage / name, directory / name)
+        pointer.chmod(0o644)
+        with pointer.open("rb") as stream:
+            os.fsync(stream.fileno())
+        os.replace(pointer, directory / "current.json")
+        fd = os.open(directory, os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+            for path in directory.iterdir():
+                if re.fullmatch(r"[0-9a-f]{64}\.bin", path.name) and path.name not in current and path.is_file():
+                    path.unlink()
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        print(f"已发布 {ticket['version']}，在线设备将在下次心跳收到更新。", flush=True)
 
 
 if __name__ == "__main__":

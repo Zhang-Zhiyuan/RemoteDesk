@@ -235,6 +235,7 @@ internal static class RelayTunnelClient
                     Math.Clamp(GetInteger(device, "lastSeenSeconds"), 0, 3600))
                 {
                     DirectAddresses = report.Addresses, DirectPort = report.Port,
+                    AppVersion = GetString(device, "appVersion"),
                     SharedName = GetString(device, "sharedName") ?? "",
                     OriginalMachineName = GetString(device, "originalMachineName") ?? GetString(device, "machineName") ?? "",
                     CanRename = GetBoolean(root, "deviceNaming"),

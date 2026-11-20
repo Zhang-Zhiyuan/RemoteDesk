@@ -32,6 +32,7 @@ final class AndroidRelayPanel extends LinearLayout {
     private final AndroidRelayPanelStatus panelStatus = new AndroidRelayPanelStatus();
     private final EditText server, sshPort, adminUser, adminPassword;
     private final CheckBox publish;
+    private final Button installUpdate;
     private final Button saveButton, cancelSetupButton, manageButton, clearButton;
     private boolean restoringPublish;
     private boolean setupBusy;
@@ -53,6 +54,9 @@ final class AndroidRelayPanel extends LinearLayout {
             String hostText = getContext().getString(R.string.relay_host_status,
                 RemoteDeskForegroundService.getRelayStatus());
             if (!hostText.contentEquals(hostStatus.getText())) hostStatus.setText(hostText);
+            String action = AndroidFleetUpdate.enabled(getContext()) ? AndroidFleetUpdate.actionLabel(getContext()) : "";
+            if (!action.contentEquals(installUpdate.getText())) installUpdate.setText(action);
+            installUpdate.setVisibility(action.isEmpty() || BuildConfig.DEBUG ? GONE : VISIBLE);
             if (content.getVisibility() == VISIBLE && System.currentTimeMillis() - lastRefresh > 15000) refresh();
             ui.postDelayed(this, 1000);
         }
@@ -123,6 +127,18 @@ final class AndroidRelayPanel extends LinearLayout {
         hostStatus.setTextColor(AndroidUiTheme.MUTED);
         content.addView(status, layout());
         content.addView(hostStatus, layout());
+        CheckBox autoUpdate = new CheckBox(context);
+        autoUpdate.setText("本机空闲时自动安装中继上的新版");
+        autoUpdate.setChecked(AndroidFleetUpdate.enabled(context));
+        autoUpdate.setOnCheckedChangeListener((box, enabled) -> AndroidFleetUpdate.setEnabled(context, enabled));
+        if (!BuildConfig.DEBUG) content.addView(autoUpdate, layout());
+        installUpdate = button("", false);
+        installUpdate.setVisibility(GONE);
+        installUpdate.setOnClickListener(view -> {
+            try { AndroidFleetUpdate.openAction(context); }
+            catch (RuntimeException ex) { setStatus("系统安装设置暂不可用。"); }
+        });
+        content.addView(installUpdate, layout());
         saveButton = button("登录服务器", true);
         saveButton.setOnClickListener(view -> save());
         configuration.addView(saveButton, layout());

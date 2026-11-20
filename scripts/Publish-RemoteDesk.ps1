@@ -1249,6 +1249,9 @@ function New-LinuxSelfContainedRuntime {
     Get-Content -LiteralPath (Join-Path $Root "scripts/linux/remotedesk_linux_runtime.sh") -Raw |
         Write-Utf8NoBomContent -Path (Join-Path $Staging "app/remotedesk_linux_runtime.sh")
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_relay.py") -Destination (Join-Path $Staging "app\remotedesk_linux_relay.py") -Force
+    Copy-Item -LiteralPath (Join-Path $Root "scripts/linux/remotedesk_linux_update.py") -Destination (Join-Path $Staging "app/remotedesk_linux_update.py") -Force
+    Copy-Item -LiteralPath (Join-Path $Root "src/RemoteDesk.Android/app/src/main/assets/fleet-publisher.cer") -Destination (Join-Path $Staging "app") -Force
+    [IO.File]::WriteAllText((Join-Path $Staging "app/fleet-version"), (Get-ReleaseVersion -Root $Root))
     Copy-Item -LiteralPath (Join-Path $Root 'scripts/linux/remotedesk_linux_relay_login.py') -Destination (Join-Path $Staging 'app/remotedesk_linux_relay_login.py') -Force
     Copy-Item -LiteralPath (Join-Path $Root 'scripts/relay/read_remotedesk_relay_config.py') -Destination (Join-Path $Staging 'app/read_remotedesk_relay_config.py') -Force
     Copy-Item -LiteralPath (Join-Path $Root "scripts\linux\remotedesk_linux_startup.py") -Destination (Join-Path $Staging "app\remotedesk_linux_startup.py") -Force
@@ -1373,6 +1376,7 @@ find "$tmp" -type d -exec chmod 755 {} +
 find "$tmp" -type f -exec chmod 644 {} +
 chmod +x "$tmp/remotedesk-linux-host" "$tmp/remotedesk-protocol-probe" "$tmp/remotedesk-linux-app" "$tmp/remotedesk-linux-doctor"
 find "$tmp/runtime/bin" -maxdepth 1 -type f -exec chmod +x {} + 2>/dev/null || true
+python3 "$tmp/app/remotedesk_linux_update.py" --inventory "$tmp"
 tar --format=gnu -czf "$out" -C "$tmp" .
 '@
             $scriptContent = $scriptTemplate.Replace("__SRC__", $wslStaging).Replace("__OUT__", $wslTarGz)
@@ -1580,7 +1584,7 @@ Section: net
 Priority: optional
 Architecture: $architecture
 Maintainer: RemoteDesk <noreply@example.invalid>
-Depends: libc6 (>= 2.38), libexpat1, libffi8, libgcc-s1, libssl3t64 | libssl3, libx11-6, libxtst6, python3-tk, python3-pil, imagemagick, ffmpeg, xdotool, zlib1g
+Depends: libc6 (>= 2.38), libexpat1, libffi8, libgcc-s1, libssl3t64 | libssl3, libx11-6, libxtst6, python3-tk, python3-pil, python3-cryptography, imagemagick, ffmpeg, xdotool, zlib1g
 Recommends: xclip | xsel, wl-clipboard, xvfb, openbox, x11vnc, wmctrl, dbus-x11, mpv, pkexec, zenity
 Description: RemoteDesk self-contained Linux host and viewer
  RemoteDesk Linux app speaks the encrypted RemoteDesk protocol for LAN testing.

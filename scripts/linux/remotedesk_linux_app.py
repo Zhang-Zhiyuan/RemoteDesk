@@ -54,7 +54,7 @@ try:
 except (OSError, AttributeError):
     _clipboard_x11 = None
 
-if __name__ == "__main__" and sys.platform.startswith("linux"):
+if __name__ == "__main__" and sys.platform.startswith("linux") and sys.argv[1:] != ["--fleet-check"]:
     # Run before importing Tk/Pillow/cryptography so missing imports are repairable.
     from remotedesk_linux_dependencies import prepare_runtime
 
@@ -138,6 +138,7 @@ from remotedesk_protocol_probe import (
     write_message,
 )
 import remotedesk_linux_startup as host_startup
+import remotedesk_linux_update as fleet_update
 import remotedesk_linux_ssh as ssh_terminal
 from remotedesk_linux_device_panel import DevicePanel, fit_table_columns
 from remotedesk_linux_transfers import ViewerTransferTasks, TransferStop, TransferTaskPanel
@@ -5716,6 +5717,11 @@ class RemoteDeskLinuxApp:
                                   command=self._change_relay_publish)
         publish.pack(anchor=tk.W, pady=8)
         self.relay_publish_control = publish
+        self.fleet_preference = host_startup.config_home() / "remotedesk" / "host-state" / "disable-auto-update"
+        self.fleet_enabled = not self.fleet_preference.exists()
+        self.fleet_switch = tk.BooleanVar(value=self.fleet_enabled)
+        ttk.Checkbutton(tab, text="本机空闲时自动安装中继上的新版", variable=self.fleet_switch,
+                        command=self._toggle_fleet_updates).pack(anchor=tk.W)
         self.relay_setup_controls.append(publish)
         self._wrapping_label(form, text="填写服务器 root / 管理员密码，不是设备密钥。登录后自动获取配置，管理员密码不保存；已登录时可留空。",
                   wraplength=680, style="PanelSubtitle.TLabel").grid(row=6, column=0, columnspan=3, sticky=tk.W)
@@ -5808,6 +5814,66 @@ class RemoteDeskLinuxApp:
         else:
             self.relay_form.pack(fill=tk.X, before=self.relay_publish_control)
             self.relay_manage_button.config(text='收起服务器设置')
+
+    def _toggle_fleet_updates(self):
+        enabled = self.fleet_switch.get()
+        try:
+            host_startup.private_directory(self.fleet_preference.parent)
+            if enabled:
+                self.fleet_preference.unlink(missing_ok=True)
+            else:
+                host_startup.atomic_private_write(self.fleet_preference, b"disabled\n")
+            self.fleet_enabled = enabled
+        except OSError as error:
+            self.fleet_switch.set(self.fleet_enabled)
+            self.relay_status.configure(text=f"无法保存软件更新设置：{error}")
+
+    def _handle_fleet_offer(self, connector, ticket):
+        def idle():
+            return (not self.closing and self.fleet_enabled and self.relay_host is connector and connector.online.is_set()
+                    and self.viewer is None and self.viewer_reconnect_after_id is None
+                    and not self.ssh_sessions and not connector.ssh_tasks and not connector.desktop_tasks)
+        if not idle() or getattr(self, "fleet_busy", False) or time.monotonic() < getattr(self, "fleet_retry_at", 0):
+            return
+        self.fleet_busy = True
+        self.relay_status.configure(text="正在校验并下载已发布的更新。")
+        result = queue.Queue(maxsize=1)
+        def work():
+            try:
+                with fleet_update.activity_lock(exclusive=True):
+                    pass
+                result.put((fleet_update.apply(connector.options, ticket, idle), ""))
+            except BlockingIOError:
+                result.put((None, "正在使用，将在空闲时重试。"))
+            except Exception as error:
+                result.put((None, f"自动更新稍后重试：{error}"))
+        def finish():
+            if self.closing:
+                return
+            if result.empty():
+                self.root.after(200, finish)
+                return
+            launcher, error = result.get()
+            if launcher:
+                self.fleet_restart = launcher
+                self._restart_updated_app()
+            else:
+                self.fleet_busy = False
+                self.fleet_retry_at = time.monotonic() + (15 if "空闲" in error else 300)
+                self.relay_status.configure(text=error)
+        threading.Thread(target=work, name="RemoteDeskUpdate", daemon=True).start()
+        self.root.after(200, finish)
+
+    def _restart_updated_app(self):
+        if self.viewer is not None or self.ssh_sessions or (self.relay_host and
+                (self.relay_host.ssh_tasks or self.relay_host.desktop_tasks)):
+            self.root.after(1000, self._restart_updated_app)
+            return
+        try:
+            with fleet_update.activity_lock(exclusive=True):
+                self.close()
+        except BlockingIOError:
+            self.root.after(1000, self._restart_updated_app)
 
     def _change_relay_publish(self):
         if self.relay_setup_busy or self.relay_options is None: return
@@ -6124,7 +6190,8 @@ class RemoteDeskLinuxApp:
         events = self.events
         connector = relay.RelayHostConnector(options, local_port,
             self.host_machine_name.get(), status=lambda value: put_ui_event(events, "relay_status", (connector, value)),
-            desktop_enabled=desktop, ssh_enabled=ssh, ssh_port=ssh_port, device_key=key)
+            desktop_enabled=desktop, ssh_enabled=ssh, ssh_port=ssh_port, device_key=key,
+            update_offer=lambda ticket: put_ui_event(events, "fleet_offer", (connector, ticket)))
         self.relay_host = connector
         connector.start()
 
@@ -9045,6 +9112,8 @@ class RemoteDeskLinuxApp:
                     self._defer_ui_dialog(self._handle_relay_setup, value)
                 else:
                     self._handle_relay_setup(value)
+            elif event == "fleet_offer":
+                self._handle_fleet_offer(*value)
             elif event == "relay_status":
                 connector, message = value
                 if connector is self.relay_host and not self.relay_setup_busy:
@@ -9460,8 +9529,14 @@ def main() -> int:
                 pass
 
     root.mainloop()
+    if getattr(app, "fleet_restart", None):
+        app.stop_host_at_exit()
+        instance.close()
+        os.execv(app.fleet_restart, [app.fleet_restart, *sys.argv[1:]])
     return 0
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--fleet-check"]:
+        raise SystemExit(0 if fleet_update.installed()[0] else 1)
     raise SystemExit(main())

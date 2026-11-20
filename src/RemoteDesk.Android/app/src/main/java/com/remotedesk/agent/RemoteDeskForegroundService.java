@@ -298,6 +298,8 @@ public final class RemoteDeskForegroundService extends Service {
                 android.os.Build.MODEL, value -> {
                     if (generation == relayGeneration) relayStatus = value;
                 });
+            relayHost.updateIdle = () -> generation == relayGeneration && !hostServer.hasAuthenticatedSession()
+                && AndroidFleetUpdate.viewers.get() == 0 && !AndroidSshKeepAliveService.hasSessions();
             relayHost.start();
         } catch (Exception ex) { relayStatus = "中转配置无法读取，请重新保存配置。"; }
     }

@@ -148,6 +148,7 @@ public final class RemoteDeskViewerActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        AndroidFleetUpdate.viewers.incrementAndGet();
         localInputPaused = savedInstanceState != null && savedInstanceState.getBoolean("localInputPaused", false);
         AndroidDisplay.configureEdgeToEdge(this, false);
         AndroidSessionLog.configure(this);
@@ -1146,6 +1147,7 @@ public final class RemoteDeskViewerActivity extends Activity {
         ownerTeardownExecutor.shutdown();
         realtimeLogSink.close();
         super.onDestroy();
+        AndroidFleetUpdate.viewers.decrementAndGet();
     }
 
     private void updateFullscreenBackHandler() {

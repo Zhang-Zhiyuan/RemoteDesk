@@ -87,6 +87,7 @@ internal sealed partial class RemoteHostServer : IDisposable
     }
 
     public bool HasActiveRemoteControl => _remoteControlActivity.IsActive;
+    internal bool HasConnectedClients { get { lock (_clientStateLock) return _activeClients.Count != 0; } }
     public Task DisconnectRemoteControlAsync() => _remoteControlActivity.DisconnectAsync();
 
     public bool IsRunning => _listener is not null;
