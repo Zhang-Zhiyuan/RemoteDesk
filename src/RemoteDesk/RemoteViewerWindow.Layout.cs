@@ -19,6 +19,7 @@ internal sealed partial class RemoteViewerWindow
              (_inputPauseButton, ToggleLocalInputPause),
              (_privacyScreenButton, async () => await TogglePrivacyScreenAsync()),
              (_transferTasksButton, ShowTransferTasks),
+             (_sendAccountPackageButton, async () => await SendAccountPackageAsync()),
              (_pullRemoteFilesButton, async () => await PullRemoteClipboardFilesAsync()),
              (_openReceivedFilesButton, OpenReceivedFilesDirectory),
              (_remoteInputMethodButton, async () => await SwitchRemoteInputMethodAsync()),
@@ -30,7 +31,7 @@ internal sealed partial class RemoteViewerWindow
              (_fullScreenButton, ToggleFullScreen)],
             [[_privacyScreenButton], [_inputPauseButton], [_transferTasksButton], [_androidBackButton], [_androidHomeButton], [_androidRecentsButton],
              [_displayScaleButton, _experimentalUpscaleButton], [_fullScreenButton], [_switchCaptureTargetButton, _additionalScreenButton],
-             [_pullRemoteFilesButton, _openReceivedFilesButton], [_remoteInputMethodButton], [_nativeDetailButton]],
+             [_pullRemoteFilesButton, _openReceivedFilesButton], [_remoteInputMethodButton], [_nativeDetailButton], [_sendAccountPackageButton]],
             ReleaseAllRemoteInputs);
         FontChanged += (_, _) => QueueStatusFooterLayout(refreshMetrics: true);
         _statusBar.FontChanged += (_, _) => QueueStatusFooterLayout(refreshMetrics: true);

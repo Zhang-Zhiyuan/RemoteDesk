@@ -20,6 +20,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\RemoteDesk\RemoteDesk.csproj" />
     <None Include="..\data\relay-path-stability.tsv" Link="relay-path-stability.tsv" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\data\account-login-v1.asxaccount" Link="account-login-v1.asxaccount" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

@@ -41,6 +41,7 @@ public final class AndroidFileUploadQueueTest {
         assertNull(queue.start(queue.entries.get(1)));
         assertEquals(AndroidFileUploadQueue.State.CANCELLED, queue.entries.get(1).state);
         assertTrue(queue.summary().contains("取消 2"));
+        assertEquals("文件任务已取消", queue.resultTitle());
     }
 
     @Test public void metadataSizeErrorsIdentifyTheSelectedFileAndAcceptBoundarySizes() throws Exception {
@@ -63,6 +64,9 @@ public final class AndroidFileUploadQueueTest {
         assertNotEquals(first.transferId, second.transferId);
         queue.finish(queue.entries.get(1), true, false, "数据已发送；请核实远端保存");
         assertTrue(queue.summary().contains("已确认保存 1 · 已发送待核实 1"));
+        assertEquals("已发送，请核实保存位置", queue.resultTitle());
+        assertFalse(queue.statusLine().contains("\n"));
+        assertFalse(queue.statusLine().contains("甲"));
         assertFalse(queue.summary().contains("失败")); // Status color must not mistake "失败 0" for an error.
         assertTrue(queue.summary().contains("不会自动粘贴"));
         queue.cancel();
@@ -75,6 +79,7 @@ public final class AndroidFileUploadQueueTest {
         queue.finish(queue.entries.get(0), false, true, "无法读取");
         assertNotNull(queue.start(queue.entries.get(1)));
         assertTrue(queue.summary().contains("失败 1"));
+        assertEquals("文件传输有失败项", queue.resultTitle());
     }
 
     @Test public void peerWithoutCancellationFinishesCurrentFileButNeverStartsRemainingFiles() throws Exception {

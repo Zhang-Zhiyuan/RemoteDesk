@@ -141,7 +141,7 @@ import remotedesk_linux_startup as host_startup
 import remotedesk_linux_update as fleet_update
 import remotedesk_linux_ssh as ssh_terminal
 from remotedesk_linux_device_panel import DevicePanel, fit_table_columns
-from remotedesk_linux_transfers import ViewerTransferTasks, TransferStop, TransferTaskPanel
+from remotedesk_linux_transfers import ViewerTransferTasks, TransferStop, TransferTask, TransferTaskPanel
 import remotedesk_protocol_probe as file_protocol
 
 
@@ -3172,6 +3172,42 @@ class ViewerFilePreviewResult:
     action_text: str
     queued_status: str
     error: str = ""
+    account_package: bytes | None = field(default=None, repr=False)
+
+
+ACCOUNT_PACKAGE_LIMIT = 2 * 1024 * 1024
+ACCOUNT_IMPORT_HINT = "在 Windows 的 API 切换器中，打开对应客户端的“官方账号”，选择“导入登录包”，输入迁移密码后按需切换账号。"
+
+
+def read_account_package(path: Path) -> bytes:
+    invalid = "请选择 API 切换器从“官方账号”导出的完整 .asxaccount 登录包。"
+    if path.suffix.lower() != ".asxaccount" or not path.is_file():
+        raise ValueError(invalid)
+    with path.open("rb") as stream:
+        data = stream.read(ACCOUNT_PACKAGE_LIMIT + 1)
+    if not 0 < len(data) <= ACCOUNT_PACKAGE_LIMIT:
+        raise ValueError("登录包大小应在 1 字节至 2 MiB 之间。")
+    try:
+        package = json.loads(data.decode("utf-8"))
+    except (ValueError, RecursionError):
+        raise ValueError(invalid) from None
+    if (not isinstance(package, dict) or package.get("format") != "api-switcher-account-login"
+            or type(package.get("version")) is not int):
+        raise ValueError(invalid)
+    if package.get("version") == 2 and isinstance(package.get("cipher"), dict) and package["cipher"].get("name") == "none":
+        raise ValueError("这个登录包没有设置迁移密码。请在 API 切换器中重新导出，设置至少 8 个字符的迁移密码后再发送。")
+    try:
+        kdf, cipher = package["kdf"], package["cipher"]
+        if (package["version"] == 1 and package["compression"] == "zlib"
+                and kdf["name"] == "PBKDF2HMAC-SHA256" and type(kdf["iterations"]) is int
+                and 100_000 <= kdf["iterations"] <= 2_000_000
+                and len(base64.b64decode(kdf["salt"], validate=True)) == 16
+                and cipher["name"] == "AES-256-GCM" and len(base64.b64decode(cipher["nonce"], validate=True)) == 12
+                and len(base64.b64decode(package["payload"], validate=True)) > 16):
+            return data
+    except (ValueError, TypeError, KeyError, RecursionError):
+        pass
+    raise ValueError(invalid)
 
 
 def create_file_transfer_preview(
@@ -4206,7 +4242,7 @@ class ViewerConnection:
             with self.privacy_lock:
                 self.privacy_requests.pop(request_id, None)
 
-    def send_files(self, file_paths: list[str]) -> bool:
+    def send_files(self, file_paths: list[str], *, account_package: bytes | None = None) -> bool:
         if self.session is None or self.sock is None:
             return False
         if not (self.remote_capabilities & CAPABILITY_FILE_RECEIVE):
@@ -4215,27 +4251,48 @@ class ViewerConnection:
         normalized_paths = [str(Path(item).expanduser()) for item in file_paths if item]
         if not normalized_paths:
             return False
+        if account_package is not None and len(normalized_paths) != 1:
+            raise ValueError("请选择一个账号登录包。")
         with self.transfer_tasks.lock:
+            if self.stop_event.is_set() or self.transfer_tasks.closed.is_set():
+                return False
             if self.transfer_tasks.download is not None:
                 self._put_event("viewer_status", "取回任务尚未结束，请完成或取消后再发送文件。")
                 return False
             if not self.file_transfer_lock.acquire(blocking=False):
                 self._put_event("viewer_status", "已有文件传输正在进行。")
                 return False
-            self.transfer_tasks.begin_upload(normalized_paths)
-        thread = threading.Thread(
-            target=self._send_files_locked,
-            args=(normalized_paths,),
-            name="RemoteDeskFileSender",
-            daemon=True,
-        )
-        thread.start()
+            task = self.transfer_tasks.begin_upload(normalized_paths)
+        try:
+            threading.Thread(
+                target=self._send_files_locked,
+                args=(normalized_paths,),
+                kwargs={"task": task, "account_package": account_package},
+                name="RemoteDeskFileSender",
+                daemon=True,
+            ).start()
+        except (OSError, RuntimeError) as error:
+            detail = f"无法启动文件发送任务：{error}"
+            self._finish_file_upload(task, "未完成", detail)
+            self._put_event("viewer_status", detail)
+            return False
         return True
 
-    def _send_files_locked(self, file_paths: list[str]) -> None:
-        task = self.transfer_tasks.begin_upload(file_paths)
+    def _finish_file_upload(self, task: TransferTask, phase: str, detail: str) -> None:
+        with self.transfer_tasks.lock:
+            try:
+                if not task.terminal:
+                    self.transfer_tasks.finish(task, phase, detail)
+            finally:
+                self.file_transfer_lock.release()
+
+    def _send_files_locked(self, file_paths: list[str], *, task: TransferTask | None = None,
+                           account_package: bytes | None = None) -> None:
+        if task is None:
+            task = self.transfer_tasks.begin_upload(file_paths)
         sent = 0
         failed = 0
+        sent_archive = False
         results: list[str] = []
         try:
             for file_path in file_paths:
@@ -4246,9 +4303,16 @@ class ViewerConnection:
                 try:
                     self.transfer_tasks.update(task, name=source_path.name, phase="准备 / 打包", completed_bytes=0,
                         total_bytes=None, cancellable=True, detail=f"本批 {len(file_paths)} 项，已完成 {sent} 项。")
-                    transfer_path, transfer_name, display_name, temporary_archive = self._prepare_transfer_path(source_path)
                     self.transfer_tasks.check_upload()
-                    receipt_message = self._send_file_to_remote(transfer_path, transfer_name, display_name)
+                    if account_package is None:
+                        transfer_path, transfer_name, display_name, temporary_archive = self._prepare_transfer_path(source_path)
+                        self.transfer_tasks.check_upload()
+                        receipt_message = self._send_file_to_remote(transfer_path, transfer_name, display_name)
+                        sent_archive |= temporary_archive is not None
+                    else:
+                        display_name = source_path.name
+                        receipt_message = self._send_file_to_remote(source_path, sanitize_file_name(display_name),
+                            display_name, account_package=account_package)
                     results.append(f"已发送：{display_name}\n{receipt_message}\n")
                     sent += 1
                 except Exception as ex:
@@ -4271,13 +4335,14 @@ class ViewerConnection:
                           f"已发送 {sent} 个项目{suffix}；对方是旧版，请检查接收目录确认是否保存。")
                 self._put_event("viewer_status", status)
         finally:
-            self.file_transfer_lock.release()
-            self.transfer_tasks.finish(task, "已取消" if task.cancel.is_set() else "连接已结束" if self.stop_event.is_set()
+            self._finish_file_upload(task, "已取消" if task.cancel.is_set() else "连接已结束" if self.stop_event.is_set()
                 else "已完成" if failed == 0 and sent == len(file_paths) else "未完成", "\n".join(results))
             if results:
                 remaining = len(file_paths) - sent - failed
-                summary = f"已发送 {sent} 项，未完成 {failed} 项，未开始 {remaining} 项。\n文件夹以 ZIP 保存，不自动解压。\n\n"
-                self._put_event("viewer_file_results", summary + "\n".join(results))
+                summary = f"已发送 {sent} 项，未完成 {failed} 项，未开始 {remaining} 项。"
+                if sent_archive:
+                    summary += "\n文件夹以 ZIP 保存，不自动解压。"
+                self._put_event("viewer_file_results", summary + "\n\n" + "\n".join(results))
 
     def _prepare_transfer_path(self, source: Path) -> tuple[Path, str, str, Path | None]:
         self.transfer_tasks.check_upload()
@@ -4298,12 +4363,11 @@ class ViewerConnection:
             return archive, transfer_name, f"{path.name} -> {transfer_name}", archive
         raise FileNotFoundError("只支持发送文件或文件夹。")
 
-    def _send_file_to_remote(self, path: Path, transfer_name: str, display_name: str) -> str:
-        if not path.is_file():
+    def _send_file_to_remote(self, path: Path, transfer_name: str, display_name: str, *, account_package: bytes | None = None) -> str:
+        if account_package is None and not path.is_file():
             raise FileNotFoundError("只支持发送普通文件。")
-        source_stat = path.stat()
-        file_size = source_stat.st_size
-        source_mtime_ns = source_stat.st_mtime_ns
+        source_stat = path.stat() if account_package is None else None
+        file_size = len(account_package) if account_package is not None else source_stat.st_size
         if file_size > MAX_FILE_TRANSFER_BYTES:
             raise ProtocolError(f"文件超过 RemoteDesk 传输上限：{file_size} bytes")
 
@@ -4330,7 +4394,7 @@ class ViewerConnection:
             offset = 0
             digest = hashlib.sha256()
             last_progress_at = 0.0
-            with path.open("rb") as input_file:
+            with (io.BytesIO(account_package) if account_package is not None else path.open("rb")) as input_file:
                 while offset < file_size:
                     self.transfer_tasks.check_upload()
                     if receipt is not None and receipt.completed.is_set() and not receipt.success:
@@ -4353,13 +4417,12 @@ class ViewerConnection:
                         percent = 100 if file_size == 0 else min(100, int(offset * 100 / max(1, file_size)))
                         self._put_event("viewer_status", f"正在发送：{display_name} {percent}%")
 
-            current_stat = path.stat()
-            if (
-                offset != file_size
-                or current_stat.st_size != file_size
-                or current_stat.st_mtime_ns != source_mtime_ns
-            ):
+            if offset != file_size:
                 raise EOFError("源文件在传输过程中发生变化。")
+            if source_stat is not None:
+                current_stat = path.stat()
+                if current_stat.st_size != file_size or current_stat.st_mtime_ns != source_stat.st_mtime_ns:
+                    raise EOFError("源文件在传输过程中发生变化。")
 
             with self.transfer_tasks.lock:
                 self.transfer_tasks.check_upload()
@@ -4383,7 +4446,10 @@ class ViewerConnection:
                 self._put_event("viewer_status", receipt.message)
             transfer_active = False
             legacy_drain = receipt is None
-            return (receipt.message or "远端确认保存，但未提供实际路径。") if receipt is not None else "旧版远端未返回保存确认或实际路径，请到被控端检查。"
+            if receipt is None:
+                return "旧版远端未返回保存确认或实际路径，请到被控端检查。"
+            message = receipt.message or "远端确认保存，但未提供实际路径。"
+            return message + "\n" + ACCOUNT_IMPORT_HINT if account_package is not None else message
         except Exception as ex:
             # A best-effort cancel can itself wait behind TCP data. Failure
             # must restore the normal watchdog before attempting that write.
@@ -7108,6 +7174,7 @@ class RemoteDeskLinuxApp:
             style="Danger.TButton",
         )
         self.send_file_button = ttk.Button(buttons, text="发送文件", command=self.send_viewer_files, state=tk.DISABLED)
+        self.send_account_package_button = ttk.Button(buttons, text="发送账号登录包…", command=self.send_viewer_account_package, state=tk.DISABLED)
         self.send_folder_button = ttk.Button(buttons, text="发送文件夹", command=self.send_viewer_folder, state=tk.DISABLED)
 
         text_frame = ttk.Frame(tab)
@@ -7124,6 +7191,7 @@ class RemoteDeskLinuxApp:
             self.disconnect_button,
             self.send_file_button,
             self.send_folder_button,
+            self.send_account_package_button,
         )
 
         self._wrap_action_buttons(buttons, viewer_actions)
@@ -7802,6 +7870,9 @@ class RemoteDeskLinuxApp:
                 name="RemoteDeskUpscaleSwitch", daemon=True).start()
 
         upscale_button.configure(command=toggle_upscaling)
+        self.viewer_window_account_button = ttk.Button(controls, text="发送账号登录包…",
+            command=self.send_viewer_account_package, style="Viewer.TButton",
+            state=tk.NORMAL if self._viewer_has_capability(self.viewer, CAPABILITY_FILE_RECEIVE) else tk.DISABLED)
         viewer_buttons = (
             ttk.Button(
                 controls,
@@ -7812,6 +7883,7 @@ class RemoteDeskLinuxApp:
             viewer_window_send_file_button,
             viewer_window_send_folder_button,
             upscale_button,
+            self.viewer_window_account_button,
             ttk.Button(
                 controls,
                 text="断开",
@@ -7826,7 +7898,7 @@ class RemoteDeskLinuxApp:
             if self.viewer is not None:
                 self._release_pressed_viewer_inputs(flush=True, background_flush=True)
             actions_menu.delete(0, tk.END)
-            for index, button in enumerate((*clipboard_buttons, *viewer_buttons[1:4])):
+            for index, button in enumerate((*clipboard_buttons, *viewer_buttons[1:-1])):
                 if index == len(clipboard_buttons):
                     actions_menu.add_separator()
                 actions_menu.add_command(
@@ -8158,6 +8230,8 @@ class RemoteDeskLinuxApp:
         for attribute in (
             "send_file_button",
             "send_folder_button",
+            "send_account_package_button",
+            "viewer_window_account_button",
             "viewer_window_send_file_button",
             "viewer_window_send_folder_button",
         ):
@@ -8228,6 +8302,7 @@ class RemoteDeskLinuxApp:
         title: str,
         action_text: str,
         queued_status: str,
+        *, account_package: bool = False,
     ) -> bool:
         if getattr(self, "viewer_file_preview_active", False):
             self._set_viewer_status("正在读取上一批传输项，请稍候。")
@@ -8263,6 +8338,7 @@ class RemoteDeskLinuxApp:
                 cancel_event,
             ),
             name=VIEWER_FILE_PREVIEW_WORKER_NAME,
+            kwargs={"account_package": True} if account_package else {},
             daemon=True,
         )
         worker.start()
@@ -8279,16 +8355,23 @@ class RemoteDeskLinuxApp:
         generation: int,
         token: int,
         cancel_event: threading.Event,
+        *, account_package: bool = False,
     ) -> None:
         normalized_paths: list[str] = []
         items: list[FileTransferPreviewItem] = []
         note = ""
         error = ""
+        snapshot = None
         try:
-            normalized_paths, items, note = create_file_transfer_preview(
-                paths,
-                cancel_event=cancel_event,
-            )
+            if account_package:
+                if len(paths) != 1:
+                    raise ValueError("请选择一个账号登录包。")
+                path = Path(paths[0])
+                snapshot = read_account_package(path)
+                normalized_paths = [str(path)]
+                items = [FileTransferPreviewItem("加密账号登录包", str(path), sanitize_file_name(path.name), len(snapshot), "")]
+            else:
+                normalized_paths, items, note = create_file_transfer_preview(paths, cancel_event=cancel_event)
             if items:
                 directory, location_note = ViewerConnection.get_file_receive_location(viewer, cancel_event)
                 items = [replace(item, destination_path=format_remote_receive_destination(item.transfer_name, directory)) for item in items]
@@ -8314,6 +8397,7 @@ class RemoteDeskLinuxApp:
                 action_text,
                 queued_status,
                 error,
+                snapshot,
             ),
         )
 
@@ -8366,7 +8450,8 @@ class RemoteDeskLinuxApp:
             if not confirmed:
                 self._set_viewer_status("已取消文件传输。")
                 return
-            if result.viewer.send_files(list(result.normalized_paths)):
+            send_options = {"account_package": result.account_package} if result.account_package is not None else {}
+            if result.viewer.send_files(list(result.normalized_paths), **send_options):
                 self._set_viewer_status(result.queued_status)
             else:
                 self._set_viewer_status("文件发送未开始。")
@@ -8841,6 +8926,17 @@ class RemoteDeskLinuxApp:
             "即将发送以下文件到远端。",
             f"已加入发送队列：{len(paths)} 个文件。",
         )
+
+    def send_viewer_account_package(self) -> None:
+        viewer, generation = self.viewer, self.viewer_generation
+        if viewer is None or getattr(self, "viewer_file_preview_active", False):
+            return
+        path = filedialog.askopenfilename(parent=self.viewer_window or self.root,
+            title="选择 API 切换器设置迁移密码后导出的单账号登录包",
+            filetypes=[("API 切换器账号登录包", "*.asxaccount"), ("所有文件", "*")])
+        if path and viewer is self.viewer and generation == self.viewer_generation:
+            self._begin_viewer_file_transfer_preview([path], "确认发送账号登录包", ACCOUNT_IMPORT_HINT,
+                "登录包已加入发送队列。", account_package=True)
 
     def send_viewer_folder(self) -> None:
         viewer = self.viewer

@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 import re
 import subprocess
-import tempfile
 import time
 import xml.etree.ElementTree as ET
 
@@ -91,13 +90,9 @@ def main():
     try:
         adb("shell", "am", "force-stop", PACKAGE)
         adb("shell", "run-as", PACKAGE, "rm", "-f", "files/viewer-state.json")
-        with tempfile.TemporaryDirectory(prefix="remotedesk-owned-endpoint-") as directory:
-            private = Path(directory) / "endpoint.json"
-            private.write_text(json.dumps({"host": "10.0.2.2", "port": endpoint["port"],
-                "password": config["password"]}), encoding="utf-8")
-            adb("push", private, "/data/local/tmp/remotedesk-r3-owned-endpoint.json")
-            adb("shell", "run-as", PACKAGE, "cp", "/data/local/tmp/remotedesk-r3-owned-endpoint.json", "files/interop-endpoint.json")
-            adb("shell", "rm", "-f", "/data/local/tmp/remotedesk-r3-owned-endpoint.json")
+        private = json.dumps({"host": "10.0.2.2", "port": endpoint["port"], "password": config["password"]}).encode()
+        subprocess.run(prefix + ["shell", "-T", "run-as " + PACKAGE + " sh -c 'umask 077; mkdir -p files && cat > files/interop-endpoint.json'"],
+            input=private, check=True, capture_output=True, timeout=30)
         adb("shell", "am", "start", "-W", "-n", PACKAGE + "/com.remotedesk.agent.ViewerProbeLauncher")
         wait(lambda: state().get("frame", [0, 0])[0] == target()["screenWidth"], 30)
         wait(lambda: state().get("presentedFrames", 0) >= 3)
@@ -109,9 +104,10 @@ def main():
         check("Android touch reaches the isolated Linux test button", True)
         remote_tap(before["editor"])
         action("keyboard")
-        action("send_text", "--es", "text", "-android-r3")
-        wait(lambda: "-android-r3" in target()["text"])
-        check("Android IME send reaches the isolated Linux editor", True)
+        suffix = "-android-" + str(time.monotonic_ns())
+        action("send_text", "--es", "text", suffix)
+        wait(lambda: "中文测试😀" + suffix in target()["text"])
+        check("Current Android IME commit reaches Linux with Chinese and emoji intact", True)
         action("pause_input")
         wait(lambda: state().get("localInputPaused", False))
         clicks = target()["clicks"]
@@ -154,7 +150,6 @@ def main():
         save()
         adb("shell", "am", "force-stop", PACKAGE)
         adb("shell", "run-as", PACKAGE, "rm", "-f", "files/interop-endpoint.json")
-        adb("shell", "rm", "-f", "/data/local/tmp/remotedesk-r3-owned-endpoint.json")
 
 
 if __name__ == "__main__":

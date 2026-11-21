@@ -169,6 +169,8 @@ internal static class RemoteControlNoticeProbe
             previousPrimary.Dispose();
             SendMessage(main.Handle, 0x007E, 0, 0); // Display topology notification, not a real settings change.
             Wait(() => manager.Notices[primary.DeviceName] is { IsDisposed: false, Visible: true });
+            // On a one-monitor workstation the selected notice was the primary we just replaced.
+            notice = manager.Notices[secondary.DeviceName];
             Check("hidden launcher refreshes every notice on display-change notification",
                 manager.Notices.Count == monitors.Length && !ReferenceEquals(manager.Notices[primary.DeviceName], previousPrimary));
             displayedNotices = manager.Notices.Values.ToArray();

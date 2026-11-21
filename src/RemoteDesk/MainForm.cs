@@ -93,6 +93,7 @@ public sealed partial class MainForm : Form
     private Button _sendClipboardButton = null!;
     private Button _readClipboardButton = null!;
     private Button _sendFileButton = null!;
+    private Button _sendAccountPackageButton = null!;
     private Button _pasteFilesButton = null!;
     private Button _pullRemoteFilesButton = null!;
     private Button _openReceivedFilesButton = null!;
@@ -1180,6 +1181,9 @@ public sealed partial class MainForm : Form
         _readClipboardButton.Enabled = false;
         _sendFileButton = CreateSecondaryButton("发送文件");
         _sendFileButton.Enabled = false;
+        _sendAccountPackageButton = CreateSecondaryButton(AccountLoginPackageUi.Action);
+        _sendAccountPackageButton.Enabled = false;
+        _sendAccountPackageButton.Click += async (_, _) => await AccountLoginPackageUi.SendAsync(this, _viewerClient, ShowTransferTasks);
         _pasteFilesButton = CreateSecondaryButton("粘贴文件");
         _pasteFilesButton.Enabled = false;
         _pullRemoteFilesButton = CreateSecondaryButton(RemoteFilePullUi.DefaultButtonText);
@@ -1227,6 +1231,7 @@ public sealed partial class MainForm : Form
         toolbar.Controls.Add(_sendClipboardButton);
         toolbar.Controls.Add(_readClipboardButton);
         toolbar.Controls.Add(_sendFileButton);
+        toolbar.Controls.Add(_sendAccountPackageButton);
         toolbar.Controls.Add(_pasteFilesButton);
         toolbar.Controls.Add(_pullRemoteFilesButton);
         toolbar.Controls.Add(_openReceivedFilesButton);
@@ -8257,6 +8262,7 @@ public sealed partial class MainForm : Form
         _viewerInputPauseButton.Text = _viewerClient.IsLocalInputPaused ? "仅观看：开" : "仅观看：关";
         _readClipboardButton.Enabled = connected && capabilities.HasFlag(RemoteDeviceCapabilities.ClipboardText);
         _sendFileButton.Enabled = connected && capabilities.HasFlag(RemoteDeviceCapabilities.FileReceive);
+        _sendAccountPackageButton.Enabled = _sendFileButton.Enabled;
         _pasteFilesButton.Enabled = !_pastingClipboardFilesFromMain &&
             connected &&
             capabilities.HasFlag(RemoteDeviceCapabilities.FileReceive);
@@ -8302,6 +8308,8 @@ public sealed partial class MainForm : Form
             connected && capabilities.HasFlag(RemoteDeviceCapabilities.FileReceive)
                 ? $"选择本机文件发送到远端接收目录（一次最多 {MaxClipboardFilePasteCount} 项）；传输前确认清单，传输任务中可查看进度和取消。{checksumSuffix}"
                 : disconnected);
+        SetToolTip(_sendAccountPackageButton, connected && capabilities.HasFlag(RemoteDeviceCapabilities.FileReceive)
+            ? "发送 API 切换器导出的 Codex 或 Claude Code 加密账号登录包。" : disconnected);
         SetToolTip(
             _pasteFilesButton,
             connected && capabilities.HasFlag(RemoteDeviceCapabilities.FileReceive)

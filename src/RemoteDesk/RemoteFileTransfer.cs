@@ -9,7 +9,10 @@ internal enum RemoteFilePasteItemKind
     Directory
 }
 
-internal sealed record RemoteFilePasteItem(string Path, RemoteFilePasteItemKind Kind);
+internal sealed record RemoteFilePasteItem(string Path, RemoteFilePasteItemKind Kind)
+{
+    internal AccountLoginPackage? AccountPackage { get; init; }
+}
 
 internal sealed record RemoteFilePastePlan(
     IReadOnlyList<string> Files,
@@ -33,7 +36,7 @@ internal readonly record struct RemoteFilePasteResult(
     IReadOnlyList<RemoteFileItemResult>? Results = null,
     bool Cancelled = false);
 
-internal sealed record RemoteFileItemResult(string Name, bool Success, string Details);
+internal sealed record RemoteFileItemResult(string Name, bool Success, string Details, bool SaveConfirmed = false);
 
 internal readonly record struct RemoteFileDropPasteResult(
     RemoteFilePasteResult TransferResult,

@@ -220,7 +220,7 @@ internal sealed partial class RemoteViewerClient
         try
         {
             if (plan.TransferItems.Any(item => item.Kind == RemoteFilePasteItemKind.Directory)) return null;
-            return plan.TransferItems.Sum(item => new FileInfo(item.Path).Length);
+            return plan.TransferItems.Sum(item => item.AccountPackage?.Length ?? new FileInfo(item.Path).Length);
         }
         catch (Exception ex) when (RemoteFileTransfer.IsRecoverableTransferException(ex)) { return null; }
     }

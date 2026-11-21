@@ -2174,10 +2174,10 @@ internal sealed partial class RemoteViewerClient : IDisposable
             try
             {
                 if (!IsCurrentConnection(ownerConnection)) throw new IOException("连接已断开或切换，未开始此项传输。");
-                var (archivedDirectory, savedMessage) = await SendTransferItemToRemoteCoreAsync(
+                var (archivedDirectory, savedMessage, saveConfirmed) = await SendTransferItemToRemoteCoreAsync(
                     item,
                     ownerConnection, task);
-                results.Add(new(RemoteFileTransfer.GetTransferDisplayName(item.Path), true, savedMessage));
+                results.Add(new(RemoteFileTransfer.GetTransferDisplayName(item.Path), true, savedMessage, saveConfirmed));
                 sentFiles++;
                 UpdateFileTransferTask(task, value => value with
                 {
@@ -2226,7 +2226,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
             Cancelled: task?.Cancellation.IsCancellationRequested == true);
     }
 
-    private async Task<(bool Archived, string Message)> SendTransferItemToRemoteCoreAsync(
+    private async Task<(bool Archived, string Message, bool SaveConfirmed)> SendTransferItemToRemoteCoreAsync(
         RemoteFilePasteItem item,
         CancellationTokenSource ownerConnection,
         FileTransferTaskContext? task = null)
@@ -2274,11 +2274,11 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 sourcePath = temporaryArchivePath;
             }
 
-            string savedMessage = await SendFileToRemoteCoreAsync(
+            var (message, saveConfirmed) = await SendFileToRemoteCoreAsync(
                 sourcePath,
                 transferFileName,
-                ownerConnection: ownerConnection, task: task);
-            return (archivedDirectory, savedMessage);
+                ownerConnection: ownerConnection, task: task, accountPackage: item.AccountPackage);
+            return (archivedDirectory, message, saveConfirmed);
         }
         finally
         {
@@ -2289,17 +2289,18 @@ internal sealed partial class RemoteViewerClient : IDisposable
         }
     }
 
-    private async Task<string> SendFileToRemoteCoreAsync(
+    private async Task<(string Message, bool SaveConfirmed)> SendFileToRemoteCoreAsync(
         string path,
         string? transferFileName = null,
         bool remoteUpdate = false,
         CancellationTokenSource? ownerConnection = null,
-        FileTransferTaskContext? task = null)
+        FileTransferTaskContext? task = null,
+        AccountLoginPackage? accountPackage = null)
     {
         ownerConnection ??= RequireActiveFileTransferConnection();
         CancellationToken cancellationToken = task?.OperationToken ?? ownerConnection.Token;
         cancellationToken.ThrowIfCancellationRequested();
-        if (!File.Exists(path))
+        if (accountPackage is null && !File.Exists(path))
         {
             throw new FileNotFoundException("文件不存在。", path);
         }
@@ -2312,15 +2313,16 @@ internal sealed partial class RemoteViewerClient : IDisposable
             RemoteUpdater.ValidateRemoteUpdatePackageName(fileName);
         }
 
-        await using var input = new FileStream(
+        await using Stream input = accountPackage?.OpenRead() ?? new FileStream(
             path,
             FileMode.Open,
             FileAccess.Read,
             FileShare.Read,
             RemoteMessageCodec.RecommendedFileTransferChunkBytes,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
-        RemoteFileTransferSourceSnapshot sourceSnapshot = RemoteFileTransfer.CaptureSourceSnapshot(path, input);
-        long fileLength = sourceSnapshot.Length;
+        RemoteFileTransferSourceSnapshot? sourceSnapshot = input is FileStream file
+            ? RemoteFileTransfer.CaptureSourceSnapshot(path, file) : null;
+        long fileLength = sourceSnapshot?.Length ?? input.Length;
         if (fileLength > RemoteMessageCodec.MaxFileTransferBytes)
         {
             throw new InvalidOperationException($"文件超过传输上限：{RemoteFileTransfer.FormatBytes(RemoteMessageCodec.MaxFileTransferBytes)}。");
@@ -2414,7 +2416,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 ArrayPool<byte>.Shared.Return(buffer);
             }
 
-            RemoteFileTransfer.EnsureSourceUnchanged(path, sourceSnapshot);
+            if (sourceSnapshot is { } original) RemoteFileTransfer.EnsureSourceUnchanged(path, original);
             cancellationToken.ThrowIfCancellationRequested();
 
             if (checksum is not null)
@@ -2465,7 +2467,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 {
                     Status = result.StatusMessage ?? $"远端已确认保存：{fileName}，未返回实际位置。"
                 });
-                return result.StatusMessage ?? $"远端已确认保存 {fileName}，但未返回实际路径。";
+                return (result.StatusMessage ?? $"远端已确认保存 {fileName}，但未返回实际路径。", true);
             }
             // A completed local TCP write may still be buffered in the relay.
             // Legacy receivers and remote updates do not provide a correlated
@@ -2473,7 +2475,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
             pendingFileDelivery = true;
             string unconfirmed = $"已发送 {fileName}；旧版远端未返回保存确认或实际路径，请到被控端检查。";
             UpdateFileTransferTask(task, value => value with { Status = unconfirmed });
-            return unconfirmed;
+            return (unconfirmed, false);
         }
         catch (Exception ex) when (transferStarted &&
             (RemoteFileTransfer.IsRecoverableTransferException(ex) || ex is OperationCanceledException))

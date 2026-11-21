@@ -517,6 +517,43 @@ class SessionControlTests(unittest.TestCase):
             self.assertEqual(b"owned", actual.read_bytes())
             self.assertIn(str(actual), task.detail)
 
+    def test_next_upload_cannot_inherit_the_task_at_slot_handoff(self):
+        viewer = self.viewer()
+        previous = viewer.transfer_tasks.begin_upload(["first"])
+        slot = viewer.file_transfer_lock
+        slot.acquire()
+        viewer.file_transfer_lock = mock.Mock(wraps=slot)
+        observed = []
+
+        def handoff():
+            slot.release()
+            observed.append(previous.terminal)
+            self.assertTrue(viewer.send_files(["second"]))
+
+        viewer.file_transfer_lock.release.side_effect = handoff
+        with mock.patch.object(threading.Thread, "start"), tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "first"
+            source.write_text("fixture")
+            with mock.patch.object(viewer, "_send_file_to_remote", return_value="saved fixture"):
+                viewer._send_files_locked([str(source)])
+        self.assertEqual([True], observed)
+        self.assertIsNot(previous, viewer.transfer_tasks.upload)
+        self.assertFalse(viewer.transfer_tasks.upload.terminal)
+        slot.release()
+
+    def test_worker_start_failure_releases_upload_slot_for_retry(self):
+        viewer = self.viewer()
+        with mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("no worker available")):
+            self.assertFalse(viewer.send_files(["first"]))
+        previous = viewer.transfer_tasks.upload
+        self.assertTrue(previous.terminal)
+        self.assertEqual("未完成", previous.phase)
+        self.assertFalse(viewer.file_transfer_lock.locked())
+        with mock.patch.object(threading.Thread, "start"):
+            self.assertTrue(viewer.send_files(["retry"]))
+        self.assertIsNot(previous, viewer.transfer_tasks.upload)
+        viewer.file_transfer_lock.release()
+
     def test_upload_and_return_are_mutually_exclusive_in_both_directions(self):
         viewer = self.viewer()
         with tempfile.TemporaryDirectory() as folder:

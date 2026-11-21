@@ -71,8 +71,10 @@ internal static class SessionLifecycleProbe
             await Until(() => Target().GetProperty("clicks").GetInt32() == beforeClicks + 1);
             await Click("editor");
             string marker = "audit-" + Guid.NewGuid().ToString("N")[..8];
-            Check("Text reaches only the owned Xvfb editor", client.SendTextInput(marker).SentCodePoints == marker.Length);
+            if (client.SendTextInput(marker).SentCodePoints != marker.Length)
+                throw new InvalidOperationException("Could not queue the test text");
             await Until(() => Target().GetProperty("text").GetString()!.Contains(marker));
+            Check("Text reaches only the owned Xvfb editor", true);
             var baseline = Target();
             client.SetLocalInputPaused(true);
             int beforeFrames = frames;

@@ -93,6 +93,7 @@ internal sealed partial class RemoteViewerWindow : Form
     private readonly Panel _statusFooterPanel;
     private readonly StatusBarControl _statusBar;
     private readonly FlowLayoutPanel _fileTransferActionsPanel;
+    private readonly Button _sendAccountPackageButton;
     private readonly Button _pullRemoteFilesButton;
     private readonly Button _openReceivedFilesButton;
     private readonly Button _remoteInputMethodButton;
@@ -342,6 +343,9 @@ internal sealed partial class RemoteViewerWindow : Form
         _transferTasksButton = CreateStatusActionButton("传输任务");
         _transferTasksButton.AccessibleName = "查看文件传输进度和取消任务";
         _transferTasksButton.Click += (_, _) => ShowTransferTasks();
+        _sendAccountPackageButton = CreateStatusActionButton(AccountLoginPackageUi.Action);
+        _sendAccountPackageButton.Enabled = filePasteEnabled;
+        _sendAccountPackageButton.Click += async (_, _) => await SendAccountPackageAsync();
         _remoteInputMethodButton =
             CreateStatusActionButton("远端输入法");
         _switchCaptureTargetButton =
@@ -373,6 +377,7 @@ internal sealed partial class RemoteViewerWindow : Form
         _fileTransferActionsPanel.Controls.Add(_inputPauseButton);
         _fileTransferActionsPanel.Controls.Add(_privacyScreenButton);
         _fileTransferActionsPanel.Controls.Add(_transferTasksButton);
+        _fileTransferActionsPanel.Controls.Add(_sendAccountPackageButton);
         _fileTransferActionsPanel.Controls.Add(_pullRemoteFilesButton);
         _fileTransferActionsPanel.Controls.Add(_openReceivedFilesButton);
         _fileTransferActionsPanel.Controls.Add(
@@ -1874,7 +1879,10 @@ internal sealed partial class RemoteViewerWindow : Form
     public void SetFilePasteEnabled(bool enabled)
     {
         _filePasteEnabled = enabled;
+        _sendAccountPackageButton.Enabled = enabled;
     }
+
+    private Task SendAccountPackageAsync() => AccountLoginPackageUi.SendAsync(this, _client, ShowTransferTasks);
 
     public void SetFileDropPasteEnabled(bool enabled)
     {

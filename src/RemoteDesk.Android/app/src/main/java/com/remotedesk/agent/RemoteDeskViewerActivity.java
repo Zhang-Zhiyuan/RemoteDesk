@@ -127,8 +127,8 @@ public final class RemoteDeskViewerActivity extends Activity {
     private volatile RemoteDeskTransport.SecureSession session;
     private volatile ViewerConnectionOwner connectionOwner;
     private static final int PICK_TRANSFER_FILE = 701;
+    private static final int PICK_ACCOUNT_PACKAGE = 702;
     private ViewerConnectionOwner filePickerOwner;
-    private android.app.AlertDialog fileProgressDialog;
     private volatile boolean localInputPaused;
     private volatile Socket pendingConnectionSocket;
     private volatile AndroidH264SurfaceDecoder h264Decoder;
@@ -469,7 +469,7 @@ public final class RemoteDeskViewerActivity extends Activity {
     private void showViewerMenu() {
         releaseViewerGesture();
         String[] choices = { "画面缩放（" + Math.round(viewport.zoom * 100) + "%）", "画质：" +
-            (preferJpegClarity ? "文字清晰 JPEG" : "流畅 H.264 自动"), "全屏显示", "屏幕方向", "手势帮助", "连接诊断", "文字剪贴板", "发送多个文件…", localInputPaused ? "恢复控制（关闭仅观看）" : "仅观看（暂停本地输入）", "隐私屏…", "断开连接…" };
+            (preferJpegClarity ? "文字清晰 JPEG" : "流畅 H.264 自动"), "全屏显示", "屏幕方向", "手势帮助", "连接诊断", "文字剪贴板", "发送多个文件…", "发送账号登录包…", localInputPaused ? "恢复控制（关闭仅观看）" : "仅观看（暂停本地输入）", "隐私屏…", "断开连接…" };
         new android.app.AlertDialog.Builder(this).setTitle("远控工具")
             .setItems(choices, (dialog, which) -> {
                 if (which == 0) showZoomOptions();
@@ -483,9 +483,10 @@ public final class RemoteDeskViewerActivity extends Activity {
                     .setPositiveButton("知道了", null).show();
                 else if (which == 5) showDiagnostics();
                 else if (which == 6) showClipboardMenu();
-                else if (which == 7) pickTransferFile();
-                else if (which == 8) setLocalInputPaused(!localInputPaused);
-                else if (which == 9) togglePrivacyScreen();
+                else if (which == 7) pickTransferFile(false);
+                else if (which == 8) pickTransferFile(true);
+                else if (which == 9) setLocalInputPaused(!localInputPaused);
+                else if (which == 10) togglePrivacyScreen();
                 else confirmDisconnect();
             }).show();
     }
@@ -562,31 +563,33 @@ public final class RemoteDeskViewerActivity extends Activity {
         }
     }
 
-    private void pickTransferFile() {
+    private void pickTransferFile(boolean accountPackage) {
         ViewerConnectionOwner owner = connectionOwner;
         if (owner == null || !isCurrentConnectionOwner(owner) ||
             (owner.remoteCapabilities.get() & RemoteDeskProtocol.CAPABILITY_FILE_RECEIVE) == 0) {
             toast("当前未连接，或远端不支持接收文件"); return;
         }
-        if (!owner.fileBusy.compareAndSet(false, true)) { toast("已有文件正在准备或传输"); return; }
+        if (filePickerOwner != null || !owner.fileBusy.compareAndSet(false, true)) { toast("已有文件正在选择或传输"); return; }
         filePickerOwner = owner;
         try {
             android.content.Intent intent = new android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT);
             intent.addCategory(android.content.Intent.CATEGORY_OPENABLE);
             intent.setType("*/*");
-            intent.putExtra(android.content.Intent.EXTRA_ALLOW_MULTIPLE, true);
+            intent.putExtra(android.content.Intent.EXTRA_ALLOW_MULTIPLE, !accountPackage);
             intent.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            startActivityForResult(intent, PICK_TRANSFER_FILE);
+            if (accountPackage) intent = android.content.Intent.createChooser(intent, "选择 API 切换器导出的加密 .asxaccount 登录包");
+            startActivityForResult(intent, accountPackage ? PICK_ACCOUNT_PACKAGE : PICK_TRANSFER_FILE);
         } catch (RuntimeException ex) {
             owner.fileBusy.set(false); filePickerOwner = null;
-            showFileResult(owner, false, "无法打开系统文件选择器：" + MainActivity.formatExceptionMessage(ex));
+            showFileError(owner, "无法打开系统文件选择器：" + MainActivity.formatExceptionMessage(ex));
         }
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != PICK_TRANSFER_FILE) return;
+        boolean accountPackage = requestCode == PICK_ACCOUNT_PACKAGE;
+        if (!accountPackage && requestCode != PICK_TRANSFER_FILE) return;
         ViewerConnectionOwner owner = filePickerOwner;
         filePickerOwner = null;
         if (owner == null) return;
@@ -598,9 +601,11 @@ public final class RemoteDeskViewerActivity extends Activity {
             android.content.ClipData clip = data.getClipData();
             if (clip != null) for (int i = 0; i < clip.getItemCount(); i++) selected.add(clip.getItemAt(i).getUri());
             List<android.net.Uri> sources = AndroidFileUploadQueue.selection(selected, data.getData());
+            if (accountPackage && sources.size() != 1) throw new IOException("请选择一个账号登录包。");
             owner.fileExecutor.execute(() -> {
                 try {
                     List<AndroidFileUploadQueue.Entry<android.net.Uri>> entries = new java.util.ArrayList<>();
+                    byte[] snapshot = null;
                     for (android.net.Uri uri : sources) {
                         if (!isCurrentConnectionOwner(owner)) throw new IOException("连接已结束");
                         String name = null;
@@ -615,7 +620,12 @@ public final class RemoteDeskViewerActivity extends Activity {
                             }
                         }
                         String fileName = AndroidFileUploadQueue.fileName(name);
-                        if (size < 0) {
+                        if (accountPackage) {
+                            try (java.io.InputStream input = getContentResolver().openInputStream(uri)) {
+                                snapshot = AccountLoginPackage.read(fileName, input);
+                            }
+                            size = snapshot.length;
+                        } else if (size < 0) {
                             try (android.content.res.AssetFileDescriptor descriptor = getContentResolver().openAssetFileDescriptor(uri, "r")) {
                                 if (descriptor != null) size = descriptor.getLength();
                             }
@@ -627,19 +637,20 @@ public final class RemoteDeskViewerActivity extends Activity {
                         if (!sendControlMessageIfCurrent(owner, payload)) throw new IOException("连接已结束");
                     }, () -> isCurrentConnectionOwner(owner));
                     AndroidFileUploadQueue<android.net.Uri> batch = new AndroidFileUploadQueue<>(entries);
-                    runOnUiThread(() -> confirmFileUpload(owner, batch, location));
+                    final byte[] approvedBytes = snapshot;
+                    runOnUiThread(() -> confirmFileUpload(owner, batch, location, approvedBytes));
                 } catch (Exception ex) {
                     owner.fileBusy.set(false);
-                    showFileResult(owner, false, MainActivity.formatExceptionMessage(ex));
+                    showFileError(owner, MainActivity.formatExceptionMessage(ex));
                 }
             });
         } catch (Exception failure) {
             owner.fileBusy.set(false);
-            showFileResult(owner, false, MainActivity.formatExceptionMessage(failure));
+            showFileError(owner, MainActivity.formatExceptionMessage(failure));
         }
     }
 
-    private void confirmFileUpload(ViewerConnectionOwner owner, AndroidFileUploadQueue<android.net.Uri> batch, AndroidFileReceiveLocation.Location location) {
+    private void confirmFileUpload(ViewerConnectionOwner owner, AndroidFileUploadQueue<android.net.Uri> batch, AndroidFileReceiveLocation.Location location, byte[] accountPackage) {
         if (!isCurrentConnectionOwner(owner) || isFinishing() || isDestroyed()) { owner.fileBusy.set(false); return; }
         long total = 0;
         StringBuilder files = new StringBuilder();
@@ -648,24 +659,25 @@ public final class RemoteDeskViewerActivity extends Activity {
             files.append("\n\n").append(entry.name).append(" · ").append(android.text.format.Formatter.formatFileSize(this, entry.bytes))
                 .append("\n保存到：").append(location.file(entry.name));
         }
-        new android.app.AlertDialog.Builder(this).setTitle("确认发送 " + batch.entries.size() + " 个文件")
+        android.app.AlertDialog confirm = new android.app.AlertDialog.Builder(this).setTitle(accountPackage == null ? "确认发送 " + batch.entries.size() + " 个文件" : "确认发送账号登录包")
             .setMessage("共 " + batch.entries.size() + " 个文件 · " + android.text.format.Formatter.formatFileSize(this, total) +
                 "\n设备：" + owner.remoteMachineName + "\n连接：" + (relayOptions == null ? "IP 直连" : "公网中继") + files +
-                "\n\n重名自动改名，不覆盖原文件。\n" + location.note + "\n\n逐个发送并显示保存回执；旧版无回执需自行核实。仅保存文件，不会自动粘贴到远端应用。")
+                "\n\n" + (location.note.isEmpty() ? "重名文件将自动改名。" : location.note) + "\n\n" +
+                (accountPackage == null ? "逐个发送并显示保存回执；旧版无回执需自行核实。仅保存文件，不会自动粘贴到远端应用。" : AccountLoginPackage.IMPORT_HINT))
             .setNegativeButton("取消", (dialog, which) -> owner.fileBusy.set(false))
             .setOnCancelListener(dialog -> owner.fileBusy.set(false))
-            .setPositiveButton("发送", (dialog, which) -> startFileUpload(owner, batch)).show();
+            .setPositiveButton("发送", (dialog, which) -> startFileUpload(owner, batch, accountPackage)).create();
+        showFileDialog(owner, confirm);
     }
 
-    private void startFileUpload(ViewerConnectionOwner owner, AndroidFileUploadQueue<android.net.Uri> batch) {
+    private void startFileUpload(ViewerConnectionOwner owner, AndroidFileUploadQueue<android.net.Uri> batch, byte[] accountPackage) {
         if (!isCurrentConnectionOwner(owner)) { owner.fileBusy.set(false); toast("连接已切换，请重新选择文件"); return; }
         owner.fileBatch = batch;
         android.app.AlertDialog progress = new android.app.AlertDialog.Builder(this).setTitle("文件发送队列")
             .setMessage(batch.summary()).setCancelable(false)
             .setNeutralButton(localInputPaused ? "恢复控制" : "仅观看", null)
             .setNegativeButton("取消剩余", null).create();
-        fileProgressDialog = progress;
-        progress.show();
+        showFileDialog(owner, progress);
         progress.getButton(android.app.AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
             setLocalInputPaused(!localInputPaused);
             progress.getButton(android.app.AlertDialog.BUTTON_NEUTRAL).setText(localInputPaused ? "恢复控制" : "仅观看");
@@ -692,7 +704,8 @@ public final class RemoteDeskViewerActivity extends Activity {
                             if ((transferCapabilities & RemoteDeskProtocol.CAPABILITY_FILE_RECEIVE) == 0)
                                 throw new IOException("远端已停止接收文件");
                             // Lease only the actual sender/receipt wait, not the picker or confirmation.
-                            try (java.io.InputStream input = getContentResolver().openInputStream(entry.source)) {
+                            try (java.io.InputStream input = accountPackage == null ? getContentResolver().openInputStream(entry.source)
+                                    : new java.io.ByteArrayInputStream(accountPackage)) {
                                 if (input == null) throw new IOException("无法读取已选文件");
                                 uploadLease = owner.fileLiveness.begin();
                                 result = sender.send(input, entry.name, entry.bytes, transferCapabilities, sender.withCancellationFence(owner.writeLock, payload -> {
@@ -712,25 +725,39 @@ public final class RemoteDeskViewerActivity extends Activity {
                         runOnUiThread(() -> { if (progress.isShowing()) progress.setMessage(batch.summary()); });
                     }
                 } finally {
-                    owner.fileBusy.set(false); owner.fileSender = null;
+                    owner.fileSender = null; owner.fileBusy.set(false);
                 }
-                String message = batch.summary();
+                boolean savedPackage = accountPackage != null && batch.entries.get(0).state == AndroidFileUploadQueue.State.SAVED;
+                String message = savedPackage ? batch.summary() + "\n\n" + AccountLoginPackage.IMPORT_HINT : batch.summary();
                 runOnUiThread(() -> {
                     progress.dismiss();
-                    if (fileProgressDialog == progress) fileProgressDialog = null;
-                    showFileResult(owner, true, message);
+                    if (!isFinishing() && !isDestroyed() && isCurrentConnectionOwner(owner)) {
+                        updateStatus(owner, batch.statusLine());
+                        showFileMessage(owner, batch.resultTitle(), message);
+                    }
                 });
             });
         } catch (RuntimeException closed) { batch.cancel(); progress.dismiss(); owner.fileBusy.set(false); owner.fileSender = null; }
     }
 
-    private void showFileResult(ViewerConnectionOwner owner, boolean success, String message) {
+    private void showFileError(ViewerConnectionOwner owner, String message) {
         runOnUiThread(() -> {
             if (isFinishing() || isDestroyed() || !isCurrentConnectionOwner(owner)) return;
             updateStatus(owner, message);
-            new android.app.AlertDialog.Builder(this).setTitle(success ? "文件传输结果" : "文件未完成传输")
-                .setMessage(message).setPositiveButton("知道了", null).show();
+            showFileMessage(owner, "文件未完成传输", message);
         });
+    }
+
+    private void showFileMessage(ViewerConnectionOwner owner, String title, String message) {
+        showFileDialog(owner, new android.app.AlertDialog.Builder(this).setTitle(title)
+            .setMessage(message).setPositiveButton("知道了", null).create());
+    }
+
+    private void showFileDialog(ViewerConnectionOwner owner, android.app.AlertDialog dialog) {
+        if (owner.fileDialog != null) owner.fileDialog.dismiss();
+        owner.fileDialog = dialog;
+        dialog.setOnDismissListener(ignored -> { if (owner.fileDialog == dialog) owner.fileDialog = null; });
+        dialog.show();
     }
 
     private void showClipboardMenu() {
@@ -1130,7 +1157,6 @@ public final class RemoteDeskViewerActivity extends Activity {
     @Override
     protected void onDestroy() {
         privacyHandler.removeCallbacks(privacyPoll);
-        if (fileProgressDialog != null) { fileProgressDialog.dismiss(); fileProgressDialog = null; }
         if (localClipboard != null) localClipboard.removePrimaryClipChangedListener(clipboardChanged);
         clearFullscreenBackHandler();
         running.set(false);
@@ -2627,6 +2653,13 @@ public final class RemoteDeskViewerActivity extends Activity {
             return false;
         }
         closeQuietly(owner.socket);
+        runOnUiThread(() -> {
+            if (owner.fileDialog != null) owner.fileDialog.dismiss();
+            if (filePickerOwner == owner && !isFinishing() && !isDestroyed()) {
+                finishActivity(PICK_TRANSFER_FILE);
+                finishActivity(PICK_ACCOUNT_PACKAGE);
+            }
+        });
         return true;
     }
 
@@ -3011,6 +3044,7 @@ public final class RemoteDeskViewerActivity extends Activity {
         final AndroidViewerClipboard clipboard = new AndroidViewerClipboard();
         final ExecutorService clipboardExecutor = Executors.newSingleThreadExecutor();
         final ExecutorService fileExecutor = Executors.newSingleThreadExecutor();
+        android.app.AlertDialog fileDialog; // Only accessed on the UI thread for this connection.
         final AtomicBoolean fileBusy = new AtomicBoolean();
         volatile AndroidFileSender fileSender;
         volatile AndroidFileUploadQueue<android.net.Uri> fileBatch;

@@ -1,0 +1,16 @@
+{
+  "format": "api-switcher-account-login",
+  "version": 1,
+  "created_at": "2026-11-21T18:12:22.073718+00:00",
+  "kdf": {
+    "name": "PBKDF2HMAC-SHA256",
+    "iterations": 390000,
+    "salt": "VQ9VQoO05OsXoCSu0RRtqg=="
+  },
+  "cipher": {
+    "name": "AES-256-GCM",
+    "nonce": "C+SKTaeqfLO7m46C"
+  },
+  "compression": "zlib",
+  "payload": "Oq7pp/LvXBNHgstkS97CFor577PEZHREGn4ec8dme92JfnYNEUoh2Qz/doijccGVRIT6gabsLYDhSrjs7sjq2YxX6sBCU8tW+hRsCtSJu1MDTMZr"
+}

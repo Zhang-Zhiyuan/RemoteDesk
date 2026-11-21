@@ -90,7 +90,14 @@ final class AndroidFileUploadQueue<T> {
             : "正在取消当前文件和剩余队列…";
     }
 
-    synchronized String summary() {
+    synchronized String resultTitle() {
+        if (cancelled) return "文件任务已取消";
+        for (Entry<T> entry : entries) if (entry.state == State.FAILED) return "文件传输有失败项";
+        for (Entry<T> entry : entries) if (entry.state == State.SENT_UNCONFIRMED) return "已发送，请核实保存位置";
+        return "文件传输结果";
+    }
+
+    synchronized String statusLine() {
         int saved = 0, unconfirmed = 0, failed = 0, stopped = 0;
         for (Entry<T> entry : entries) {
             if (entry.state == State.SAVED) saved++;
@@ -102,6 +109,11 @@ final class AndroidFileUploadQueue<T> {
             .append(saved).append(" · 已发送待核实 ").append(unconfirmed);
         if (failed > 0) text.append(" · 失败 ").append(failed);
         if (stopped > 0) text.append(" · 取消 ").append(stopped);
+        return text.toString();
+    }
+
+    synchronized String summary() {
+        StringBuilder text = new StringBuilder(statusLine());
         if (cancelled && sender != null && !activeCancellationSupported)
             text.append("\n").append(cancellationStatus());
         for (int i = 0; i < entries.size(); i++) {
