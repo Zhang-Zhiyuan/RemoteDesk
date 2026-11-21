@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import queue
 import sys
@@ -17,6 +18,42 @@ FIXTURE = Path(__file__).parent / "data/account-login-v1.asxaccount"
 
 
 class AccountLoginPackageTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("REMOTEDESK_RUN_TK_TESTS") == "1", "requires owned Xvfb")
+    def test_account_action_remains_visible_in_wide_and_narrow_headers(self):
+        root = app.tk.Tk()
+        self.addCleanup(root.destroy)
+        ui = object.__new__(app.RemoteDeskLinuxApp)
+        ui.root = root
+        ui._build_header(root)
+        header, = root.winfo_children()
+        button = header.children["account_package"]
+        for width, row in ((1000, 0), (320, 2), (1000, 0)):
+            with self.subTest(width=width):
+                root.geometry(f"{width}x240")
+                root.update()
+                self.assertTrue(button.winfo_ismapped())
+                self.assertEqual(row, int(button.grid_info()["row"]))
+                self.assertGreaterEqual(button.winfo_x(), 0)
+                self.assertLessEqual(button.winfo_x() + button.winfo_width(), header.winfo_width())
+                self.assertLessEqual(button.winfo_y() + button.winfo_height(), header.winfo_height())
+
+    def test_header_explains_export_before_connecting_and_limits_the_picker_to_a_ready_session(self):
+        ui = object.__new__(app.RemoteDeskLinuxApp)
+        ui.root = mock.Mock()
+        ui.viewer_window = None
+        ui.viewer_generation = 1
+        ui.viewer_file_preview_active = False
+        with mock.patch.object(app.messagebox, "showinfo") as info, mock.patch.object(app.filedialog, "askopenfilename", return_value="") as pick:
+            ui.viewer = None
+            ui.send_viewer_account_package(parent=ui.root)
+            info.assert_called_once_with(app.ACCOUNT_PACKAGE_TITLE, app.ACCOUNT_PACKAGE_GUIDE, parent=ui.root)
+            ui.viewer = mock.Mock(remote_capabilities=0)
+            ui.send_viewer_account_package(parent=ui.root)
+            pick.assert_not_called()
+            ui.viewer.remote_capabilities = app.CAPABILITY_FILE_RECEIVE
+            ui.send_viewer_account_package(parent=ui.root)
+            pick.assert_called_once()
+
     def test_plain_profiles_and_damaged_exports_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "示例.asxaccount"

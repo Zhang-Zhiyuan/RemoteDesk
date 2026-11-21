@@ -256,6 +256,13 @@ public final class MainActivity extends Activity {
             AndroidUiTheme.createSectionSubtitle(
                 this,
                 "点选发现的设备，或填写 IP / 主机名；端口可自动探测。"));
+        Button accountPackage = new Button(this);
+        accountPackage.setText(R.string.account_package_title);
+        AndroidUiTheme.styleButton(this, accountPackage, AndroidUiTheme.ButtonRole.SECONDARY);
+        accountPackage.setOnClickListener(view -> new AlertDialog.Builder(this)
+            .setTitle(R.string.account_package_title).setMessage(R.string.account_package_guide)
+            .setPositiveButton("知道了", null).show());
+        addColumnView(connectionColumn, accountPackage);
         lanPanel = new AndroidLanDiscoveryPanel(this, () -> viewerAddressEdit.getText().toString(), this::openDiscoveredViewer);
         addColumnView(connectionColumn, lanPanel);
         Button addDevice = new Button(this); addDevice.setText("新增设备");

@@ -3176,6 +3176,12 @@ class ViewerFilePreviewResult:
 
 
 ACCOUNT_PACKAGE_LIMIT = 2 * 1024 * 1024
+ACCOUNT_PACKAGE_TITLE = "Codex / Claude 登录包"
+ACCOUNT_PACKAGE_GUIDE = (
+    "在 Windows 的 API 切换器里，打开 Codex 或 Claude Code 的“官方账号”，选择“导出当前登录”，"
+    "设置迁移密码，保存 .asxaccount 文件。\n\n"
+    "通过 IP 直连或公网中继连接接收设备，再点这个按钮选择文件。发送前可以核对设备和保存位置。"
+)
 ACCOUNT_IMPORT_HINT = "在 Windows 的 API 切换器中，打开对应客户端的“官方账号”，选择“导入登录包”，输入迁移密码后按需切换账号。"
 
 
@@ -6808,32 +6814,27 @@ class RemoteDeskLinuxApp:
             font=("DejaVu Sans", 9),
             anchor=tk.W,
         )
-        badge = tk.Label(
-            header,
-            text="直连 / 私有中继",
-            bg="#172554",
-            fg="#bfdbfe",
-            font=("DejaVu Sans", 9, "bold"),
-            padx=10,
-            pady=6,
+        account = ttk.Button(
+            header, name="account_package", text=ACCOUNT_PACKAGE_TITLE + "…",
+            command=lambda: self.send_viewer_account_package(parent=self.root),
         )
         title.grid(row=0, column=1, sticky=tk.W)
         subtitle.grid(row=1, column=1, sticky=tk.W, pady=(2, 0))
-        badge.grid(row=0, column=2, rowspan=2, sticky=tk.E, padx=(16, 0))
         header.columnconfigure(1, weight=1)
 
-        compact_state = {"value": False}
+        compact_state = None
 
         def update_header_layout(event: tk.Event[Any] | None = None) -> None:
+            nonlocal compact_state
             available_width = int(getattr(event, "width", header.winfo_width()))
-            compact = available_width < brand.winfo_reqwidth() + title.winfo_reqwidth() + badge.winfo_reqwidth() + 90
-            if compact == compact_state["value"] and available_width > 1:
+            compact = available_width < brand.winfo_reqwidth() + max(title.winfo_reqwidth(), subtitle.winfo_reqwidth()) + account.winfo_reqwidth() + 64
+            if compact == compact_state:
                 return
-            compact_state["value"] = compact
+            compact_state = compact
             if compact:
-                badge.grid_remove()
+                account.grid(row=2, column=0, columnspan=3, rowspan=1, sticky=tk.W, padx=0, pady=(6, 0))
             else:
-                badge.grid()
+                account.grid(row=0, column=2, columnspan=1, rowspan=2, sticky=tk.E, padx=(16, 0), pady=0)
 
         header.bind("<Configure>", update_header_layout, add="+")
         header.after_idle(update_header_layout)
@@ -7174,7 +7175,6 @@ class RemoteDeskLinuxApp:
             style="Danger.TButton",
         )
         self.send_file_button = ttk.Button(buttons, text="发送文件", command=self.send_viewer_files, state=tk.DISABLED)
-        self.send_account_package_button = ttk.Button(buttons, text="发送账号登录包…", command=self.send_viewer_account_package, state=tk.DISABLED)
         self.send_folder_button = ttk.Button(buttons, text="发送文件夹", command=self.send_viewer_folder, state=tk.DISABLED)
 
         text_frame = ttk.Frame(tab)
@@ -7191,7 +7191,6 @@ class RemoteDeskLinuxApp:
             self.disconnect_button,
             self.send_file_button,
             self.send_folder_button,
-            self.send_account_package_button,
         )
 
         self._wrap_action_buttons(buttons, viewer_actions)
@@ -7870,7 +7869,7 @@ class RemoteDeskLinuxApp:
                 name="RemoteDeskUpscaleSwitch", daemon=True).start()
 
         upscale_button.configure(command=toggle_upscaling)
-        self.viewer_window_account_button = ttk.Button(controls, text="发送账号登录包…",
+        self.viewer_window_account_button = ttk.Button(controls, text=ACCOUNT_PACKAGE_TITLE + "…",
             command=self.send_viewer_account_package, style="Viewer.TButton",
             state=tk.NORMAL if self._viewer_has_capability(self.viewer, CAPABILITY_FILE_RECEIVE) else tk.DISABLED)
         viewer_buttons = (
@@ -8230,7 +8229,6 @@ class RemoteDeskLinuxApp:
         for attribute in (
             "send_file_button",
             "send_folder_button",
-            "send_account_package_button",
             "viewer_window_account_button",
             "viewer_window_send_file_button",
             "viewer_window_send_folder_button",
@@ -8927,11 +8925,19 @@ class RemoteDeskLinuxApp:
             f"已加入发送队列：{len(paths)} 个文件。",
         )
 
-    def send_viewer_account_package(self) -> None:
+    def send_viewer_account_package(self, *, parent=None) -> None:
         viewer, generation = self.viewer, self.viewer_generation
-        if viewer is None or getattr(self, "viewer_file_preview_active", False):
+        parent = parent or self.viewer_window or self.root
+        if viewer is None:
+            messagebox.showinfo(ACCOUNT_PACKAGE_TITLE, ACCOUNT_PACKAGE_GUIDE, parent=parent)
             return
-        path = filedialog.askopenfilename(parent=self.viewer_window or self.root,
+        if not self._viewer_has_capability(viewer, CAPABILITY_FILE_RECEIVE):
+            messagebox.showinfo(ACCOUNT_PACKAGE_TITLE, "当前连接尚不可接收文件。", parent=parent)
+            return
+        if self.viewer_file_preview_active:
+            messagebox.showinfo(ACCOUNT_PACKAGE_TITLE, "正在读取上一批传输项，请稍候。", parent=parent)
+            return
+        path = filedialog.askopenfilename(parent=parent,
             title="选择 API 切换器设置迁移密码后导出的单账号登录包",
             filetypes=[("API 切换器账号登录包", "*.asxaccount"), ("所有文件", "*")])
         if path and viewer is self.viewer and generation == self.viewer_generation:

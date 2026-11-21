@@ -469,22 +469,24 @@ public final class RemoteDeskViewerActivity extends Activity {
     private void showViewerMenu() {
         releaseViewerGesture();
         String[] choices = { "画面缩放（" + Math.round(viewport.zoom * 100) + "%）", "画质：" +
-            (preferJpegClarity ? "文字清晰 JPEG" : "流畅 H.264 自动"), "全屏显示", "屏幕方向", "手势帮助", "连接诊断", "文字剪贴板", "发送多个文件…", "发送账号登录包…", localInputPaused ? "恢复控制（关闭仅观看）" : "仅观看（暂停本地输入）", "隐私屏…", "断开连接…" };
+            (preferJpegClarity ? "文字清晰 JPEG" : "流畅 H.264 自动"), getString(R.string.account_package_title),
+            "全屏显示", "屏幕方向", "手势帮助", "连接诊断", "文字剪贴板", "发送多个文件…",
+            localInputPaused ? "恢复控制（关闭仅观看）" : "仅观看（暂停本地输入）", "隐私屏…", "断开连接…" };
         new android.app.AlertDialog.Builder(this).setTitle("远控工具")
             .setItems(choices, (dialog, which) -> {
                 if (which == 0) showZoomOptions();
                 else if (which == 1) new android.app.AlertDialog.Builder(this).setTitle("选择画质")
                     .setSingleChoiceItems(new String[] { "流畅 · H.264 硬件优先", "文字清晰 · JPEG（带宽更高）" }, preferJpegClarity ? 1 : 0,
                         (selection, value) -> { if (preferJpegClarity != (value == 1)) toggleVideoQualityMode(); selection.dismiss(); }).show();
-                else if (which == 2) setViewerFullscreen(true);
-                else if (which == 3) showOrientationOptions();
-                else if (which == 4) new android.app.AlertDialog.Builder(this).setTitle("手机远控手势")
+                else if (which == 2) pickTransferFile(true);
+                else if (which == 3) setViewerFullscreen(true);
+                else if (which == 4) showOrientationOptions();
+                else if (which == 5) new android.app.AlertDialog.Builder(this).setTitle("手机远控手势")
                     .setMessage("触控板：单指滑动推动鼠标，不会跳到手指位置；轻触左键，连续轻触双击，长按后滑动拖拽。\n\n直接触摸：点哪里，鼠标就到哪里并点击；单指滑动拖拽。底部模式按钮可切换并记住选择。\n\n两种模式均支持双指平行上下滑动，让远端网页或列表滚动。触控板模式先把鼠标移到要滚动的区域。\n\n双指轻触：右键；双指开合：只缩放本地画面，缩放中可平移。\n\n鼠标面板可锁定拖动，再点一次释放。失焦、切换模式和退出时会释放拖动。\n\n键盘：先点选远端输入框，使用手机输入法编辑后点发送；快捷键直接作用于远端。")
                     .setPositiveButton("知道了", null).show();
-                else if (which == 5) showDiagnostics();
-                else if (which == 6) showClipboardMenu();
-                else if (which == 7) pickTransferFile(false);
-                else if (which == 8) pickTransferFile(true);
+                else if (which == 6) showDiagnostics();
+                else if (which == 7) showClipboardMenu();
+                else if (which == 8) pickTransferFile(false);
                 else if (which == 9) setLocalInputPaused(!localInputPaused);
                 else if (which == 10) togglePrivacyScreen();
                 else confirmDisconnect();

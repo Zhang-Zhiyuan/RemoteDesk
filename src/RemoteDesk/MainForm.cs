@@ -671,10 +671,14 @@ public sealed partial class MainForm : Form
 
     private Control CreateAppHeader()
     {
-        var header = new BufferedPanel
+        var header = new BufferedTableLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = 76,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            MinimumSize = new Size(0, 76),
+            ColumnCount = 3,
+            RowCount = 1,
             BackColor = SurfaceBackColor,
             Padding = new Padding(20, 12, 20, 11),
             Margin = new Padding(0)
@@ -690,19 +694,10 @@ public sealed partial class MainForm : Form
                 Math.Max(0, header.ClientSize.Height - 1));
         };
 
-        var layout = new BufferedTableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 3,
-            RowCount = 1,
-            BackColor = SurfaceBackColor,
-            Margin = new Padding(0),
-            Padding = new Padding(0)
-        };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 56));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 56));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        header.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         var mark = new Label
         {
@@ -718,6 +713,7 @@ public sealed partial class MainForm : Form
         {
             Dock = DockStyle.Fill,
             AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 1,
             RowCount = 2,
             BackColor = SurfaceBackColor,
@@ -745,45 +741,22 @@ public sealed partial class MainForm : Form
             Margin = new Padding(0)
         }, 0, 1);
 
-        var badge = new Label
+        _sendAccountPackageButton = CreateSecondaryButton(AccountLoginPackageUi.Action);
+        _sendAccountPackageButton.Anchor = AnchorStyles.Right;
+        _sendAccountPackageButton.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        _sendAccountPackageButton.Margin = new Padding(8, 0, 0, 0);
+        _sendAccountPackageButton.Click += async (_, _) =>
         {
-            Text = "WINDOWS  ·  直连 / 私有中继",
-            AutoSize = true,
-            BackColor = PrimarySoftColor,
-            ForeColor = Color.FromArgb(30, 64, 175),
-            Font = new Font(Font.FontFamily, 8.5F, FontStyle.Bold),
-            Padding = new Padding(10, 6, 10, 6),
-            Margin = new Padding(12, 8, 0, 0),
-            TextAlign = ContentAlignment.MiddleCenter
+            if (CanConnectedViewer(RemoteDeviceCapabilities.FileReceive))
+                await AccountLoginPackageUi.SendAsync(this, _viewerClient, ShowTransferTasks);
+            else
+                MessageBox.Show(this, _viewerClient.IsConnected ? "当前连接的设备不支持接收文件。"
+                    : AccountLoginPackageUi.OfflineGuide, AccountLoginPackageUi.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
         };
 
-        layout.Controls.Add(mark, 0, 0);
-        layout.Controls.Add(copy, 1, 0);
-        layout.Controls.Add(badge, 2, 0);
-        header.Controls.Add(layout);
-        bool sizingHeader = false;
-        void FitHeaderText()
-        {
-            if (sizingHeader || copy.ClientSize.Width <= 0) return;
-            sizingHeader = true;
-            try
-            {
-                int copyHeight = copy.GetPreferredSize(new Size(copy.ClientSize.Width, 0)).Height;
-                int requiredHeight = Math.Max(ResponsiveWindowLayout.ScaleLogical(76, header.DeviceDpi),
-                    copyHeight + header.Padding.Vertical + layout.Padding.Vertical + copy.Margin.Vertical);
-                if (header.Height != requiredHeight) header.Height = requiredHeight;
-            }
-            finally { sizingHeader = false; }
-        }
-        header.Layout += (_, _) => FitHeaderText();
-        copy.FontChanged += (_, _) => FitHeaderText();
-        header.ClientSizeChanged += (_, _) =>
-        {
-            badge.Visible = header.ClientSize.Width >=
-                ResponsiveWindowLayout.ScaleLogical(
-                    690,
-                    header.DeviceDpi);
-        };
+        header.Controls.Add(mark, 0, 0);
+        header.Controls.Add(copy, 1, 0);
+        header.Controls.Add(_sendAccountPackageButton, 2, 0);
         return header;
     }
 
@@ -1181,9 +1154,6 @@ public sealed partial class MainForm : Form
         _readClipboardButton.Enabled = false;
         _sendFileButton = CreateSecondaryButton("发送文件");
         _sendFileButton.Enabled = false;
-        _sendAccountPackageButton = CreateSecondaryButton(AccountLoginPackageUi.Action);
-        _sendAccountPackageButton.Enabled = false;
-        _sendAccountPackageButton.Click += async (_, _) => await AccountLoginPackageUi.SendAsync(this, _viewerClient, ShowTransferTasks);
         _pasteFilesButton = CreateSecondaryButton("粘贴文件");
         _pasteFilesButton.Enabled = false;
         _pullRemoteFilesButton = CreateSecondaryButton(RemoteFilePullUi.DefaultButtonText);
@@ -1231,7 +1201,6 @@ public sealed partial class MainForm : Form
         toolbar.Controls.Add(_sendClipboardButton);
         toolbar.Controls.Add(_readClipboardButton);
         toolbar.Controls.Add(_sendFileButton);
-        toolbar.Controls.Add(_sendAccountPackageButton);
         toolbar.Controls.Add(_pasteFilesButton);
         toolbar.Controls.Add(_pullRemoteFilesButton);
         toolbar.Controls.Add(_openReceivedFilesButton);
@@ -8262,7 +8231,6 @@ public sealed partial class MainForm : Form
         _viewerInputPauseButton.Text = _viewerClient.IsLocalInputPaused ? "仅观看：开" : "仅观看：关";
         _readClipboardButton.Enabled = connected && capabilities.HasFlag(RemoteDeviceCapabilities.ClipboardText);
         _sendFileButton.Enabled = connected && capabilities.HasFlag(RemoteDeviceCapabilities.FileReceive);
-        _sendAccountPackageButton.Enabled = _sendFileButton.Enabled;
         _pasteFilesButton.Enabled = !_pastingClipboardFilesFromMain &&
             connected &&
             capabilities.HasFlag(RemoteDeviceCapabilities.FileReceive);
@@ -8308,8 +8276,9 @@ public sealed partial class MainForm : Form
             connected && capabilities.HasFlag(RemoteDeviceCapabilities.FileReceive)
                 ? $"选择本机文件发送到远端接收目录（一次最多 {MaxClipboardFilePasteCount} 项）；传输前确认清单，传输任务中可查看进度和取消。{checksumSuffix}"
                 : disconnected);
-        SetToolTip(_sendAccountPackageButton, connected && capabilities.HasFlag(RemoteDeviceCapabilities.FileReceive)
-            ? "发送 API 切换器导出的 Codex 或 Claude Code 加密账号登录包。" : disconnected);
+        SetToolTip(_sendAccountPackageButton, !connected ? "查看如何导出登录包并发送到另一台设备。"
+            : capabilities.HasFlag(RemoteDeviceCapabilities.FileReceive) ? "选择加密登录包，发送到当前连接的设备。"
+            : "当前连接的设备不支持接收文件。");
         SetToolTip(
             _pasteFilesButton,
             connected && capabilities.HasFlag(RemoteDeviceCapabilities.FileReceive)

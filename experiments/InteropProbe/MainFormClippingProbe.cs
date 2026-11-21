@@ -67,6 +67,7 @@ internal static class MainFormClippingProbe
             var relayList = Field<ListView>(main, "_relayDevicesList");
             relayList.Items.Add(new ListViewItem(new[] { "Synthetic-长名称测试工作站", "Windows", "1.0.25", "正在监听", "刚刚", "[2001:db8:1234:5678:abcd:ef12:3456:7890]:56565" }));
             var tabs = Field<TabControl>(main, "_tabs");
+            var accountPackage = Field<Button>(main, "_sendAccountPackageButton");
             foreach (int logicalWidth in new[] { 1120, 800, 640, 520, 1120 })
             {
                 main.MinimumSize = Size.Empty;
@@ -79,6 +80,13 @@ internal static class MainFormClippingProbe
                     string prefix = $"main-font{points}-width{logicalWidth}-tab{index}-case{cases.Count}";
                     Save(main, Path.Combine(output, prefix + ".png"));
                     int before = issues.Count;
+                    var accountBounds = accountPackage.RectangleToScreen(accountPackage.ClientRectangle);
+                    var accountPreferred = accountPackage.GetPreferredSize(Size.Empty);
+                    if (!accountPackage.Visible || !accountPackage.Enabled ||
+                        !main.RectangleToScreen(main.ClientRectangle).Contains(accountBounds) ||
+                        accountBounds.Bottom > tabs.PointToScreen(Point.Empty).Y ||
+                        accountPackage.Width < accountPreferred.Width || accountPackage.Height < accountPreferred.Height)
+                        issues.Add($"{prefix}: account package action is hidden, clipped or unavailable before connecting");
                     foreach (Control control in Descendants(page).Where(c => c.Visible))
                     {
                         if (control is Label label && label.Text.Length > 0)

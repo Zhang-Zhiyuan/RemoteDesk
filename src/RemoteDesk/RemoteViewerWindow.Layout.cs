@@ -31,7 +31,7 @@ internal sealed partial class RemoteViewerWindow
              (_fullScreenButton, ToggleFullScreen)],
             [[_privacyScreenButton], [_inputPauseButton], [_transferTasksButton], [_androidBackButton], [_androidHomeButton], [_androidRecentsButton],
              [_displayScaleButton, _experimentalUpscaleButton], [_fullScreenButton], [_switchCaptureTargetButton, _additionalScreenButton],
-             [_pullRemoteFilesButton, _openReceivedFilesButton], [_remoteInputMethodButton], [_nativeDetailButton], [_sendAccountPackageButton]],
+             [_sendAccountPackageButton], [_pullRemoteFilesButton, _openReceivedFilesButton], [_remoteInputMethodButton], [_nativeDetailButton]],
             ReleaseAllRemoteInputs);
         FontChanged += (_, _) => QueueStatusFooterLayout(refreshMetrics: true);
         _statusBar.FontChanged += (_, _) => QueueStatusFooterLayout(refreshMetrics: true);

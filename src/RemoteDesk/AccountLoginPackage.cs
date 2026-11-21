@@ -56,7 +56,11 @@ internal sealed class AccountLoginPackage
 
 internal static class AccountLoginPackageUi
 {
-    internal const string Action = "发送账号登录包…";
+    internal const string Title = "Codex / Claude 登录包";
+    internal const string Action = Title + "…";
+    internal const string OfflineGuide =
+        "在 Windows 的 API 切换器里，打开 Codex 或 Claude Code 的“官方账号”，选择“导出当前登录”，设置迁移密码，保存 .asxaccount 文件。\n\n" +
+        "用 RemoteDesk 的“IP 直连”或“公网中继”连接接收设备，再点这个按钮选择文件。发送前可以核对设备和保存位置。";
 
     internal static async Task SendAsync(Form owner, RemoteViewerClient client, Action showTasks)
     {
