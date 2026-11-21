@@ -51,6 +51,8 @@
 
         <service android:name=".AndroidSshKeepAliveService" android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+        <service android:name=".ViewerFilePickerService" android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <service
             android:name=".RemoteDeskForegroundService"

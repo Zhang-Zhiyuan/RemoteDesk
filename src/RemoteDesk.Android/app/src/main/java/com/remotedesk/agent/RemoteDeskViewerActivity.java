@@ -573,6 +573,25 @@ public final class RemoteDeskViewerActivity extends Activity {
         }
         if (filePickerOwner != null || !owner.fileBusy.compareAndSet(false, true)) { toast("已有文件正在选择或传输"); return; }
         filePickerOwner = owner;
+        ViewerFilePickerService.acquire(this, ready -> {
+            if (filePickerOwner != owner) return;
+            if (!ready || !isCurrentConnectionOwner(owner) || !clipboardForeground || isFinishing() || isDestroyed()) {
+                releaseFilePicker();
+                owner.fileBusy.set(false);
+                if (!ready) showFileError(owner, "无法在选择文件时保持连接，请返回远控窗口后重试。");
+                return;
+            }
+            openTransferPicker(owner, accountPackage);
+        });
+    }
+
+    private void releaseFilePicker() {
+        if (filePickerOwner == null) return;
+        filePickerOwner = null;
+        ViewerFilePickerService.release();
+    }
+
+    private void openTransferPicker(ViewerConnectionOwner owner, boolean accountPackage) {
         try {
             android.content.Intent intent = new android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT);
             intent.addCategory(android.content.Intent.CATEGORY_OPENABLE);
@@ -582,7 +601,8 @@ public final class RemoteDeskViewerActivity extends Activity {
             if (accountPackage) intent = android.content.Intent.createChooser(intent, "选择 API 切换器导出的加密 .asxaccount 登录包");
             startActivityForResult(intent, accountPackage ? PICK_ACCOUNT_PACKAGE : PICK_TRANSFER_FILE);
         } catch (RuntimeException ex) {
-            owner.fileBusy.set(false); filePickerOwner = null;
+            releaseFilePicker();
+            owner.fileBusy.set(false);
             showFileError(owner, "无法打开系统文件选择器：" + MainActivity.formatExceptionMessage(ex));
         }
     }
@@ -593,7 +613,7 @@ public final class RemoteDeskViewerActivity extends Activity {
         boolean accountPackage = requestCode == PICK_ACCOUNT_PACKAGE;
         if (!accountPackage && requestCode != PICK_TRANSFER_FILE) return;
         ViewerConnectionOwner owner = filePickerOwner;
-        filePickerOwner = null;
+        releaseFilePicker();
         if (owner == null) return;
         if (resultCode != RESULT_OK || data == null || !isCurrentConnectionOwner(owner)) {
             owner.fileBusy.set(false); return;
@@ -1158,6 +1178,7 @@ public final class RemoteDeskViewerActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        releaseFilePicker();
         privacyHandler.removeCallbacks(privacyPoll);
         if (localClipboard != null) localClipboard.removePrimaryClipChangedListener(clipboardChanged);
         clearFullscreenBackHandler();
