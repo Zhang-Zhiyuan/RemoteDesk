@@ -4,7 +4,30 @@ import static org.junit.Assert.*;
 
 public class AndroidViewerViewportTest {
     private AndroidViewerViewport viewport() { AndroidViewerViewport v = new AndroidViewerViewport(); v.geometry(1000, 1000, 1920, 1080); return v; }
-    @Test public void fitNeverEnlargesSmallSource() { AndroidViewerViewport v = new AndroidViewerViewport(); v.geometry(2000, 1200, 800, 600); assertEquals(1, v.scale(), 0); }
+    @Test public void fitEnlargesSmallSourceAndNativePixelsSurviveResizeAndIme() {
+        AndroidViewerViewport v = new AndroidViewerViewport();
+        v.geometry(2000, 1200, 800, 600);
+        assertEquals(2, v.scale(), 0);
+        v.zoomAt(100, 1000, 600);
+        assertEquals(8, v.scale(), 0);
+        v.reset();
+        assertNull(v.point(199, 600, true));
+        assertArrayEquals(new int[]{400, 300}, v.point(1000, 600, true));
+        v.originalSize();
+        assertEquals(1, v.scale(), 0);
+        v.keyboard(true); v.geometry(2000, 400, 800, 600);
+        v.keyboard(false); v.geometry(1600, 900, 800, 600);
+        assertEquals(1, v.scale(), .0001);
+        v.reset();
+        assertEquals(1.5f, v.scale(), .0001);
+        v.zoomAt(.1f, 800, 450);
+        assertEquals(1, v.scale(), .0001);
+    }
+    @Test public void nativeSelectedAtExactFitSurvivesRotation() {
+        AndroidViewerViewport v = new AndroidViewerViewport();
+        v.geometry(800, 600, 800, 600); v.originalSize(); v.geometry(1600, 1200, 800, 600);
+        assertEquals(1, v.scale(), .0001);
+    }
     @Test public void letterboxDoesNotStartDirectInput() { assertNull(viewport().point(500, 100, true)); }
     @Test public void centerMapsToSourceCenter() { assertArrayEquals(new int[]{960,540}, viewport().point(500, 500, true)); }
     @Test public void zoomKeepsFocusPixelInPlace() { AndroidViewerViewport v = viewport(); int[] before = v.point(650,500,true); v.zoomAt(2,650,500); assertArrayEquals(before,v.point(650,500,true)); }

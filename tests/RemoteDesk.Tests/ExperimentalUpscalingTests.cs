@@ -40,26 +40,20 @@ public sealed class ExperimentalUpscalingTests
         Assert.NotEmpty(D3D11ExperimentalUpscaler.Compile(entry, profile));
 
     [Fact]
-    public void ToggleIsAdjacentReversibleAndDoesNotChangeGeometry()
+    public void DisplayMenuDefaultsToTextAndCanRestoreSystemScalingWithoutChangingGeometry()
     {
         using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var viewer = new RemoteViewerWindow(client, "upscale test", false, false, false, false, false, false);
-        var button = viewer.ExperimentalUpscaleButtonForEntityTests;
-        var scale = viewer.DisplayScaleButtonForEntityTests;
+        Assert.Equal("画面", viewer.DisplayScaleButtonForEntityTests.Text);
+        var filters = viewer.DisplayMenuForEntityTests.Items.OfType<ToolStripMenuItem>()
+            .Single(item => item.Text == "放大效果").DropDownItems.OfType<ToolStripMenuItem>().ToArray();
+        Assert.Equal("文字优先", Assert.Single(filters, item => item.Checked).Text);
+        filters.Single(item => item.Text == "系统缩放").PerformClick();
         Assert.False(viewer.ExperimentalUpscalingForEntityTests);
-        Assert.Contains("关", button.Text);
-        Assert.Same(scale.Parent, button.Parent);
-        Assert.Equal(scale.Parent!.Controls.GetChildIndex(scale) + 1,
-            button.Parent!.Controls.GetChildIndex(button));
-        bool originalGeometry = viewer.AllowDisplayUpscalingForEntityTests;
-        viewer.ToggleExperimentalUpscaling();
+        Assert.True(viewer.AllowDisplayUpscalingForEntityTests);
+        filters.Single(item => item.Text == "文字优先").PerformClick();
         Assert.True(viewer.ExperimentalUpscalingForEntityTests);
-        Assert.Contains("开", button.Text);
-        Assert.Equal(originalGeometry, viewer.AllowDisplayUpscalingForEntityTests);
-        viewer.ToggleExperimentalUpscaling();
-        Assert.False(viewer.ExperimentalUpscalingForEntityTests);
-        Assert.Contains("关", button.Text);
-        Assert.Equal(originalGeometry, viewer.AllowDisplayUpscalingForEntityTests);
+        Assert.True(viewer.AllowDisplayUpscalingForEntityTests);
     }
 
     [Theory]

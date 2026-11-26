@@ -19,8 +19,8 @@ internal static class ViewerClippingProbe
             "_androidBackButton", "_androidHomeButton", "_androidRecentsButton",
             "_inputPauseButton", "_transferTasksButton",
             "_pullRemoteFilesButton", "_openReceivedFilesButton", "_remoteInputMethodButton",
-            "_switchCaptureTargetButton", "_additionalScreenButton", "_displayScaleButton", "_experimentalUpscaleButton",
-            "_nativeDetailButton", "_fullScreenButton"
+            "_switchCaptureTargetButton", "_additionalScreenButton", "_displayScaleButton",
+            "_fullScreenButton", "_privacyScreenButton", "_sendAccountPackageButton"
         }.Select(name => Get<Button>(viewer, name)).ToHashSet();
         viewer.Show();
         Invoke(viewer, "UninstallSystemKeyboardCapture");
@@ -65,9 +65,7 @@ internal static class ViewerClippingProbe
                 var inline = actions.Controls.OfType<Button>().Where(b => b.Visible && b != overflow.MoreButton).ToArray();
                 if (!expectedActions.SetEquals(inline.Concat(overflow.OverflowButtons)))
                     problems.Add("Inline + overflow actions do not cover the exact expected commands, including Android navigation and independent screens");
-                var scale = Get<Button>(viewer, "_displayScaleButton");
-                var upscale = Get<Button>(viewer, "_experimentalUpscaleButton");
-                if (scale.Parent != upscale.Parent) problems.Add("Scaling controls split across menu and toolbar");
+                if (inline.Length > 4) problems.Add("Secondary commands reappeared in the primary toolbar");
                 overflow.RebuildMenu();
                 if (overflow.MenuForTests.Items.Count != overflow.OverflowButtons.Count)
                     problems.Add("Overflow menu loses an available action");
@@ -114,11 +112,22 @@ internal static class ViewerClippingProbe
         }
         var scaleButton = Get<Button>(viewer, "_displayScaleButton");
         bool previousScale = viewer.AllowDisplayUpscalingForEntityTests;
-        var scaleItem = overflow.MenuForTests.Items.OfType<ToolStripMenuItem>().Single(item => item.Text == scaleButton.Text);
-        scaleItem.PerformClick();
+        var displayMenu = viewer.DisplayMenuForEntityTests;
+        bool displayOpened = false;
+        displayMenu.Opened += (_, _) => displayOpened = true;
+        var scaleItem = overflow.MenuForTests.Items.OfType<ToolStripMenuItem>().SingleOrDefault(item => item.Text == scaleButton.Text);
+        if (scaleItem is not null) scaleItem.PerformClick();
         overflow.MenuForTests.Close();
+        if (scaleItem is null) scaleButton.PerformClick();
         for (int i = 0; i < 5; i++) Application.DoEvents();
-        bool menuAction = viewer.AllowDisplayUpscalingForEntityTests != previousScale;
+        using (var bitmap = new Bitmap(displayMenu.Width, displayMenu.Height))
+        {
+            displayMenu.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+            bitmap.Save(Path.Combine(output, "viewer-display-menu.png"));
+        }
+        displayMenu.Items[1].PerformClick();
+        displayMenu.Close();
+        bool menuAction = displayOpened && viewer.AllowDisplayUpscalingForEntityTests != previousScale;
         cases.Add(new { scenario = "More menu keeps focus local and invokes the real scaling command", menuFocus, menuAction,
             menuOpened, pictureFocusedAtMenuOpen,
             pictureFocus = picture.ContainsFocus, moreFocused = overflow.MoreButton.Focused,
@@ -170,11 +179,8 @@ internal static class ViewerClippingProbe
             Invoke(viewer, "UninstallSystemKeyboardCapture");
             viewer.ClientSize = new Size(1400, 800);
             Pump();
-            var button = Get<Button>(viewer, "_nativeDetailButton");
-            var actions = Get<FlowLayoutPanel>(viewer, "_fileTransferActionsPanel");
-            var overflow = Get<ViewerActionOverflow>(viewer, "_statusActionOverflow");
-            bool Reachable() => button.Visible && (button.Parent == actions ||
-                (overflow.MoreButton.Visible && overflow.OverflowButtons.Contains(button)));
+            var button = Get<ToolStripMenuItem>(viewer, "_nativeDetailMenuItem");
+            bool Reachable() => button.Available && viewer.DisplayMenuForEntityTests.Items.Contains(button);
             void Offer(bool available)
             {
                 var offer = new NativeDetailOffer(1, new Size(1920, 1080), available);
@@ -191,10 +197,10 @@ internal static class ViewerClippingProbe
             }
             viewer.ToggleNativeDetailsAsync().GetAwaiter().GetResult();
             Offer(false);
-            bool paused = Reachable() && button.Text == "原生补清：暂停";
+            bool paused = Reachable() && button.Checked && button.Text!.Contains("已暂停");
             viewer.ToggleNativeDetailsAsync().GetAwaiter().GetResult();
             Pump();
-            bool hiddenAfterOff = !button.Visible && !overflow.OverflowButtons.Contains(button);
+            bool hiddenAfterOff = !button.Available;
             Offer(true);
             bool returned = Reachable();
             bool passed = appeared && paused && hiddenAfterOff && returned;

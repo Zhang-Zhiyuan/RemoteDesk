@@ -278,7 +278,6 @@ public final class RemoteDeskViewerActivity extends Activity {
             public void screens() { showScreenSelector(); }
             public void privacy() { togglePrivacyScreen(); }
             public void zoom() { showZoomOptions(); }
-            public void upscale() { toggleExperimentalUpscaling(); }
             public void diagnostics() { showDiagnostics(); }
             public void shortcut(int... keys) { sendKeyboard(null, keys); }
             public void phoneNavigation(int key) { sendPhoneNavigation(key); }
@@ -343,7 +342,7 @@ public final class RemoteDeskViewerActivity extends Activity {
         });
         viewerFrame.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> updateH264SurfaceLayout());
         setContentView(rootLayout);
-        chrome.controls(false); chrome.screens.setEnabled(false);
+        chrome.controls(false); chrome.screenSelection(false);
         refreshInteraction(); updateFullscreenBackHandler();
         rootLayout.requestApplyInsets();
     }
@@ -468,27 +467,19 @@ public final class RemoteDeskViewerActivity extends Activity {
 
     private void showViewerMenu() {
         releaseViewerGesture();
-        String[] choices = { "画面缩放（" + Math.round(viewport.zoom * 100) + "%）", "画质：" +
-            (preferJpegClarity ? "文字清晰 JPEG" : "流畅 H.264 自动"), getString(R.string.account_package_title),
-            "全屏显示", "屏幕方向", "手势帮助", "连接诊断", "文字剪贴板", "发送多个文件…",
-            localInputPaused ? "恢复控制（关闭仅观看）" : "仅观看（暂停本地输入）", "隐私屏…", "断开连接…" };
+        String[] choices = { "全屏显示", "屏幕方向", "手势帮助", "连接诊断", "文字剪贴板", "发送多个文件…",
+            getString(R.string.account_package_title), "断开连接…" };
         new android.app.AlertDialog.Builder(this).setTitle("远控工具")
             .setItems(choices, (dialog, which) -> {
-                if (which == 0) showZoomOptions();
-                else if (which == 1) new android.app.AlertDialog.Builder(this).setTitle("选择画质")
-                    .setSingleChoiceItems(new String[] { "流畅 · H.264 硬件优先", "文字清晰 · JPEG（带宽更高）" }, preferJpegClarity ? 1 : 0,
-                        (selection, value) -> { if (preferJpegClarity != (value == 1)) toggleVideoQualityMode(); selection.dismiss(); }).show();
-                else if (which == 2) showDeveloperLogin();
-                else if (which == 3) setViewerFullscreen(true);
-                else if (which == 4) showOrientationOptions();
-                else if (which == 5) new android.app.AlertDialog.Builder(this).setTitle("手机远控手势")
+                if (which == 0) setViewerFullscreen(true);
+                else if (which == 1) showOrientationOptions();
+                else if (which == 2) new android.app.AlertDialog.Builder(this).setTitle("手机远控手势")
                     .setMessage("触控板：单指滑动推动鼠标，不会跳到手指位置；轻触左键，连续轻触双击，长按后滑动拖拽。\n\n直接触摸：点哪里，鼠标就到哪里并点击；单指滑动拖拽。底部模式按钮可切换并记住选择。\n\n两种模式均支持双指平行上下滑动，让远端网页或列表滚动。触控板模式先把鼠标移到要滚动的区域。\n\n双指轻触：右键；双指开合：只缩放本地画面，缩放中可平移。\n\n鼠标面板可锁定拖动，再点一次释放。失焦、切换模式和退出时会释放拖动。\n\n键盘：先点选远端输入框，使用手机输入法编辑后点发送；快捷键直接作用于远端。")
                     .setPositiveButton("知道了", null).show();
-                else if (which == 6) showDiagnostics();
-                else if (which == 7) showClipboardMenu();
-                else if (which == 8) pickTransferFile(false);
-                else if (which == 9) setLocalInputPaused(!localInputPaused);
-                else if (which == 10) togglePrivacyScreen();
+                else if (which == 3) showDiagnostics();
+                else if (which == 4) showClipboardMenu();
+                else if (which == 5) pickTransferFile(false);
+                else if (which == 6) showDeveloperLogin();
                 else confirmDisconnect();
             }).show();
     }
@@ -899,21 +890,32 @@ public final class RemoteDeskViewerActivity extends Activity {
     }
 
     private void showZoomOptions() {
-        new android.app.AlertDialog.Builder(this).setTitle("画面缩放（不改变传输画质）")
-            .setItems(new String[] { "适应窗口 · 重置位置", "原始像素 1:1", "放大", "缩小" }, (dialog, which) -> {
-                releaseViewerGesture();
+        releaseViewerGesture();
+        new android.app.AlertDialog.Builder(this).setTitle("画面 · " + Math.round(viewport.scale() * 100) + "%")
+            .setItems(new String[] { "适应窗口（自动放大）", "原始像素 1:1", "放大一级", "缩小一级",
+                experimentalUpscaling ? "关闭 GPU 放大增强" : "启用 GPU 放大增强",
+                "传输画质：" + (preferJpegClarity ? "JPEG" : "自动 H.264") }, (dialog, which) -> {
+                if (which == 4) { toggleExperimentalUpscaling(); return; }
+                if (which == 5) { showVideoQualityOptions(); return; }
                 if (which == 0) viewport.reset();
                 else if (which == 1) viewport.originalSize();
                 else viewport.zoomAt(which == 2 ? 1.5f : 1 / 1.5f, viewport.viewWidth / 2f, viewport.viewHeight / 2f);
                 refreshInteraction();
-            }).setNeutralButton(experimentalUpscaling ? "新版放大：开" : "新版放大：关",
-                (dialog, which) -> toggleExperimentalUpscaling()).show();
+            }).show();
+    }
+
+    private void showVideoQualityOptions() {
+        new android.app.AlertDialog.Builder(this).setTitle("传输画质")
+            .setSingleChoiceItems(new String[] { "流畅 · H.264 硬件优先", "文字清晰 · JPEG（带宽更高）" },
+                preferJpegClarity ? 1 : 0, (dialog, which) -> {
+                    if (preferJpegClarity != (which == 1)) toggleVideoQualityMode();
+                    dialog.dismiss();
+                }).show();
     }
 
     private void toggleExperimentalUpscaling() {
         releaseViewerGesture();
         experimentalUpscaling = !experimentalUpscaling;
-        chrome.upscaling(experimentalUpscaling);
         ViewerConnectionOwner owner = connectionOwner;
         if (owner != null) owner.h264FirstFramePresented.set(false);
         if (h264Decoder != null) h264Decoder.resetCandidateFailuresForRendererChange();
@@ -924,8 +926,8 @@ public final class RemoteDeskViewerActivity extends Activity {
             attachCurrentDecoderSurface();
         }
         if (owner != null) requestVideoKeyFrame(owner.generation, "viewer spatial scaler changed");
-        toast(experimentalUpscaling ? "新版放大（实验）已开启：仅放大 H.264 画面时增强，不改变缩放比例；JPEG 保持原版。" :
-            "新版放大已关闭，恢复原版显示。");
+        toast(experimentalUpscaling ? "已开启 GPU 放大增强，放大 H.264 画面时生效。" :
+            "已切换为系统缩放。");
     }
 
     private void removeExperimentalUpscaler() {
@@ -979,7 +981,7 @@ public final class RemoteDeskViewerActivity extends Activity {
         runOnUiThread(() -> {
             if (source != experimentalUpscaler || !experimentalUpscaling || !isCurrentConnectionOwner(owner)) return;
             AndroidSessionLog.info("Experimental upscaling fell back: " + reason);
-            experimentalUpscaling = false; chrome.upscaling(false);
+            experimentalUpscaling = false;
             removeExperimentalUpscaler();
             owner.h264FirstFramePresented.set(false);
             if (owner.decoder != null) owner.decoder.resetCandidateFailuresForRendererChange();
@@ -987,7 +989,7 @@ public final class RemoteDeskViewerActivity extends Activity {
             surfaceView.setAlpha(h264SurfaceActive ? 1f : 0f);
             attachCurrentDecoderSurface();
             requestVideoKeyFrame(owner.generation, "experimental upscale fallback");
-            toast("新版放大不兼容，已自动关闭并恢复原版。");
+            toast("当前设备不支持 GPU 放大增强，已切换为系统缩放。");
         });
     }
 
@@ -1017,7 +1019,7 @@ public final class RemoteDeskViewerActivity extends Activity {
     private void showDiagnostics() {
         new android.app.AlertDialog.Builder(this).setTitle("连接诊断")
             .setMessage(statusView.getText() + "\n\n" + healthView.getText() + "\n\n手势缩放 " +
-                Math.round(viewport.zoom * 100) + "% · " + (gestures.trackpad ? "触控板" : "直接触摸"))
+                Math.round(viewport.scale() * 100) + "% · " + (gestures.trackpad ? "触控板" : "直接触摸"))
             .setPositiveButton("关闭", null).show();
     }
 
@@ -1605,7 +1607,7 @@ public final class RemoteDeskViewerActivity extends Activity {
                     // Read the current authority here, not a stale queued snapshot.
                     chrome.phoneNavigation(owner.remotePlatform);
                     chrome.controls(canSendRemoteInput(owner));
-                    chrome.screens.setEnabled(captureTargets.length > 0 &&
+                    chrome.screenSelection(captureTargets.length > 1 &&
                         (owner.remoteCapabilities.get() & RemoteDeskProtocol.CAPABILITY_CAPTURE_TARGET_SELECTION) != 0);
                 });
             } else if (control.kind == RemoteDeskProtocol.CONTROL_CLIPBOARD_TEXT) {
@@ -1621,7 +1623,7 @@ public final class RemoteDeskViewerActivity extends Activity {
                 runOnUiThread(() -> {
                     if (!isCurrentConnectionOwner(owner)) return;
                     captureTargets = control.captureTargets.clone();
-                    chrome.screens.setEnabled(captureTargets.length > 0 &&
+                    chrome.screenSelection(captureTargets.length > 1 &&
                         (owner.remoteCapabilities.get() & RemoteDeskProtocol.CAPABILITY_CAPTURE_TARGET_SELECTION) != 0);
                 });
             } else if (control.kind == RemoteDeskProtocol.CONTROL_CAPTURE_TARGET_CHANGED &&
@@ -2778,7 +2780,7 @@ public final class RemoteDeskViewerActivity extends Activity {
                 selectedTargetId = "";
                 chrome.controls(false);
                 chrome.phoneNavigation("");
-                chrome.screens.setEnabled(false);
+                chrome.screenSelection(false);
                 owner.remoteGestureActive = false;
                 owner.lastMoveSentAt = 0L;
                 owner.displayGeometryReady = false;

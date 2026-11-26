@@ -3640,6 +3640,11 @@ class ViewerConnection:
             return
         self.display_size = normalized_size
 
+    def refresh_display(self) -> None:
+        if not self.stop_event.is_set():
+            threading.Thread(target=self._request_video_key_frame_if_due,
+                name="RemoteDeskDisplayRefresh", daemon=True).start()
+
     def set_native_presenter_target(
         self,
         window_id: int,
@@ -3659,9 +3664,9 @@ class ViewerConnection:
         active = bool(success and enabled and current)
         self._put_event("viewer_upscaling", active)
         self._put_event("viewer_status", (
-            "新版放大（实验）已开启，仅 GPU 放大时生效；传输分辨率与输入坐标不变。" if active else
-            "已恢复原版放大。" if success else
-            "新版放大未启用：需要已激活的 mpv 原生 GPU 画面；JPEG / 兼容显示保持原版。"))
+            "已开启 GPU 放大增强。" if active else
+            "已切换为系统缩放。" if success else
+            "GPU 放大增强需要 mpv 原生显示。"))
 
     def close(self) -> None:
         self._signal_stop_and_release_decoder()
@@ -7903,8 +7908,11 @@ class RemoteDeskLinuxApp:
         # and hides the text entry, clipboard/file buttons and disconnect action.
         footer = ttk.Frame(window, style="ViewerToolbar.TFrame")
         footer.pack(side=tk.BOTTOM, fill=tk.X)
+        viewport = tk.Frame(window, bg=VIEWER_BG)
+        viewport.pack(fill=tk.BOTH, expand=True)
+        self.viewer_limit_upscaling = False
         frame_label = tk.Label(
-            window,
+            viewport,
             text="正在建立加密连接…\n画面将在握手完成后显示",
             anchor=tk.CENTER,
             bg=VIEWER_BG,
@@ -7914,7 +7922,8 @@ class RemoteDeskLinuxApp:
             bd=0,
             takefocus=True,
         )
-        frame_label.pack(fill=tk.BOTH, expand=True)
+        frame_label.place(relx=.5, rely=.5, anchor=tk.CENTER, relwidth=1, relheight=1)
+        viewport.bind("<Configure>", lambda _event: self._layout_viewer_surface() if self.viewer_limit_upscaling else None)
         frame_label.bind("<Motion>", self._viewer_mouse_motion)
         frame_label.bind("<ButtonPress-1>", lambda event: self._viewer_mouse_button(event, INPUT_MOUSE_DOWN, MOUSE_LEFT))
         frame_label.bind("<ButtonRelease-1>", lambda event: self._viewer_mouse_button(event, INPUT_MOUSE_UP, MOUSE_LEFT))
@@ -7955,7 +7964,6 @@ class RemoteDeskLinuxApp:
 
         controls = ttk.Frame(footer, style="ViewerToolbar.TFrame", padding=(10, 8, 10, 8))
         clipboard_bar = ttk.Frame(footer, style="ViewerToolbar.TFrame", padding=(10, 4))
-        clipboard_bar.pack(fill=tk.X)
         clipboard_buttons = []
         for label, action in (("发送本机剪贴板", lambda: self.viewer_clipboard()),
                               ("取回远端剪贴板", lambda: self.viewer_clipboard(read=True)),
@@ -7968,20 +7976,6 @@ class RemoteDeskLinuxApp:
         self.viewer_privacy_button = ttk.Button(clipboard_bar, text="隐私屏…", command=self._toggle_privacy_screen, style="Viewer.TButton")
         self.viewer_privacy_button.bind("<Button-3>", self._privacy_screen_menu)
         clipboard_buttons.append(self.viewer_privacy_button)
-        clipboard_columns = 0
-        def update_clipboard_layout(event: Any = None) -> None:
-            nonlocal clipboard_columns
-            available = max(1, (event.width if event is not None else clipboard_bar.winfo_width()) - 20)
-            button_width = max(button.winfo_reqwidth() for button in clipboard_buttons) + 6
-            columns = max(1, min(3, available // max(1, button_width)))
-            if columns == clipboard_columns:
-                return
-            clipboard_columns = columns
-            for index, button in enumerate(clipboard_buttons):
-                clipboard_bar.columnconfigure(index, weight=1 if index < columns else 0)
-                button.grid(row=index // columns, column=index % columns, sticky=tk.EW, padx=(0, 6), pady=2)
-        clipboard_bar.bind("<Configure>", update_clipboard_layout, add="+")
-        clipboard_bar.after_idle(update_clipboard_layout)
         controls.pack(fill=tk.X)
         phone_bar = ttk.Frame(footer, style="ViewerToolbar.TFrame", padding=(10, 4))
         phone_buttons = []
@@ -8020,21 +8014,44 @@ class RemoteDeskLinuxApp:
             state=tk.DISABLED,
             style="Viewer.TButton",
         )
-        upscale_button = ttk.Button(controls, text="新版放大：关", style="Viewer.TButton")
-        self.viewer_upscale_button = upscale_button
+        display_menu = tk.Menu(controls, tearoff=False)
+        display_button = ttk.Menubutton(controls, text="画面", menu=display_menu, style="Viewer.TButton")
         self.viewer_experimental_upscaling = False
+        self.viewer_upscaling_pending = False
+        scale_limit = tk.BooleanVar(controls, value=False)
+
+        def set_scale_limit() -> None:
+            if self.viewer_limit_upscaling == scale_limit.get():
+                return
+            self.viewer_limit_upscaling = scale_limit.get()
+            self._layout_viewer_surface()
+            if self.viewer is not None and self.last_photo is not None and not self.native_presenter_active:
+                # Apply the new target before asking a static software stream for one fresh frame.
+                owner = self.viewer
+                controls.after_idle(lambda: owner.refresh_display() if self.viewer is owner else None)
 
         def toggle_upscaling() -> None:
-            viewer = self.viewer
-            if viewer is None:
-                self._set_viewer_status("请先连接设备；新版放大默认关闭。")
-                return
-            enabled = not self.viewer_experimental_upscaling
-            upscale_button.configure(state=tk.DISABLED)
-            threading.Thread(target=viewer.set_experimental_upscaling, args=(enabled,),
-                name="RemoteDeskUpscaleSwitch", daemon=True).start()
+            if self.viewer is not None and not self.viewer_upscaling_pending:
+                self.viewer_upscaling_pending = True
+                threading.Thread(target=self.viewer.set_experimental_upscaling,
+                    args=(not self.viewer_experimental_upscaling,), name="RemoteDeskUpscaleSwitch", daemon=True).start()
 
-        upscale_button.configure(command=toggle_upscaling)
+        def release_menu_input() -> None:
+            if self.viewer is not None:
+                self._release_pressed_viewer_inputs(flush=True, background_flush=True)
+
+        display_menu.add_radiobutton(label="适应窗口（自动放大）", variable=scale_limit, value=False, command=set_scale_limit)
+        display_menu.add_radiobutton(label="限制放大（最大 1:1）", variable=scale_limit, value=True, command=set_scale_limit)
+        display_menu.add_separator()
+        display_menu.add_command(label="启用 GPU 放大增强", command=toggle_upscaling)
+
+        def refresh_display_menu() -> None:
+            release_menu_input()
+            display_menu.entryconfigure(tk.END,
+                label="关闭 GPU 放大增强" if self.viewer_experimental_upscaling else "启用 GPU 放大增强",
+                state=tk.NORMAL if self.native_presenter_active and not self.viewer_upscaling_pending else tk.DISABLED)
+
+        display_menu.configure(postcommand=refresh_display_menu)
         self.viewer_window_account_button = ttk.Button(controls, text=ACCOUNT_PACKAGE_TITLE + "…",
             command=lambda: self.show_account_login(from_viewer=True), style="Viewer.TButton")
         viewer_buttons = (
@@ -8046,7 +8063,6 @@ class RemoteDeskLinuxApp:
             ),
             viewer_window_send_file_button,
             viewer_window_send_folder_button,
-            upscale_button,
             self.viewer_window_account_button,
             ttk.Button(
                 controls,
@@ -8059,14 +8075,14 @@ class RemoteDeskLinuxApp:
         more_button = ttk.Menubutton(controls, text="更多操作", menu=actions_menu, style="Viewer.TButton")
 
         def refresh_actions_menu() -> None:
-            if self.viewer is not None:
-                self._release_pressed_viewer_inputs(flush=True, background_flush=True)
+            release_menu_input()
             actions_menu.delete(0, tk.END)
             for index, button in enumerate((*clipboard_buttons, *viewer_buttons[1:-1])):
                 if index == len(clipboard_buttons):
                     actions_menu.add_separator()
                 actions_menu.add_command(
-                    label=button.cget("text"), command=button.invoke,
+                    label=button.cget("text"),
+                    command=(lambda: self._privacy_screen_menu(anchor=more_button)) if button is self.viewer_privacy_button else button.invoke,
                     state=tk.DISABLED if button.instate(("disabled",)) else tk.NORMAL,
                 )
             actions_menu.add_separator()
@@ -8077,61 +8093,25 @@ class RemoteDeskLinuxApp:
 
         def update_toolbar_layout(event: tk.Event[Any] | None = None) -> None:
             toolbar_layout_state["pending"] = None
+            buttons = (viewer_buttons[0], display_button, more_button, viewer_buttons[-1])
             available_width = controls.winfo_width() - 20
-            actions_width = sum(button.winfo_reqwidth() + 8 for button in viewer_buttons)
-            mode = "wide" if available_width >= actions_width + entry.winfo_reqwidth() + 8 else "medium" if available_width >= actions_width else "compact"
-            # Derive the expanded size from widgets, not the current footer size:
-            # measuring the collapsed footer would oscillate between both modes.
-            button_height = max(button.winfo_reqheight() for button in viewer_buttons)
-            clip_columns = max(1, min(3, available_width // max(1, max(button.winfo_reqwidth() for button in clipboard_buttons) + 6)))
-            clip_height = ((len(clipboard_buttons) + clip_columns - 1) // clip_columns) * (max(button.winfo_reqheight() for button in clipboard_buttons) + 4) + 8
-            control_height = (max(entry.winfo_reqheight(), button_height) if mode == "wide" else
-                              entry.winfo_reqheight() + 8 + (button_height if mode == "medium" else 3 * (button_height + 6))) + 16
-            target_height = target_bar.winfo_reqheight() if target_bar.winfo_manager() else 0
-            phone_height = phone_bar.winfo_reqheight() if phone_bar.winfo_manager() else 0
-            if clip_height + control_height + status.winfo_reqheight() + target_height + phone_height > max(140, window.winfo_height() * .45):
-                mode = "overflow"
-            if mode == toolbar_layout_state["mode"]:
+            compact = available_width < entry.winfo_reqwidth() + sum(b.winfo_reqwidth() + 6 for b in buttons)
+            if compact == toolbar_layout_state["mode"]:
                 return
-            toolbar_layout_state["mode"] = mode
+            toolbar_layout_state["mode"] = compact
             entry.grid_forget()
-            more_button.grid_forget()
-            for button in viewer_buttons:
+            for button in buttons:
                 button.grid_forget()
-            for column in range(len(viewer_buttons) + 1):
-                controls.columnconfigure(column, weight=0)
-
-            if mode == "overflow":
-                clipboard_bar.pack_forget()
-                entry.grid(row=0, column=0, sticky=tk.EW, padx=(0, 8))
-                viewer_buttons[0].grid(row=0, column=1, sticky=tk.EW)
-                more_button.grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
-                viewer_buttons[-1].grid(row=1, column=1, sticky=tk.EW, pady=(6, 0))
-                controls.columnconfigure(0, weight=1)
-            elif mode == "wide":
-                entry.grid(row=0, column=0, sticky=tk.EW, padx=(0, 8))
-                controls.columnconfigure(0, weight=1)
-                for column, button in enumerate(viewer_buttons, start=1):
-                    button.grid(row=0, column=column, padx=(0 if column == 1 else 8, 0))
-            elif mode == "medium":
-                entry.grid(row=0, column=0, columnspan=len(viewer_buttons), sticky=tk.EW, pady=(0, 8))
-                for column, button in enumerate(viewer_buttons):
-                    button.grid(row=1, column=column, sticky=tk.EW, padx=(0 if column == 0 else 4, 4))
-                    controls.columnconfigure(column, weight=1)
+            controls.columnconfigure(0, weight=1)
+            if compact:
+                entry.grid(row=0, column=0, columnspan=2, sticky=tk.EW, padx=(0, 6))
+                buttons[0].grid(row=0, column=2, sticky=tk.E)
+                for col, button in enumerate(buttons[1:]):
+                    button.grid(row=1, column=col, sticky=tk.W if col == 0 else tk.E, padx=(0, 6), pady=(4, 0))
             else:
-                entry.grid(row=0, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
-                for index, button in enumerate(viewer_buttons):
-                    button.grid(
-                        row=1 + index // 2,
-                        column=index % 2,
-                        sticky=tk.EW,
-                        padx=(0 if index % 2 == 0 else 4, 4 if index % 2 == 0 else 0),
-                        pady=(0, 6),
-                    )
-                controls.columnconfigure(0, weight=1)
-                controls.columnconfigure(1, weight=1)
-            if mode != "overflow" and not clipboard_bar.winfo_manager():
-                clipboard_bar.pack(fill=tk.X, before=target_bar if target_bar.winfo_manager() else controls)
+                entry.grid(row=0, column=0, sticky=tk.EW)
+                for col, button in enumerate(buttons, 1):
+                    button.grid(row=0, column=col, padx=(6, 0))
 
         def schedule_toolbar_layout(_event: Any = None) -> None:
             if toolbar_layout_state["pending"] is None:
@@ -8150,13 +8130,11 @@ class RemoteDeskLinuxApp:
 
         controls.bind("<Configure>", schedule_toolbar_layout, add="+")
         controls.bind("<Destroy>", cancel_toolbar_layout, add="+")
-        footer.bind("<Configure>", schedule_toolbar_layout, add="+")
-        window.bind("<Configure>", schedule_toolbar_layout, add="+")
         window.bind("<Destroy>", cancel_toolbar_layout, add="+")
         schedule_toolbar_layout()
 
         status = ttk.Label(footer, text="正在连接...", style="ViewerStatus.TLabel", cursor="hand2")
-        status.pack(side=tk.BOTTOM, fill=tk.X, before=clipboard_bar)
+        status.pack(side=tk.BOTTOM, fill=tk.X, before=controls)
         status.bind("<Double-Button-1>", lambda _event: self._show_viewer_status_details())
         window.bind("<Unmap>", self._viewer_window_unmapped, add="+")
         window.protocol("WM_DELETE_WINDOW", self._viewer_window_closed)
@@ -8179,6 +8157,18 @@ class RemoteDeskLinuxApp:
             frame_label.focus_set()
         except tk.TclError:
             pass
+
+    def _layout_viewer_surface(self) -> None:
+        label = self.frame_label
+        if label is None:
+            return
+        if self.viewer_limit_upscaling and (self.native_presenter_active or self.last_photo is not None):
+            viewport = label.master
+            width, height = calculate_fitted_image_size(self.remote_width, self.remote_height,
+                min(viewport.winfo_width(), self.remote_width), min(viewport.winfo_height(), self.remote_height))
+            label.place_configure(relwidth=0, relheight=0, width=width, height=height)
+        else:
+            label.place_configure(relwidth=1, relheight=1, width=0, height=0)
 
     def _viewer_frame_resized(self, event: tk.Event[Any]) -> None:
         viewer = self.viewer
@@ -8884,7 +8874,7 @@ class RemoteDeskLinuxApp:
         if str(button.cget("state")) != state:
             button.configure(state=state)
 
-    def _privacy_screen_menu(self, event: Any = None) -> None:
+    def _privacy_screen_menu(self, event: Any = None, *, anchor: Any = None) -> None:
         button = getattr(self, "viewer_privacy_button", None)
         if button is None:
             return
@@ -8896,7 +8886,8 @@ class RemoteDeskLinuxApp:
                 previous.destroy()
             except tk.TclError:
                 pass
-        menu = tk.Menu(button, tearoff=False)
+        anchor = anchor or button
+        menu = tk.Menu(anchor, tearoff=False)
         self._privacy_menu = menu
         menu.add_command(label="开启隐私屏", command=lambda: self._show_privacy_screen(1),
                          state=tk.DISABLED if getattr(self, "_privacy_command", None) is not None or
@@ -8904,8 +8895,8 @@ class RemoteDeskLinuxApp:
         menu.add_command(label="关闭隐私屏 / 恢复显示", command=lambda: self._show_privacy_screen(2))
         menu.add_command(label="刷新状态", command=lambda: self._show_privacy_screen(0))
         try:
-            menu.tk_popup(event.x_root if event else button.winfo_rootx(),
-                          event.y_root if event else button.winfo_rooty() + button.winfo_height())
+            menu.tk_popup(event.x_root if event else anchor.winfo_rootx(),
+                          event.y_root if event else anchor.winfo_rooty() + anchor.winfo_height())
         finally:
             menu.grab_release()
 
@@ -9530,9 +9521,7 @@ class RemoteDeskLinuxApp:
                 enabled = self._unpack_viewer_event(value)
                 if enabled is not None:
                     self.viewer_experimental_upscaling = bool(enabled)
-                    button = getattr(self, "viewer_upscale_button", None)
-                    if button is not None and button.winfo_exists():
-                        button.configure(text="新版放大：开" if enabled else "新版放大：关", state=tk.NORMAL)
+                    self.viewer_upscaling_pending = False
             elif event == "viewer_status":
                 message = self._unpack_viewer_event(value)
                 if message is not None:
@@ -9731,6 +9720,8 @@ class RemoteDeskLinuxApp:
         except Exception as ex:
             self._set_viewer_status(f"Frame display failed: {ex}")
             return
+        resize_surface = getattr(self, "viewer_limit_upscaling", False) and (
+            self.last_photo is None or (width, height) != (self.remote_width, self.remote_height))
         self.native_presenter_active = False
         self.last_photo = photo
         self.remote_width = width
@@ -9738,6 +9729,8 @@ class RemoteDeskLinuxApp:
         self.display_width = max(1, photo.width())
         self.display_height = max(1, photo.height())
         frame_label.config(image=photo, text="")
+        if resize_surface:
+            self._layout_viewer_surface()
         now = time.monotonic()
         if now - self.last_frame_status_update >= FRAME_STATUS_INTERVAL_SECONDS:
             self.last_frame_status_update = now
@@ -9767,9 +9760,13 @@ class RemoteDeskLinuxApp:
                 frame_label.config(image="", text="")
             except tk.TclError:
                 return
+        resize_surface = getattr(self, "viewer_limit_upscaling", False) and (
+            not self.native_presenter_active or (width, height) != (self.remote_width, self.remote_height))
         self.native_presenter_active = True
         self.remote_width = max(1, int(width))
         self.remote_height = max(1, int(height))
+        if resize_surface:
+            self._layout_viewer_surface()
         self.display_width, self.display_height = calculate_fitted_image_size(
             self.remote_width,
             self.remote_height,

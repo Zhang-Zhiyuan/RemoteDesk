@@ -4,7 +4,7 @@ namespace RemoteDesk;
 
 internal sealed partial class RemoteViewerWindow
 {
-    private Button _nativeDetailButton = null!;
+    private ToolStripMenuItem _nativeDetailMenuItem = null!;
     private System.Windows.Forms.Timer _nativeDetailTimer = null!;
     private bool _nativeDetailWanted, _nativeRequestPending, _nativeStopPending, _nativeStopInFlight;
     private bool _nativeViewportTooSmall;
@@ -14,22 +14,16 @@ internal sealed partial class RemoteViewerWindow
 
     private void InitializeNativeDetailControls()
     {
-        _nativeDetailButton = CreateStatusActionButton("原生补清：关");
-        _nativeDetailButton.AccessibleName = "原生文字补清，关闭";
-        _nativeDetailButton.Visible = _client.NativeOffer is { Available: true };
-        _nativeDetailButton.Click += async (_, _) => await ToggleNativeDetailsAsync();
-        _fileTransferActionsPanel.Controls.Add(_nativeDetailButton);
+        _nativeDetailMenuItem = new ToolStripMenuItem("静止时补清文字");
+        _nativeDetailMenuItem.Click += async (_, _) => await ToggleNativeDetailsAsync();
         _client.NativeDetailOfferChanged += OnNativeOfferChanged;
         _nativeDetailTimer = new System.Windows.Forms.Timer { Interval = 150 };
         _nativeDetailTimer.Tick += async (_, _) => await RefreshNativeRequestAsync();
-        _nativeDetailTimer.Start();
     }
 
     private void OnNativeOfferChanged(NativeDetailOffer? offer) => OnUi(() =>
     {
         if (_isClosing || IsDisposed || offer != _client.NativeOffer) return;
-        _nativeDetailButton.Visible = offer is { Available: true } || _nativeDetailWanted;
-        _nativeDetailButton.Enabled = offer is { Available: true } || _nativeDetailWanted;
         if (_nativeRequestedOffer != offer)
         {
             _client.InvalidateNativeDetails(); _nativeRequestedOffer = null;
@@ -57,6 +51,7 @@ internal sealed partial class RemoteViewerWindow
         }
         else
         {
+            _nativeDetailTimer.Start();
             _nativeStopPending = false;
             _nativeRequestedOffer = null; _nativeIdleSince = Environment.TickCount64;
             SetStatus("原生补清已开启：停下操作后补充鼠标附近的原始像素；拥塞或硬件不支持时保持普通画面。", MutedTextColor);
@@ -68,17 +63,12 @@ internal sealed partial class RemoteViewerWindow
     private void UpdateNativeDetailButton()
     {
         bool available = _client.NativeOffer is { Available: true };
-        _nativeDetailButton.Visible = available || _nativeDetailWanted;
-        _nativeDetailButton.Enabled = available || _nativeDetailWanted;
+        _nativeDetailMenuItem.Available = available || _nativeDetailWanted;
+        _nativeDetailMenuItem.Checked = _nativeDetailWanted;
         bool paused = _nativeDetailWanted && (!available || _nativeViewportTooSmall);
-        _nativeDetailButton.Text = !_nativeDetailWanted ? "原生补清：关" : paused ? "原生补清：暂停" : "原生补清：开";
-        _nativeDetailButton.AccessibleName = _nativeViewportTooSmall ? "原生补清已暂停，放大窗口可恢复" : _nativeDetailButton.Text;
-        _toolTip?.SetToolTip(_nativeDetailButton,
-            (_nativeViewportTooSmall ? "当前窗口太小。放大到远端分辨率的一半以上，空闲时会自动恢复。\n" : "") +
-            "保留流畅 H.264，空闲时补充鼠标附近的原始像素，不猜测文字。\n" +
-            "需要新版 Windows 被控端和 GPU 显示。默认关闭，可随时恢复普通画面。\n" +
-            "无带宽余量、正在输入或窗口太小时不补清；当前版本仅增强最多 1024×1024 的区域。\n" +
-            "开启后使用可靠视频传输；已有 UDP 鼠标通道继续保留。");
+        _nativeDetailMenuItem.Text = paused ? "静止时补清文字（已暂停）" : "静止时补清文字";
+        _nativeDetailMenuItem.ToolTipText = _nativeViewportTooSmall ? "放大窗口后会自动恢复。"
+            : "空闲时从被控 Windows 获取鼠标附近的原始像素。开启后使用可靠视频传输。";
     }
 
     private async Task RefreshNativeRequestAsync()
@@ -149,7 +139,11 @@ internal sealed partial class RemoteViewerWindow
         }
         catch (Exception ex) when (ex is InvalidOperationException or IOException or OperationCanceledException)
         { /* Retry on the idle timer without blocking input or closing the viewer. */ }
-        finally { _nativeStopInFlight = false; }
+        finally
+        {
+            _nativeStopInFlight = false;
+            if (!_nativeDetailWanted && !_nativeStopPending && !_isClosing && !IsDisposed) _nativeDetailTimer.Stop();
+        }
     }
 
     internal static bool CanDisplayNativeDetails(Size native, Size displayed) =>

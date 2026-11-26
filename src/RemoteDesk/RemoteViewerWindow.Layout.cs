@@ -11,13 +11,13 @@ internal sealed partial class RemoteViewerWindow
         var more = CreateStatusActionButton("更多 ▴");
         more.AccessibleName = "更多远控操作";
         more.ContextMenuStrip = _statusMenu;
-        _toolTip.SetToolTip(more, "窗口较窄，其他操作在这里；右键可查看状态与放大算法设置。");
+        _toolTip.SetToolTip(more, "输入、隐私、文件和其他会话操作。");
         _statusActionOverflow = new ViewerActionOverflow(_fileTransferActionsPanel, more,
             [(_androidBackButton, async () => await SendAndroidNavigationAsync(Keys.Escape)),
              (_androidHomeButton, async () => await SendAndroidNavigationAsync(Keys.Home)),
              (_androidRecentsButton, async () => await SendAndroidNavigationAsync(Keys.F12)),
              (_inputPauseButton, ToggleLocalInputPause),
-             (_privacyScreenButton, async () => await TogglePrivacyScreenAsync()),
+             (_privacyScreenButton, () => BeginInvoke((Action)(() => ShowFooterMenu(_privacyMenu, _privacyScreenButton)))),
              (_transferTasksButton, ShowTransferTasks),
              (_sendAccountPackageButton, async () => await SendAccountPackageAsync()),
              (_pullRemoteFilesButton, async () => await PullRemoteClipboardFilesAsync()),
@@ -25,13 +25,9 @@ internal sealed partial class RemoteViewerWindow
              (_remoteInputMethodButton, async () => await SwitchRemoteInputMethodAsync()),
              (_switchCaptureTargetButton, async () => await SwitchCaptureTargetAsync()),
              (_additionalScreenButton, async () => await OpenAdditionalScreenAsync()),
-             (_displayScaleButton, ToggleDisplayScaleMode),
-             (_experimentalUpscaleButton, ToggleExperimentalUpscaling),
-             (_nativeDetailButton, async () => await ToggleNativeDetailsAsync()),
+             (_displayScaleButton, () => BeginInvoke((Action)ShowDisplayOptions)),
              (_fullScreenButton, ToggleFullScreen)],
-            [[_privacyScreenButton], [_inputPauseButton], [_transferTasksButton], [_androidBackButton], [_androidHomeButton], [_androidRecentsButton],
-             [_displayScaleButton, _experimentalUpscaleButton], [_fullScreenButton], [_switchCaptureTargetButton, _additionalScreenButton],
-             [_sendAccountPackageButton], [_pullRemoteFilesButton, _openReceivedFilesButton], [_remoteInputMethodButton], [_nativeDetailButton]],
+            [[_displayScaleButton], [_fullScreenButton], [_switchCaptureTargetButton], [_androidBackButton]],
             ReleaseAllRemoteInputs);
         FontChanged += (_, _) => QueueStatusFooterLayout(refreshMetrics: true);
         _statusBar.FontChanged += (_, _) => QueueStatusFooterLayout(refreshMetrics: true);

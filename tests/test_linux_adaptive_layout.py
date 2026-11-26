@@ -270,7 +270,7 @@ class RealTkAdaptiveLayoutTests(unittest.TestCase):
                 footer = self.ui.viewer_window_status.master
                 self.assertGreaterEqual(self.ui.frame_label.winfo_height(), height * .35)
                 more = next(control for parent in footer.winfo_children() for control in parent.winfo_children()
-                            if isinstance(control, app.ttk.Menubutton))
+                            if isinstance(control, app.ttk.Menubutton) and control.cget("text") == "更多操作")
                 menu = more.nametowidget(more.cget("menu"))
                 self.root.tk.call(menu.cget("postcommand"))
                 menu_labels = {menu.entrycget(index, "label") for index in range(menu.index(app.tk.END) + 1)
@@ -335,6 +335,36 @@ class RealTkAdaptiveLayoutTests(unittest.TestCase):
         self.root.update()
         self.assertFalse(self.ui.viewer_android_bar.winfo_ismapped())
 
+    def test_display_menu_scales_surface_and_keeps_pointer_aligned(self):
+        ui = self.ui
+        ui.viewer_window = ui.viewer = ui.window_icon = ui.last_photo = None
+        ui.native_presenter_active = False
+        ui.text_input = app.tk.StringVar(self.root)
+        ui._viewer_frame_focus_out = mock.Mock()
+        with mock.patch.object(app, "apply_adaptive_window_geometry"):
+            ui._open_viewer_window("owned-layout.invalid", 56565)
+        ui.viewer_window.geometry("1100x700")
+        self.root.update()
+        ui.last_frame_status_update = float("inf")
+        ui._show_native_frame(320, 180, 0, "fixture")
+        self.assertGreater(ui.display_width, 320)
+        controls = ui.viewer_target_controls_anchor
+        display = next(button for button in controls.winfo_children()
+                       if isinstance(button, app.ttk.Menubutton) and button.cget("text") == "画面")
+        menu = display.nametowidget(display.cget("menu"))
+        for mode, expected_width in ((1, 320), (0, None), (1, 320)):
+            menu.invoke(mode)
+            self.root.update()
+            if expected_width:
+                self.assertEqual((320, 180), (ui.frame_label.winfo_width(), ui.frame_label.winfo_height()))
+            else:
+                self.assertGreater(ui.display_width, 320)
+            self.assertEqual((160, 90), ui._pointer_event_to_remote(SimpleNamespace(
+                x=ui.frame_label.winfo_width() // 2, y=ui.frame_label.winfo_height() // 2)))
+        ui._show_native_frame(640, 360, 0, "fixture")
+        self.root.update()
+        self.assertEqual(640, ui.frame_label.winfo_width())
+
     def test_viewer_overflow_menu_preserves_actions_and_disabled_state(self):
         self.root.tk.call("tk", "scaling", 192 / 72)
         self.ui._configure_style()
@@ -352,7 +382,7 @@ class RealTkAdaptiveLayoutTests(unittest.TestCase):
         self.root.update()
         footer = self.ui.viewer_window_status.master
         more = next(control for parent in footer.winfo_children() for control in parent.winfo_children()
-                    if isinstance(control, app.ttk.Menubutton))
+                    if isinstance(control, app.ttk.Menubutton) and control.cget("text") == "更多操作")
         self.assertTrue(more.winfo_ismapped())
         menu = more.nametowidget(more.cget("menu"))
         sent = []
@@ -392,8 +422,8 @@ class RealTkAdaptiveLayoutTests(unittest.TestCase):
         for _ in range(3):
             window.geometry("1900x1000")
             self.root.update()
-            self.assertFalse(more.winfo_ismapped())
-            self.assertTrue(self.ui.viewer_window_send_file_button.winfo_ismapped())
+            self.assertTrue(more.winfo_ismapped())
+            self.assertFalse(self.ui.viewer_window_send_file_button.winfo_ismapped())
             window.geometry("640x480")
             self.root.update()
             self.assertTrue(more.winfo_ismapped())

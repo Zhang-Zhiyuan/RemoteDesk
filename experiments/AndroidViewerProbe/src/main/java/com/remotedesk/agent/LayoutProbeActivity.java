@@ -46,7 +46,6 @@ public final class LayoutProbeActivity extends Activity {
             public void more() { actions++; }
             public void screens() { actions++; }
             public void zoom() { actions++; }
-            public void upscale() { actions++; }
             public void diagnostics() { actions++; }
             public void shortcut(int... keys) { actions++; }
             public void phoneNavigation(int key) { actions++; }
@@ -64,6 +63,7 @@ public final class LayoutProbeActivity extends Activity {
         chrome.status.setText("已连接 · 合成测试电脑");
         chrome.watchOnly.setOnClickListener(v -> chrome.inputPaused(!chrome.watchOnly.isSelected()));
         chrome.mode(false, false); chrome.adapt(compact);
+        chrome.screenSelection(true);
         chrome.phoneNavigation(getIntent().getStringExtra("platform"));
         root.postDelayed(() -> runStage(0), 250);
     }
@@ -102,13 +102,16 @@ public final class LayoutProbeActivity extends Activity {
                 require(chrome.more.getGlobalVisibleRect(menuVisible)
                         && menuVisible.width() == chrome.more.getWidth(), "Pinned menu clipped");
                 tap(chrome.more);
-                for (int i = 0; i < chrome.mainRow.getChildCount(); i++) tap(chrome.mainRow.getChildAt(i));
+                for (int i = 0; i < chrome.mainRow.getChildCount(); i++) {
+                    View button = chrome.mainRow.getChildAt(i);
+                    if (button.isShown()) tap(button);
+                }
                 tap(chrome.watchOnly);
             } else if (stage == 1) {
                 require(chrome.watchOnly.isSelected() && chrome.watchOnly.getLayout().getEllipsisCount(0) == 0,
                     "Only-watch toggle clipped or coordinate tap missed");
-                require(chrome.mainRow.getChildCount() == 6 && actions == 6,
-                    "Coordinate taps missed callbacks (including zoom/upscale): " + actions);
+                require(actions == 5,
+                    "Coordinate taps missed callbacks (including display settings): " + actions);
                 chrome.keyboard(true); chrome.adapt(compact);
             } else if (stage == 2) {
                 Rect editor = new Rect();
@@ -119,19 +122,19 @@ public final class LayoutProbeActivity extends Activity {
                 require("布局输入 Layout 123".contentEquals(chrome.composer.getText()), "Resize lost text");
                 tap(chrome.send);
             } else if (stage == 3) {
-                require(chrome.composer.length() == 0 && actions == 7, "Send click failed");
+                require(chrome.composer.length() == 0 && actions == 6, "Send click failed");
                 chrome.keyboard(false); chrome.setMouseOpen(true);
             } else if (stage == 4) {
                 for (int i = 0; i < chrome.mousePanel.getChildCount(); i++) tap(chrome.mousePanel.getChildAt(i));
             } else {
-                if (stage == 5) require(actions == 10, "Mouse action taps missed callbacks: " + actions);
+                if (stage == 5) require(actions == 9, "Mouse action taps missed callbacks: " + actions);
                 if (AndroidViewerNavigation.isAndroid(getIntent().getStringExtra("platform"))) {
                     if (stage == 5) {
                         for (View button : new View[] {chrome.phoneBack, chrome.phoneHome, chrome.phoneRecents}) tap(button);
                         // Native Button.performClick can be posted after ACTION_UP.
                         root.postDelayed(() -> runStage(6), 150); return;
                     }
-                    require(actions == 13, "Phone navigation taps missed callbacks");
+                    require(actions == 12, "Phone navigation taps missed callbacks");
                     chrome.controls(false);
                     require(!chrome.phoneBack.isEnabled() && !chrome.phoneHome.isEnabled() && !chrome.phoneRecents.isEnabled(),
                         "Read-only navigation still enabled");

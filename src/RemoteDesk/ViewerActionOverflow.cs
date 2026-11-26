@@ -9,6 +9,7 @@ internal sealed class ViewerActionOverflow : IDisposable
     private readonly Panel _overflowOwner = new();
     private readonly (Button Button, Action Execute)[] _commands;
     private readonly Button[][] _priorityGroups;
+    private readonly HashSet<Button> _primary;
     private readonly ContextMenuStrip _menu = new();
     private readonly Action _releaseInput;
     internal Button MoreButton { get; }
@@ -22,6 +23,7 @@ internal sealed class ViewerActionOverflow : IDisposable
         _panel = panel;
         _commands = commands;
         _priorityGroups = priorityGroups;
+        _primary = priorityGroups.SelectMany(group => group).ToHashSet();
         _releaseInput = releaseInput;
         // Keep parked commands inside the owning form's PMv2/font notification
         // tree. A detached parking panel retains its old DeviceDpi when these
@@ -55,7 +57,7 @@ internal sealed class ViewerActionOverflow : IDisposable
         int width = Math.Max(1, availableWidth - _panel.Padding.Horizontal);
         var inline = new HashSet<Button>(available);
         int Measure(Button button) => button.GetPreferredSize(Size.Empty).Width + button.Margin.Horizontal;
-        bool overflow = available.Sum(Measure) > width;
+        bool overflow = available.Any(button => !_primary.Contains(button)) || available.Sum(Measure) > width;
         if (overflow)
         {
             inline.Clear();

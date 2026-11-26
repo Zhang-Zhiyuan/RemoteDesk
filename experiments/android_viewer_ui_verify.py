@@ -18,7 +18,7 @@ PACKAGE = "com.remotedesk.viewerprobe"
 
 def toolbar_swipe(nodes, label):
     """Return a bounded gesture on this probe's overflow strip, never its desktop."""
-    labels = {"更多", "键盘", "鼠标", "屏幕", "缩放", "触控板", "直接触摸", "新版放大"}
+    labels = {"更多", "键盘", "鼠标", "屏幕", "画面", "触控板", "直接触摸", "隐私屏"}
     if label not in labels:
         return None
     strips = [n for n in nodes if n.get("package") == PACKAGE and
@@ -33,7 +33,7 @@ def toolbar_swipe(nodes, label):
     if right - left < 32 or bottom <= top:
         return None
     inset = max(8, (right - left) // 10)
-    start, end = (right-inset, left+inset) if label in {"更多", "新版放大"} else (left+inset, right-inset)
+    start, end = (right-inset, left+inset) if label in {"更多", "隐私屏"} else (left+inset, right-inset)
     return start, (top+bottom)//2, end, (top+bottom)//2
 
 
@@ -130,7 +130,7 @@ def main():
         raise TimeoutError("Peer did not acknowledge " + name)
 
     def fit():
-        tap("更多"); tap("画面缩放", prefix=True); tap("适应窗口 · 重置位置")
+        tap("画面"); tap("适应窗口（自动放大）")
 
     def assert_finished():
         report["completed"]=True
@@ -336,7 +336,7 @@ def main():
                          s["dock"][3]-s["dock"][1] < first["dock"][3]-first["dock"][1])
         check("Landscape compact chrome remeasures", landscape["dock"][3]-landscape["dock"][1] < first["dock"][3]-first["dock"][1], landscape["dock"])
         photo("landscape")
-        tap("更多"); tap("画面缩放", prefix=True); tap("原始像素 1:1")
+        tap("画面"); tap("原始像素 1:1")
         check("Original size means one source pixel per physical pixel", abs(state()["scale"]-1) < .01, state()["scale"])
 
         tap("键盘"); keyboard = wait(lambda s: s["keyboard"] and s["imeInset"] > 0, stable_seconds=.6)
@@ -355,14 +355,14 @@ def main():
         check("Shortcut modifier order is balanced", [(e[0],e[4]) for e in shortcut] == [(5,17),(5,65),(6,65),(6,17)], shortcut)
         tap("收起"); wait(lambda s: not s["keyboard"] and s["imeInset"] == 0)
 
-        tap("更多"); tap("画质：", prefix=True); tap("文字清晰 · JPEG（带宽更高）")
+        tap("画面"); tap("传输画质：", prefix=True); tap("文字清晰 · JPEG（带宽更高）")
         jpeg = wait(lambda s: not s["h264"] and "JPEG" in s["health"])
         check("H264 to JPEG switch presents", jpeg["frame"] == [1920,1080], jpeg["health"])
         tap("屏幕"); tap("测试屏幕 2 · 720P")
         secondary = wait(lambda s: s["frame"] == [1280,720])
         check("Screen switch updates coordinate dimensions", secondary["frame"] == [1280,720], secondary["frame"])
         photo("screen-two-jpeg")
-        tap("更多"); tap("画质：", prefix=True); tap("流畅 · H.264 硬件优先")
+        tap("画面"); tap("传输画质：", prefix=True); tap("流畅 · H.264 硬件优先")
         h264 = wait(lambda s: s["h264"] and "H.264" in s["health"] and "FPS 0.0" not in s["health"])
         check("JPEG to H264 recreates usable Surface", h264["frame"] == [1920,1080], h264["health"])
         tap("屏幕"); tap("测试屏幕 1 · 1080P")

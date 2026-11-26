@@ -62,25 +62,18 @@ public sealed class NisUpscalingTests
     }
 
     [Fact]
-    public void AlgorithmSelectionDoesNotEnableExperimentOrChangeInputGeometry()
+    public void AlgorithmSelectionAppliesImmediatelyWithoutChangingInputGeometry()
     {
         using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
         using var viewer = new RemoteViewerWindow(client, "algorithm test", false, false, false, false, false, false);
-        bool geometry = viewer.AllowDisplayUpscalingForEntityTests;
-        viewer.SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.TextStrokes);
-        var menu = viewer.ExperimentalUpscaleButtonForEntityTests.ContextMenuStrip!;
-        var algorithms = Assert.Single(menu.Items.OfType<ToolStripMenuItem>(), item => item.Text!.StartsWith("新版放大算法"));
-        Assert.Contains("文字笔画", Assert.Single(algorithms.DropDownItems.OfType<ToolStripMenuItem>(), item => item.Checked).Text);
-        Assert.False(viewer.ExperimentalUpscalingForEntityTests);
-        viewer.SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.CatmullRom);
-        Assert.False(viewer.ExperimentalUpscalingForEntityTests);
-        viewer.ToggleExperimentalUpscaling();
-        viewer.SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.Nis);
-        Assert.True(viewer.ExperimentalUpscalingForEntityTests);
-        Assert.Equal(geometry, viewer.AllowDisplayUpscalingForEntityTests);
-        Assert.NotNull(viewer.ExperimentalUpscaleButtonForEntityTests.ContextMenuStrip);
-        viewer.ToggleExperimentalUpscaling();
-        Assert.False(viewer.ExperimentalUpscalingForEntityTests);
+        viewer.SetDisplayScaleMode(false);
+        viewer.SetUpscalingFilter(null);
+        foreach (var algorithm in Enum.GetValues<ExperimentalUpscalingAlgorithm>())
+        {
+            viewer.SetUpscalingFilter(algorithm);
+            Assert.True(viewer.ExperimentalUpscalingForEntityTests);
+            Assert.False(viewer.AllowDisplayUpscalingForEntityTests);
+        }
     }
 
     [Fact]

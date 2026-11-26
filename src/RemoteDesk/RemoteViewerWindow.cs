@@ -99,7 +99,11 @@ internal sealed partial class RemoteViewerWindow : Form
     private readonly Button _remoteInputMethodButton;
     private readonly Button _switchCaptureTargetButton;
     private readonly Button _displayScaleButton;
-    private readonly Button _experimentalUpscaleButton;
+    private readonly ContextMenuStrip _displayMenu = new();
+    private readonly ToolStripMenuItem _fitMenuItem;
+    private readonly ToolStripMenuItem _nativeSizeMenuItem;
+    private readonly ToolStripMenuItem _systemScaleMenuItem;
+    private readonly ToolStripMenuItem _driverScaleMenuItem;
     private readonly Button _fullScreenButton;
     private readonly Button _androidBackButton;
     private readonly Button _androidHomeButton;
@@ -136,8 +140,8 @@ internal sealed partial class RemoteViewerWindow : Form
     private MediaFoundationD3D11H264Decoder? _mediaFoundationH264Decoder;
     private D3D11HwndVideoPresenter? _d3d11VideoPresenter;
     private bool _scaledEdgeEnhancement = true;
-    private bool _experimentalUpscaling;
-    private int _experimentalUpscalingAlgorithm = (int)ExperimentalUpscalingAlgorithm.Nis;
+    private bool _experimentalUpscaling = true;
+    private int _experimentalUpscalingAlgorithm = (int)ExperimentalUpscalingAlgorithm.TextStrokes;
     private readonly ToolStripMenuItem _nisUpscaleMenuItem;
     private readonly ToolStripMenuItem _bicubicUpscaleMenuItem;
     private readonly ToolStripMenuItem _textUpscaleMenuItem;
@@ -208,7 +212,7 @@ internal sealed partial class RemoteViewerWindow : Form
     internal volatile bool CaptureDirectSnapshotsForTests;
     private int _directPresentationQualificationCount;
     // Fit large desktops, but do not stretch small desktops' text by default.
-    private int _allowDisplayUpscaling;
+    private int _allowDisplayUpscaling = 1;
     private int _pictureBoxHandleAvailable;
     private int _pictureBoxClientWidth;
     private int _pictureBoxClientHeight;
@@ -353,10 +357,8 @@ internal sealed partial class RemoteViewerWindow : Form
         _additionalScreenButton = CreateStatusActionButton("多屏分窗");
         _additionalScreenButton.AccessibleName = "在独立窗口打开另一块远程屏幕";
         _additionalScreenButton.Visible = false;
-        _displayScaleButton =
-            CreateStatusActionButton("允许放大");
-        _experimentalUpscaleButton = CreateStatusActionButton("新版放大：关");
-        _experimentalUpscaleButton.AccessibleName = "新版放大（实验），关闭";
+        _displayScaleButton = CreateStatusActionButton("画面");
+        _displayScaleButton.AccessibleName = "画面设置";
         _fullScreenButton = CreateStatusActionButton("全屏");
         _androidBackButton = CreateAndroidNavigationButton("返回", Keys.Escape);
         _androidHomeButton = CreateAndroidNavigationButton("主页", Keys.Home);
@@ -386,7 +388,6 @@ internal sealed partial class RemoteViewerWindow : Form
         _fileTransferActionsPanel.Controls.Add(_additionalScreenButton);
         _fileTransferActionsPanel.Controls.Add(
             _displayScaleButton);
-        _fileTransferActionsPanel.Controls.Add(_experimentalUpscaleButton);
         InitializeNativeDetailControls();
         _fileTransferActionsPanel.Controls.Add(_fullScreenButton);
         _statusFooterPanel = new ViewerFooterPanel
@@ -429,43 +430,21 @@ internal sealed partial class RemoteViewerWindow : Form
         _statusMenu = new ContextMenuStrip();
         _statusMenu.Items.Add("复制当前状态", null, async (_, _) => await CopyStatusAsync());
         _statusMenu.Items.Add("打开本机接收目录", null, (_, _) => OpenReceivedFilesDirectory());
-        var enhancementMenuItem = new ToolStripMenuItem("GPU 清晰增强（缩放时）")
-        {
-            Checked = true,
-            CheckOnClick = true,
-            ToolTipText = "使用显卡边缘增强改善缩放观感；不支持时自动使用普通缩放，不会还原原生像素。"
-        };
-        enhancementMenuItem.CheckedChanged += (_, _) =>
-        {
-            Volatile.Write(ref _scaledEdgeEnhancement, enhancementMenuItem.Checked);
-            lock (_d3d11PresenterLock)
-                _d3d11VideoPresenter?.SetEdgeEnhancement(enhancementMenuItem.Checked);
-            SetStatus(enhancementMenuItem.Checked
-                ? "已允许 GPU 清晰增强；仅在显卡支持且画面缩放时生效。"
-                : "GPU 清晰增强已关闭，使用普通缩放。", MutedTextColor);
-        };
-        _statusMenu.Items.Add(enhancementMenuItem);
-        var upscaleMenu = new ToolStripMenuItem("新版放大算法（实验）");
-        _nisUpscaleMenuItem = new ToolStripMenuItem("NIS 边缘自适应（1～2 倍）", null,
-            (_, _) => SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.Nis)) { Checked = true };
-        _bicubicUpscaleMenuItem = new ToolStripMenuItem("双三次＋防光晕（兼容 / 对照）", null,
-            (_, _) => SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.CatmullRom));
-        _textUpscaleMenuItem = new ToolStripMenuItem("文字笔画（终端、文档）", null,
-            (_, _) => SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.TextStrokes))
-        { ToolTipText = "视频只加强已有的细笔画；开启原生补清后，收到的原始像素按覆盖面积放大。照片可继续用 NIS。" };
-        _gridUpscaleMenuItem = new ToolStripMenuItem("原像素（低分辨率桌面）", null,
-            (_, _) => SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm.PixelGrid))
-        { ToolTipText = "按远端视频的像素放大，小字和单像素线条边界清楚。整数倍最清晰。" };
-        upscaleMenu.DropDownItems.AddRange([_nisUpscaleMenuItem, _textUpscaleMenuItem, _gridUpscaleMenuItem, _bicubicUpscaleMenuItem]);
-        _statusMenu.Items.Add(upscaleMenu);
         _statusBar.ContextMenuStrip = _statusMenu;
-        _experimentalUpscaleButton.ContextMenuStrip = _statusMenu;
+        _fitMenuItem = new ToolStripMenuItem("适应窗口（自动放大）", null, (_, _) => SetDisplayScaleMode(true));
+        _nativeSizeMenuItem = new ToolStripMenuItem("限制放大（最大 1:1）", null, (_, _) => SetDisplayScaleMode(false));
+        _systemScaleMenuItem = new ToolStripMenuItem("系统缩放", null, (_, _) => SetUpscalingFilter(null));
+        _driverScaleMenuItem = new ToolStripMenuItem("显卡驱动锐化", null, (_, _) => SetUpscalingFilter(null, driverSharpening: true));
+        _textUpscaleMenuItem = new ToolStripMenuItem("文字优先", null, (_, _) => SetUpscalingFilter(ExperimentalUpscalingAlgorithm.TextStrokes));
+        _nisUpscaleMenuItem = new ToolStripMenuItem("照片优先（NIS）", null, (_, _) => SetUpscalingFilter(ExperimentalUpscalingAlgorithm.Nis));
+        _bicubicUpscaleMenuItem = new ToolStripMenuItem("平滑（双三次）", null, (_, _) => SetUpscalingFilter(ExperimentalUpscalingAlgorithm.CatmullRom));
+        _gridUpscaleMenuItem = new ToolStripMenuItem("保留像素边缘", null, (_, _) => SetUpscalingFilter(ExperimentalUpscalingAlgorithm.PixelGrid));
+        var upscaleMenu = new ToolStripMenuItem("放大效果") { ToolTipText = "H.264 硬件显示时在本机处理放大的画面。" };
+        upscaleMenu.DropDownItems.AddRange([_textUpscaleMenuItem, _nisUpscaleMenuItem, _bicubicUpscaleMenuItem, _gridUpscaleMenuItem, new ToolStripSeparator(), _driverScaleMenuItem, _systemScaleMenuItem]);
+        _displayMenu.Items.AddRange([_fitMenuItem, _nativeSizeMenuItem, new ToolStripSeparator(), upscaleMenu, _nativeDetailMenuItem]);
+        UpdateDisplayMenu();
         ConfigureFilePullToolTips();
         UpdateNativeDetailButton();
-        _toolTip.SetToolTip(_experimentalUpscaleButton,
-            "点击开关 GPU 放大，右键选择算法。低分辨率桌面可选“原像素”，照片可选 NIS（1～2 倍）。\n" +
-            "先开启“允许放大”。H.264 硬件显示时，底部会显示实际生效的算法。");
-        _experimentalUpscaleButton.Click += (_, _) => ToggleExperimentalUpscaling();
 
         Controls.Add(_pictureBox);
         Controls.Add(_remoteFilePullProgressBar);
@@ -522,7 +501,7 @@ internal sealed partial class RemoteViewerWindow : Form
                 await SwitchCaptureTargetAsync();
         _additionalScreenButton.Click += async (_, _) => await OpenAdditionalScreenAsync();
         _displayScaleButton.Click +=
-            (_, _) => ToggleDisplayScaleMode();
+            (_, _) => ShowDisplayOptions();
         _fullScreenButton.Click += (_, _) => ToggleFullScreen();
         InitializeStatusActionOverflow();
         ApplyEffectiveInputState();
@@ -1221,22 +1200,24 @@ internal sealed partial class RemoteViewerWindow : Form
         }
     }
 
-    internal void ToggleDisplayScaleMode()
-    {
-        if (_isClosing || IsDisposed)
-        {
-            return;
-        }
+    private void ShowDisplayOptions() => ShowFooterMenu(_displayMenu, _displayScaleButton);
 
-        bool allowUpscaling =
-            Volatile.Read(
-                ref _allowDisplayUpscaling) == 0;
-        Volatile.Write(
-            ref _allowDisplayUpscaling,
-            allowUpscaling ? 1 : 0);
-        _displayScaleButton.Text = allowUpscaling
-            ? "禁止放大"
-            : "允许放大";
+    private void ShowFooterMenu(ContextMenuStrip menu, Button button)
+    {
+        if (_isClosing || IsDisposed) return;
+        Button anchor = button.Parent == _fileTransferActionsPanel
+            ? button : _statusActionOverflow!.MoreButton;
+        ReleaseAllRemoteInputs();
+        anchor.Focus();
+        menu.Font = anchor.Font;
+        menu.Show(anchor, Point.Empty, ToolStripDropDownDirection.AboveRight);
+    }
+
+    internal void SetDisplayScaleMode(bool allowUpscaling)
+    {
+        if (_isClosing || IsDisposed || (Volatile.Read(ref _allowDisplayUpscaling) != 0) == allowUpscaling) return;
+        Volatile.Write(ref _allowDisplayUpscaling, allowUpscaling ? 1 : 0);
+        UpdateDisplayMenu();
         UpdatePictureBoxDisplayMode(
             GetRemoteImageSize());
         ConfigureFilePullToolTips();
@@ -1264,7 +1245,8 @@ internal sealed partial class RemoteViewerWindow : Form
         }
 
         _pictureBox.Invalidate();
-        RequestH264KeyFrameIfDue();
+        _ = RefreshUpscalingFrameAsync(Volatile.Read(ref _experimentalUpscaling),
+            (ExperimentalUpscalingAlgorithm)Volatile.Read(ref _experimentalUpscalingAlgorithm));
     }
 
     private D3D11HwndVideoScaleMode
@@ -1492,52 +1474,50 @@ internal sealed partial class RemoteViewerWindow : Form
         }
     }
 
-    internal void ToggleExperimentalUpscaling()
+    private void UpdateDisplayMenu()
     {
-        if (_isClosing || IsDisposed) return;
-        bool enabled = !Volatile.Read(ref _experimentalUpscaling);
-        Volatile.Write(ref _experimentalUpscaling, enabled);
+        _fitMenuItem.Checked = Volatile.Read(ref _allowDisplayUpscaling) != 0;
+        _nativeSizeMenuItem.Checked = !_fitMenuItem.Checked;
+        bool enabled = Volatile.Read(ref _experimentalUpscaling);
         var algorithm = (ExperimentalUpscalingAlgorithm)Volatile.Read(ref _experimentalUpscalingAlgorithm);
-        UpdateExperimentalUpscaleButton();
+        _driverScaleMenuItem.Checked = !enabled && Volatile.Read(ref _scaledEdgeEnhancement);
+        _systemScaleMenuItem.Checked = !enabled && !_driverScaleMenuItem.Checked;
+        _nisUpscaleMenuItem.Checked = enabled && algorithm == ExperimentalUpscalingAlgorithm.Nis;
+        _bicubicUpscaleMenuItem.Checked = enabled && algorithm == ExperimentalUpscalingAlgorithm.CatmullRom;
+        _textUpscaleMenuItem.Checked = enabled && algorithm == ExperimentalUpscalingAlgorithm.TextStrokes;
+        _gridUpscaleMenuItem.Checked = enabled && algorithm == ExperimentalUpscalingAlgorithm.PixelGrid;
+    }
+
+    internal void SetUpscalingFilter(ExperimentalUpscalingAlgorithm? selection, bool driverSharpening = false)
+    {
+        if (selection is { } value && !Enum.IsDefined(value)) throw new ArgumentOutOfRangeException(nameof(selection));
+        if (_isClosing || IsDisposed) return;
+        bool enabled = selection.HasValue;
+        var algorithm = selection ?? (ExperimentalUpscalingAlgorithm)Volatile.Read(ref _experimentalUpscalingAlgorithm);
+        bool edgeEnhancement = enabled || driverSharpening;
+        if (enabled == Volatile.Read(ref _experimentalUpscaling) && edgeEnhancement == Volatile.Read(ref _scaledEdgeEnhancement) &&
+            (int)algorithm == Volatile.Read(ref _experimentalUpscalingAlgorithm)) return;
+        Volatile.Write(ref _scaledEdgeEnhancement, edgeEnhancement);
+        Volatile.Write(ref _experimentalUpscalingAlgorithm, (int)algorithm);
+        Volatile.Write(ref _experimentalUpscaling, enabled);
+        UpdateDisplayMenu();
         lock (_d3d11PresenterLock)
+        {
+            _d3d11VideoPresenter?.SetEdgeEnhancement(edgeEnhancement);
             _d3d11VideoPresenter?.SetExperimentalUpscaling(enabled, algorithm);
-        SetStatus(!enabled ? "已关闭新版放大，恢复原版显示路径。" :
-            "新版放大（实验）已开启；仅在允许放大且 H.264 GPU 画面实际放大时生效，其他情况保持原版。",
-            MutedTextColor);
+        }
         _pictureBox.Invalidate();
         _ = RefreshUpscalingFrameAsync(enabled, algorithm);
         _pictureBox.Focus();
     }
 
-    private void UpdateExperimentalUpscaleButton()
+    private void PrepareInitialUpscaling(D3D11HwndVideoPresenterOptions options)
     {
-        bool enabled = Volatile.Read(ref _experimentalUpscaling);
-        _experimentalUpscaleButton.Text = enabled ? "新版放大：开" : "新版放大：关";
-        _experimentalUpscaleButton.AccessibleName = enabled ? "新版放大（实验），开启" : "新版放大（实验），关闭";
-    }
-
-    internal void SelectExperimentalUpscalingAlgorithm(ExperimentalUpscalingAlgorithm algorithm)
-    {
-        if (!Enum.IsDefined(algorithm)) throw new ArgumentOutOfRangeException(nameof(algorithm));
-        if (_isClosing || IsDisposed) return;
-        Volatile.Write(ref _experimentalUpscalingAlgorithm, (int)algorithm);
-        _nisUpscaleMenuItem.Checked = algorithm == ExperimentalUpscalingAlgorithm.Nis;
-        _bicubicUpscaleMenuItem.Checked = algorithm == ExperimentalUpscalingAlgorithm.CatmullRom;
-        _textUpscaleMenuItem.Checked = algorithm == ExperimentalUpscalingAlgorithm.TextStrokes;
-        _gridUpscaleMenuItem.Checked = algorithm == ExperimentalUpscalingAlgorithm.PixelGrid;
-        // Selection alone does not silently enable the opt-in feature.
-        bool enabled = Volatile.Read(ref _experimentalUpscaling);
-        lock (_d3d11PresenterLock)
-            _d3d11VideoPresenter?.SetExperimentalUpscaling(enabled, algorithm);
-        SetStatus(algorithm switch
-        {
-            ExperimentalUpscalingAlgorithm.PixelGrid => "已选择原像素。开启新版放大后，保留低分辨率桌面的像素边界。",
-            ExperimentalUpscalingAlgorithm.TextStrokes => "已选择文字笔画。开启新版放大后，从 1.75 倍起增强笔画，轻度放大使用双三次。",
-            ExperimentalUpscalingAlgorithm.Nis => "已选择 NIS（实验）；开启新版放大且实际放大 1～2 倍时使用，不支持时自动使用双三次。",
-            _ => "已选择双三次＋防光晕，可与 NIS 对照；新版放大的开关状态不变。"
-        }, MutedTextColor);
-        if (enabled) _ = RefreshUpscalingFrameAsync(true, algorithm);
-        _pictureBox.Focus();
+        if (options.EnableExperimentalUpscaling && options.ScaleMode == D3D11HwndVideoScaleMode.Fit &&
+            Volatile.Read(ref _pictureBoxClientWidth) > options.SourceWidth &&
+            Volatile.Read(ref _pictureBoxClientHeight) > options.SourceHeight &&
+            !D3D11ExperimentalUpscaler.PrepareShadersAsync(options.UpscalingAlgorithm).IsCompleted)
+            _ = RefreshUpscalingFrameAsync(true, options.UpscalingAlgorithm);
     }
 
     // A static desktop can send exactly one frame in response to a refresh.
@@ -1568,11 +1548,13 @@ internal sealed partial class RemoteViewerWindow : Form
             {
                 if (!ReferenceEquals(_d3d11VideoPresenter, presenter)) return;
                 Volatile.Write(ref _experimentalUpscaling, false);
+                Volatile.Write(ref _scaledEdgeEnhancement, false);
+                presenter.SetEdgeEnhancement(false);
                 presenter.SetExperimentalUpscaling(false);
             }
-            UpdateExperimentalUpscaleButton();
+            UpdateDisplayMenu();
             DiagnosticLog.Append("VIEWER", "新版放大自动回退：" + reason);
-            SetStatus("新版放大不兼容，已自动关闭并恢复原版；连接不受影响。", MutedTextColor);
+            SetStatus("显卡不支持选定的放大效果，已切换到系统缩放。", MutedTextColor);
         });
     }
 
@@ -1619,7 +1601,7 @@ internal sealed partial class RemoteViewerWindow : Form
     internal Button DisplayScaleButtonForEntityTests =>
         _displayScaleButton;
 
-    internal Button ExperimentalUpscaleButtonForEntityTests => _experimentalUpscaleButton;
+    internal ContextMenuStrip DisplayMenuForEntityTests => _displayMenu;
     internal bool ExperimentalUpscalingForEntityTests => Volatile.Read(ref _experimentalUpscaling);
 
     internal bool AllowDisplayUpscalingForEntityTests =>
@@ -1988,16 +1970,7 @@ internal sealed partial class RemoteViewerWindow : Form
             _remoteInputMethodButton,
             "切换被控 Windows 的输入法（相当于在远端按 " +
                 "Win+Space），不会切换本机输入法。");
-        bool allowDisplayUpscaling =
-            Volatile.Read(
-                ref _allowDisplayUpscaling) != 0;
-        _toolTip.SetToolTip(
-            _displayScaleButton,
-            allowDisplayUpscaling
-                ? "当前允许放大以适应窗口。点击后，较小画面按 1:1 原始像素居中显示，" +
-                    "避免被放大后发虚；大画面仍会等比缩小。"
-                : "当前禁止放大：较小画面按原始像素居中，大画面等比缩小。" +
-                    "点击后允许放大以适应窗口；不会改变远端分辨率或编码画质。");
+        _toolTip.SetToolTip(_displayScaleButton, "调整画面大小、放大效果和可用的文字补清。");
         _toolTip.SetToolTip(
             _fullScreenButton,
             "切换无边框全屏（F11）。4K 在默认窗口会被大幅缩小，" +
@@ -2008,7 +1981,7 @@ internal sealed partial class RemoteViewerWindow : Form
                 ? "操作远端桌面；本机系统拒绝拖放注册，向远端拖入文件已关闭。可切换是否放大画面，按 F11 可切换全屏。"
                 : canDragOut
                 ? "操作远端桌面；在远端资源管理器中把文件拖出此窗口，可接续拖放到本机。可切换是否放大画面，按 F11 可切换全屏。"
-                : "操作远端桌面；默认不放大小画面，按 F11 可切换全屏。");
+                : "操作远端桌面；在“画面”中调整缩放，按 F11 可切换全屏。");
         UpdateStatusToolTip(_statusBar.StatusText);
     }
 
@@ -2307,6 +2280,7 @@ internal sealed partial class RemoteViewerWindow : Form
             _pictureBox.DirectPresentationActive = false;
             DisposeD3D11VideoPresenter();
             ResetH264Decoder();
+            _displayMenu.Dispose();
             _statusMenu.Dispose();
             _toolTip.Dispose();
         }
@@ -4180,6 +4154,7 @@ internal sealed partial class RemoteViewerWindow : Form
                     _d3d11VideoPresenter = presenter;
                     if (_client.NativeDetails.IsEnabled) ScheduleNativeDetailPreparation();
                     presenter.ExperimentalUpscalingFailed += OnExperimentalUpscalingFailed;
+                    PrepareInitialUpscaling(options);
                     _d3d11VideoPresenterDevicePointer =
                         devicePointer;
                     _d3d11VideoPresenterSourceSize =
@@ -5255,6 +5230,7 @@ internal sealed partial class RemoteViewerWindow : Form
                 _d3d11VideoPresenter = presenter;
                 if (_client.NativeDetails.IsEnabled) ScheduleNativeDetailPreparation();
                 presenter.ExperimentalUpscalingFailed += OnExperimentalUpscalingFailed;
+                PrepareInitialUpscaling(options);
                 _d3d11VideoPresenterDevicePointer =
                     deviceLease.NativePointer;
                 _d3d11VideoPresenterSourceSize =

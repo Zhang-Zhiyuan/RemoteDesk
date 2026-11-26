@@ -11,7 +11,7 @@ final class AndroidViewerViewport {
     void geometry(int vw, int vh, int fw, int fh) {
         boolean newSource = fw != frameWidth || fh != frameHeight;
         float previousScale = retainedScale > 0f ? retainedScale : scale();
-        boolean keepPixelSize = !newSource && (zoom > 1f || keyboardOpen || retainedScale > 0f) && previousScale > 0f;
+        boolean keepPixelSize = !newSource && (keyboardOpen || retainedScale > 0f) && previousScale > 0f;
         viewWidth = Math.max(0, vw); viewHeight = Math.max(0, vh);
         frameWidth = Math.max(0, fw); frameHeight = Math.max(0, fh);
         // The IME temporarily crops/pans even a fitted desktop instead of
@@ -20,7 +20,7 @@ final class AndroidViewerViewport {
         if (newSource) reset();
         else if (keepPixelSize) {
             retainedScale = previousScale;
-            if (baseScale() > 0f) zoom = clamp(previousScale / baseScale(), 1f, maximumZoom());
+            if (baseScale() > 0f) zoom = clamp(previousScale / baseScale(), minimumZoom(), maximumZoom());
         }
         constrain();
     }
@@ -29,16 +29,21 @@ final class AndroidViewerViewport {
         if (keyboardOpen == open) return;
         keyboardOpen = open;
         if (open) {
-            restoreFitAfterKeyboard = zoom <= 1f && retainedScale <= 0f;
+            restoreFitAfterKeyboard = retainedScale <= 0f;
             if (retainedScale <= 0f) retainedScale = scale();
         } else if (restoreFitAfterKeyboard) reset();
     }
 
     float baseScale() {
-        return AndroidViewerScalePolicy.fitScale(viewWidth, viewHeight, frameWidth, frameHeight, false);
+        return AndroidViewerScalePolicy.fitScale(viewWidth, viewHeight, frameWidth, frameHeight, true);
     }
 
     float scale() { return baseScale() * zoom; }
+    private float minimumZoom() {
+        float base = baseScale();
+        return base > 1f ? 1f / base : 1f;
+    }
+
     private float maximumZoom() {
         float base = baseScale();
         if (base <= 0f) return MAX_ZOOM;
@@ -46,7 +51,8 @@ final class AndroidViewerViewport {
         // a high-resolution desktop or a tiny landscape IME viewport. Keep
         // native pixels and an already selected magnification reachable;
         // this changes only the local transform, never the source resolution.
-        return Math.max(MAX_ZOOM, Math.max(1f, retainedScale) / base);
+        float gestureLimit = MAX_ZOOM / Math.max(1f, base);
+        return Math.max(1f, Math.max(gestureLimit, Math.max(1f, retainedScale) / base));
     }
     float left() { return (viewWidth - frameWidth * scale()) / 2f + panX; }
     float top() { return (viewHeight - frameHeight * scale()) / 2f + panY; }
@@ -62,13 +68,15 @@ final class AndroidViewerViewport {
         zoom = 1f / base;
         panX = panY = 0f;
         constrain();
-        rememberUserScale();
+        retainedScale = 1f;
+        restoreFitAfterKeyboard = false;
     }
 
     void zoomAt(float factor, float x, float y) {
         if (!Float.isFinite(factor) || factor <= 0 || !Float.isFinite(x) || !Float.isFinite(y) || scale() <= 0) return;
         float previous = zoom;
-        zoom = clamp(zoom * factor, 1f, maximumZoom());
+        zoom = clamp(zoom * factor, minimumZoom(), maximumZoom());
+        if (zoom == previous) return;
         float ratio = zoom / previous;
         panX = x - viewWidth / 2f - (x - viewWidth / 2f - panX) * ratio;
         panY = y - viewHeight / 2f - (y - viewHeight / 2f - panY) * ratio;
@@ -77,8 +85,9 @@ final class AndroidViewerViewport {
     }
 
     private void rememberUserScale() {
-        retainedScale = zoom > 1f || keyboardOpen ? scale() : 0f;
-        restoreFitAfterKeyboard = zoom <= 1f;
+        boolean fitted = Math.abs(zoom - 1f) < .0001f;
+        retainedScale = !fitted || keyboardOpen ? scale() : 0f;
+        restoreFitAfterKeyboard = fitted;
     }
 
     void pan(float dx, float dy) {

@@ -12,9 +12,9 @@ class ToolbarSwipeTests(unittest.TestCase):
                 "content-desc": "远程操作栏，左右滑动可查看所有按钮", "bounds": "[20,800][420,860]", **changes}
 
     def test_reveal_far_controls_only_within_owned_strip(self):
-        for label in ("更多", "新版放大"):
+        for label in ("更多", "隐私屏"):
             self.assertEqual((380, 830, 60, 830), toolbar_swipe([self.strip()], label))
-        for label in ("键盘", "鼠标", "屏幕", "缩放", "触控板", "直接触摸"):
+        for label in ("键盘", "鼠标", "屏幕", "画面", "触控板", "直接触摸"):
             self.assertEqual((60, 830, 380, 830), toolbar_swipe([self.strip()], label))
 
     def test_unrelated_ambiguous_or_invalid_views_are_not_swiped(self):

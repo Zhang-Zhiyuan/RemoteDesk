@@ -26,7 +26,6 @@ final class AndroidViewerChrome {
         void screens();
         default void privacy() { }
         void zoom();
-        void upscale();
         void diagnostics();
         void shortcut(int... keys);
         void phoneNavigation(int key);
@@ -37,7 +36,7 @@ final class AndroidViewerChrome {
     final TextView status, health, hint;
     final View indicator;
     final EditText composer;
-    final Button mode, keyboard, mouse, drag, screens, send, upscale, more, watchOnly, privacy;
+    final Button mode, keyboard, mouse, drag, screens, send, more, watchOnly, privacy;
     boolean keyboardOpen, mouseOpen;
     private boolean compact;
     private boolean compactKeys;
@@ -151,14 +150,13 @@ final class AndroidViewerChrome {
         mode = button("触控板", v -> actions.mode());
         mouse = button("鼠标", v -> { setMouseOpen(!mouseOpen); });
         screens = button("屏幕", v -> actions.screens());
+        weighted(mainRow, button("画面", v -> actions.zoom()));
         weighted(mainRow, keyboard); weighted(mainRow, mode); weighted(mainRow, mouse);
+        screenSelection(false);
         weighted(mainRow, screens);
         privacy = button("隐私屏…", v -> actions.privacy());
         privacy.setVisibility(View.GONE);
         weighted(mainRow, privacy);
-        weighted(mainRow, button("缩放", v -> actions.zoom()));
-        upscale = button("新版放大：关", v -> actions.upscale());
-        weighted(mainRow, upscale);
         more = button("更多", v -> actions.more());
         // Keep usable hit targets on split-screen/small displays and with large
         // system fonts. A weighted, fixed-width row used to squash five buttons
@@ -218,10 +216,9 @@ final class AndroidViewerChrome {
         mode(previousTrackpad, previousLocked);
     }
 
-    void upscaling(boolean enabled) {
-        upscale.setText(enabled ? "新版放大：开" : "新版放大：关");
-        upscale.setContentDescription(enabled ? "新版放大（实验）已开启，点击恢复原版" : "新版放大（实验）已关闭，点击开启");
-        mark(upscale, enabled);
+    void screenSelection(boolean available) {
+        screens.setVisibility(available ? View.VISIBLE : View.GONE);
+        screens.setEnabled(available);
     }
 
     void adapt(boolean smallHeight) {
