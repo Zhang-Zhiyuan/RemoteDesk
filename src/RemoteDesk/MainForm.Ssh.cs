@@ -28,17 +28,16 @@ public sealed partial class MainForm
         _allowSshBox = new CheckBox { Text = "允许通过中继连接本机 SSH", AutoSize = true, Dock = DockStyle.Top };
         ResponsiveWindowLayout.ConfigureWrappedCheckBox(_allowSshBox);
         _sshHostPortBox = CreatePortInput();
+        _sshHostPortBox.Dock = DockStyle.Top;
         _sshHostPortBox.Minimum = 1;
         _sshHostPortBox.Value = 22;
         _sshHostPortBox.AccessibleName = "Windows SSH 首选端口";
         SetToolTip(_sshHostPortBox, "Windows sshd 监听多个端口时优先使用此端口。");
-        var content = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Margin = Padding.Empty };
+        var content = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Margin = Padding.Empty };
         content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         content.Controls.Add(_allowSshBox);
-        var portRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top, Margin = Padding.Empty };
-        portRow.Controls.Add(new Label { AutoSize = true, Anchor = AnchorStyles.Left, Text = "Windows SSH 首选端口" });
-        portRow.Controls.Add(_sshHostPortBox);
-        content.Controls.Add(portRow);
+        content.Controls.Add(new Label { AutoSize = true, Dock = DockStyle.Top, Text = "Windows SSH 首选端口" });
+        content.Controls.Add(_sshHostPortBox);
         var hint = new Label { AutoSize = true, Dock = DockStyle.Top, UseMnemonic = false,
             Text = "注册中继后自动准备 Windows OpenSSH，新安装仅监听本机。运行中的 WSL 可单独选择，使用发行版自己的 SSH 账号与端口。" };
         content.Controls.Add(hint);
