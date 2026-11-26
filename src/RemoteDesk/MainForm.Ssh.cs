@@ -43,7 +43,7 @@ public sealed partial class MainForm
             Text = "注册中继后自动准备 Windows OpenSSH，新安装仅监听本机。运行中的 WSL 可单独选择，使用发行版自己的 SSH 账号与端口。" };
         content.Controls.Add(hint);
         _prepareWindowsSshButton = CreateSecondaryButton("检查并准备 Windows SSH");
-        SetToolTip(_prepareWindowsSshButton, "检查 Windows 自带的 OpenSSH。手动启用时会保留 WSL 端口映射；出厂配置遇到端口冲突时，仅为 Windows 分配本机端口。");
+        SetToolTip(_prepareWindowsSshButton, "启用使用原厂配置的 Windows SSH 时，为中继分配独立的本机端口。已有自定义配置和 WSL 映射保持原样。");
         _prepareWindowsSshButton.Click += async (_, _) => await PrepareHostSshAsync(retry: true, enableDisabled: _sshServiceDisabled);
         content.Controls.Add(_prepareWindowsSshButton);
         content.Controls.Add(_sshHostStatus);
@@ -133,7 +133,7 @@ public sealed partial class MainForm
         {
             var result = await WindowsSshService.PrepareAsync(retry, enableDisabled);
             if (_isClosing || IsDisposed) return;
-            _sshServiceDisabled = result.Reason == 21;
+            _sshServiceDisabled = result.Reason == 21 || enableDisabled && result.Reason != 0;
             _prepareWindowsSshButton.Text = _sshServiceDisabled ? "启用 Windows SSH（手动启动）" : "检查并准备 Windows SSH";
             _sshHostStatus.Text = result.Message;
             _diagnosticLog.Append("SSH", result.Message);

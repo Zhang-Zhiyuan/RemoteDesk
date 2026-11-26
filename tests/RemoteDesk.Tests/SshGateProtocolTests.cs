@@ -54,6 +54,7 @@ public sealed class SshGateProtocolTests
     [InlineData(26, typeof(IOException))]
     [InlineData(29, typeof(IOException))]
     [InlineData(31, typeof(IOException))]
+    [InlineData(32, typeof(IOException))]
     [InlineData(7, typeof(InvalidDataException))]
     public async Task ClientExplainsFailureWithoutStartingSsh(int status, Type expected)
     {
@@ -74,6 +75,7 @@ public sealed class SshGateProtocolTests
     [InlineData(0, "PORT_BUSY", 29)]
     [InlineData(0, "CUSTOM_SERVICE", 30)]
     [InlineData(0, "ADMIN_REQUIRED", 31)]
+    [InlineData(0, "NO_SERVICE", 32)]
     [InlineData(1, "READY", 28)]
     [InlineData(0, "", 28)]
     public void PreparationResultIsAvailableToTheHostAndGate(int exitCode, string marker, byte expected)
@@ -81,6 +83,13 @@ public sealed class SshGateProtocolTests
         var result = WindowsSshService.ParsePreparation(exitCode, marker);
         Assert.Equal(expected, result.Reason);
         if (expected == 26) Assert.Contains("0x800F0954", result.Message);
+    }
+
+    [Fact]
+    public void StartupReportsTheServiceExitCodeAndTheCorrectWindowsPage()
+    {
+        Assert.Contains("1067", WindowsSshService.ParsePreparation(0, "START_FAILED 1053 1067").Message);
+        Assert.Contains("公网中继 → 本机 SSH", SshGateProtocol.NativeServiceFailure(21));
     }
 
     [Theory]

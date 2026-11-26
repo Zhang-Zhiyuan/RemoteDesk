@@ -65,7 +65,8 @@ internal static class WindowsSshService
         byte reason = (exitCode == 0 ? parts.FirstOrDefault() : null) switch
         {
             "READY" => 0, "DISABLED" => 21, "INSTALL_FAILED" => 26, "RESTART_NEEDED" => 27,
-            "PORT_BUSY" => 29, "CONFIG_CHECK" or "CUSTOM_SERVICE" => 30, "ADMIN_REQUIRED" => 31, _ => 28
+            "PORT_BUSY" => 29, "CONFIG_CHECK" or "CUSTOM_SERVICE" => 30, "ADMIN_REQUIRED" => 31,
+            "NO_SERVICE" => 32, _ => 28
         };
         string message = reason == 0 ? "Windows SSH 已就绪。" : SshGateProtocol.NativeServiceFailure(reason);
         if ((reason == 26 && parts.Length == 2 ||
@@ -74,6 +75,9 @@ internal static class WindowsSshService
             parts[^1].Length == 10 && parts[^1].StartsWith("0x", StringComparison.Ordinal) &&
             uint.TryParse(parts[^1].AsSpan(2), System.Globalization.NumberStyles.HexNumber, null, out _))
             message += " " + string.Join(" ", parts.Skip(1));
+        if (reason == 28 && parts is ["START_FAILED", var native, var service] &&
+            uint.TryParse(native, out uint nativeError) && uint.TryParse(service, out uint serviceError))
+            message = $"Windows sshd 启动失败（Win32 {nativeError}，服务退出码 {serviceError}）。请查看事件查看器的 OpenSSH / Admin。";
         return new(reason, message);
     }
 
