@@ -106,7 +106,7 @@ async def authenticate_gate(reader, writer, device_id, device_key):
     if result == b"\3":
         raise ConnectionError("所选 WSL 的 SSH 服务不可达。请确认发行版已运行，并在其中启动 OpenSSH Server。")
     if 20 <= result[0] <= 32:
-        reasons = ("尚未安装 OpenSSH Server", "sshd 已禁用，可在“公网中继 → 本机 SSH”启用", "sshd 服务已停止", "无法查询 sshd 监听状态",
+        reasons = ("尚未安装 OpenSSH Server", "sshd 已禁用，可在“公网中继 → 本机 SSH”启用", "sshd 服务已停止", "无法确认 OpenSSH 组件或 sshd 监听状态",
                    "sshd 没有可连接的监听端口", "正在准备 OpenSSH Server，请稍后重试",
                    "无法从 Windows 可选功能源安装 OpenSSH Server", "安装 OpenSSH 后需要重启",
                    "OpenSSH 准备失败，请查看目标电脑的事件记录", "SSH 端口已被监听或映射占用",

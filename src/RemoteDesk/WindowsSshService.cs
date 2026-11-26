@@ -28,7 +28,9 @@ internal static class WindowsSshService
                 lock (PreparationLock)
                 {
                     Volatile.Write(ref _preparationStatus, result.Reason);
-                    _retryAfter = Environment.TickCount64 + 120_000;
+                    // Every connection still checks SCM first. These servicing states
+                    // usually need Windows to finish a reboot or repair the component.
+                    _retryAfter = Environment.TickCount64 + (result.Reason is 27 or 32 ? 1_800_000 : 120_000);
                 }
                 return result;
             });
@@ -66,9 +68,13 @@ internal static class WindowsSshService
         {
             "READY" => 0, "DISABLED" => 21, "INSTALL_FAILED" => 26, "RESTART_NEEDED" => 27,
             "PORT_BUSY" => 29, "CONFIG_CHECK" or "CUSTOM_SERVICE" => 30, "ADMIN_REQUIRED" => 31,
-            "NO_SERVICE" => 32, _ => 28
+            "NO_SERVICE" => 32, "MISSING_BINARY" => 30, "STATE_UNKNOWN" => 23, _ => 28
         };
         string message = reason == 0 ? "Windows SSH 已就绪。" : SshGateProtocol.NativeServiceFailure(reason);
+        if (reason == 30 && parts[0] == "MISSING_BINARY")
+            message = "Windows 将 OpenSSH Server 列为已安装，但系统目录缺少 sshd.exe。请在 Windows 可选功能中修复 OpenSSH Server。";
+        if (reason == 23 && parts[0] == "STATE_UNKNOWN")
+            message = "Windows 安装命令已返回，仍查不到 sshd 服务，也无法确认 OpenSSH Server 的可选功能状态。";
         if ((reason == 26 && parts.Length == 2 ||
              reason == 28 && parts.Length == 3 && parts[0] == "PREP_ERROR" &&
              parts[1] is "inspection" or "installation" or "configuration" or "startup") &&

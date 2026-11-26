@@ -1949,6 +1949,9 @@ if (-not $SkipTests) {
         Invoke-Checked "Running Windows tests" {
             dotnet test .\RemoteDesk.sln -c Release
         }
+        Invoke-Checked "Checking Windows OpenSSH servicing results" {
+            & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -File .\tests\Test-WindowsSshServicing.ps1
+        }
     }
     else {
         Write-Step "Skipping Windows tests for Linux-only package"

@@ -73,7 +73,7 @@ internal static class SshGateProtocol
         20 => "目标 Windows 尚未安装 OpenSSH Server。",
         21 => "Windows 的 sshd 服务已禁用。请在目标电脑的“公网中继 → 本机 SSH”点“启用 Windows SSH（手动启动）”。",
         22 => "目标 Windows 的 sshd 服务已停止。请在“公网中继 → 本机 SSH”点“检查并准备 Windows SSH”。",
-        23 => "目标 Windows 无法查询 sshd 的监听状态。",
+        23 => "目标 Windows 无法确认 OpenSSH 组件或 sshd 服务的监听状态。",
         24 => "目标 Windows 的 sshd 没有可连接的监听端口。",
         25 => "目标 Windows 正在准备 OpenSSH Server，稍后重试。",
         26 => "Windows 未能安装 OpenSSH Server。可挂载与系统版本匹配的「语言和可选功能」介质，再点「检查并准备 Windows SSH」。",

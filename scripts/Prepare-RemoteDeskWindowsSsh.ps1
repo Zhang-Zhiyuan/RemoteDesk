@@ -101,6 +101,25 @@ function Install-OpenSshFromMedia {
         [IO.Directory]::Delete($temp,$false)
     }
 }
+
+function Get-OpenSshInstallResult($install) {
+    if ($install.RestartNeeded) { return 'RESTART_NEEDED' }
+    # DISM can return successfully before SCM registers sshd, or without adding
+    # the capability at all. Confirm what Windows actually installed.
+    for ($i = 0; $i -lt 9; $i++) {
+        if (Get-Service -Name sshd -ErrorAction SilentlyContinue) { return 'REGISTERED' }
+        if ($i -lt 8) { Start-Sleep -Milliseconds 500 }
+    }
+    try { $state = (Get-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0' -ErrorAction Stop).State }
+    catch { return 'STATE_UNKNOWN' }
+    if ($state -in 'InstallPending','UninstallPending') { return 'RESTART_NEEDED' }
+    if ($state -in 'NotPresent','Staged','Removed','Resolved','PartiallyInstalled') { return 'NEEDS_SOURCE' }
+    if ($state -ne 'Installed') { return 'STATE_UNKNOWN' }
+    if (Get-Service -Name sshd -ErrorAction SilentlyContinue) { return 'REGISTERED' }
+    if ([IO.File]::Exists((Join-Path ([Environment]::SystemDirectory) 'OpenSSH\sshd.exe'))) { return 'NO_SERVICE' }
+    return 'MISSING_BINARY'
+}
+
 $service = Get-Service -Name sshd -ErrorAction SilentlyContinue
 if ($service.Status -eq 'Running') { 'READY'; return }
 $newService = $false
@@ -115,16 +134,30 @@ $binary = Join-Path ([Environment]::SystemDirectory) 'OpenSSH\sshd.exe'
 $fresh = !(Test-Path -LiteralPath $config)
 if (!$service) {
     $stage = 'installation'
+    # Retrying DISM while an earlier transaction awaits a reboot cannot start sshd.
+    try { $current = Get-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0' -ErrorAction Stop }
+    catch { $current = $null }
+    if ($current.State -in 'InstallPending','UninstallPending') { 'RESTART_NEEDED'; return }
     $rule = 'OpenSSH-Server-In-TCP'
     $hadRule = Get-NetFirewallRule -Name $rule -ErrorAction SilentlyContinue
     try {
-        $install = Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0'
-    } catch {
-        $code = '0x{0:X8}' -f $_.Exception.HResult
-        if ($code -in '0x80070005','0x800704EC') { "INSTALL_FAILED $code"; return }
-        try { $install = Install-OpenSshFromMedia }
-        catch { $install = $null }
-        if (!$install) { "INSTALL_FAILED $code"; return }
+        $code = $null
+        try {
+            $install = Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0'
+            $result = Get-OpenSshInstallResult $install
+        } catch {
+            $code = '0x{0:X8}' -f $_.Exception.HResult
+            if ($code -in '0x80070005','0x800704EC') { "INSTALL_FAILED $code"; return }
+            $result = 'NEEDS_SOURCE'
+        }
+        if ($result -eq 'NEEDS_SOURCE') {
+            try { $install = Install-OpenSshFromMedia }
+            catch { $code = '0x{0:X8}' -f $_.Exception.HResult; $install = $null }
+            if (!$install) { ("INSTALL_FAILED $code").TrimEnd(); return }
+            $result = Get-OpenSshInstallResult $install
+            if ($result -eq 'NEEDS_SOURCE') { 'INSTALL_FAILED'; return }
+        }
+        if ($result -ne 'REGISTERED') { $result; return }
     } finally {
         # Windows adds an inbound rule when installing the optional feature.
         if (!$hadRule) {
@@ -132,13 +165,9 @@ if (!$service) {
             if ($addedRule) { $addedRule | Disable-NetFirewallRule | Out-Null }
         }
     }
-    if ($install.RestartNeeded) { 'RESTART_NEEDED'; return }
     $service = Get-Service -Name sshd -ErrorAction SilentlyContinue
-    for ($i = 0; !$service -and $i -lt 8; $i++) {
-        Start-Sleep -Milliseconds 500
-        $service = Get-Service -Name sshd -ErrorAction SilentlyContinue
-    }
-    if (!$service) { 'NO_SERVICE'; return }
+    if (!$service) { 'STATE_UNKNOWN'; return }
+    if ($service.Status -eq 'Running') { 'READY'; return }
     $newService = $true
 }
 $stage = 'configuration'

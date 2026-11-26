@@ -76,6 +76,8 @@ public sealed class SshGateProtocolTests
     [InlineData(0, "CUSTOM_SERVICE", 30)]
     [InlineData(0, "ADMIN_REQUIRED", 31)]
     [InlineData(0, "NO_SERVICE", 32)]
+    [InlineData(0, "MISSING_BINARY", 30)]
+    [InlineData(0, "STATE_UNKNOWN", 23)]
     [InlineData(1, "READY", 28)]
     [InlineData(0, "", 28)]
     public void PreparationResultIsAvailableToTheHostAndGate(int exitCode, string marker, byte expected)
