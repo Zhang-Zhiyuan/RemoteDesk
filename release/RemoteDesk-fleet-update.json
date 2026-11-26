@@ -1,44 +1,44 @@
 {
   "tickets": {
     "win-x64": {
-      "version": "1.0.64",
-      "build": "20261126191602",
+      "version": "1.0.65",
+      "build": "20261126200549",
       "platform": "win-x64",
-      "size": 137331663,
-      "sha256": "ff1a37acf86c6508372475cf33ee55ca2011a6adf83ac8756d54c1eb7a90feca",
-      "signature": "mAoD0So+7kTnMOjAp1FsfpXr6wcUjWHOE3elyNDKdVwjNDeb6B3s7lbsyV28427i3MxaOxRqLjLROUkdLa6hC8U3uPHOJGXupaZZh7K8BV+WiHqDEYcwWjLsLG9HYTDp8j8Bb2x9CdJuu2AE4+Bw1pclDr4M2FDeRyzQRmlvpkn0iernnt/lBPzVBsAKXLKFfRUtddsHbsHKQlbFWtzgzhKbQizefSUs3Y83TAFVFbpU1bRZLYCheVqPRbDns9OhW/w9if9l8/ULJzW5Fb4vSRvMy4q4/KtCRGcAQmQZcHnxPQsXvGahTvjwQCCJPYshLUysamjVoOWp6Jom8+LUz+dbl8TF9sCxmSFAQ1/lXNNoXE5YntPYqxY09DPqVtvHcxJC0XfB3bj/dGQD0MS0iEchao4cSpGgQCjlssOYzupZnEyXoeYK5ILOClFdsJNfd71bCa7ZtS5uW15IINC4IUxWe5S6BawiI+9itjxJ7yppcey7HGV0ISynx41q8mL10RrNzC+fpPiox6PRwY7SkB9Zf9NhTNkNc0TjLv9dV0FI0GdIfbpiAQ+oWjzDANbpZ2cxiNo8gGlMC0iEmk7RXb1uen1yc8Z8WTctHtN42TlhACpkmiuIbAkaDQFQIHub3gBRG17sSBfHniHa2xq+B7eB8qKfx95OIzE1MeYMn1U="
+      "size": 137325330,
+      "sha256": "db677486c8e7b93f586977f200f407e23cd9c83594654d87f9a09672d0ab1c4f",
+      "signature": "JbkpYURhNgeZIcBV5vcBKFsTtDrdr+SwWIs+UqP6lPEyb6825Hjqc/KOCFa0A5L/YnezAMvUJsn8g7oOE25PeP6fNHNLjRB90wvenHWo6DD5ZImPng6njfGeArVn0ohvxIOHO8bK/LXet9an+JKFSKAXcgkq1aA/Jr5LaZNo57aytFEuZisZvfX7PVjduUyH8o0Ze2+nTsobA8X/yuvdo0p2x4tBKkpmeooUwyXcjw6C770OkRdo2/NrLRooU/T/iZbgkelmu4bjakJ9k0mUiIkhkw7DNqRDHTDfJIH6r8iYV6s0TAKew3ncNJdtjveyyOE3OIWTZb/AnOzfku/AMYxWC4v8ffsAZ9++8fdUwV5JoJiqAlgtKMGz7UiMM059MHKCFSDiBcMUA0pcnLxaM4MDuGGxdsZKYJKEcHNpQ6IhusqfA2U74vf0KhDMHoyi7Fr1is22/+0beB9M8N4v+LAh/r2ILzUpUB+o0jNygc1wd7rShag2Tlo6ghRAyfVIFbP0GFPRULeZYJxTyfAV+y5010OWsAhCO+GEkHYvSKFgNTVW3JsYBUGs6Vh/HvpNhxYtDZpbmkneZfspj9v6tKiP2HzYo78qPDG0Igs3cET0LzKwZ1763DSon66v5HZw+mZdMIsXOm4NIgacRgo2TdgeGiIwVlnm2zdKKgXxGW8="
     },
     "android": {
-      "version": "1.0.64",
-      "build": "20261126191602",
+      "version": "1.0.65",
+      "build": "20261126200549",
       "platform": "android",
-      "size": 2928558,
-      "sha256": "708fd56509481dcf3de6fb4288dbcda9099754ff76488e31e931133cf081631a",
-      "signature": "TjxB5qIIwvGon7qfhR+YV2vZgtkNeMAcfeuvmTg97oXW6Im7mABRvxQCWA735Ipn6FHmL0riV4AbviAyTw7QtbiJvtNIZrJBD0V97kT9OYArHK8wMVxwtMAa2HcsEosk1m+iFGX5FivYM8eaQoh61XKFq3M4+TuUkcBklPyPjEHlaKFephjmIPwYpsYLr8E3/0kXk9EX4QVH2pXgLfu5yggH9nwg81rROwZ4hcCDmt3f8sshWzgsCodxYOznoMuutDP/xij0cBM1y/98F5cm6PmBrO5oQIiKq61Q7+rb8gVjBN5AsNsuEVOsO8R41qyo72j18e69dJoMccsb6G5dSgk1hHpG7fTABhZxeQMn6VE04bOD2+2v6i+P6m4ly9Uf3cxZK7FMDnxH+RZ1VMlzoBnq4w9ARyjO+ypSmQwBLyRjgRdqS/fr0veMqTXnnTz2DrCLXPS/lNNAvQ3mDbPqjRY8TOxwh8/5yF9tqvkdJ0p5zuNBQNsMIWf0ZUOBG836tdFfo+zZGed0L2wGQftUWhRuuDUfRHchE1gLOLtxCD/2yydCzc/Y9alTtbqAMTv3im+UTCsaU1GvSFfFWtjLH56xte0Ag4P+9JBN2WzZhRQlTg5khWX66QP8lHSml8ipIAAAUNgsolwqUEzAifVkMKPswdVPrjOGySgaqN7ymx8="
+      "size": 2929262,
+      "sha256": "93ca69d3d19584b97507d118a792f954130c07f05311b820decbc9912632b659",
+      "signature": "HxGhMOw2BIYH6/dGWReRcm+vEU36KPWECpH+Cpl1Bxr+MvAbhrFlvlhWSqh66mLZLlYQQrb5fFrYbsV2ZPtAo1RmnKAGfA5LnPC0BGQ/6tvCUX7O3ZDKIvLxLLPjVfZs3/MKs/bNEI1BrSlDTElNPjkq4F7Co6KoKxCuyvvQBpc6YI1RMmZKJf7BRg9NPT/oZv/Wcu5EqpMbaWzUcxX5FbYs5Iy/v8Gw3TnVDh43Eeuewyg4bVvchwmDgaNYK3KW6EdtiD2K5myVwJrVvalJ16sim3YuBc3d5TOQFr8L+HjLCfKWxZ6OGklIt9MomieBe79w4hgbIU9j/DqK7DVBkmzshT4Kt0o4c2DAwAfnTTTMABtdQXLZfgza1uL9rPk1BmbIQRAr3urgG27JaCcedxtKmOsk2MiUThqG7NBQ97Va/jlU7Xx2E6MmsrRYY23tWC0T2E1nbJajjlcdtcXMCMhOfN7TqbTr1O6ZmFW854OgDFOMcrOqzcf/7Cb/FVGhStXTvNGusDzD4XCBzFdoPUhaH3DN6pMexWgrBbzouM/tKVUIp381ioXMMHH0I2BxdEYYuzy5oxIeRCdMWbcX+uoJuKftBKCuPvPqsy/3QoTBoWyksD4kvXGZPrUDlex+EYq6PzkSDtIgoYQKSA8ZYB0DiHqexsDKvKrR2Ky9XSI="
     },
     "linux-deb-amd64": {
-      "version": "1.0.64",
-      "build": "20261126191602",
+      "version": "1.0.65",
+      "build": "20261126200549",
       "platform": "linux-deb-amd64",
-      "size": 6601126,
-      "sha256": "284fe7f5fbab0387e3f848be0969cb250f0c407b141303274493408d38b514f8",
-      "signature": "jnRE0eYtiQgmQ5DevPPjCSgAiSBSrLg4kRDzs8FRyoZMYAnbP/CytZ4ckXux3QEAVZyaU1v3C4CV0+4DNx6Te50EtrX6WcRR6cq0W7RwqglNk230pGQUqu/pa5uum4dIF5CL77giaYrtJnYsR3wE34s0YlpXO42I8Oa138v2TtSMdSZcK2TMAzllGasPeqJaJ1QFhCjcExueHcMlgMQRY51iuc/5OYVwjqi6Gjot+1epNj7sDx8tGNbx5yoYWkw9I0VN+f25Bc6Xcr6sdT5DbW/q1KTEsYDhwojDpUDgfZLuzfiCEXYxHvIU7gLhV8ez+ADaVkKDcLnjdmk+Q8f+L1zBYc/Wz0Iw4YFX0LFulc1RxE1BCnTcb1ZGkFDAXqCxRAsxVRFMJcj+kTYdhfY7USTKMa9HY/MMj31VuDC4ytx9MpAtByVlUpz6ulDCgEhnJCvk+Hdu9x7rEBFGtOIVZCBcRbuOuoeP4I38KEmf7QJcpdnrgQl7fbYCxPds/SNDUgS5JB01SwUdFdiEG/hYsbI1br0OZ0uY4LDlXbVU1S0soRQ0J33efdp4TLfHoRH7LrjZUuaHSEriXT18MQEll0cxxwv3Zj6j1k48rJL83L8p+TrlPMeNg/xouTT/aIYwec+gIG8Ppo3hQUtSMpbNPg0TTLFc8y1AR5fzSpmmTmo="
+      "size": 6596100,
+      "sha256": "e2f629f222c12cb490518fded483e311a6ce594ca3ee7d6dce4ede094c0d7317",
+      "signature": "mT1sdHES/oyOm6j9IpZvg98eB2s2di84k9RMD76jvHbyod6px2TCOYx0J6s2uANrE9zyXLifYPjGBI/GxyRvSXIqeW7/hnRzT0Ab2EhmboE2kFw5TthIUG8XckzQ3LLI1LwDAvuWgbHqLTyAUf1ENQUBdyue7R4gL0zhus0LkKR1NY9BWbOuC5tzG/QWIlM6eW2lfFjEhOYszXKjFh1pYPtLGRFNgRPnqxT6N/TLqdyD5qMbEBDDvcdV3goi3SFWYt1vygH+TEoUIymbsIVOA5TAYtkP4T8y1O4/gaoScRe8GSNak6tKG+RT6FxZH2iuenBG1RXeSiqnaeKKW//KAV78TDxmzsmcUM3/1TJNJXY9MHqHbCvOyQ/sy3n/6iY+591CxfaD7xmVtEhmZdtCplgBLDGt54jmY+rMzpwVO76s0plIbcyy+n1ktTBSgP/uAuSxQ4UWcxSmmGsr2c8dSprtPbKFQmEJeqjTDIgiu+Ihg0X7ogMhfQIiu+BgSi3X+9V/egonk+o9gF1HVIoNKpY67ZN8i5eqSEZ+CY4bLgyFUs0QCRpNXF/GIZZawp5kwOKR11lC0/RDqcMqHGvNNBLdMaJpW3JcBspNEKnOnJ0uFhBbdMtPBQujVShG88x580wW1gOQPnOvVJK5Tixiek8Kg9xrvC4T74WUPLNoWDA="
     },
     "linux-amd64": {
-      "version": "1.0.64",
-      "build": "20261126191602",
+      "version": "1.0.65",
+      "build": "20261126200549",
       "platform": "linux-amd64",
-      "size": 11370966,
-      "sha256": "9619fa1121bc42d40635f893a516d49b8911126ee7dfcc28929763b19d205c8e",
-      "signature": "VTilckL35hOnDsPIkEQm3j6rUWbeKN0acVE8XjCNSin0G/oZB1B7k5NJCiQ989Y+GNcXraXGrzyUtnbXH+2gOj3uaXLobP60Vh1kNLnIuRdNFMBQ5cfY1e6790GhLMcELxlFOjVkn6mN1gpIW60PkY8bCJ/by8giKZFMT3lzLgiA/taeDMwpjCsINlvem+Lzzl9wjl+tPFA4loDYJKawswj8QLAhXINxyul3/X6ocwMHWgUsQPvy7PoKVbl+HKbalqsli32v/dfAzerDJKjIrxcFK+jBFdZSzV91Z1MhaHBKCDxodOqG6NtAwmPphx2nG2sKWmj+pGLT1y9vMqhxq7vcbqkB02vMgoQw69NEXHy4ffe5nfpj//ACMBN+euDZGTUhb4tyazDGqKLSgL1CqzJShSbUhwAtNHDTkqRpMczcK0/iOEPpaD8Xx05A8bXfoX50fMN4eQZqhNqR3YifPySOqjuW/vMOpKL4E4E7AUZUMgTypHR7bJ6lKTlpOEzlN1pEi3Nv85+gnocAbQdsHw3B7TNPM2dQEicTvigpgVuQ68ozBO0FVATLq18vRtu0gPzzDEU06K2VfTcxi3b1tfllXTmPViNV4iXydh2Z9bCYwL34KNfDrz0Brx2Xcrqqr8lHkLM+sfuN73ZvbrvTRAD1tyByYQDCma5sv4dRCxU="
+      "size": 11370452,
+      "sha256": "00f9013335d180c306e2213b9538bfa38ba2ac2fe7824bc00039abe1ef46261f",
+      "signature": "kHmPbsnG7iLE+Oi/aomT8UBzPnf6Eh/ru2r311/jdeZyjLdfmcvtW1377zRsHPanRxc0949cbBWAhybZKZCbRDPJMy7zqJcSYd8+XTAaQAZYU1zQ01CEwhLGz4Lu8tX5RZhTAQu9dqhdtv7B2abahsu7kiXe0uiU3YN7R8Dp7iYkU+uPRvhHdeF9+HihxgHJtk4ixEKAvgf45FGeBHRQ0VcRWqEuqlwB/A2df3VtKKlQBJP9DPpctUWKy9YTpD3nkA+PmV8vp4CYMLScrfS1g5nPUwrdTEFjEXxxSzxP2zV26hao+GFt5Y9jLwNAhAfpQW7RmJnyn5JawkdNJVH7rYMOQ21sSOVZlDlZFTn/W2kevJr2pGo5W0TLTVDa1qc4wVD2o7tlZpaHWmvABL4xOBel1O9R7Fw3WT5CT1YZ54P4NxkoCd7mYgTAfLSbCPCL2JDiYaviUOMkojHCuVKptctqBPhBOopepGUPBVTWS0sIyas15jdCoCzThMFs23baP1UisF981fvy5wME1rbBj1ccgA4pWXSaPrXsywGwVbxUAtdgbwqjvwA4Li4wJLxJUdpEG5Qc2pt35m70u01ID3FmW+pKhMzpxr6NmO9L7Z4fz3Tj//lB5Pm8rhIfuO8EzHP12DoycdG5CYRaWUdOJOjrw/J17TIuLcXTm6Tlhn0="
     },
     "linux-python": {
-      "version": "1.0.64",
-      "build": "20261126191602",
+      "version": "1.0.65",
+      "build": "20261126200549",
       "platform": "linux-python",
-      "size": 259653,
-      "sha256": "a72f0e5b82f8817137f1fb37d0ae2c0cbf352be3b8f00ce349c8acb99ba14460",
-      "signature": "oixh80yvacqOE5kHsTy23kxD/9VUI/aXnvUZHY2RAcy8pXgDMwr1yxSwBhaQcBZyjZR4vh18WXAzRa+vVRcQQs8gPCIWSO18mL02fB8VkYWWQ8q/0ylJkM5W7qjLblowlsS/IzflZkz2wUViPm8esOKvb4LOcpUfSSl2CW7EV/idKiRqwp0TUlPYTKf9otVLDBkV0JH0VqNokURDqh7DOUsDp/At23FaUA3iimNa/9pSh+g9ywOx89MD1kZml67Nc/LYM42MANizDKkdyihXpbRqhCKOchWjwCdJkQNob7zo0ekyB9VJihDNAviSTjzvPU0sX4OGATCFXb0Kl0W2RyP2sRim+prsQm/ry/3zocIA2QvWvSDTlGCUjIzyjmoNAAmyseQ35J6c5L922xyEcVfp/MlYtvApTzekKlcb8zJuEXDLPuaW+GNRpU4dAUeA0Qeg1aNEojpIRHnLJviUcxDLAMU4Pf9ZoaPxqUa8uL5B4dyeIAoU8WLqd7RWJ0orVk4XFvdaJuZ/UlAX/OhHE+kN/mLUlgkv5BKQunWd9JYoPN6NmLwXwlxES+wc6faQxRlMKK+NalSZUb80XpKVIp7QbiM8i+VHNlk+AJFXhyC5CqZpcN7+pOSlZAUNJCg+YDbGbmakrk/1exTGZ3Q88ia1dP4R/3kFsiIK+AwHXmM="
+      "size": 260129,
+      "sha256": "e981c92a6594a38a302d7fe944d09e2d9ce4b3ca3e5092cc9966bb46fe0117bb",
+      "signature": "V4beGH/3wec/hSko5O2OyFXlGkyOuhAcBUYoLHvxkKQ9JNS4M7C2f13OiGY2MtpRbZqWC5t5TWVu6IxGjln1FDATyTSfppq4GC3MT8ILEjniW3OwJJynKMKoM9e9uk7VIVOH55yuGaS6ZSKZkLZXVe93R9w2ugpEgqa80tx/C1N79banElHU/2If1XU9RR/cb409jmjkSp54QvYzcv2+9K0VDELKVCzvX41/VETowa9VzbAdIYhn4ytZfHrPKp+ZuoXAN3XHJ6iMnaHojrmTHog/Pdoy8foQOVsNFxUX+7Yd0YNNHLmMMNFqwB3F5+8BSjLw8NIBMRNMG92dSXr0kcQQqPA/PfmHfSNY1Mx8/R5XrakNvL1ImL9qjU4ggrBN7o/34gQQ/wAGTMQunmD5OuqXSEhScTNu2q6V5q8LCxhoMl3iDBF/bcei+YW7ZifLr+W7svEU7dRvwjUv0Lu3iPN5vXigpxXc80AQT+9QZgZAyF57B1rrHNtfxKIQ9pVZrOKztAWYTupicUKjORpBlkS27ZmbvPawQEf/OCaVR5dSlPkWfEyNldR2dlFz8d7PESGgKuv/cEmSz/vRbqB4xkeWxW39HsiRFDViGpDHe3UaYLNhp1mW/+9+zKROQ5rKXknQvVj/wes6EStRee19traPXl0L4riydFIZ5PVmtfg="
     }
   }
 }
