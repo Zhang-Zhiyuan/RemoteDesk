@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using static RemoteDesk.WindowsServiceNative;
 
 namespace RemoteDesk;
 
@@ -150,15 +151,4 @@ internal static partial class WindowsSecureDesktopInstallation
         finally { Marshal.FreeHGlobal(buffer); }
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct ServiceConfiguration
-    {
-        internal uint Type, Start, Error;
-        internal nint Binary, Group;
-        internal uint Tag;
-        internal nint Dependencies, Account, DisplayName;
-    }
-
-    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool QueryServiceConfig(nint service, nint config, uint bytes, out uint required);
 }

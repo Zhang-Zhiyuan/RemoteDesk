@@ -7332,9 +7332,15 @@ class RemoteDeskLinuxApp:
         self._row_entry(form, 3, "系统账号", user)
         hint = self._wrapping_label(form, text="", wraplength=420, justify=tk.LEFT)
         hint.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=6)
+        drafts = {row[1]: row[2:5] for row in reversed(history)}
+        displayed = None
         def select(_event=None):
-            row = next((r for r in history if r[1] == system.get()), None)
-            host.set(row[2] if row else device); port.set(row[3] if row else ""); user.set(row[4] if row else "")
+            nonlocal displayed
+            if displayed is not None:
+                drafts[displayed] = (host.get(), port.get(), user.get())
+            displayed = system.get()
+            for field, value in zip((host, port, user), drafts.get(displayed, (device, "", ""))):
+                field.set(value)
             hint.configure(text="填写发行版可达的 IP，或 Windows 地址和已有的 WSL 映射端口。" if system.get() == "WSL"
                            else "端口和账号可留空使用 SSH 配置。默认端口为 22。")
         picker.bind("<<ComboboxSelected>>", select)

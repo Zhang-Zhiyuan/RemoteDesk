@@ -4,10 +4,16 @@ public sealed partial class MainForm
 {
     private void OpenDirectSsh()
     {
+        using var dialog = CreateDirectSshDialog();
+        dialog.ShowDialog(this);
+    }
+
+    private Form CreateDirectSshDialog()
+    {
         string device = _viewerHostBox.Text.Trim();
         var history = _settings.Viewer.DirectSshTargets.Where(p =>
             string.Equals(p.Device, device, StringComparison.OrdinalIgnoreCase)).ToList();
-        using var dialog = new Form { Text = "SSH 直连", Font = Font, AutoScaleMode = AutoScaleMode.Dpi,
+        var dialog = new Form { Text = "SSH 直连", Font = Font, AutoScaleMode = AutoScaleMode.Dpi,
             StartPosition = FormStartPosition.CenterParent, MinimizeBox = false, MaximizeBox = false };
         var panel = new TableLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(14),
             ColumnCount = 1, RowCount = 0, GrowStyle = TableLayoutPanelGrowStyle.AddRows };
@@ -26,11 +32,16 @@ public sealed partial class MainForm
         var hint = new Label { AutoSize = true, Dock = DockStyle.Top, UseMnemonic = false };
         panel.Controls.Add(hint);
         panel.SizeChanged += (_, _) => hint.MaximumSize = new Size(Math.Max(1, panel.ClientSize.Width - panel.Padding.Horizontal), 0);
+        var drafts = new Dictionary<bool, (string Host, string Port, string User)>();
+        foreach (var row in history)
+            drafts.TryAdd(row.Wsl, (row.Target.Host, row.Target.Port?.ToString() ?? "", row.Target.Username ?? ""));
+        bool? displayed = null;
         system.SelectedIndexChanged += (_, _) =>
         {
             bool wsl = system.SelectedIndex == 1;
-            var previous = history.FirstOrDefault(p => p.Wsl == wsl)?.Target;
-            host.Text = previous?.Host ?? device; port.Text = previous?.Port?.ToString() ?? ""; user.Text = previous?.Username ?? "";
+            if (displayed is bool previous) drafts[previous] = (host.Text, port.Text, user.Text);
+            (host.Text, port.Text, user.Text) = drafts.GetValueOrDefault(wsl, (device, "", ""));
+            displayed = wsl;
             hint.Text = wsl ? "填写发行版可达的 IP，或 Windows 地址和已有的 WSL 映射端口。" : "直接连接目标的 SSH 服务。首次连接请核对主机指纹。";
         };
         system.SelectedIndex = history.FirstOrDefault()?.Wsl == true ? 1 : 0;
@@ -61,6 +72,6 @@ public sealed partial class MainForm
         actions.Controls.AddRange([terminal, editor, cancel]); ConfigureWrappingDialogActions(actions);
         dialog.Controls.Add(panel); dialog.Controls.Add(actions); dialog.AcceptButton = terminal; dialog.CancelButton = cancel;
         ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(530, 400), new Size(340, 270));
-        dialog.ShowDialog(this);
+        return dialog;
     }
 }

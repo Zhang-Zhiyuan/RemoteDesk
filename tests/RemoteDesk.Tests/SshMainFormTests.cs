@@ -8,6 +8,32 @@ namespace RemoteDesk.Tests;
 public sealed class SshMainFormTests
 {
     [Fact]
+    public void DirectSshKeepsSeparateDraftsUntilDialogCloses() => OnSta(() =>
+    {
+        using var main = CreatePreview();
+        Field<TextBox>(main, "_viewerHostBox").Text = "192.0.2.1";
+        var settings = Field<RemoteDeskSettings>(main, "_settings");
+        settings.Viewer.DirectSshTargets = [new("192.0.2.1", false, new("saved.example", 22, "saved"))];
+        using var dialog = (Form)Call(main, "CreateDirectSshDialog")!;
+        var controls = dialog.Controls.OfType<TableLayoutPanel>().Single().Controls;
+        var system = controls.OfType<ComboBox>().Single();
+        var fields = controls.OfType<TextBox>().ToDictionary(box => box.AccessibleName!);
+        var host = fields["SSH 主机 / IP"];
+        var port = fields["SSH 端口"];
+        var user = fields["系统账号"];
+        Assert.Equal(("saved.example", "22", "saved"), (host.Text, port.Text, user.Text));
+        (host.Text, port.Text, user.Text) = ("native.example", "", "native");
+        system.SelectedIndex = 1;
+        Assert.Equal(("192.0.2.1", "", ""), (host.Text, port.Text, user.Text));
+        (host.Text, port.Text, user.Text) = ("guest.example", "222", "guest");
+        system.SelectedIndex = 0;
+        Assert.Equal(("native.example", "", "native"), (host.Text, port.Text, user.Text));
+        system.SelectedIndex = 1;
+        Assert.Equal(("guest.example", "222", "guest"), (host.Text, port.Text, user.Text));
+        Assert.Equal("saved.example", Assert.Single(settings.Viewer.DirectSshTargets).Target.Host);
+    });
+
+    [Fact]
     public void StoppedWslSelectionDoesNotSilentlyChangeToWindows() => OnSta(() =>
     {
         using var main = CreatePreview();

@@ -102,6 +102,9 @@ internal static class WindowsSshService
         """;
     private static async Task<IPEndPoint[]> ListAsync(CancellationToken token)
     {
+        token.ThrowIfCancellationRequested();
+        if (WindowsSshListeners.TryRead() is { } listeners) return listeners;
+        token.ThrowIfCancellationRequested();
         var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe")) {
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-Command", ListListeners }) start.ArgumentList.Add(arg);
@@ -134,6 +137,11 @@ internal static class WindowsSshService
         var parts = row.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length != 2 || !IPAddress.TryParse(parts[0], out var address) ||
             !int.TryParse(parts[1], out int port) || port is < 1 or > 65535) return null;
+        return ListenerEndpoint(address, port);
+    }
+
+    internal static IPEndPoint ListenerEndpoint(IPAddress address, int port)
+    {
         if (address.Equals(IPAddress.Any)) address = IPAddress.Loopback;
         if (address.Equals(IPAddress.IPv6Any)) address = IPAddress.IPv6Loopback;
         return new IPEndPoint(address, port);

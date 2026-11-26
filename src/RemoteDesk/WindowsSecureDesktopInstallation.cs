@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using Microsoft.Win32;
+using static RemoteDesk.WindowsServiceNative;
 
 namespace RemoteDesk;
 
@@ -394,12 +395,9 @@ internal static partial class WindowsSecureDesktopInstallation
         throw new TimeoutException("锁屏控制服务状态切换超时。");
     }
 
-    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern nint OpenSCManager(string? machine, string? database, uint access);
-    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern nint OpenService(nint manager, string name, uint access);
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern nint CreateService(nint manager, string name, string display, uint access, uint type, uint start, uint error, string binary, string? group, nint tag, string? dependencies, string account, string? password);
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool ChangeServiceConfig(nint service, uint type, uint start, uint error, string? binary, string? group, nint tag, string? dependencies, string? account, string? password, string? display);
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool StartService(nint service, int count, nint arguments);
     [DllImport("advapi32.dll", SetLastError = true)] private static extern bool ControlService(nint service, uint control, out WindowsSecureDesktopService.ServiceStatus status);
     [DllImport("advapi32.dll", SetLastError = true)] private static extern bool QueryServiceStatus(nint service, out WindowsSecureDesktopService.ServiceStatus status);
-    [DllImport("advapi32.dll")] private static extern bool CloseServiceHandle(nint handle);
 }

@@ -25,14 +25,22 @@ final class AndroidDirectSshDialog {
         EditText host = field(activity, form, "SSH 主机 / IP", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         EditText port = field(activity, form, "SSH 端口", InputType.TYPE_CLASS_NUMBER);
         TextView hint = new TextView(activity); form.addView(hint);
+        String[] hosts = { prefs.getString(scope + "os/host", device), prefs.getString(scope + "wsl/host", device) };
+        String[] ports = { prefs.getString(scope + "os/port", "22"), prefs.getString(scope + "wsl/port", "") };
         Runnable fill = () -> {
-            String key = scope + (wsl.isChecked() ? "wsl/" : "os/");
-            host.setText(prefs.getString(key + "host", device));
-            port.setText(prefs.getString(key + "port", wsl.isChecked() ? "" : "22"));
+            int index = wsl.isChecked() ? 1 : 0;
+            host.setText(hosts[index]);
+            port.setText(ports[index]);
             hint.setText(wsl.isChecked() ? "填写发行版可达的 IP，或 Windows 地址和已有的 WSL 映射端口。" : "使用目标电脑的 SSH 服务，默认端口为 22。");
         };
         wsl.setChecked(prefs.getBoolean(scope + "wsl", false));
-        fill.run(); wsl.setOnCheckedChangeListener((button, checked) -> fill.run());
+        fill.run();
+        wsl.setOnCheckedChangeListener((button, checked) -> {
+            int previous = checked ? 0 : 1;
+            hosts[previous] = host.getText().toString();
+            ports[previous] = port.getText().toString();
+            fill.run();
+        });
         ScrollView scroll = new ScrollView(activity); scroll.addView(form);
         AlertDialog dialog = new AlertDialog.Builder(activity).setTitle("SSH 直连").setView(scroll)
             .setPositiveButton("打开终端", null).setNegativeButton("取消", null).create();
