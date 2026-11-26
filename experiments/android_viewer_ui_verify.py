@@ -338,6 +338,13 @@ def main():
         photo("landscape")
         tap("画面"); tap("原始像素 1:1")
         check("Original size means one source pixel per physical pixel", abs(state()["scale"]-1) < .01, state()["scale"])
+        tap("画面")
+        photo("display-menu-landscape")
+        tap("＋")
+        check("Zoom steps apply without dismissing the display menu", wait(lambda s: s["scale"] > 1.4)["scale"] > 1.4)
+        tap("−")
+        wait(lambda s: abs(s["scale"] - 1) < .01)
+        tap("原始像素 1:1")
 
         tap("键盘"); keyboard = wait(lambda s: s["keyboard"] and s["imeInset"] > 0, stable_seconds=.6)
         check("Native IME leaves composer above keyboard", keyboard["keyboardPanel"][3] <= keyboard["dock"][3] and keyboard["keyboardPanel"][3] > keyboard["keyboardPanel"][1], keyboard)

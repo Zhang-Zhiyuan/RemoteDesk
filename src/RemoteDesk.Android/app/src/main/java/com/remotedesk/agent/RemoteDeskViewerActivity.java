@@ -891,15 +891,36 @@ public final class RemoteDeskViewerActivity extends Activity {
 
     private void showZoomOptions() {
         releaseViewerGesture();
-        new android.app.AlertDialog.Builder(this).setTitle("画面 · " + Math.round(viewport.scale() * 100) + "%")
-            .setItems(new String[] { "适应窗口（自动放大）", "原始像素 1:1", "放大一级", "缩小一级",
+        LinearLayout title = new LinearLayout(this);
+        title.setGravity(Gravity.CENTER_VERTICAL);
+        title.setPadding(dp(16), dp(4), dp(8), 0);
+        TextView scale = new TextView(this);
+        scale.setTextAppearance(android.R.style.TextAppearance_DeviceDefault_Medium);
+        Runnable updateLabel = () -> scale.setText(viewport.scale() > 0
+            ? "画面 · " + Math.round(viewport.scale() * 100) + "%" : "画面");
+        updateLabel.run();
+        title.addView(scale, new LinearLayout.LayoutParams(0, -2, 1));
+        for (boolean larger : new boolean[] { false, true }) {
+            Button step = new Button(this, null, android.R.attr.borderlessButtonStyle);
+            step.setText(larger ? "＋" : "−");
+            step.setContentDescription(larger ? "放大一级" : "缩小一级");
+            step.setPadding(0, 0, 0, 0);
+            step.setEnabled(viewport.scale() > 0);
+            step.setOnClickListener(v -> {
+                viewport.zoomAt(larger ? 1.5f : 1 / 1.5f, viewport.viewWidth / 2f, viewport.viewHeight / 2f);
+                refreshInteraction();
+                updateLabel.run();
+            });
+            title.addView(step, new LinearLayout.LayoutParams(dp(48), dp(48)));
+        }
+        new android.app.AlertDialog.Builder(this).setCustomTitle(title)
+            .setItems(new String[] { "适应窗口（自动放大）", "原始像素 1:1",
                 experimentalUpscaling ? "关闭 GPU 放大增强" : "启用 GPU 放大增强",
                 "传输画质：" + (preferJpegClarity ? "JPEG" : "自动 H.264") }, (dialog, which) -> {
-                if (which == 4) { toggleExperimentalUpscaling(); return; }
-                if (which == 5) { showVideoQualityOptions(); return; }
+                if (which == 2) { toggleExperimentalUpscaling(); return; }
+                if (which == 3) { showVideoQualityOptions(); return; }
                 if (which == 0) viewport.reset();
-                else if (which == 1) viewport.originalSize();
-                else viewport.zoomAt(which == 2 ? 1.5f : 1 / 1.5f, viewport.viewWidth / 2f, viewport.viewHeight / 2f);
+                else viewport.originalSize();
                 refreshInteraction();
             }).show();
     }
