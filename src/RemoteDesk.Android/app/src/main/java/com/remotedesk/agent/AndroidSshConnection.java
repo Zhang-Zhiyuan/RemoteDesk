@@ -76,6 +76,22 @@ final class AndroidSshConnection implements AutoCloseable {
         return socket;
     }
 
+    private Socket openDirect(AndroidDirectSshTarget endpoint) throws Exception {
+        var addresses = AndroidRelay.relayAddresses(java.net.InetAddress.getAllByName(endpoint.host), false);
+        return AndroidRelay.connectAddresses(addresses, dial, (address, timeout) -> {
+            // JSch reads on a worker while the shell thread writes. The stream adaptors of
+            // a blocking SocketChannel can serialize these operations on the same lock.
+            Socket socket = new Socket();
+            dial.add(socket);
+            try {
+                socket.setTcpNoDelay(true);
+                socket.connect(new java.net.InetSocketAddress(address, endpoint.port), timeout);
+                dial.checkOpen();
+                return socket;
+            } catch (Exception ex) { dial.release(socket); throw ex; }
+        });
+    }
+
     private void run(AndroidRelay.Options target, AndroidDirectSshTarget direct, String key, String username, byte[] password, byte[] privateKey) {
         JSch jsch = new JSch();
         try {
@@ -83,13 +99,7 @@ final class AndroidSshConnection implements AutoCloseable {
             ScheduledFuture<?> timeout = DEADLINES.schedule(dial::close, 20, TimeUnit.SECONDS);
             Socket socket;
             try {
-                if (direct == null) socket = openRelay(target, key);
-                else {
-                    socket = AndroidTcpConnector.connect(direct.host, direct.port, 20000, dial, candidate -> {
-                        try { candidate.setTcpNoDelay(true); } catch (java.net.SocketException ignored) { }
-                    });
-                    dial.add(socket);
-                }
+                socket = direct == null ? openRelay(target, key) : openDirect(direct);
             } finally { timeout.cancel(false); }
             checkOpen();
             socket.setSoTimeout(0);

@@ -14,7 +14,8 @@ public sealed partial class MainForm
         AccessibleName = "SSH 目标系统", Visible = false };
     private string? _sshSystemDevice;
     private readonly Label _sshHostStatus = new() { AutoSize = true, Dock = DockStyle.Top, UseMnemonic = false };
-    private bool _sshPreparationStarted, _sshPreparing;
+    private Button _prepareWindowsSshButton = null!;
+    private bool _sshPreparing, _sshServiceDisabled;
     private ToolStripMenuItem _sshLoginSettingsButton = null!;
     private ToolStripMenuItem _configureSshAliasButton = null!;
     private ToolStripMenuItem _manageSshAliasesButton = null!;
@@ -41,9 +42,10 @@ public sealed partial class MainForm
         var hint = new Label { AutoSize = true, Dock = DockStyle.Top, UseMnemonic = false,
             Text = "注册中继后自动准备 Windows OpenSSH，新安装仅监听本机。运行中的 WSL 可单独选择，使用发行版自己的 SSH 账号与端口。" };
         content.Controls.Add(hint);
-        var prepare = CreateSecondaryButton("检查并准备 Windows SSH");
-        prepare.Click += async (_, _) => await PrepareHostSshAsync(retry: true);
-        content.Controls.Add(prepare);
+        _prepareWindowsSshButton = CreateSecondaryButton("检查并准备 Windows SSH");
+        SetToolTip(_prepareWindowsSshButton, "检查 Windows 自带的 OpenSSH。手动启用时会保留 WSL 端口映射；出厂配置遇到端口冲突时，仅为 Windows 分配本机端口。");
+        _prepareWindowsSshButton.Click += async (_, _) => await PrepareHostSshAsync(retry: true, enableDisabled: _sshServiceDisabled);
+        content.Controls.Add(_prepareWindowsSshButton);
         content.Controls.Add(_sshHostStatus);
         content.SizeChanged += (_, _) => hint.MaximumSize = _sshHostStatus.MaximumSize = new Size(Math.Max(1, content.ClientSize.Width), 0);
         _allowSshBox.CheckedChanged += async (_, _) => await SaveSshHostSettingsAsync();
@@ -121,20 +123,28 @@ public sealed partial class MainForm
         _relayHostConnector.RequestAddressRefresh();
     }
 
-    private async Task PrepareHostSshAsync(bool retry = false)
+    private async Task PrepareHostSshAsync(bool retry = false, bool enableDisabled = false)
     {
-        if (_layoutPreview || _isClosing || IsDisposed || _sshPreparing || !_settings.Host.AllowSsh ||
-            (_sshPreparationStarted && !retry)) return;
-        _sshPreparationStarted = _sshPreparing = true;
+        if (_layoutPreview || _isClosing || IsDisposed || _sshPreparing || !_settings.Host.AllowSsh) return;
+        _sshPreparing = true;
+        _prepareWindowsSshButton.Enabled = false;
         _sshHostStatus.Text = "正在检查 Windows OpenSSH…";
         try
         {
-            string status = await WindowsSshService.PrepareAsync();
-            if (!_isClosing && !IsDisposed) _sshHostStatus.Text = status;
+            var result = await WindowsSshService.PrepareAsync(retry, enableDisabled);
+            if (_isClosing || IsDisposed) return;
+            _sshServiceDisabled = result.Reason == 21;
+            _prepareWindowsSshButton.Text = _sshServiceDisabled ? "启用 Windows SSH（手动启动）" : "检查并准备 Windows SSH";
+            _sshHostStatus.Text = result.Message;
+            _diagnosticLog.Append("SSH", result.Message);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Win32Exception)
         { if (!_isClosing && !IsDisposed) _sshHostStatus.Text = "Windows SSH 准备失败：" + ex.Message; }
-        finally { _sshPreparing = false; }
+        finally
+        {
+            _sshPreparing = false;
+            if (!_isClosing && !IsDisposed) _prepareWindowsSshButton.Enabled = _settings.Host.AllowSsh;
+        }
     }
 
     internal bool TryGetCurrentRelayHostRegistration(RelayConnectionOptions options, long generation, out int desktopPort)
@@ -166,6 +176,8 @@ public sealed partial class MainForm
         }
         PublishSshHostOptions();
         await ApplyRelayHostRegistrationAsync();
+        if (!oldEnabled && _settings.Host.AllowSsh && _relayHostConnector.IsRunning)
+            _ = PrepareHostSshAsync(retry: true);
         UpdateSshActionState();
     }
 
@@ -228,6 +240,7 @@ public sealed partial class MainForm
         _closeSshTerminalsButton.Text = $"断开所有 SSH 终端（{_sshTerminals.Count}）…";
         _closeSshTerminalsButton.Enabled = _sshTerminals.Count > 0;
         _allowSshBox.Enabled = !_relayOperationInProgress;
+        _prepareWindowsSshButton.Enabled = _allowSshBox.Checked && !_sshPreparing;
         _sshHostPortBox.Enabled = _allowSshBox.Checked && !_relayOperationInProgress;
         SetToolTip(_relayLogoutButton, _sshOpening is not null ? "请先取消 SSH 连接，再退出服务器。"
             : _sshTerminals.Count > 0 ? "请先关闭 SSH 终端，再退出服务器。" : "退出当前中继服务器，保留设备记录和设备密钥。");

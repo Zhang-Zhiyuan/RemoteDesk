@@ -63,7 +63,7 @@ internal static class SshGateProtocol
         if (status[0] == 0) throw new UnauthorizedAccessException("目标拒绝了设备密钥。");
         if (status[0] == 2) throw new IOException("目标的 SSH 服务不可达，请检查目标机器的 SSH 服务和本机 SSH 端口。");
         if (status[0] == 3) throw new IOException("所选 WSL 的 SSH 服务不可达。请确认该发行版已运行，并在其中启动 OpenSSH Server。");
-        if (status[0] is >= 20 and <= 27) throw new IOException(NativeServiceFailure(status[0]));
+        if (status[0] is >= 20 and <= 31) throw new IOException(NativeServiceFailure(status[0]));
         if (status[0] != 1) throw new InvalidDataException("目标返回了未知 SSH 通道状态。");
     }
 
@@ -71,13 +71,17 @@ internal static class SshGateProtocol
     internal static string NativeServiceFailure(byte reason) => reason switch
     {
         20 => "目标 Windows 尚未安装 OpenSSH Server。",
-        21 => "目标 Windows 的 sshd 服务已被禁用，请在本机检查服务策略。",
+        21 => "Windows 的 sshd 服务已禁用。可在目标电脑的“被控端”点“启用 Windows SSH（手动启动）”。",
         22 => "目标 Windows 的 sshd 服务已停止，可在被控端检查并准备 Windows SSH。",
         23 => "目标 Windows 无法查询 sshd 的监听状态。",
         24 => "目标 Windows 的 sshd 没有可连接的监听端口。",
         25 => "目标 Windows 正在准备 OpenSSH Server，稍后重试。",
         26 => "目标 Windows 未能从可选功能源安装 OpenSSH Server，请检查目标的 Windows 更新。",
         27 => "目标 Windows 安装 OpenSSH 后需要重启。",
+        28 => "Windows OpenSSH 准备失败，请查看被控端的 Windows 事件记录。",
+        29 => "Windows SSH 的端口已有监听或端口映射。请在目标电脑为 Windows SSH 配置独立端口。",
+        30 => "请在目标电脑检查现有 sshd 服务的路径、配置文件及主机密钥。",
+        31 => "安装或启动 Windows OpenSSH 需要在目标电脑以管理员身份运行 RemoteDesk。",
         _ => "目标的 SSH 服务不可达。"
     };
 }

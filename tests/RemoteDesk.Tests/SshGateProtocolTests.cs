@@ -52,6 +52,8 @@ public sealed class SshGateProtocolTests
     [InlineData(0, typeof(UnauthorizedAccessException))]
     [InlineData(2, typeof(IOException))]
     [InlineData(26, typeof(IOException))]
+    [InlineData(29, typeof(IOException))]
+    [InlineData(31, typeof(IOException))]
     [InlineData(7, typeof(InvalidDataException))]
     public async Task ClientExplainsFailureWithoutStartingSsh(int status, Type expected)
     {
@@ -62,6 +64,23 @@ public sealed class SshGateProtocolTests
         Exception? error = await Record.ExceptionAsync(() => SshGateProtocol.AuthenticateClientAsync(stream, "key", Id, CancellationToken.None));
         Assert.IsType(expected, error);
         Assert.Equal(32, stream.Written.Length);
+    }
+
+    [Theory]
+    [InlineData(0, "READY", 0)]
+    [InlineData(0, "DISABLED", 21)]
+    [InlineData(0, "INSTALL_FAILED 0x800F0954", 26)]
+    [InlineData(0, "RESTART_NEEDED", 27)]
+    [InlineData(0, "PORT_BUSY", 29)]
+    [InlineData(0, "CUSTOM_SERVICE", 30)]
+    [InlineData(0, "ADMIN_REQUIRED", 31)]
+    [InlineData(1, "READY", 28)]
+    [InlineData(0, "", 28)]
+    public void PreparationResultIsAvailableToTheHostAndGate(int exitCode, string marker, byte expected)
+    {
+        var result = WindowsSshService.ParsePreparation(exitCode, marker);
+        Assert.Equal(expected, result.Reason);
+        if (expected == 26) Assert.Contains("0x800F0954", result.Message);
     }
 
     [Theory]

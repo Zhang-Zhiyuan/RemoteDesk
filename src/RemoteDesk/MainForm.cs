@@ -259,6 +259,11 @@ public sealed partial class MainForm : Form
         _relayHostConnector.UpdateOffered += (options, ticket, token) =>
             OnUi(() => _ = HandleFleetOfferAsync(options, ticket, token));
         _relayHostConnector.Registered += FleetUpdate.SignalRelayReady;
+        _relayHostConnector.Registered += () => OnUi(() =>
+        {
+            if (_relayRegisterHostBox.Checked && Volatile.Read(ref _sshHostOptions).IsAvailable)
+                _ = PrepareHostSshAsync();
+        });
         _settings.Relay.DeviceId = RemoteDeviceIdentity.Normalize(_settings.Relay.DeviceId) ?? Guid.NewGuid().ToString("D");
         RemoteDeviceIdentity.LocalId = _settings.Relay.DeviceId;
         long settingsLoadedAt = Stopwatch.GetTimestamp();
@@ -4299,7 +4304,6 @@ public sealed partial class MainForm : Form
                 options,
                 localHostPort,
                 _relayOperationCancellation.Token);
-            if (Volatile.Read(ref _sshHostOptions).IsAvailable) _ = PrepareHostSshAsync();
         }
         catch (OperationCanceledException)
             when (_relayOperationCancellation.IsCancellationRequested)
