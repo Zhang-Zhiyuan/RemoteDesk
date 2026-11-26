@@ -175,12 +175,13 @@ public sealed class RelayFailureTests
                 using TcpClient client = await server.Listener.AcceptTcpClientAsync(stop.Token);
                 using SslStream tls = await server.AuthenticateAsync(client, stop.Token);
                 using var request = await RelayTls.ReadJsonAsync(tls, stop.Token);
-                Assert.Equal(page * 32, request.RootElement.GetProperty("offset").GetInt32());
-                Assert.Equal(32, request.RootElement.GetProperty("pageSize").GetInt32());
+                Assert.Equal(page * 16, request.RootElement.GetProperty("offset").GetInt32());
+                Assert.Equal(16, request.RootElement.GetProperty("pageSize").GetInt32());
+                Assert.True(request.RootElement.GetProperty("sshTargets").GetBoolean());
                 await RelayTls.WriteJsonAsync(tls, new {
                     ok = true,
                     devices = new[] { new { deviceId = Guid.NewGuid().ToString(), machineName = "host", directAddresses = new[] { "192.0.2.3" }, directPort = 40565 } },
-                    nextOffset = malformed ? (int?)0 : page == 0 ? 32 : null
+                    nextOffset = malformed ? (int?)0 : page == 0 ? 16 : null
                 }, stop.Token);
             }
         }

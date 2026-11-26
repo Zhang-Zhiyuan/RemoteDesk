@@ -133,6 +133,46 @@ class RelaySshTests(unittest.IsolatedAsyncioTestCase):
                 relay.normalize_services(value)
         self.assertEqual(frozenset(), relay.normalize_services([]))
 
+    async def test_wsl_routes_require_the_selected_system_and_leave_native_ssh_and_desktop_available(self):
+        device = str(uuid.uuid4())
+        distros = [{"id": str(uuid.uuid4()), "name": name} for name in ("Ubuntu", "Debian")]
+        control, registrations = await self.register_host(device, services=["desktop", "ssh"], sshWsl=distros)
+        reader, writer = await self.connect()
+        await write_json(writer, dict(version=1, role="directory", token=TOKEN, pageSize=16, sshTargets=True))
+        rows = (await read_json(reader))["devices"]
+        self.assertEqual([device], [row["deviceId"] for row in rows])
+        targets = rows[0]["sshTargets"]
+        self.assertEqual(["Ubuntu", "Debian"], [item["name"] for item in targets])
+        ubuntu, debian = (item["id"] for item in targets)
+        self.assertEqual(3, len({device, ubuntu, debian}))
+        self.assertNotIn(ubuntu, relay.wsl_ssh_targets(str(uuid.uuid4()), distros))
+        self.assertNotIn("sshTargets", (await self.directory())[0])
+
+        desktop, _ = await self.request(ubuntu, "viewer")
+        self.assertFalse((await read_json(desktop))["ok"])
+        viewer, _ = await self.request(ubuntu)
+        opened = await read_json(control)
+        self.assertEqual(("open-ssh", ubuntu), (opened["type"], opened["sshTarget"]))
+        for unexpected in ({}, {"sshTarget": debian}):
+            rejected, writer = await self.connect()
+            await write_json(writer, dict(version=1, role="host-data", token=TOKEN, deviceId=device,
+                                         sessionId=opened["sessionId"], service="ssh", **unexpected))
+            self.assertFalse((await read_json(rejected))["ok"])
+        guest, writer = await self.connect()
+        await write_json(writer, dict(version=1, role="host-data", token=TOKEN, deviceId=device,
+                                     sessionId=opened["sessionId"], service="ssh", sshTarget=ubuntu))
+        for reader in (guest, viewer):
+            self.assertTrue((await read_json(reader))["ok"])
+        writer.write(b"Linux"); await writer.drain()
+        self.assertEqual(b"Linux", await viewer.readexactly(5))
+
+        await write_json(registrations, dict(type="heartbeat", sshWsl=[]))
+        await read_json(control)
+        offline, _ = await self.request(ubuntu)
+        self.assertFalse((await read_json(offline))["ok"])
+        await self.pair(device, control)
+        await self.pair(device, control, "desktop")
+
 
 if __name__ == "__main__":
     unittest.main()

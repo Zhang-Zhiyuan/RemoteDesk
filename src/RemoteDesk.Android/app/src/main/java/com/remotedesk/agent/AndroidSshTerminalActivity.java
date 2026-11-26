@@ -64,6 +64,17 @@ public final class AndroidSshTerminalActivity extends Activity {
         context.startActivity(recallIntent(context, options, name));
     }
 
+    static void launch(Context context, AndroidRelay.Options options, String name, String parent) {
+        context.startActivity(recallIntent(context, options, name).putExtra("parentDeviceId", parent));
+    }
+
+    private AndroidConnectionHistory.Node savedDevice(AndroidRelay.Options options) throws Exception {
+        AndroidConnectionHistory history = AndroidConnectionHistoryStore.load(this);
+        AndroidConnectionHistory.Node node = history.findRelay(options);
+        String parent = getIntent().getStringExtra("parentDeviceId");
+        return node == null && parent != null ? history.findRelay(options.target(parent)) : node;
+    }
+
     private static Intent recallIntent(Context context, AndroidRelay.Options options, String name) {
         return new Intent(context, AndroidSshTerminalActivity.class)
             .setData(new android.net.Uri.Builder().scheme("remotedesk-ssh").authority("terminal")
@@ -85,7 +96,7 @@ public final class AndroidSshTerminalActivity extends Activity {
             deviceName = getIntent().getStringExtra("deviceName");
             if (deviceName == null) deviceName = target.deviceId;
             if (deviceName.length() > 120) deviceName = deviceName.substring(0, 120);
-            AndroidConnectionHistory.Node saved = AndroidConnectionHistoryStore.load(this).findRelay(target);
+            AndroidConnectionHistory.Node saved = savedDevice(target);
             if (saved != null) savedKey = saved.password;
         } catch (Exception ex) {
             new AlertDialog.Builder(this).setTitle("无法打开 SSH").setMessage("服务器登录或设备身份已变化，请返回在线列表重试。")
@@ -254,7 +265,7 @@ public final class AndroidSshTerminalActivity extends Activity {
             // An existing document task may outlive logout/re-login. Never
             // reconnect using credentials cached in that old activity.
             target = saved.target(target.deviceId);
-            AndroidConnectionHistory.Node node = AndroidConnectionHistoryStore.load(this).findRelay(target);
+            AndroidConnectionHistory.Node node = savedDevice(target);
             savedKey = node == null ? "" : node.password;
         } catch (Exception ex) {
             disconnect("服务器登录已变化，请从在线列表重新打开 SSH。"); return;

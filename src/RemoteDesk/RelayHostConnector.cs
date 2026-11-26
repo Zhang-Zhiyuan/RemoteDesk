@@ -24,6 +24,7 @@ internal sealed class RelayHostConnector : IDisposable
     private readonly Func<IReadOnlyList<string>> _addressProvider;
     private readonly Func<RelayConnectionOptions, CancellationToken, Task>? _prepareConnection;
     private readonly Func<RelaySshHostOptions> _sshOptionsProvider;
+    private readonly WslSshTargets _wslTargets = new();
     private readonly ConcurrentDictionary<Guid, Task> _dataBridges = new();
     private readonly ConcurrentDictionary<Guid, SshBridgeState> _sshBridges = new();
     private readonly SemaphoreSlim _sshSlots = new(4, 4);
@@ -237,7 +238,8 @@ internal sealed class RelayHostConnector : IDisposable
                     buildStamp = RemoteDeskBuildInfo.BuildStamp,
                     directAddresses = registeredAddresses,
                     directPort = localHostPort,
-                    services = Services(localHostPort)
+                    services = Services(localHostPort),
+                    sshWsl = await AdvertisedWslAsync(cancellationToken).ConfigureAwait(false)
                 },
                 cancellationToken)
             .ConfigureAwait(false);
@@ -316,7 +318,14 @@ internal sealed class RelayHostConnector : IDisposable
 
                     if (type == "open-ssh")
                     {
-                        if (sshTunneling) StartSshBridge(options, sessionId!, connectionToken);
+                        if (sshTunneling)
+                        {
+                            WslSshTarget? distro = null;
+                            if (root.TryGetProperty("sshTarget", out var target) &&
+                                (target.ValueKind != JsonValueKind.String ||
+                                 (distro = _wslTargets.Find(options.DeviceId, target.GetString()!)) is null)) continue;
+                            StartSshBridge(options, sessionId!, connectionToken, distro);
+                        }
                         continue;
                     }
                     int desktopPort = Volatile.Read(ref _localHostPort);
@@ -402,7 +411,15 @@ internal sealed class RelayHostConnector : IDisposable
         return current;
     }
 
-    private void StartSshBridge(RelayConnectionOptions options, string sessionId, CancellationToken token)
+    private async Task<object[]> AdvertisedWslAsync(CancellationToken token)
+    {
+        var options = _sshOptionsProvider();
+        if (!options.IsAvailable || !options.UseSystemSsh) return [];
+        var running = await _wslTargets.ReadAsync(token).ConfigureAwait(false);
+        return running.Select(d => (object)new { id = d.Id, name = d.Name }).ToArray();
+    }
+
+    private void StartSshBridge(RelayConnectionOptions options, string sessionId, CancellationToken token, WslSshTarget? distro = null)
     {
         RelaySshHostOptions ssh = RefreshSshConfiguration();
         if (!ssh.IsAvailable || token.IsCancellationRequested || !_sshSlots.Wait(0)) return;
@@ -413,7 +430,7 @@ internal sealed class RelayHostConnector : IDisposable
         // this state becomes visible. Revalidate after publication so that it
         // cannot miss this bridge; subsequent refreshes can always cancel it.
         RefreshSshConfiguration();
-        state.Task = RunSshBridgeAsync(options, sessionId, ssh, state.Cancellation.Token);
+        state.Task = RunSshBridgeAsync(options, sessionId, ssh, state.Cancellation.Token, distro);
         _ = state.Task.ContinueWith(completed =>
         {
             _sshBridges.TryRemove(id, out _);
@@ -424,7 +441,7 @@ internal sealed class RelayHostConnector : IDisposable
     }
 
     private async Task RunSshBridgeAsync(RelayConnectionOptions options, string sessionId,
-        RelaySshHostOptions ssh, CancellationToken token)
+        RelaySshHostOptions ssh, CancellationToken token, WslSshTarget? distro)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(15));
@@ -433,11 +450,12 @@ internal sealed class RelayHostConnector : IDisposable
         using (stream)
         {
             await RelayTls.WriteJsonAsync(stream, new { version = 1, role = "host-data", service = "ssh",
-                token = options.AccessToken, deviceId = options.DeviceId, sessionId }, deadline.Token).ConfigureAwait(false);
+                token = options.AccessToken, deviceId = options.DeviceId, sessionId,
+                sshTarget = distro?.RouteId(options.DeviceId) }, deadline.Token).ConfigureAwait(false);
             using (JsonDocument response = await RelayTls.ReadJsonAsync(stream, deadline.Token).ConfigureAwait(false))
                 SshRelayClient.EnsureSshPair(response.RootElement);
             deadline.CancelAfter(Timeout.InfiniteTimeSpan);
-            await SshHostBridge.RunAsync(stream, client, ssh, options.DeviceId, token).ConfigureAwait(false);
+            await SshHostBridge.RunAsync(stream, client, ssh, distro?.RouteId(options.DeviceId) ?? options.DeviceId, token, distro).ConfigureAwait(false);
         }
     }
 
@@ -550,7 +568,8 @@ internal sealed class RelayHostConnector : IDisposable
                         timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                         directAddresses = currentAddresses,
                         directPort = localHostPort,
-                        services = Services(localHostPort)
+                        services = Services(localHostPort),
+                        sshWsl = await AdvertisedWslAsync(cancellationToken).ConfigureAwait(false)
                     },
                     cancellationToken)
                 .ConfigureAwait(false);

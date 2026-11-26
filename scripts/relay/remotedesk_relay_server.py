@@ -30,7 +30,7 @@ from typing import Optional
 from pathlib import Path
 
 
-RELAY_RELEASE_VERSION = "1.0.56"
+RELAY_RELEASE_VERSION = "1.0.59"
 # Capture once when this process loads, not when an installer replaces the file.
 RELAY_SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
@@ -149,6 +149,24 @@ def normalize_services(value):
     return frozenset(value)
 
 
+def wsl_ssh_targets(host_id, entries):
+    if not isinstance(entries, list) or len(entries) > 8:
+        raise ValueError("WSL 目标列表无效。")
+    targets = {}
+    for item in entries:
+        if not isinstance(item, dict):
+            raise ValueError("WSL 目标无效。")
+        distro = normalize_uuid(item.get("id"), "WSL 发行版")
+        name = normalize_shared_name(item.get("name"))
+        if not name:
+            raise ValueError("WSL 发行版名称为空。")
+        # Scope each SSH identity to its physical host and installed distribution.
+        digest = hashlib.sha256(f"RemoteDesk/WSL/1\n{host_id}\n{distro}".encode("ascii")).hexdigest()
+        route = str(uuid.UUID(digest[:32]))
+        targets[route] = name
+    return targets
+
+
 def normalize_shared_name(value):
     if not isinstance(value, str):
         raise ValueError("设备名称必须是文字。")
@@ -242,6 +260,7 @@ class HostConnection:
     active_ssh_sessions: int = 0
     update_platform: str = ""
     app_version: str = ""
+    wsl_targets: dict = field(default_factory=dict)
 
     def update_addresses(self, message):
         # Missing fields mean a legacy heartbeat; an explicit empty/invalid
@@ -253,6 +272,10 @@ class HostConnection:
     def update_services(self, message):
         if "services" in message:
             self.services = normalize_services(message["services"])
+        if self.platform != "Windows" or "ssh" not in self.services:
+            self.wsl_targets.clear()
+        elif "sshWsl" in message:
+            self.wsl_targets = wsl_ssh_targets(self.device_id, message["sshWsl"])
 
 
 @dataclass
@@ -264,6 +287,7 @@ class PendingSession:
     completed: asyncio.Future
     created_at: float = field(default_factory=time.monotonic)
     service: str = "desktop"
+    ssh_target: Optional[str] = None
 
 
 class RelayServer:
@@ -494,6 +518,8 @@ class RelayServer:
                         for item in self.pending.values()
                     ),
                     "services": sorted(host.services),
+                    **({"sshTargets": [{"id": key, "name": value} for key, value in host.wsl_targets.items()]}
+                       if request.get("sshTargets") is True and page_size <= 16 and host.wsl_targets else {}),
                     "sshSessions": host.active_ssh_sessions,
                     "lastSeenSeconds": max(
                         0, int(now - host.last_seen)
@@ -568,6 +594,11 @@ class RelayServer:
         loop = asyncio.get_running_loop()
         async with self.state_lock:
             host = self.hosts.get(device_id)
+            ssh_target = None
+            if host is None and service == "ssh":
+                host = next((h for h in self.hosts.values() if device_id in h.wsl_targets), None)
+                if host is not None:
+                    ssh_target, device_id = device_id, host.device_id
             if (host is None or host.writer.is_closing()
                     or time.monotonic() - host.last_seen >= HOST_IDLE_TIMEOUT_SECONDS):
                 raise ValueError("目标设备不在线。")
@@ -588,6 +619,7 @@ class RelayServer:
                 loop.create_future(),
                 loop.create_future(),
                 service=service,
+                ssh_target=ssh_target,
             )
             self.pending[session_id] = pending
 
@@ -595,7 +627,8 @@ class RelayServer:
         try:
             await self._write_host(
                 host,
-                {"type": "open-ssh" if service == "ssh" else "open", "sessionId": session_id},
+                {"type": "open-ssh" if service == "ssh" else "open", "sessionId": session_id,
+                 **({"sshTarget": ssh_target} if ssh_target else {})},
             )
             host_reader, host_writer = await asyncio.wait_for(
                 asyncio.shield(pending.data_connected),
@@ -652,6 +685,8 @@ class RelayServer:
                 raise ValueError("中继会话不存在或已经过期。")
             if (hello.get("service", "desktop") != pending.service or
                     self.hosts.get(device_id) is not pending.host_connection or
+                    hello.get("sshTarget") != pending.ssh_target or
+                    (pending.ssh_target is not None and pending.ssh_target not in pending.host_connection.wsl_targets) or
                     pending.service not in pending.host_connection.services):
                 raise ValueError("中继服务不匹配、已禁用或主机注册已更换。")
             if pending.data_connected.done():

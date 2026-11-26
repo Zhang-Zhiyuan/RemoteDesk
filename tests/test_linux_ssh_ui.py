@@ -71,6 +71,21 @@ class SshUiTests(unittest.TestCase):
         self.assertEqual("disabled", str(self.ui.relay_ssh_button.cget("state")))
         self.assertEqual("disabled", str(self.ui.relay_ssh_alias_button.cget("state")))
 
+    def test_selected_distribution_stopping_keeps_desktop_and_prevents_wrong_ssh_target(self):
+        base = self.target(["desktop", "ssh"])
+        guest = "b060ccda-3207-4000-802d-ec333445448d"
+        device = dict(base, platform="Windows", sshTargets=[dict(id=guest, name="Ubuntu")])
+        self.ui._show_relay_directory([device])
+        self.ui.ssh_system_picker.current(1)
+        self.assertEqual(guest, self.ui._selected_ssh_system(device)["deviceId"])
+        self.ui._show_relay_directory([dict(device, sshTargets=[])])
+        self.assertIn("已停止", self.ui.ssh_system_picker.get())
+        self.assertEqual("disabled", str(self.ui.relay_ssh_button.cget("state")))
+        self.assertEqual("disabled", str(self.ui.relay_editor_button.cget("state")))
+        self.assertEqual("normal", str(self.ui.relay_connect_button.cget("state")))
+        self.ui._show_relay_directory([device])
+        self.assertEqual(guest, self.ui._selected_ssh_system(device)["deviceId"])
+
     def test_terminal_advanced_actions_are_collapsed_by_default(self):
         self.target(["ssh"])
         self.assertEqual("打开终端", self.ui.relay_ssh_button.cget("text"))

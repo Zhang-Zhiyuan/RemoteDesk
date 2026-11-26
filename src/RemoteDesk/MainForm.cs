@@ -4296,6 +4296,7 @@ public sealed partial class MainForm : Form
                 options,
                 localHostPort,
                 _relayOperationCancellation.Token);
+            if (Volatile.Read(ref _sshHostOptions).IsAvailable) _ = PrepareHostSshAsync();
         }
         catch (OperationCanceledException)
             when (_relayOperationCancellation.IsCancellationRequested)

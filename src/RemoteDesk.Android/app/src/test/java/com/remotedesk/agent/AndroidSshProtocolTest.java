@@ -61,7 +61,8 @@ public final class AndroidSshProtocolTest {
     @Test public void gateErrorsDistinguishUnavailableSshAndBadAuthentication() throws Exception {
         for(int code:new int[]{0,2,3,255}) {
             IOException ex=assertThrows(IOException.class,()->AndroidSshProtocol.authenticate(new ByteArrayInputStream(hello(code)),new ByteArrayOutputStream(),ID,KEY));
-            assertEquals(code==2,ex.getMessage().contains("不可达"));
+            assertEquals(code==2 || code==3,ex.getMessage().contains("不可达"));
+            assertEquals(code==3,ex.getMessage().contains("WSL"));
         }
     }
     @Test public void malformedProofInputsRejected() throws Exception {
@@ -75,6 +76,18 @@ public final class AndroidSshProtocolTest {
         for(String json:new String[]{"{}","{\"ok\":true,\"type\":\"paired\"}","{\"ok\":\"true\",\"type\":\"paired\",\"service\":\"ssh\"}",
                 "{\"ok\":true,\"type\":\"paired\",\"service\":\"desktop\"}","{\"ok\":true,\"type\":\"waiting\",\"service\":\"ssh\"}"})
             assertThrows(IOException.class,()->AndroidSshProtocol.paired(new JSONObject(json)));
+    }
+
+    @Test public void onlyWindowsHostsOfferSeparateDistributionRoutes() throws Exception {
+        String guest = "bc42af8e-521a-4741-a7e3-71da214aff17";
+        org.json.JSONArray systems = new org.json.JSONArray()
+            .put(new JSONObject().put("id", ID).put("name", "parent"))
+            .put(new JSONObject().put("id", guest).put("name", "Ubuntu (Dev)"))
+            .put(new JSONObject().put("id", "invalid").put("name", "unknown"));
+        JSONObject row = new JSONObject().put("platform", "Windows").put("sshTargets", systems);
+        assertEquals(java.util.Collections.singletonMap(guest, "Ubuntu (Dev)"), AndroidSshProtocol.destinations(row, ID));
+        row.put("platform", "Linux");
+        assertTrue(AndroidSshProtocol.destinations(row, ID).isEmpty());
     }
     @Test public void legacyAndMalformedCapabilitiesFailClosedForSsh() throws Exception {
         JSONObject capable=new JSONObject("{\"services\":[\"desktop\",\"ssh\"]}");

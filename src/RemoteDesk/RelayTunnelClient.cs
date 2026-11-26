@@ -130,13 +130,13 @@ internal static class RelayTunnelClient
     {
         var result = new Dictionary<string, RelayOnlineDevice>(StringComparer.Ordinal);
         int offset = 0;
-        for (int page = 0; page < 16; page++)
+        for (int page = 0; page < 32; page++)
         {
             var response = await ListDevicesPageAsync(options, offset, cancellationToken).ConfigureAwait(false);
             foreach (var device in response.Devices) result[device.DeviceId] = device;
             if (result.Count > 512) throw new RelayProtocolException("中继在线设备过多。");
             if (response.NextOffset is null) return result.Values.ToArray();
-            if (response.NextOffset != offset + 32 || response.NextOffset >= 512)
+            if (response.NextOffset != offset + 16 || response.NextOffset >= 512)
                 throw new RelayProtocolException("中继目录分页无效。");
             offset = response.NextOffset.Value;
         }
@@ -193,7 +193,8 @@ internal static class RelayTunnelClient
                         version = 1,
                         role = "directory",
                         token = options.AccessToken,
-                        pageSize = 32,
+                        pageSize = 16,
+                        sshTargets = true,
                         offset
                     },
                     cancellationToken)
@@ -240,6 +241,7 @@ internal static class RelayTunnelClient
                     OriginalMachineName = GetString(device, "originalMachineName") ?? GetString(device, "machineName") ?? "",
                     CanRename = GetBoolean(root, "deviceNaming"),
                     SupportsSsh = GetBoolean(root, "sshTunneling") && HasService(device, "ssh", false),
+                    WslDestinations = ReadWslDestinations(device, parsedDeviceId),
                     SupportsDesktop = HasService(device, "desktop", true),
                     NamingUnavailableReason = string.IsNullOrEmpty(GetString(root, "deviceNamingError"))
                         ? RelayDeviceName.UnsupportedMessage : RelayDeviceName.ErrorMessage(GetString(root, "deviceNamingError")!)
@@ -255,6 +257,21 @@ internal static class RelayTunnelClient
             }
             return (result, next);
         }
+    }
+
+    internal static IReadOnlyList<SshDestination> ReadWslDestinations(JsonElement device, Guid parent)
+    {
+        if (GetString(device, "platform") != "Windows" || !device.TryGetProperty("sshTargets", out var targets) ||
+            targets.ValueKind != JsonValueKind.Array || targets.GetArrayLength() > 8) return [];
+        var result = new List<SshDestination>();
+        foreach (var entry in targets.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.Object || !Guid.TryParseExact(GetString(entry, "id"), "D", out var id) ||
+                id == Guid.Empty || id == parent || result.Any(item => item.Id == id.ToString("D")) ||
+                GetString(entry, "name") is not { } name || !WslSshTargets.ValidName(name)) continue;
+            result.Add(new(id.ToString("D"), "WSL · " + name));
+        }
+        return result;
     }
 
     internal static bool HasService(JsonElement device, string service, bool legacyDefault) =>

@@ -5715,6 +5715,8 @@ class RemoteDeskLinuxApp:
         self.relay_devices = {}
         self.ssh_sessions = {}
         self.ssh_alias_pending = None
+        self.ssh_preparation_started = False
+        self.ssh_preparing = False
         self.host_preferences = host_startup.HostPreferences()
         self.host_resume_after_id = None
         self.host_restart_attempt = 0
@@ -5840,11 +5842,12 @@ class RemoteDeskLinuxApp:
         ttk.Button(tab, text="查看 / 使用 IP", command=self._request_relay_addresses).pack(anchor=tk.W)
         ssh_actions = ttk.Frame(tab)
         ssh_actions.pack(fill=tk.X, pady=(8, 0))
+        self.ssh_system_picker = ttk.Combobox(tab, state="readonly", width=16)
+        self.ssh_system_picker.bind("<<ComboboxSelected>>", lambda _e: self._update_relay_device_actions())
+        self.ssh_actions_row = ssh_actions
         self.relay_ssh_button = ttk.Button(ssh_actions, text="打开终端", command=self._open_relay_ssh, state=tk.DISABLED)
-        self.relay_ssh_button.pack(side=tk.LEFT)
         self.relay_editor_button = ttk.Button(ssh_actions, text="用 VS Code 打开",
             command=lambda: self._configure_terminal_ssh_alias(open_editor=True), state=tk.DISABLED)
-        self.relay_editor_button.pack(side=tk.LEFT, padx=(6, 0))
         self.relay_ssh_advanced = ttk.Frame(tab)
         def toggle_ssh_options():
             expanded = bool(self.relay_ssh_advanced.winfo_manager())
@@ -5854,7 +5857,7 @@ class RemoteDeskLinuxApp:
                 self.relay_ssh_advanced.pack(fill=tk.X, after=ssh_actions, pady=(4, 0))
             self.relay_ssh_more_button.configure(text="终端选项 ▸" if expanded else "收起选项 ▾")
         self.relay_ssh_more_button = ttk.Button(ssh_actions, text="终端选项 ▸", command=toggle_ssh_options)
-        self.relay_ssh_more_button.pack(side=tk.LEFT, padx=8)
+        self._wrap_action_buttons(ssh_actions, (self.relay_ssh_button, self.relay_editor_button, self.relay_ssh_more_button))
         self.relay_ssh_settings_button = ttk.Button(self.relay_ssh_advanced, text="换账号连接…",
             command=lambda: self._open_relay_ssh(configure=True, force_new=True), state=tk.DISABLED)
         self.relay_ssh_settings_button.pack(anchor=tk.W, pady=(8, 0))
@@ -6211,12 +6214,42 @@ class RemoteDeskLinuxApp:
         if selected and selected[0] in self.relay_devices: self.relay_list.selection_set(selected[0])
         self._update_relay_device_actions()
 
+    def _selected_ssh_system(self, target):
+        picker = getattr(self, "ssh_system_picker", None)
+        if picker is None or target is None:
+            if picker is not None:
+                picker.pack_forget()
+            return target
+        parent = target["deviceId"]
+        choices = [(parent, target.get("platform") or "本机系统")]
+        choices.extend((d["id"], "WSL · " + d["name"]) for d in target.get("sshTargets", []))
+        previous = getattr(self, "_ssh_system_choices", [])
+        current = picker.current()
+        last = previous[current][0] if previous and previous[0][0] == parent and 0 <= current < len(previous) else parent
+        available = {key for key, _ in choices}
+        if last not in available:
+            label = previous[current][1]
+            choices.append((last, label if label.endswith("（已停止）") else label + "（已停止）"))
+        if previous != choices:
+            self._ssh_system_choices = choices
+            picker.configure(values=[label for _, label in choices])
+            picker.current(next(i for i, choice in enumerate(choices) if choice[0] == last))
+        if len(choices) > 1:
+            if not picker.winfo_manager():
+                picker.pack(before=self.ssh_actions_row, fill=tk.X)
+        else:
+            picker.pack_forget()
+        if last not in available:
+            return None
+        return target if last == parent else dict(target, deviceId=last, machineName=target["machineName"] + " · " + picker.get())
+
     def _update_relay_device_actions(self):
         selected = self.relay_list.selection()
         target = self.relay_devices.get(selected[0]) if selected else None
+        ssh_target = self._selected_ssh_system(target)
         existing = False
-        if target is not None and self.relay_options is not None:
-            alias = ssh_terminal.host_key_alias(replace(self.relay_options, device_id=target["deviceId"]))
+        if ssh_target is not None and self.relay_options is not None:
+            alias = ssh_terminal.host_key_alias(replace(self.relay_options, device_id=ssh_target["deviceId"]))
             existing = any(not session.done.is_set() and ssh_terminal.host_key_alias(session.options) == alias
                            for session, _window, _label in getattr(self, "ssh_sessions", {}).values())
         if getattr(self, "relay_ssh_button", None) is not None:
@@ -6234,7 +6267,8 @@ class RemoteDeskLinuxApp:
                  (target is not None and target.get("sshTunneling") is True and "ssh" in target.get("services", [])))):
             button = getattr(self, attribute, None)
             if button is not None:
-                button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+                button.configure(state=tk.NORMAL if enabled and (attribute == "relay_connect_button" or ssh_target is not None)
+                                 else tk.DISABLED)
 
     def _stop_relay_registration(self):
         connector = getattr(self, "relay_host", None)
@@ -6267,6 +6301,8 @@ class RemoteDeskLinuxApp:
             self._stop_relay_registration()
             return
         local_port = self.host_running_port if desktop else 56565
+        if ssh:
+            self._prepare_host_ssh()
         previous = getattr(self, "relay_host", None)
         if previous is not None and previous.options == options:
             previous.local_port = local_port
@@ -6287,6 +6323,32 @@ class RemoteDeskLinuxApp:
         # Invalidate old-key/old-port bridges immediately, including while the
         # user temporarily clears an entry. Never restart the desktop here.
         self._sync_relay_registration()
+
+    def _prepare_host_ssh(self, retry=False):
+        if (not sys.platform.startswith("linux") or getattr(self, "closing", False) or
+                getattr(self, "ssh_preparing", False) or (getattr(self, "ssh_preparation_started", False) and not retry)):
+            return
+        self.ssh_preparation_started = True
+        from remotedesk_linux_dependencies import detect_missing
+        if not detect_missing("ssh-host"):
+            if retry:
+                self.host_status.config(text="已检测到 SSH 服务程序。请确认系统 SSH 服务已启动，本机端口与监听配置一致。")
+            return
+        if os.environ.get("REMOTEDESK_AUTO_INSTALL") == "0":
+            self.host_status.config(text="本机缺少 SSH 服务，自动安装已关闭。")
+            return
+        self.ssh_preparing = True
+        events = self.events
+        def prepare():
+            try:
+                result = subprocess.run([sys.executable, str(SCRIPT_DIR / "remotedesk_linux_dependencies.py"),
+                                         "--mode", "ssh-host"], check=False)
+                message = {0: "已检测到 SSH 服务程序。", 125: "已取消安装 SSH 服务。"}.get(
+                    result.returncode, "SSH 服务准备未完成，请检查本机软件源和服务配置。")
+            except OSError as error:
+                message = "无法准备本机 SSH：" + str(error)
+            put_ui_event(events, "ssh_host_prepared", message)
+        threading.Thread(target=prepare, name="RemoteDeskSshSetup", daemon=True).start()
 
     def _toggle_ssh_host(self):
         if self.host_ssh_enabled.get():
@@ -6309,7 +6371,7 @@ class RemoteDeskLinuxApp:
 
     def _open_relay_ssh(self, *, configure=False, force_new=False, login_provider=None, use_existing=False):
         selected = self.relay_list.selection()
-        target = self.relay_devices.get(selected[0]) if selected else None
+        target = self._selected_ssh_system(self.relay_devices.get(selected[0]) if selected else None)
         if self.relay_options is None or target is None:
             self.relay_status.config(text="请刷新并选择已开启 SSH 的设备；服务器与被控端均需支持独立 SSH 通道。")
             return
@@ -6518,6 +6580,7 @@ class RemoteDeskLinuxApp:
         selected = self.relay_list.selection()
         target = self.relay_devices.get(selected[0]) if selected else None
         current = self.relay_options
+        target = self._selected_ssh_system(target)
         if current is None or target is None or target.get("sshTunneling") is not True or "ssh" not in target.get("services", []):
             self.relay_status.config(text="请选择已开启 SSH 的在线设备。")
             return
@@ -7136,10 +7199,11 @@ class RemoteDeskLinuxApp:
         self.host_ssh_port = tk.StringVar(value="22")
         ttk.Checkbutton(form, text="允许本机 SSH 中继", variable=self.host_ssh_enabled,
                         command=self._toggle_ssh_host).grid(row=10, column=0, columnspan=3, sticky=tk.W, pady=6)
-        self._row_entry(form, 11, "本机 SSH 端口", self.host_ssh_port)
+        self._row_entry(form, 11, "SSH 首选端口", self.host_ssh_port)
         ttk.Button(form, text="应用 / 保存 SSH 设置", command=self._toggle_ssh_host).grid(row=12, column=0, columnspan=3, sticky=tk.W, pady=6)
         self._wrapping_label(form, text="仅转发本机回环地址（127.0.0.1 / ::1）的 SSH 服务；先验证设备密钥，再由 SSH 验证账号。关闭此项立即结束 SSH，不停止桌面。",
                              style="PanelSubtitle.TLabel").grid(row=13, column=0, columnspan=3, sticky=tk.EW, pady=6)
+        ttk.Button(form, text="检查本机 SSH 服务", command=lambda: self._prepare_host_ssh(retry=True)).grid(row=14, column=0, columnspan=3, sticky=tk.W)
 
         buttons = ttk.Frame(tab, style="App.TFrame")
         buttons.pack(fill=tk.X, pady=(10, 6))
@@ -9298,6 +9362,9 @@ class RemoteDeskLinuxApp:
                 connector, message = value
                 if connector is self.relay_host and not self.relay_setup_busy:
                     self.relay_status.config(text=str(message))
+            elif event == "ssh_host_prepared":
+                self.ssh_preparing = False
+                self.host_status.config(text=value)
             elif event == "ssh_status":
                 session_id, message = value
                 row = self.ssh_sessions.get(session_id)

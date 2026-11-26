@@ -2,6 +2,11 @@ using System.Globalization;
 
 namespace RemoteDesk;
 
+internal sealed record SshDestination(string Id, string Label, bool Available = true)
+{
+    public override string ToString() => Available ? Label : Label + "（已停止）";
+}
+
 internal sealed record RelayOnlineDevice(
     string DeviceId,
     string MachineName,
@@ -16,6 +21,7 @@ internal sealed record RelayOnlineDevice(
     public string OriginalMachineName { get; init; } = "";
     public bool CanRename { get; init; }
     public bool SupportsSsh { get; init; }
+    public IReadOnlyList<SshDestination> WslDestinations { get; init; } = [];
     public bool SupportsDesktop { get; init; } = true;
     public string? AppVersion { get; init; }
     public string NamingUnavailableReason { get; init; } = RelayDeviceName.UnsupportedMessage;

@@ -847,10 +847,30 @@ def rename_device(options, name):
     return asyncio.run(rename_device_async(options, name))
 
 
+def ssh_destinations(item, parent):
+    entries = item.get("sshTargets", [])
+    if item.get("platform") != "Windows" or not isinstance(entries, list) or len(entries) > 8:
+        return []
+    targets = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not 0 < len(name) <= 80 or not name.isprintable():
+            continue
+        try:
+            identifier = uuid.UUID(entry.get("id", ""))
+        except (ValueError, AttributeError, TypeError):
+            continue
+        if identifier.int and str(identifier) != parent:
+            targets[str(identifier)] = name
+    return [{"id": i, "name": n} for i, n in targets.items()]
+
+
 async def _list_devices_pages(options):
     options = options.validate()
     result, seen, offset = [], set(), 0
-    for _ in range(16):
+    for _ in range(32):
         response = await _directory_page(options, offset)
         devices = response.get("devices")
         if not isinstance(devices, list) or len(devices) > 512:
@@ -865,6 +885,7 @@ async def _list_devices_pages(options):
             if device_id in seen:
                 continue
             seen.add(device_id)
+            targets = ssh_destinations(item, device_id)
             result.append(dict(deviceId=device_id, machineName=str(item.get("machineName", "未命名设备"))[:120],
                                platform=str(item.get("platform", "未知"))[:40], busy=item.get("busy") is True,
                                sharedName=str(item.get("sharedName", ""))[:80],
@@ -876,13 +897,13 @@ async def _list_devices_pages(options):
                                           else ([] if "services" in item else ["desktop"]))],
                                namingUnavailableReason=(naming_error_message(response['deviceNamingError'])
                                                         if response.get('deviceNamingError') else NAMING_UNAVAILABLE),
-                               **normalize_address_report(item)))
+                               **({"sshTargets": targets} if targets else {}), **normalize_address_report(item)))
         if len(result) > 512:
             raise ValueError("中转在线设备过多。")
         next_offset = response.get("nextOffset")
         if next_offset is None:
             return result
-        if type(next_offset) is not int or next_offset != offset + 32 or next_offset >= 512:
+        if type(next_offset) is not int or next_offset != offset + 16 or next_offset >= 512:
             raise ValueError("中转目录分页无效。")
         offset = next_offset
     raise ValueError("中转目录分页过多。")
@@ -891,7 +912,7 @@ async def _list_devices_pages(options):
 async def _directory_page(options, offset):
     reader, writer = await connect_tls(options)
     try:
-        return await hello(reader, writer, options, "directory", pageSize=32, offset=offset)
+        return await hello(reader, writer, options, "directory", pageSize=16, offset=offset, sshTargets=True)
     finally:
         await close_writer(writer)
 

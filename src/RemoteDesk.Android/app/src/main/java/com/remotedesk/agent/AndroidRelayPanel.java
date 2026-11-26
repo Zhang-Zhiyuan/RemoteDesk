@@ -482,7 +482,7 @@ final class AndroidRelayPanel extends LinearLayout {
                         (device.sshAvailable ? "；独立通道，不接管桌面" : "；需要主机和中继启用 SSH"));
                     ssh.setOnClickListener(view -> {
                         if (!closed && active && !setupBusy && epoch == generation && saved == options && device.sshAvailable)
-                            AndroidSshTerminalActivity.launch(getContext(), options.target(device.deviceId), device.name);
+                            openSshSystem(options, device, generation);
                     });
                     devices.addView(ssh, layout());
                     Button rename = button("共享名称", false);
@@ -529,6 +529,24 @@ final class AndroidRelayPanel extends LinearLayout {
                     }).setNegativeButton("取消", null).show();
             });
         });
+    }
+
+    private void openSshSystem(AndroidRelay.Options options, AndroidRelay.Device device, int generation) {
+        if (device.sshTargets.isEmpty()) {
+            AndroidSshTerminalActivity.launch(getContext(), options.target(device.deviceId), device.name);
+            return;
+        }
+        java.util.List<String> ids = new java.util.ArrayList<>(), labels = new java.util.ArrayList<>();
+        ids.add(device.deviceId); labels.add("Windows");
+        for (java.util.Map.Entry<String,String> e : device.sshTargets.entrySet()) {
+            ids.add(e.getKey()); labels.add("WSL · " + e.getValue());
+        }
+        new AlertDialog.Builder(getContext()).setTitle("SSH 目标系统 · " + device.name)
+            .setItems(labels.toArray(new String[0]), (dialog, index) -> {
+                if (closed || !active || setupBusy || epoch != generation || saved != options) return;
+                AndroidSshTerminalActivity.launch(getContext(), options.target(ids.get(index)),
+                    device.name + " · " + labels.get(index), device.deviceId);
+            }).setNegativeButton("取消", null).show();
     }
 
     private void showNameDialog(AndroidRelay.Options options, AndroidRelay.Device device) {

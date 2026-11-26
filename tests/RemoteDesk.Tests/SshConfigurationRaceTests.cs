@@ -49,7 +49,7 @@ public sealed class SshConfigurationRaceTests
                 ((IPEndPoint)listener.LocalEndpoint).Port, new string('a', 64),
                 new string('b', 64), Guid.NewGuid().ToString("D"));
             typeof(RelayHostConnector).GetMethod("StartSshBridge", flags)!.Invoke(host,
-                [options, Guid.NewGuid().ToString("D"), CancellationToken.None]);
+                [options, Guid.NewGuid().ToString("D"), CancellationToken.None, null]);
             Assert.NotNull(bridgeToken);
             Assert.True(bridgeToken.Value.IsCancellationRequested);
             Assert.False(listener.Pending());

@@ -62,6 +62,7 @@ internal static class SshGateProtocol
         await stream.ReadExactlyAsync(status, token).ConfigureAwait(false);
         if (status[0] == 0) throw new UnauthorizedAccessException("目标拒绝了设备密钥。");
         if (status[0] == 2) throw new IOException("目标的 SSH 服务不可达，请检查目标机器的 SSH 服务和本机 SSH 端口。");
+        if (status[0] == 3) throw new IOException("所选 WSL 的 SSH 服务不可达。请确认该发行版已运行，并在其中启动 OpenSSH Server。");
         if (status[0] != 1) throw new InvalidDataException("目标返回了未知 SSH 通道状态。");
     }
 }

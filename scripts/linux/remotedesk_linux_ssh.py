@@ -67,7 +67,14 @@ async def accept_gate(reader, writer, device_id, device_key, local_port, connect
             try:
                 local = await dial("127.0.0.1", local_port)
             except OSError:
-                local = await dial("::1", local_port)
+                try:
+                    local = await dial("::1", local_port)
+                except OSError:
+                    if connect is not None:
+                        raise
+                    from remotedesk_ssh_endpoint import find_local_ssh
+                    address, port = await asyncio.get_running_loop().run_in_executor(None, find_local_ssh, local_port)
+                    local = await dial(address, port)
         except OSError:
             writer.write(b"\2")
             await writer.drain()
@@ -95,6 +102,8 @@ async def authenticate_gate(reader, writer, device_id, device_key):
     result = await reader.readexactly(1)
     if result == b"\2":
         raise ConnectionError("设备已验证，但本机 SSH 服务不可达。")
+    if result == b"\3":
+        raise ConnectionError("所选 WSL 的 SSH 服务不可达。请确认发行版已运行，并在其中启动 OpenSSH Server。")
     if result != b"\1":
         raise PermissionError("SSH 设备门禁拒绝连接。")
 

@@ -77,11 +77,11 @@ class RelayAddressDirectoryTests(unittest.IsolatedAsyncioTestCase):
                      directAddresses=["192.0.2.3"], directPort=56565)
         second = dict(first, deviceId="9220b49b-0f2f-4f87-913a-c3f95091500f", machineName="second")
         with mock.patch.object(client, "_directory_page", new=mock.AsyncMock(side_effect=[
-            dict(devices=[first], nextOffset=32), dict(devices=[first, second])])) as page:
+            dict(devices=[first], nextOffset=16), dict(devices=[first, second])])) as page:
             result = await client.list_devices_async(options)
             self.assertEqual(2, len(result))
-            self.assertEqual([0, 32], [call.args[1] for call in page.call_args_list])
-        for cursor in (True, "32", 32.0, 0, -1, 512):
+            self.assertEqual([0, 16], [call.args[1] for call in page.call_args_list])
+        for cursor in (True, "16", 16.0, 0, -1, 32, 512):
             with mock.patch.object(client, "_directory_page", new=mock.AsyncMock(return_value=dict(devices=[], nextOffset=cursor))):
                 with self.assertRaises(ValueError): await client.list_devices_async(options)
 

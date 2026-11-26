@@ -522,9 +522,11 @@ class LinuxRelayTlsTests(unittest.IsolatedAsyncioTestCase):
                 request = await client.read_json(reader)
                 offsets.append(request["offset"])
                 self.assertEqual(TOKEN, request["token"])
+                self.assertEqual(16, request["pageSize"])
+                self.assertIs(request["sshTargets"], True)
                 value = dict(ok=True, devices=[dict(deviceId=str(uuid.UUID(int=request["offset"] + 1)))])
                 if request["offset"] == 0:
-                    value["nextOffset"] = 32
+                    value["nextOffset"] = 16
                 await client.write_json(writer, value)
                 self.assertEqual(b"", await reader.read())
             finally:
@@ -532,7 +534,7 @@ class LinuxRelayTlsTests(unittest.IsolatedAsyncioTestCase):
         listener = await asyncio.start_server(page, "127.0.0.1", 0, ssl=self.tls)
         self.extra_servers.append(listener)
         devices = await client.list_devices_async(replace(self.options, port=listener.sockets[0].getsockname()[1]))
-        self.assertEqual([0, 32], offsets)
+        self.assertEqual([0, 16], offsets)
         self.assertEqual(2, len(devices))
 
     async def test_viewer_cancels_pending_relay_pair(self):

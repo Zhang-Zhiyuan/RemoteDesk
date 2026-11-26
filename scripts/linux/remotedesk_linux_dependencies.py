@@ -11,6 +11,7 @@ import platform
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -35,6 +36,7 @@ DEPENDENCIES = {
     "tk": ("图形界面 Tk", "python3-tk"),
     "pillow": ("JPEG 图像解码", "python3-pil"),
     "ssh": ("服务器 root 登录", "python3-paramiko"),
+    "sshd": ("本机 SSH 服务", "openssh-server"),
     "ffmpeg": ("画面采集与视频编解码 FFmpeg", "ffmpeg"),
     "x11": ("X11 图形库", "libx11-6"),
     "xtst": ("鼠标和键盘控制 XTest", "libxtst6"),
@@ -76,6 +78,10 @@ def system_environment() -> dict[str, str]:
 
 
 def detect_missing(mode: str = "app") -> list[MissingDependency]:
+    if mode == "ssh-host":
+        if any(shutil.which(exe, path=SYSTEM_PATH) for exe in ("sshd", "dropbear")):
+            return []
+        return [MissingDependency("sshd", *DEPENDENCIES["sshd"], "未找到本机 SSH 服务")]
     if mode not in ("app", "host"):
         raise ValueError("Unsupported dependency profile")
     result = subprocess.run([sys.executable, "-c", MODULE_PROBE, mode],
@@ -399,11 +405,18 @@ def prepare_runtime(mode: str = "app", *, graphical: bool | None = None) -> int:
         # Explicit unattended/diagnostic opt-out: never opens dialogs or elevates.
         return 0
     if graphical is None:
-        graphical = mode == "app" and bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        graphical = mode in ("app", "ssh-host") and bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     try:
         missing = detect_missing(mode)
         if not missing:
             return 0
+        if mode == "ssh-host":
+            for address in ("127.0.0.1", "::1"):
+                try:
+                    with socket.create_connection((address, 22), timeout=.5):
+                        raise RuntimeError("本机 22 端口已有服务。请保留原监听，并在被控设置中填写现有 SSH 端口。")
+                except OSError:
+                    continue
         summary = "\n".join(f"• {item.label}（{item.package}）" for item in missing)
         try:
             command = install_command(missing)
@@ -415,8 +428,12 @@ def prepare_runtime(mode: str = "app", *, graphical: bool | None = None) -> int:
             + "\n\n是否从系统软件源安装？随后由系统申请管理员授权。"
               "\n不会以管理员身份运行 RemoteDesk，不修改驱动或软件源。"
               "\n取消后本次不启动，可安装完再打开。\n\n终端安装命令：\n" + manual)
+        if mode == "ssh-host":
+            message = ("需要通过中继登录这台 Linux 电脑时，系统须运行 SSH 服务。\n\n"
+                       "是否安装 openssh-server？发行版将按本机配置启动服务并监听 SSH 端口。\n"
+                       "取消可继续使用远程桌面。\n\n" + manual)
         if not dialog(message, question=True, graphical=graphical):
-            print("RemoteDesk 依赖安装未获确认；本次启动已取消。", file=sys.stderr)
+            print("RemoteDesk 组件安装已取消。", file=sys.stderr)
             return CANCELLED
         preflight_install(command)
         elevated = elevated_command(command, graphical)
@@ -444,7 +461,7 @@ def prepare_runtime(mode: str = "app", *, graphical: bool | None = None) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="RemoteDesk Linux dependency check / consent-based installation")
-    parser.add_argument("--mode", choices=("app", "host"), default="app")
+    parser.add_argument("--mode", choices=("app", "host", "ssh-host"), default="app")
     checks = parser.add_mutually_exclusive_group()
     checks.add_argument("--check", action="store_true", help="Read-only JSON report; never prompts or installs")
     checks.add_argument("--check-install", action="store_true",

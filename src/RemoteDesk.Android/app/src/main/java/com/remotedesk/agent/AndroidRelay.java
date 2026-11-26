@@ -347,6 +347,7 @@ final class AndroidRelay {
         final boolean canRename;
         final boolean busy;
         final boolean sshAvailable;
+        final java.util.Map<String,String> sshTargets;
         final boolean desktopAvailable;
         final List<String> directAddresses;
         final int directPort;
@@ -367,6 +368,13 @@ final class AndroidRelay {
         Device(String id, String name, String platform, boolean busy, List<String> addresses, int port,
                String sharedName, String originalName, boolean canRename, String namingUnavailableReason,
                boolean sshAvailable, boolean desktopAvailable) {
+            this(id, name, platform, busy, addresses, port, sharedName, originalName, canRename, namingUnavailableReason,
+                sshAvailable, desktopAvailable, java.util.Collections.emptyMap());
+        }
+        Device(String id, String name, String platform, boolean busy, List<String> addresses, int port,
+               String sharedName, String originalName, boolean canRename, String namingUnavailableReason,
+               boolean sshAvailable, boolean desktopAvailable, java.util.Map<String,String> sshTargets) {
+            this.sshTargets = java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(sshTargets));
             this.deviceId = id; this.name = name; this.platform = platform; this.busy = busy;
             this.sharedName = sharedName; this.originalName = originalName; this.canRename = canRename;
             this.namingUnavailableReason = namingUnavailableReason;
@@ -398,12 +406,12 @@ final class AndroidRelay {
                 List<Device> result = new ArrayList<>();
                 Set<String> seen = new java.util.HashSet<>();
                 int offset = 0;
-                for (int page = 0; page < 16; page++) {
+        for (int page = 0; page < 32; page++) {
                     dial.checkOpen();
                     JSONObject response;
                     try (SSLSocket socket = connectDirectoryPage(dial,
                             pageDial -> AndroidRelayNetworkSelector.connect(context, options, pageDial))) {
-                        try { response = exchange(socket, request(options, "directory").put("pageSize", 32).put("offset", offset)); }
+                try { response = exchange(socket, request(options, "directory").put("pageSize", 16).put("offset", offset).put("sshTargets", true)); }
                         finally { dial.release(socket); }
                     }
                     JSONArray devices = response.optJSONArray("devices");
@@ -421,14 +429,15 @@ final class AndroidRelay {
                                 Boolean.TRUE.equals(response.opt("deviceNaming")),
                                 response.optString("deviceNamingError", "").isEmpty() ? AndroidRelayDeviceName.UNSUPPORTED :
                                     AndroidRelayDeviceName.errorMessage(response.optString("deviceNamingError")),
-                                AndroidSshProtocol.available(response, item), AndroidSshProtocol.desktopAvailable(item)));
+                                AndroidSshProtocol.available(response, item), AndroidSshProtocol.desktopAvailable(item),
+                                AndroidSshProtocol.destinations(item, id)));
                         } catch (IllegalArgumentException ignored) { }
                     }
                     dial.checkOpen();
                     if (result.size() > 512) throw new IOException("中转在线设备过多。");
                     if (!response.has("nextOffset") || response.isNull("nextOffset")) return result;
                     Object next = response.opt("nextOffset");
-                    if (!(next instanceof Integer) || ((Integer) next) != offset + 32 || ((Integer) next) >= 512)
+                    if (!(next instanceof Integer) || ((Integer) next) != offset + 16 || ((Integer) next) >= 512)
                         throw new IOException("中转目录分页无效。");
                     offset = (Integer) next;
                 }

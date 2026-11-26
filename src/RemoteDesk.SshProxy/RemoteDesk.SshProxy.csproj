@@ -12,11 +12,14 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+    <PackageReference Include="SSH.NET" Version="2026.0.0" />
     <Compile Include="..\RemoteDesk\SshCommandProfiles.cs" Link="Core\SshCommandProfiles.cs" />
     <Compile Include="..\RemoteDesk\SshCommandProxy.cs" Link="Core\SshCommandProxy.cs" />
     <Compile Include="..\RemoteDesk\SshFileSafety.cs" Link="Core\SshFileSafety.cs" />
     <Compile Include="..\RemoteDesk\SshRelayClient.cs" Link="Core\SshRelayClient.cs" />
     <Compile Include="..\RemoteDesk\SshGateProtocol.cs" Link="Core\SshGateProtocol.cs" />
+    <Compile Include="..\RemoteDesk\WslSshTargets.cs" Link="Core\WslSshTargets.cs" />
+    <EmbeddedResource Include="..\..\scripts\linux\remotedesk_ssh_endpoint.py" LogicalName="RemoteDesk.WslSshGuest.py" />
     <Compile Include="..\RemoteDesk\RelayCoreModels.cs" Link="Core\RelayCoreModels.cs" />
     <Compile Include="..\RemoteDesk\RelayProtocol.cs" Link="Core\RelayProtocol.cs" />
     <Compile Include="..\RemoteDesk\RelayNetworkPathSelector.cs" Link="Core\RelayNetworkPathSelector.cs" />

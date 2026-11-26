@@ -8,6 +8,24 @@ namespace RemoteDesk.Tests;
 public sealed class SshMainFormTests
 {
     [Fact]
+    public void StoppedWslSelectionDoesNotSilentlyChangeToWindows() => OnSta(() =>
+    {
+        using var main = CreatePreview();
+        var distro = new WslSshTarget("bc42af8e-521a-4741-a7e3-71da214aff17", "Ubuntu");
+        var guest = new SshDestination(distro.RouteId(Device.DeviceId), "WSL · Ubuntu");
+        var online = Device with { SupportsSsh = true, WslDestinations = [guest] };
+        Assert.Equal(Device.DeviceId, ((SshDestination)Call(main, "SelectedSshSystem", online)!).Id);
+        var picker = Field<ComboBox>(main, "_sshSystem");
+        picker.SelectedIndex = 1;
+        Assert.Equal(guest, Call(main, "SelectedSshSystem", online));
+        var stopped = Assert.IsType<SshDestination>(Call(main, "SelectedSshSystem", Device));
+        Assert.Equal(guest.Id, stopped.Id);
+        Assert.False(stopped.Available);
+        Assert.Equal(guest, Call(main, "SelectedSshSystem", online));
+        Assert.NotEqual(distro.RouteId(Guid.NewGuid().ToString()), guest.Id);
+    });
+
+    [Fact]
     public void SshOnlyBusyDeviceAllowsIndependentSshButNotDesktop() => OnSta(() =>
     {
         using var main = CreatePreview();

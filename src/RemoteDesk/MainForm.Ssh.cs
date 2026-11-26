@@ -10,6 +10,11 @@ public sealed partial class MainForm
     private Button _sshTerminalButton = null!;
     private Button _sshEditorButton = null!;
     private Button _sshMoreButton = null!;
+    private readonly ComboBox _sshSystem = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 170,
+        AccessibleName = "SSH 目标系统", Visible = false };
+    private string? _sshSystemDevice;
+    private readonly Label _sshHostStatus = new() { AutoSize = true, Dock = DockStyle.Top, UseMnemonic = false };
+    private bool _sshPreparationStarted, _sshPreparing;
     private ToolStripMenuItem _sshLoginSettingsButton = null!;
     private ToolStripMenuItem _configureSshAliasButton = null!;
     private ToolStripMenuItem _manageSshAliasesButton = null!;
@@ -23,18 +28,25 @@ public sealed partial class MainForm
         _allowSshBox = new CheckBox { Text = "允许通过中继连接本机 SSH", AutoSize = true, Dock = DockStyle.Top };
         ResponsiveWindowLayout.ConfigureWrappedCheckBox(_allowSshBox);
         _sshHostPortBox = CreatePortInput();
-        _sshHostPortBox.Dock = DockStyle.Top;
         _sshHostPortBox.Minimum = 1;
         _sshHostPortBox.Value = 22;
-        _sshHostPortBox.AccessibleName = "本机 SSH 监听端口";
-        var content = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = Padding.Empty };
+        _sshHostPortBox.AccessibleName = "Windows SSH 首选端口";
+        SetToolTip(_sshHostPortBox, "Windows sshd 监听多个端口时优先使用此端口。");
+        var content = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Margin = Padding.Empty };
         content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         content.Controls.Add(_allowSshBox);
-        content.Controls.Add(_sshHostPortBox);
+        var portRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top, Margin = Padding.Empty };
+        portRow.Controls.Add(new Label { AutoSize = true, Anchor = AnchorStyles.Left, Text = "Windows SSH 首选端口" });
+        portRow.Controls.Add(_sshHostPortBox);
+        content.Controls.Add(portRow);
         var hint = new Label { AutoSize = true, Dock = DockStyle.Top, UseMnemonic = false,
-            Text = "转发至本机 127.0.0.1 的 SSH 服务；须自行安装并启动 OpenSSH Server。\n与桌面控制独立；还需设备密钥和 SSH 账户认证，不自动安装服务或开放端口。" };
+            Text = "注册中继后自动准备 Windows OpenSSH，新安装仅监听本机。运行中的 WSL 可单独选择，使用发行版自己的 SSH 账号与端口。" };
         content.Controls.Add(hint);
-        content.SizeChanged += (_, _) => hint.MaximumSize = new Size(Math.Max(1, content.ClientSize.Width), 0);
+        var prepare = CreateSecondaryButton("检查并准备 Windows SSH");
+        prepare.Click += async (_, _) => await PrepareHostSshAsync(retry: true);
+        content.Controls.Add(prepare);
+        content.Controls.Add(_sshHostStatus);
+        content.SizeChanged += (_, _) => hint.MaximumSize = _sshHostStatus.MaximumSize = new Size(Math.Max(1, content.ClientSize.Width), 0);
         _allowSshBox.CheckedChanged += async (_, _) => await SaveSshHostSettingsAsync();
         _sshHostPortBox.ValueChanged += async (_, _) => await SaveSshHostSettingsAsync();
         return content;
@@ -88,6 +100,9 @@ public sealed partial class MainForm
             if (MessageBox.Show(this, "断开所有 SSH 终端？运行中的命令可能随连接结束。远程桌面不受影响。",
                 "断开终端", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) == DialogResult.OK) CloseSshTerminals();
         };
+        _sshSystem.SelectionChangeCommitted += (_, _) => UpdateSshActionState();
+        SetToolTip(_sshSystem, "选择终端和 VS Code 要进入的系统。");
+        actions.Controls.Add(_sshSystem);
         actions.Controls.Add(_sshTerminalButton);
         actions.Controls.Add(_sshEditorButton);
         actions.Controls.Add(_sshMoreButton);
@@ -103,8 +118,24 @@ public sealed partial class MainForm
     private void PublishSshHostOptions()
     {
         Volatile.Write(ref _sshHostOptions, new RelaySshHostOptions(
-            _settings.Host.AllowSsh, _settings.Host.SshPort, _hostPasswordBox.Text));
+            _settings.Host.AllowSsh, _settings.Host.SshPort, _hostPasswordBox.Text) { UseSystemSsh = true });
         _relayHostConnector.RequestAddressRefresh();
+    }
+
+    private async Task PrepareHostSshAsync(bool retry = false)
+    {
+        if (_layoutPreview || _isClosing || IsDisposed || _sshPreparing || !_settings.Host.AllowSsh ||
+            (_sshPreparationStarted && !retry)) return;
+        _sshPreparationStarted = _sshPreparing = true;
+        _sshHostStatus.Text = "正在检查 Windows OpenSSH…";
+        try
+        {
+            string status = await WindowsSshService.PrepareAsync();
+            if (!_isClosing && !IsDisposed) _sshHostStatus.Text = status;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Win32Exception)
+        { if (!_isClosing && !IsDisposed) _sshHostStatus.Text = "Windows SSH 准备失败：" + ex.Message; }
+        finally { _sshPreparing = false; }
     }
 
     internal bool TryGetCurrentRelayHostRegistration(RelayConnectionOptions options, long generation, out int desktopPort)
@@ -143,15 +174,41 @@ public sealed partial class MainForm
         ? "请先选择在线设备。" : !selected.SupportsSsh
             ? "此设备未启用 SSH，或其中继 / 客户端版本尚不支持。" : null;
 
+    private SshDestination? SelectedSshSystem(RelayOnlineDevice? device)
+    {
+        if (device is null) { _sshSystem.Visible = false; _sshSystemDevice = null; return null; }
+        var primary = new SshDestination(device.DeviceId, device.Platform);
+        var choices = new List<SshDestination> { primary };
+        choices.AddRange(device.WslDestinations);
+        var last = _sshSystemDevice == device.DeviceId ? _sshSystem.SelectedItem as SshDestination : null;
+        if (last is not null && choices.All(i => i.Id != last.Id)) choices.Add(last with { Available = false });
+        if (_sshSystemDevice != device.DeviceId || !_sshSystem.Items.Cast<SshDestination>().SequenceEqual(choices))
+        {
+            _sshSystemDevice = device.DeviceId;
+            _sshSystem.BeginUpdate();
+            try
+            {
+                _sshSystem.Items.Clear(); _sshSystem.Items.AddRange(choices.ToArray());
+                _sshSystem.SelectedItem = choices.FirstOrDefault(i => i.Id == last?.Id) ?? primary;
+            }
+            finally { _sshSystem.EndUpdate(); }
+        }
+        _sshSystem.Visible = choices.Count > 1;
+        _sshSystem.Enabled = _sshOpening is null;
+        return _sshSystem.SelectedItem as SshDestination;
+    }
+
     private void UpdateSshActionState()
     {
         if (_sshTerminalButton is null || _sshTerminalButton.IsDisposed) return;
         string? reason = SshConnectionBlockReason(GetSelectedRelayDevice());
         var selected = GetSelectedRelayDevice();
+        var destination = SelectedSshSystem(selected);
+        if (destination is { Available: false }) reason = "这个 WSL 发行版已经停止。请选择其他系统或在被控端启动它。";
         string? alias = null;
         if (selected is not null && IsRelayConfigured())
         {
-            try { alias = SshTerminalLauncher.HostKeyAlias(_settings.Relay.TlsCertificateSha256!, selected.DeviceId); }
+            try { alias = SshTerminalLauncher.HostKeyAlias(_settings.Relay.TlsCertificateSha256!, destination!.Id); }
             catch (ArgumentException error) { reason = error.Message; }
         }
         bool existing = alias is not null && _sshTerminals.Any(terminal => terminal.IsActive && terminal.HostKeyAlias == alias);
@@ -190,7 +247,8 @@ public sealed partial class MainForm
         // Never reuse that other device's draft for an independent SSH target.
         if (_relayKeySelection == selection && !string.IsNullOrEmpty(_relayViewerPasswordBox.Text)) return _relayViewerPasswordBox.Text;
         if (RelayDeviceSelectionPolicy.IsLocalDevice(selected, _settings.Relay.DeviceId)) return _hostPasswordBox.Text;
-        return AppSettingsService.UnprotectSecret(RelayDeviceKeys.Find(_settings.Relay.DeviceKeys, route));
+        return AppSettingsService.UnprotectSecret(RelayDeviceKeys.Find(_settings.Relay.DeviceKeys, route) ??
+            RelayDeviceKeys.Find(_settings.Relay.DeviceKeys, route with { DeviceId = selected.DeviceId }));
     }
 
     private Task OpenSshTerminalAsync() => OpenSshTerminalCoreAsync();
@@ -200,7 +258,9 @@ public sealed partial class MainForm
         if (_sshOpening is not null) { _sshOpening.Cancel(); return; }
         RelayOnlineDevice? selected = GetSelectedRelayDevice();
         if (_isClosing || !IsRelayConfigured() || selected is null) return;
-        RelayConnectionOptions route = CreateRelayOptions(selected!.DeviceId);
+        if (SelectedSshSystem(selected) is not { Available: true } system) return;
+        RelayConnectionOptions route = CreateRelayOptions(system.Id);
+        string display = selected.MachineName + " · " + system.Label;
         string alias = SshTerminalLauncher.HostKeyAlias(route.TlsCertificateSha256, route.DeviceId);
         var existing = _sshTerminals.FirstOrDefault(terminal => terminal.HostKeyAlias == alias && terminal.IsActive);
         if (!forceNew && existing is not null)
@@ -223,7 +283,7 @@ public sealed partial class MainForm
         string key = GetSshDeviceKey(selected, route), user = profile?.Username ?? "", identity = profile?.IdentityFile ?? "";
         if (configure || profile?.CanQuickConnect(alias, key) != true)
         {
-            using var dialog = CreateSshConnectionDialog(selected.MachineName, Font, key, profile,
+            using var dialog = CreateSshConnectionDialog(display, Font, key, profile,
                 out TextBox username, out TextBox deviceKey, out TextBox identityFile);
             if (dialog.ShowDialog(this) != DialogResult.OK || _isClosing) return;
             user = username.Text.Trim(); key = deviceKey.Text; identity = identityFile.Text.Trim();
@@ -235,7 +295,7 @@ public sealed partial class MainForm
         SshLocalForwarder? forwarder = null;
         try
         {
-            SetRelayStatus($"正在连接 {selected.MachineName} 的 SSH...", MutedTextColor);
+            SetRelayStatus($"正在连接 {display} 的 SSH...", MutedTextColor);
             connection = await SshRelayClient.OpenAsync(route, key, pending.Token);
             if (_isClosing || IsDisposed || generation != _relayConfigurationGeneration) return;
             pending.Token.ThrowIfCancellationRequested();
@@ -266,8 +326,8 @@ public sealed partial class MainForm
                 new[] { new SshTerminalProfile(alias, user, string.IsNullOrEmpty(identity) ? null : Path.GetFullPath(identity)) }
                     .Concat(_settings.Viewer.SshProfiles));
             TrySaveSettings();
-            _ = ObserveSshTerminalAsync(terminal, selected.MachineName);
-            SetRelayStatus($"已打开 {selected.MachineName} 的 SSH 终端；最小化保持连接，再点可唤回。首次指纹 / SSH 密码仍在终端确认。", SuccessTextColor);
+            _ = ObserveSshTerminalAsync(terminal, display);
+            SetRelayStatus($"已打开 {display} 的 SSH 终端。最小化后可返回同一连接。", SuccessTextColor);
         }
         catch (OperationCanceledException) { if (!_isClosing && !IsDisposed) SetRelayStatus("SSH 连接已取消。", MutedTextColor); }
         catch (Exception error) when (error is IOException or SocketException or InvalidOperationException or
@@ -302,13 +362,14 @@ public sealed partial class MainForm
     private async Task ConfigureSshAliasAsync(bool openEditor = false)
     {
         RelayOnlineDevice? selected = GetSelectedRelayDevice();
-        if (_sshOpening is not null || _isClosing || _relayOperationInProgress || !IsRelayConfigured() || SshConnectionBlockReason(selected) is not null) return;
+        if (_sshOpening is not null || _isClosing || _relayOperationInProgress || !IsRelayConfigured() || selected is null || SshConnectionBlockReason(selected) is not null) return;
         CancellationTokenSource? pending = null;
         try
         {
             if (!File.Exists(SshTerminalLauncher.ExecutablePath))
                 throw new InvalidOperationException("请先在 Windows 可选功能中安装 OpenSSH 客户端。");
-            RelayConnectionOptions route = CreateRelayOptions(selected!.DeviceId);
+            if (SelectedSshSystem(selected) is not { Available: true } system) return;
+            RelayConnectionOptions route = CreateRelayOptions(system.Id);
             long generation = _relayConfigurationGeneration;
             string scope = SshCommandProfiles.ComputeRelayScope(route);
             IReadOnlyList<SshCommandProfile> profiles = SshCommandProfiles.ReadAll();
@@ -325,9 +386,11 @@ public sealed partial class MainForm
             var preferences = previous is null ? _settings.Viewer.SshProfiles.FirstOrDefault(item => item.HostKeyAlias == hostAlias)
                 : new SshTerminalProfile(hostAlias, previous.Username, previous.IdentityFile);
             string suggestedAlias = previous?.Alias ?? (SshAliasConfig.IsValidAlias(selected.MachineName) ? selected.MachineName.ToLowerInvariant() : "rd-" + route.DeviceId[..8]);
+            if (previous is null && system.Id != selected.DeviceId)
+                suggestedAlias = suggestedAlias[..Math.Min(46, suggestedAlias.Length)] + "-wsl-" + system.Id[..8];
             if (openEditor && !suggestedAlias.StartsWith("rd-", StringComparison.Ordinal))
                 suggestedAlias = "rd-" + suggestedAlias[..Math.Min(61, suggestedAlias.Length)];
-            using var dialog = CreateSshAliasDialog(selected.MachineName, Font, GetSshDeviceKey(selected, route), preferences, suggestedAlias,
+            using var dialog = CreateSshAliasDialog(selected.MachineName + " · " + system.Label, Font, GetSshDeviceKey(selected, route), preferences, suggestedAlias,
                 out TextBox username, out TextBox deviceKey, out TextBox identityFile, out TextBox commandAlias);
             if (dialog.ShowDialog(this) != DialogResult.OK || _isClosing) return;
             SshCommandProfile profile = new SshCommandProfile(previous?.Id ?? Guid.NewGuid(), commandAlias.Text.Trim(), route.DeviceId,

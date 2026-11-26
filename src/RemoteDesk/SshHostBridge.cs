@@ -6,7 +6,7 @@ namespace RemoteDesk;
 internal static class SshHostBridge
 {
     internal static async Task RunAsync(Stream relay, IDisposable relayOwner, RelaySshHostOptions options,
-        string deviceId, CancellationToken cancellationToken)
+        string deviceId, CancellationToken cancellationToken, WslSshTarget? distro = null)
     {
         if (!options.IsAvailable) throw new InvalidOperationException("本机未开启 SSH 中继。");
         using (relayOwner)
@@ -14,22 +14,29 @@ internal static class SshHostBridge
         {
             deadline.CancelAfter(TimeSpan.FromSeconds(10));
             if (!await SshGateProtocol.AuthenticateServerAsync(relay, options.DeviceKey, deviceId, deadline.Token).ConfigureAwait(false)) return;
-            TcpClient? local = null;
+            if (distro is not null) deadline.CancelAfter(TimeSpan.FromSeconds(16));
+            Stream? local = null;
             try
             {
                 try
                 {
                     // No address or port from the requesting peer is accepted.
-                    local = await ConnectLoopbackAsync(options.Port, deadline.Token).ConfigureAwait(false);
+                    if (distro is not null)
+                        local = await WslSshBridge.OpenAsync(distro, deadline.Token).ConfigureAwait(false);
+                    else if (options.UseSystemSsh)
+                        local = await WindowsSshService.ConnectAsync(options.Port, deadline.Token).ConfigureAwait(false);
+                    else
+                        local = (await ConnectLoopbackAsync(options.Port, deadline.Token).ConfigureAwait(false)).GetStream();
                 }
-                catch (SocketException)
+                catch (Exception ex) when (ex is SocketException or IOException or System.ComponentModel.Win32Exception or
+                    System.Runtime.InteropServices.COMException or InvalidOperationException or UnauthorizedAccessException)
                 {
-                    await relay.WriteAsync(new byte[] { 2 }, deadline.Token).ConfigureAwait(false);
+                    await relay.WriteAsync(new byte[] { distro is null ? (byte)2 : (byte)3 }, deadline.Token).ConfigureAwait(false);
                     return;
                 }
                 await relay.WriteAsync(new byte[] { 1 }, deadline.Token).ConfigureAwait(false);
                 deadline.CancelAfter(Timeout.InfiniteTimeSpan);
-                await RelayStreamBridge.RunAsync(relay, local.GetStream(), relayOwner, local, cancellationToken).ConfigureAwait(false);
+                await RelayStreamBridge.RunAsync(relay, local, relayOwner, local, cancellationToken).ConfigureAwait(false);
             }
             finally { local?.Dispose(); }
         }

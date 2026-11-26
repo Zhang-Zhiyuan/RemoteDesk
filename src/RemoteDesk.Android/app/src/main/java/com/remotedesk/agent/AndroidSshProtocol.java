@@ -68,8 +68,25 @@ final class AndroidSshProtocol {
             try { output.write(client); output.flush(); } finally { Arrays.fill(client, (byte) 0); }
             int accepted = input.read();
             if (accepted == 2) throw new IOException("目标主机的 SSH 服务不可达，请在目标主机检查 SSH 设置。");
+            if (accepted == 3) throw new IOException("所选 WSL 的 SSH 服务不可达。请确认发行版已运行，并在其中启动 OpenSSH Server。");
             if (accepted != 1) throw new IOException("目标主机拒绝 SSH 设备认证。");
         } finally { Arrays.fill(key, (byte) 0); }
+    }
+
+    static java.util.Map<String,String> destinations(org.json.JSONObject device, String parent) {
+        java.util.Map<String,String> choices = new java.util.LinkedHashMap<>();
+        org.json.JSONArray entries = device.optJSONArray("sshTargets");
+        if (!"Windows".equals(device.optString("platform")) || entries == null || entries.length() > 8) return choices;
+        for (int i = 0; i < entries.length(); i++) {
+            org.json.JSONObject entry = entries.optJSONObject(i);
+            if (entry == null) continue;
+            String id = entry.optString("id"), name = entry.optString("name");
+            try {
+                if (java.util.UUID.fromString(id).toString().equals(id) && !id.equals(parent) &&
+                    name.matches("[\\p{L}\\p{N} ._()+-]{1,80}")) choices.put(id, name);
+            } catch (IllegalArgumentException ignored) { }
+        }
+        return choices;
     }
 
     static String alias(AndroidRelay.Options target) {
