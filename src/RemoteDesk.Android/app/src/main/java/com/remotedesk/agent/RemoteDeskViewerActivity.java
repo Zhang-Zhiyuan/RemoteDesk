@@ -896,23 +896,27 @@ public final class RemoteDeskViewerActivity extends Activity {
         title.setPadding(dp(16), dp(4), dp(8), 0);
         TextView scale = new TextView(this);
         scale.setTextAppearance(android.R.style.TextAppearance_DeviceDefault_Medium);
-        Runnable updateLabel = () -> scale.setText(viewport.scale() > 0
-            ? "画面 · " + Math.round(viewport.scale() * 100) + "%" : "画面");
-        updateLabel.run();
         title.addView(scale, new LinearLayout.LayoutParams(0, -2, 1));
-        for (boolean larger : new boolean[] { false, true }) {
-            Button step = new Button(this, null, android.R.attr.borderlessButtonStyle);
+        Button[] steps = { new Button(this, null, android.R.attr.borderlessButtonStyle),
+            new Button(this, null, android.R.attr.borderlessButtonStyle) };
+        Runnable updateScale = () -> {
+            scale.setText(viewport.scale() > 0 ? "画面 · " + Math.round(viewport.scale() * 100) + "%" : "画面");
+            steps[0].setEnabled(viewport.canZoomOut());
+            steps[1].setEnabled(viewport.canZoomIn());
+        };
+        for (Button step : steps) {
+            boolean larger = step == steps[1];
             step.setText(larger ? "＋" : "−");
             step.setContentDescription(larger ? "放大一级" : "缩小一级");
             step.setPadding(0, 0, 0, 0);
-            step.setEnabled(viewport.scale() > 0);
             step.setOnClickListener(v -> {
                 viewport.zoomAt(larger ? 1.5f : 1 / 1.5f, viewport.viewWidth / 2f, viewport.viewHeight / 2f);
                 refreshInteraction();
-                updateLabel.run();
+                updateScale.run();
             });
             title.addView(step, new LinearLayout.LayoutParams(dp(48), dp(48)));
         }
+        updateScale.run();
         new android.app.AlertDialog.Builder(this).setCustomTitle(title)
             .setItems(new String[] { "适应窗口（自动放大）", "原始像素 1:1",
                 experimentalUpscaling ? "关闭 GPU 放大增强" : "启用 GPU 放大增强",

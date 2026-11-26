@@ -54,6 +54,9 @@ final class AndroidViewerViewport {
         float gestureLimit = MAX_ZOOM / Math.max(1f, base);
         return Math.max(1f, Math.max(gestureLimit, Math.max(1f, retainedScale) / base));
     }
+    boolean canZoomIn() { return scale() > 0 && zoom < maximumZoom() - .0001f; }
+    boolean canZoomOut() { return scale() > 0 && zoom > minimumZoom() + .0001f; }
+
     float left() { return (viewWidth - frameWidth * scale()) / 2f + panX; }
     float top() { return (viewHeight - frameHeight * scale()) / 2f + panY; }
     void reset() {

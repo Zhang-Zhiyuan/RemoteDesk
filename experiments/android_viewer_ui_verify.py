@@ -341,9 +341,11 @@ def main():
         tap("画面")
         photo("display-menu-landscape")
         tap("＋")
-        check("Zoom steps apply without dismissing the display menu", wait(lambda s: s["scale"] > 1.4)["scale"] > 1.4)
+        # The eight-times-fit cap can be reached before a full step on a short landscape viewport.
+        enlarged = wait(lambda s: s["scale"] > 1.01)["scale"]
         tap("−")
-        wait(lambda s: abs(s["scale"] - 1) < .01)
+        reduced = wait(lambda s: 0 < s["scale"] < enlarged - .01)["scale"]
+        check("Zoom steps apply without dismissing the display menu", 0 < reduced < enlarged, [enlarged, reduced])
         tap("原始像素 1:1")
 
         tap("键盘"); keyboard = wait(lambda s: s["keyboard"] and s["imeInset"] > 0, stable_seconds=.6)
