@@ -29,8 +29,37 @@ internal static class DesktopUserLaunch
         }
     }
 
-    internal static void SignIn(bool codex) =>
-        Open(Path.Combine(Environment.SystemDirectory, "cmd.exe"), "/d /k " + DeveloperLogin.Command(codex));
+    internal static void SignIn(bool codex)
+    {
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        string path = string.Join(Path.PathSeparator, new[] { EnvironmentVariableTarget.Process, EnvironmentVariableTarget.User,
+            EnvironmentVariableTarget.Machine }.Select(target => Environment.GetEnvironmentVariable("PATH", target)));
+        string tool = codex ? "codex" : "claude";
+        string executable = FindLoginClient(codex, path, Path.Combine(home, ".vscode", "extensions"))
+            ?? throw new FileNotFoundException($"未找到 {tool}。请安装对应 CLI，或将它加入当前用户的 PATH 后重试。");
+        Open(executable, codex ? "login --device-auth" : "auth login");
+    }
+
+    internal static string? FindLoginClient(bool codex, string searchPath, string extensions)
+    {
+        string name = codex ? "codex" : "claude";
+        foreach (string entry in searchPath.Split(Path.PathSeparator))
+        {
+            string directory = Environment.ExpandEnvironmentVariables(entry.Trim().Trim('"'));
+            if (!Path.IsPathFullyQualified(directory)) continue;
+            foreach (string suffix in new[] { ".exe", ".cmd", ".bat" })
+            {
+                string path = Path.Combine(directory, name + suffix);
+                if (File.Exists(path)) return path;
+            }
+        }
+        if (!codex || !Directory.Exists(extensions)) return null;
+        string architecture = RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "windows-aarch64" : "windows-x86_64";
+        return new DirectoryInfo(extensions).EnumerateDirectories("openai.chatgpt-*")
+            .OrderByDescending(directory => directory.LastWriteTimeUtc)
+            .Select(directory => Path.Combine(directory.FullName, "bin", architecture, "codex.exe"))
+            .FirstOrDefault(File.Exists);
+    }
 
     internal static string[] EditorArguments(string alias) => SshAliasConfig.IsValidAlias(alias)
         ? ["--new-window", "--remote", "ssh-remote+" + alias] : throw new ArgumentException("SSH 别名无效。");

@@ -100,7 +100,8 @@ internal static class SshAliasFixtureProbe
             checks.Add("logged-out settings deny new SSH with no SSH stdout");
             Program.Save(Path.Combine(output, "native-ssh-alias.json"), new { passed = true, checks,
                 actualNativeOpenSsh = true, productionConfigChanged = false, installedGuiNeeded = false,
-                note = "Owned TLS relay / real WSL sshd fixture; this is not live device 5090 or a VS Code UI end-to-end test." });
+                note = editorTest ? "Desktop VS Code and Remote - SSH connected to the owned real Ubuntu sshd through the TLS relay."
+                    : "Native OpenSSH connected to the owned real Ubuntu sshd through the TLS relay." });
             Console.WriteLine($"Native SSH alias fixture: {checks.Count} checks passed.");
             return 0;
         }

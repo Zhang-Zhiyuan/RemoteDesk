@@ -219,6 +219,26 @@ public sealed class SshTerminalTests
     }
 
     [Fact]
+    public void LoginFindsCodexInOfficialExtensionWhenTheDesktopPathLacksItsCli()
+    {
+        var fixture = Directory.CreateTempSubdirectory("rd-login-test-");
+        try
+        {
+            string arch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture == System.Runtime.InteropServices.Architecture.Arm64
+                ? "windows-aarch64" : "windows-x86_64";
+            var extension = fixture.CreateSubdirectory(Path.Combine("openai.chatgpt-test", "bin", arch));
+            string embedded = Path.Combine(extension.FullName, "codex.exe");
+            File.WriteAllBytes(embedded, []);
+            Assert.Equal(embedded, DesktopUserLaunch.FindLoginClient(true, ".", fixture.FullName));
+            string shim = Path.Combine(fixture.FullName, "codex.cmd");
+            File.WriteAllBytes(shim, []);
+            Assert.Equal(shim, DesktopUserLaunch.FindLoginClient(true, fixture.FullName, fixture.FullName));
+            Assert.Null(DesktopUserLaunch.FindLoginClient(false, fixture.FullName, fixture.FullName));
+        }
+        finally { fixture.Delete(true); }
+    }
+
+    [Fact]
     public async Task ForwarderCarriesBothDirectionsAndAllowsOnlyOneLocalSession()
     {
         using var remoteListener = new TcpListener(IPAddress.Loopback, 0);
