@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import fnmatch
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -104,6 +105,11 @@ async def authenticate_gate(reader, writer, device_id, device_key):
         raise ConnectionError("设备已验证，但本机 SSH 服务不可达。")
     if result == b"\3":
         raise ConnectionError("所选 WSL 的 SSH 服务不可达。请确认发行版已运行，并在其中启动 OpenSSH Server。")
+    if 20 <= result[0] <= 27:
+        reasons = ("尚未安装 OpenSSH Server", "sshd 服务已禁用", "sshd 服务已停止", "无法查询 sshd 监听状态",
+                   "sshd 没有可连接的监听端口", "正在准备 OpenSSH Server，请稍后重试",
+                   "无法从 Windows 可选功能源安装 OpenSSH Server", "安装 OpenSSH 后需要重启")
+        raise ConnectionError("目标 Windows " + reasons[result[0] - 20] + "。")
     if result != b"\1":
         raise PermissionError("SSH 设备门禁拒绝连接。")
 
@@ -573,12 +579,90 @@ def editor_alias(options, *, directory=None, ssh_directory=None):
     return profile["alias"]
 
 
+@dataclass(frozen=True)
+class DirectTarget:
+    host: str
+    port: int | None
+    user: str
+
+    @classmethod
+    def parse(cls, address, port="", user=""):
+        host = address.strip()
+        if host.startswith("[") and host.endswith("]") and ":" in host:
+            host = host[1:-1]
+        if ":" in host:
+            if not re.fullmatch(r"[0-9A-Fa-f:.]+(?:%[A-Za-z0-9_.-]+)?", host):
+                raise ValueError("请填写有效的 IPv6 地址。")
+            ipaddress.IPv6Address(host)
+        elif not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,252}", host):
+            raise ValueError("请填写 SSH 主机的 IPv4、IPv6 地址或主机名。")
+        port = str(port).strip()
+        if port and (not re.fullmatch(r"[0-9]{1,5}", port) or not 1 <= int(port) <= 65535):
+            raise ValueError("SSH 端口必须在 1 到 65535 之间。")
+        user = user.strip()
+        if user:
+            validate_username(user)
+        return cls(host, int(port) if port else None, user)
+
+    def terminal_arguments(self):
+        binary = shutil.which("ssh")
+        if not binary:
+            raise FileNotFoundError("请安装 OpenSSH 客户端。")
+        return [binary, "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3",
+                *(["-p", str(self.port)] if self.port else []), *(["-l", self.user] if self.user else []),
+                "--", self.host]
+
+    def editor_authority(self):
+        target = {"hostName": self.host}
+        if self.port: target["port"] = self.port
+        if self.user: target["user"] = self.user
+        return "ssh-remote+" + json.dumps(target, separators=(",", ":")).encode().hex()
+
+
+def direct_history(directory=None):
+    from remotedesk_linux_startup import read_private
+    path = (directory or ssh_config_directory()) / "direct.json"
+    try:
+        entries = json.loads(read_private(path))
+    except FileNotFoundError:
+        return []
+    if not isinstance(entries, list) or len(entries) > 50 or any(
+            not isinstance(row, list) or len(row) != 5 or not all(isinstance(v, str) for v in row) for row in entries):
+        raise ValueError("SSH 直连记录格式无效。")
+    return entries
+
+
+def remember_direct(device, system, target, directory=None):
+    import fcntl
+    from remotedesk_linux_startup import private_directory, atomic_private_write
+    directory = directory or ssh_config_directory()
+    private_directory(directory)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        entry = [device.casefold(), system, target.host, str(target.port or ""), target.user]
+        rows = [entry] + [row for row in direct_history(directory) if row[:2] != entry[:2]]
+        atomic_private_write(directory / "direct.json", json.dumps(rows[:50]).encode())
+    finally:
+        os.close(fd)
+
+
 def open_editor(alias):
-    alias = validate_alias(alias)
+    _open_editor_authority("ssh-remote+" + validate_alias(alias))
+
+
+def _open_editor_authority(authority):
     executable = shutil.which("code")
     if not executable:
         raise FileNotFoundError("请安装桌面版 VS Code 和 Remote - SSH 扩展，并将 code 加入 PATH。")
-    subprocess.Popen([executable, "--new-window", "--remote", "ssh-remote+" + alias], start_new_session=True)
+    subprocess.Popen([executable, "--new-window", "--remote", authority], start_new_session=True)
+
+
+def open_direct(target, editor):
+    if editor:
+        _open_editor_authority(target.editor_authority())
+    else:
+        subprocess.Popen(terminal_arguments(target.terminal_arguments(), "SSH · " + target.host), start_new_session=True)
 
 
 def _alias_fragment(profiles, directory):

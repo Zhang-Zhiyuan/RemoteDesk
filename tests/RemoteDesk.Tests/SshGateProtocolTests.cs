@@ -51,6 +51,7 @@ public sealed class SshGateProtocolTests
     [Theory]
     [InlineData(0, typeof(UnauthorizedAccessException))]
     [InlineData(2, typeof(IOException))]
+    [InlineData(26, typeof(IOException))]
     [InlineData(7, typeof(InvalidDataException))]
     public async Task ClientExplainsFailureWithoutStartingSsh(int status, Type expected)
     {

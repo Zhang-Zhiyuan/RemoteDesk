@@ -36,6 +36,7 @@ public final class AndroidSshTerminalActivity extends Activity {
     private static final String ORIGIN = "https://ssh.remotedesk.invalid/";
     private final Handler ui = new Handler(Looper.getMainLooper());
     private AndroidRelay.Options target;
+    private AndroidDirectSshTarget direct;
     private String deviceName, savedKey = "";
     private LinearLayout root, terminalPanel;
     private LinearLayout loginPanel;
@@ -68,6 +69,16 @@ public final class AndroidSshTerminalActivity extends Activity {
         context.startActivity(recallIntent(context, options, name).putExtra("parentDeviceId", parent));
     }
 
+    static Intent directIntent(Context context, AndroidDirectSshTarget endpoint) {
+        return new Intent(context, AndroidSshTerminalActivity.class)
+            .setData(new android.net.Uri.Builder().scheme("remotedesk-ssh").authority("direct").appendPath(endpoint.alias()).build())
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
+            .putExtra("directHost", endpoint.host).putExtra("directPort", endpoint.port);
+    }
+
+    private String hostAlias() { return direct == null ? AndroidSshProtocol.alias(target) : direct.alias(); }
+    private String targetIdentity() { return direct == null ? "设备 ID：" + target.deviceId : "SSH 地址：" + direct.address(); }
+
     private AndroidConnectionHistory.Node savedDevice(AndroidRelay.Options options) throws Exception {
         AndroidConnectionHistory history = AndroidConnectionHistoryStore.load(this);
         AndroidConnectionHistory.Node node = history.findRelay(options);
@@ -89,15 +100,20 @@ public final class AndroidSshTerminalActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         AndroidDisplay.configureEdgeToEdge(this, true);
         try {
-            AndroidRelay.Options options = AndroidRelaySettings.load(this);
-            if (options == null || !options.tlsCertificateSha256.equals(getIntent().getStringExtra("relayPin")))
-                throw new IOException("服务器登录已变化，请从在线列表重新打开 SSH。");
-            target = options.target(getIntent().getStringExtra("deviceId"));
-            deviceName = getIntent().getStringExtra("deviceName");
-            if (deviceName == null) deviceName = target.deviceId;
-            if (deviceName.length() > 120) deviceName = deviceName.substring(0, 120);
-            AndroidConnectionHistory.Node saved = savedDevice(target);
-            if (saved != null) savedKey = saved.password;
+            if (getIntent().hasExtra("directHost")) {
+                direct = new AndroidDirectSshTarget(getIntent().getStringExtra("directHost"), getIntent().getIntExtra("directPort", 0));
+                deviceName = direct.address();
+            } else {
+                AndroidRelay.Options options = AndroidRelaySettings.load(this);
+                if (options == null || !options.tlsCertificateSha256.equals(getIntent().getStringExtra("relayPin")))
+                    throw new IOException("服务器登录已变化，请从在线列表重新打开 SSH。");
+                target = options.target(getIntent().getStringExtra("deviceId"));
+                deviceName = getIntent().getStringExtra("deviceName");
+                if (deviceName == null) deviceName = target.deviceId;
+                if (deviceName.length() > 120) deviceName = deviceName.substring(0, 120);
+                AndroidConnectionHistory.Node saved = savedDevice(target);
+                if (saved != null) savedKey = saved.password;
+            }
         } catch (Exception ex) {
             new AlertDialog.Builder(this).setTitle("无法打开 SSH").setMessage("服务器登录或设备身份已变化，请返回在线列表重试。")
                 .setPositiveButton("返回", (d, w) -> finish()).setOnCancelListener(d -> finish()).show();
@@ -136,22 +152,25 @@ public final class AndroidSshTerminalActivity extends Activity {
         ScrollView loginScroll = new ScrollView(this);
         LinearLayout form = new LinearLayout(this); form.setOrientation(LinearLayout.VERTICAL);
         int pad = AndroidDisplay.dp(this, 12); form.setPadding(pad, pad, pad, pad);
-        form.addView(label("用目标电脑的系统账号登录，不是中继服务器的 root 账号。返回列表后连接会保留，再点此设备可回到终端。"));
+        form.addView(label(direct == null ? "用目标电脑的系统账号登录。返回列表后连接会保留，再点此设备可回到终端。"
+            : "通过 IP 直连目标的 SSH 服务。首次连接请核对主机指纹。"));
         LinearLayout advanced = new LinearLayout(this); advanced.setOrientation(LinearLayout.VERTICAL);
         advanced.setVisibility(View.GONE);
         deviceKey = field("设备密钥", true); deviceKey.setText(savedKey);
         deviceKey.setContentDescription("目标设备密钥；已保存密钥可在此更改，仅用于本次 SSH 连接");
-        if (savedKey.isEmpty()) form.addView(deviceKey);
-        else { form.addView(label("已复用保存的设备密钥。")); advanced.addView(deviceKey); }
+        if (direct == null) {
+            if (savedKey.isEmpty()) form.addView(deviceKey);
+            else { form.addView(label("已复用保存的设备密钥。")); advanced.addView(deviceKey); }
+        }
         username = field("目标电脑的系统账号", false); form.addView(username);
-        username.setText(getSharedPreferences("ssh_target_accounts", MODE_PRIVATE).getString(AndroidSshProtocol.alias(target), ""));
+        username.setText(getSharedPreferences("ssh_target_accounts", MODE_PRIVATE).getString(hostAlias(), ""));
         password = field("目标 SSH 密码（不保存）", true); form.addView(password);
         Button moreSettings = button("更多设置 ▸", v -> {
             boolean expanded = advanced.getVisibility() != View.VISIBLE;
             advanced.setVisibility(expanded ? View.VISIBLE : View.GONE);
             ((Button)v).setText(expanded ? "收起更多设置 ▾" : "更多设置 ▸");
         });
-        moreSettings.setContentDescription("展开可选的私钥、设备密钥和主机身份设置");
+        moreSettings.setContentDescription(direct == null ? "展开可选的私钥、设备密钥和主机身份设置" : "展开私钥和主机身份设置");
         form.addView(moreSettings); form.addView(advanced);
         advanced.addView(label("以下均为可选项；密码登录无需配置私钥、端口或命令行别名。"));
         advanced.addView(button("选择 SSH 私钥（可选）", v -> {
@@ -258,7 +277,7 @@ public final class AndroidSshTerminalActivity extends Activity {
 
     private void startConnection() {
         if (connection != null || !pageReady || identityBusy) return;
-        try {
+        if (direct == null) try {
             AndroidRelay.Options saved = AndroidRelaySettings.load(this);
             if (saved == null || !saved.tlsCertificateSha256.equals(target.tlsCertificateSha256))
                 throw new IOException("服务器登录已变化");
@@ -273,12 +292,16 @@ public final class AndroidSshTerminalActivity extends Activity {
         String user = username.getText().toString().trim();
         String key = deviceKey.length() == 0 ? savedKey : deviceKey.getText().toString();
         if (user.isEmpty() || user.length() > 128 || user.matches(".*[\\p{Cntrl}].*") ||
-                (selectedPrivateKey == null && password.length() == 0) || password.length() > 4096 || key.isEmpty() || key.length() > 4096) {
-            status.setText(R.string.ssh_credentials_required); return;
+                (selectedPrivateKey == null && password.length() == 0) || password.length() > 4096 || (direct == null && key.isEmpty()) || key.length() > 4096) {
+            if (direct == null) status.setText(R.string.ssh_credentials_required);
+            else status.setText("请填写目标系统账号和 SSH 密码，或选择 SSH 私钥。");
+            return;
         }
         byte[] secret = password.getText().toString().getBytes(StandardCharsets.UTF_8);
         String sessionId = java.util.UUID.randomUUID().toString();
-        if (!AndroidSshKeepAliveService.keep(this, sessionId, deviceName, recallIntent(this, target, deviceName),
+        Intent recall = direct == null ? recallIntent(this, target, deviceName) : directIntent(this, direct);
+        if (direct == null && getIntent().hasExtra("parentDeviceId")) recall.putExtra("parentDeviceId", getIntent().getStringExtra("parentDeviceId"));
+        if (!AndroidSshKeepAliveService.keep(this, sessionId, deviceName, recall,
                 () -> ui.post(() -> { if (sessionId.equals(keepAliveId)) disconnect("SSH 已断开（通知、系统服务或服务器登录状态已变化）。"); }))) {
             Arrays.fill(secret, (byte) 0);
             status.setText(R.string.ssh_keepalive_unavailable);
@@ -299,8 +322,8 @@ public final class AndroidSshTerminalActivity extends Activity {
                     if (!current()) { wait.countDown(); return; }
                     trustWait = wait;
                     trustDialog = new AlertDialog.Builder(AndroidSshTerminalActivity.this).setTitle("首次连接 SSH 主机")
-                        .setMessage("目标：" + deviceName + "\n设备 ID：" + target.deviceId + "\n\n主机指纹：\n" + fingerprint +
-                            "\n\n请通过可信渠道核对目标 sshd 指纹。确认后保存到此中继身份与设备；变化时将拒绝连接。")
+                        .setMessage("目标：" + deviceName + "\n" + targetIdentity() + "\n\n主机指纹：\n" + fingerprint +
+                            "\n\n请核对目标 sshd 指纹。确认后会保存，指纹变化时将拒绝连接。")
                         .setNegativeButton("取消", (d, w) -> wait.countDown())
                         .setPositiveButton("指纹一致，信任", (d, w) -> { if (current()) accepted.set(true); wait.countDown(); })
                         .setOnCancelListener(d -> wait.countDown()).show();
@@ -314,7 +337,7 @@ public final class AndroidSshTerminalActivity extends Activity {
                 if (text.startsWith("SSH 已连接")) {
                     sshConnected = true;
                     android.content.SharedPreferences accounts = getSharedPreferences("ssh_target_accounts", MODE_PRIVATE);
-                    String alias = AndroidSshProtocol.alias(target);
+                    String alias = hostAlias();
                     if (accounts.contains(alias) || accounts.getAll().size() < 256) accounts.edit().putString(alias, user).apply();
                 }
             } }); }
@@ -351,7 +374,8 @@ public final class AndroidSshTerminalActivity extends Activity {
         connection = next;
         byte[] privateKey = selectedPrivateKey; selectedPrivateKey = null;
         password.setHint("目标 SSH 密码（不保存）"); password.setContentDescription("目标 SSH 密码（不保存）");
-        next.start(target, key, user, secret, privateKey);
+        if (direct == null) next.start(target, key, user, secret, privateKey);
+        else next.startDirect(direct, user, secret, privateKey);
     }
 
     private void displayPendingOutput() {
@@ -367,7 +391,7 @@ public final class AndroidSshTerminalActivity extends Activity {
 
     @Override protected void onStart() {
         super.onStart(); foreground = true;
-        if (connection != null) {
+        if (connection != null && direct == null) {
             try {
                 AndroidRelay.Options saved = AndroidRelaySettings.load(this);
                 if (!AndroidRelaySettings.sameSshLogin(target, saved)) disconnect("服务器登录已变化，SSH 已断开。");
@@ -419,12 +443,12 @@ public final class AndroidSshTerminalActivity extends Activity {
     private void showHostIdentity() {
         if (connection != null || identityBusy) return;
         AndroidSshHostKeys keys = new AndroidSshHostKeys(this);
-        String alias = AndroidSshProtocol.alias(target);
+        String alias = hostAlias();
         String fingerprint = keys.get(alias);
         AlertDialog.Builder dialog = new AlertDialog.Builder(this).setTitle("SSH 主机身份")
-            .setMessage("目标：" + deviceName + "\n设备 ID：" + target.deviceId + "\n\n" +
+            .setMessage("目标：" + deviceName + "\n" + targetIdentity() + "\n\n" +
                 (fingerprint.isEmpty() ? "尚未保存 SSH 主机身份。首次连接必须核对并确认指纹。" : fingerprint +
-                    "\n\n此身份仅用于此中继证书与目标设备的 SSH 服务；与中继管理员登录、远程桌面密钥分别保存。"))
+                    (direct == null ? "\n\n此身份用于此中继与设备的 SSH 服务。" : "\n\n此身份用于此地址和端口的 SSH 服务。")))
             .setNegativeButton("关闭",null);
         if (!fingerprint.isEmpty()) dialog.setNeutralButton("忘记此身份",(d,w) -> {
             if (connection != null) return;

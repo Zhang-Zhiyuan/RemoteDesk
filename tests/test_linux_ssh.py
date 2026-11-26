@@ -24,6 +24,27 @@ KEY = "test-device-key"
 NONCE = bytes(range(32))
 
 
+class DirectTargetTests(unittest.TestCase):
+    def test_terminal_and_editor_keep_guest_port_without_a_relay(self):
+        target = ssh.DirectTarget.parse("[2001:db8::7]", "2222", "lab")
+        with mock.patch("shutil.which", return_value="/usr/bin/ssh"):
+            self.assertEqual(target.terminal_arguments()[-6:], ["-p", "2222", "-l", "lab", "--", "2001:db8::7"])
+            defaults = ssh.DirectTarget.parse("lab-host")
+            self.assertNotIn("-p", defaults.terminal_arguments())
+        self.assertEqual(json.loads(bytes.fromhex(target.editor_authority().split("+")[1])),
+                         {"hostName": "2001:db8::7", "port": 2222, "user": "lab"})
+        for address, port in (("-Fconfig", ""), ("host\nother", "22"), ("::1", "65536")):
+            with self.assertRaises(ValueError): ssh.DirectTarget.parse(address, port)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux file locking")
+    def test_native_and_guest_preferences_are_independent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "ssh"
+            for system, port in (("主机系统", "22"), ("WSL", "2222"), ("主机系统", "23")):
+                ssh.remember_direct("PC", system, ssh.DirectTarget.parse("pc", port, "lab"), root)
+            self.assertEqual([row[3] for row in ssh.direct_history(root)], ["23", "2222"])
+
+
 class SshGateTests(unittest.IsolatedAsyncioTestCase):
     def writer(self):
         return mock.Mock(drain=mock.AsyncMock(), wait_closed=mock.AsyncMock())

@@ -19,7 +19,7 @@ final class AndroidRelaySettings {
         AndroidPasswordStore.saveRelay(context, options == null ? "" : options.json().toString());
         // Publication/admin-port changes are independent of outbound SSH. Only
         // changing/removing the actual relay login revokes its live sessions.
-        if (!sameSshLogin(previous, options)) AndroidSshKeepAliveService.closeAll(context);
+        if (!sameSshLogin(previous, options)) AndroidSshKeepAliveService.closeRelaySessions(context);
     }
 
     static boolean sameSshLogin(AndroidRelay.Options previous, AndroidRelay.Options next) {

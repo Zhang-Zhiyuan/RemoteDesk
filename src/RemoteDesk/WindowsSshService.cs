@@ -7,7 +7,15 @@ namespace RemoteDesk;
 
 internal static class WindowsSshService
 {
+    private static int _preparationStatus;
     internal static async Task<string> PrepareAsync()
+    {
+        Volatile.Write(ref _preparationStatus, 25);
+        try { return await PrepareCoreAsync().ConfigureAwait(false); }
+        finally { Interlocked.CompareExchange(ref _preparationStatus, 0, 25); }
+    }
+
+    private static async Task<string> PrepareCoreAsync()
     {
         using var resource = typeof(WindowsSshService).Assembly.GetManifestResourceStream("RemoteDesk.PrepareSsh.ps1")!;
         using var reader = new StreamReader(resource);
@@ -24,16 +32,29 @@ internal static class WindowsSshService
         await Task.WhenAll(output, error, child.WaitForExitAsync()).ConfigureAwait(false);
         if (child.ExitCode != 0) return "准备失败，请检查 Windows 可选功能、Windows 更新和本机 sshd 配置。";
         string status = (await output).Trim();
+        if (status.StartsWith("INSTALL_FAILED ", StringComparison.Ordinal))
+        {
+            Volatile.Write(ref _preparationStatus, 26);
+            return "Windows 未能安装 OpenSSH Server，请检查 Windows 更新或组织的可选功能源。" + status["INSTALL_FAILED ".Length..];
+        }
+        if (status == "RESTART_NEEDED")
+        {
+            Volatile.Write(ref _preparationStatus, 27);
+            return SshGateProtocol.NativeServiceFailure(27);
+        }
         return status == "READY" ? "Windows SSH 已就绪。" : status;
     }
+
+    internal sealed class Unavailable(byte reason) : IOException(SshGateProtocol.NativeServiceFailure(reason)) { internal byte Reason => reason; }
 
     // Ask the OS which sockets its OpenSSH service owns. A WSL portproxy can be
     // listening on the usual port, even when Windows sshd uses a different one.
     private const string ListListeners = """
         $ErrorActionPreference='Stop'
         $service=Get-CimInstance Win32_Service -Filter "Name='sshd'"
-        if (!$service) { exit 2 }
-        if ($service.State -ne 'Running' -or $service.ProcessId -eq 0) { exit 2 }
+        if (!$service) { exit 20 }
+        if ($service.StartMode -eq 'Disabled') { exit 21 }
+        if ($service.State -ne 'Running' -or $service.ProcessId -eq 0) { exit 22 }
         Get-NetTCPConnection -State Listen -OwningProcess $service.ProcessId -ErrorAction SilentlyContinue |
             ForEach-Object { '{0} {1}' -f $_.LocalAddress,$_.LocalPort }
         """;
@@ -47,6 +68,13 @@ internal static class WindowsSshService
         {
             Task<string> output = child.StandardOutput.ReadToEndAsync(token);
             await Task.WhenAll(output, child.StandardError.ReadToEndAsync(token), child.WaitForExitAsync(token)).ConfigureAwait(false);
+            if (child.ExitCode != 0)
+            {
+                int reason = child.ExitCode is 20 or 21 or 22 ? child.ExitCode : 23;
+                int preparing = Volatile.Read(ref _preparationStatus);
+                if (reason is 20 or 22 && preparing != 0) reason = preparing;
+                throw new Unavailable((byte)reason);
+            }
             return (await output).Split(['\r','\n'], StringSplitOptions.RemoveEmptyEntries)
                 .Select(ParseListener).OfType<IPEndPoint>().Distinct().ToArray();
         }
@@ -74,6 +102,6 @@ internal static class WindowsSshService
             catch (SocketException) { socket.Dispose(); }
             catch { socket.Dispose(); throw; }
         }
-        throw new IOException("Windows OpenSSH Server 未就绪，请在被控端准备 SSH 服务。");
+        throw new Unavailable(24);
     }
 }

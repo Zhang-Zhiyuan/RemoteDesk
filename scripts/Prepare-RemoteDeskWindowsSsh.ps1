@@ -10,20 +10,22 @@ $binary = Join-Path ([Environment]::SystemDirectory) 'OpenSSH\sshd.exe'
 if ($service -and (Get-CimInstance Win32_Service -Filter "Name='sshd'").PathName.Trim('"') -ne $binary) {
     '请在本机启动已有的自定义 sshd 服务。'; return
 }
-$installedHere = !$service
-$fresh = $installedHere -and !(Test-Path -LiteralPath $config)
+# Windows may come with the optional feature preinstalled but never started.
+$fresh = !(Test-Path -LiteralPath $config)
 if (!$service) {
     $rule = 'OpenSSH-Server-In-TCP'
     $hadRule = Get-NetFirewallRule -Name $rule -ErrorAction SilentlyContinue
     try {
         $install = Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0'
+    } catch {
+        'INSTALL_FAILED 0x{0:X8}' -f $_.Exception.HResult; return
     } finally {
         # Windows adds an inbound rule when installing the optional feature.
         if (!$hadRule) {
             Get-NetFirewallRule -Name $rule -ErrorAction SilentlyContinue | Disable-NetFirewallRule | Out-Null
         }
     }
-    if ($install.RestartNeeded) { 'Windows 安装 OpenSSH 后需要重启。'; return }
+    if ($install.RestartNeeded) { 'RESTART_NEEDED'; return }
     $service = Get-Service -Name sshd
 }
 if ($fresh -and (Test-Path -LiteralPath $config)) {

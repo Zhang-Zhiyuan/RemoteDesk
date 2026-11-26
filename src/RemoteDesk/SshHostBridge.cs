@@ -31,7 +31,8 @@ internal static class SshHostBridge
                 catch (Exception ex) when (ex is SocketException or IOException or System.ComponentModel.Win32Exception or
                     System.Runtime.InteropServices.COMException or InvalidOperationException or UnauthorizedAccessException)
                 {
-                    await relay.WriteAsync(new byte[] { distro is null ? (byte)2 : (byte)3 }, deadline.Token).ConfigureAwait(false);
+                    byte reason = distro is not null ? (byte)3 : ex is WindowsSshService.Unavailable failure ? failure.Reason : (byte)2;
+                    await relay.WriteAsync(new byte[] { reason }, deadline.Token).ConfigureAwait(false);
                     return;
                 }
                 await relay.WriteAsync(new byte[] { 1 }, deadline.Token).ConfigureAwait(false);

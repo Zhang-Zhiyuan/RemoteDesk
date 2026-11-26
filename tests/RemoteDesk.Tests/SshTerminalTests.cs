@@ -8,6 +8,23 @@ namespace RemoteDesk.Tests;
 public sealed class SshTerminalTests
 {
     [Fact]
+    public void DirectTerminalAndEditorUseTheSameIpv6AddressAndGuestPort()
+    {
+        var target = DirectSshTarget.Create("[2001:db8::7]", "2222", "lab");
+        Assert.Equal(new[] { "-p", "2222", "-l", "lab", "--", "2001:db8::7" }, target.TerminalArguments().TakeLast(6));
+        using var data = System.Text.Json.JsonDocument.Parse(Convert.FromHexString(target.EditorAuthority()["ssh-remote+".Length..]));
+        Assert.Equal("2001:db8::7", data.RootElement.GetProperty("hostName").GetString());
+        Assert.Equal(2222, data.RootElement.GetProperty("port").GetInt32());
+        Assert.Equal("lab", data.RootElement.GetProperty("user").GetString());
+        var original = DirectSshTarget.Create("lab-host", "", "");
+        Assert.DoesNotContain("-p", original.TerminalArguments());
+        Assert.DoesNotContain("-l", original.TerminalArguments());
+        Assert.Throws<ArgumentException>(() => DirectSshTarget.Create("-Fother", "", ""));
+        Assert.Throws<ArgumentException>(() => DirectSshTarget.Create("valid", "65536", ""));
+        Assert.Throws<ArgumentException>(() => DirectSshTarget.Create("valid", "", "name\r\nHost"));
+    }
+
+    [Fact]
     public async Task FailedTerminalLauncherReleasesTunnelAndCannotBeRecalled()
     {
         using var owner = new CountingOwner(new MemoryStream());

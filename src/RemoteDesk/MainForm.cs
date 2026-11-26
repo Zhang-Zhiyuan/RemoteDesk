@@ -1202,6 +1202,9 @@ public sealed partial class MainForm : Form
         toolbar.Controls.Add(_viewerInputPauseButton);
         toolbar.Controls.Add(_remoteUpdateButton);
         toolbar.Controls.Add(_viewerToggleButton);
+        var directSsh = CreateSecondaryButton("SSH 直连…");
+        directSsh.Click += (_, _) => OpenDirectSsh();
+        toolbar.Controls.Add(directSsh);
         long toolbarPopulatedAt = Stopwatch.GetTimestamp();
 
         // This section lives in an AutoSize root row. It must shrink after

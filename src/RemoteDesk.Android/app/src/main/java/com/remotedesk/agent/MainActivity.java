@@ -272,6 +272,14 @@ public final class MainActivity extends Activity {
         addLabeledField(connectionColumn, "远端地址", viewerAddressEdit);
         addLabeledField(connectionColumn, "设备密钥", viewerPasswordEdit);
         addColumnView(connectionColumn, viewerButton);
+        Button directSsh = new Button(this);
+        directSsh.setText("SSH 直连…");
+        AndroidUiTheme.styleButton(this, directSsh, AndroidUiTheme.ButtonRole.SECONDARY);
+        directSsh.setOnClickListener(view -> {
+            RemoteEndpoint device = parseRemoteEndpoint(viewerAddressEdit.getText().toString(), 56565);
+            AndroidDirectSshDialog.show(this, device == null ? "" : device.host);
+        });
+        addColumnView(connectionColumn, directSsh);
         historyPanel = new AndroidConnectionHistoryPanel(this, this::openHistoryViewer,
             this::fillHistoryNode, this::updateStatusPanel);
         addColumnView(connectionColumn, historyPanel);

@@ -69,6 +69,7 @@ internal sealed class ViewerSettings
     public List<SavedRemoteDevice> RecentDevices { get; set; } = [];
 
     public List<SshTerminalProfile> SshProfiles { get; set; } = [];
+    public List<DirectSshPreference> DirectSshTargets { get; set; } = [];
 }
 
 internal sealed class SavedRemoteDevice
@@ -343,6 +344,9 @@ internal sealed class AppSettingsService
         settings.Viewer.RecentDevices ??= [];
         settings.Viewer.RecentDevices = NormalizeRecentDevices(settings.Viewer.RecentDevices);
         settings.Viewer.SshProfiles = SshTerminalProfile.Normalize(settings.Viewer.SshProfiles);
+        settings.Viewer.DirectSshTargets = (settings.Viewer.DirectSshTargets ?? [])
+            .Where(p => p?.Device is { Length: <= 253 } && p.Target is { Host.Length: > 0 and <= 253, Username.Length: <= 128, Port: null or (> 0 and <= 65535) })
+            .DistinctBy(p => (p.Device.ToLowerInvariant(), p.Wsl)).Take(50).ToList();
         settings.Viewer.VideoMode = NormalizeViewerVideoMode(settings.Viewer.VideoMode, settings.Viewer.PreferH264);
         settings.Viewer.PreferH264 = settings.Viewer.VideoMode != ViewerVideoMode.StableJpeg;
 

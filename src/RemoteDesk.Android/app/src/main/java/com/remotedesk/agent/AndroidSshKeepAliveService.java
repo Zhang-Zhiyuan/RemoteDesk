@@ -56,11 +56,22 @@ public final class AndroidSshKeepAliveService extends Service {
     }
 
     static void closeAll(Context context) {
+        closeSessions(context, false);
+    }
+
+    static void closeRelaySessions(Context context) {
+        closeSessions(context, true);
+    }
+
+    private static void closeSessions(Context context, boolean relayOnly) {
         for (String id : sessions.keySet()) {
-            Entry entry = sessions.remove(id);
-            if (entry != null) entry.stop.run();
+            Entry entry = sessions.get(id);
+            if (entry == null || relayOnly && entry.recall.hasExtra("directHost")) continue;
+            if (sessions.remove(id, entry)) entry.stop.run();
         }
-        context.stopService(new Intent(context, AndroidSshKeepAliveService.class));
+        if (sessions.isEmpty()) context.stopService(new Intent(context, AndroidSshKeepAliveService.class));
+        else try { context.startService(new Intent(context, AndroidSshKeepAliveService.class)); }
+        catch (RuntimeException ignored) { }
     }
 
     @Override public void onCreate() {

@@ -34,6 +34,10 @@ final class AndroidSshProtocol {
         return false;
     }
 
+    static boolean advertisesSsh(AndroidRelay.Device device, String destination) {
+        return device.sshAvailable && (device.deviceId.equals(destination) || device.sshTargets.containsKey(destination));
+    }
+
     static void paired(JSONObject response) throws IOException {
         if (!Boolean.TRUE.equals(response.opt("ok")) || !"paired".equals(response.optString("type")) ||
                 !"ssh".equals(response.optString("service")))
@@ -69,6 +73,12 @@ final class AndroidSshProtocol {
             int accepted = input.read();
             if (accepted == 2) throw new IOException("目标主机的 SSH 服务不可达，请在目标主机检查 SSH 设置。");
             if (accepted == 3) throw new IOException("所选 WSL 的 SSH 服务不可达。请确认发行版已运行，并在其中启动 OpenSSH Server。");
+            if (accepted >= 20 && accepted <= 27) {
+                String[] reasons = {"尚未安装 OpenSSH Server", "sshd 服务已禁用", "sshd 服务已停止", "无法查询 sshd 监听状态",
+                    "sshd 没有可连接的监听端口", "正在准备 OpenSSH Server，请稍后重试",
+                    "无法从 Windows 可选功能源安装 OpenSSH Server", "安装 OpenSSH 后需要重启"};
+                throw new IOException("目标 Windows " + reasons[accepted - 20] + "。");
+            }
             if (accepted != 1) throw new IOException("目标主机拒绝 SSH 设备认证。");
         } finally { Arrays.fill(key, (byte) 0); }
     }

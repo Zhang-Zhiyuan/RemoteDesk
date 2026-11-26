@@ -64,9 +64,18 @@ internal static class DesktopUserLaunch
     internal static string[] EditorArguments(string alias) => SshAliasConfig.IsValidAlias(alias)
         ? ["--new-window", "--remote", "ssh-remote+" + alias] : throw new ArgumentException("SSH 别名无效。");
 
-    internal static void OpenEditor(string alias)
+    internal static void OpenEditor(string alias) => StartEditor(string.Join(" ", EditorArguments(alias)));
+
+    internal static void OpenDirectSsh(DirectSshTarget target, bool editor)
     {
-        string args = string.Join(" ", EditorArguments(alias));
+        if (editor) { StartEditor("--new-window --remote " + target.EditorAuthority()); return; }
+        string executable = SshTerminalLauncher.ExecutablePath;
+        if (!File.Exists(executable)) throw new FileNotFoundException("请在 Windows 可选功能中安装 OpenSSH 客户端。");
+        Open(executable, string.Join(" ", target.TerminalArguments()));
+    }
+
+    private static void StartEditor(string args)
+    {
         const string key = @"\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\Code.exe";
         var candidates = new List<string?> {
             Registry.GetValue("HKEY_CURRENT_USER" + key, "", null) as string,

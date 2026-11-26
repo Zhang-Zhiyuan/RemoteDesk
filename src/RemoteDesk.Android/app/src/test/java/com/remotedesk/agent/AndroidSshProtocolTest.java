@@ -14,6 +14,19 @@ import static org.junit.Assert.*;
 public final class AndroidSshProtocolTest {
     private static final String ID = "01234567-89ab-cdef-0123-456789abcdef";
     private static final String KEY = "test-device-key";
+    @Test public void directTrustAndRelayDestinationChecksAreScopedToTheEndpoint() {
+        AndroidDirectSshTarget direct = new AndroidDirectSshTarget("[::1]", 2222);
+        assertEquals(direct.alias(), new AndroidDirectSshTarget("0:0:0:0:0:0:0:1", 2222).alias());
+        assertNotEquals(direct.alias(), new AndroidDirectSshTarget("::1", 22).alias());
+        assertThrows(IllegalArgumentException.class, () -> new AndroidDirectSshTarget("hostname/path", 22));
+        assertThrows(IllegalArgumentException.class, () -> new AndroidDirectSshTarget("host", 65536));
+        String guest = "01234567-89ab-cdef-0123-456789abcdea";
+        AndroidRelay.Device windows = new AndroidRelay.Device(ID, "pc", "Windows", false, List.of(), 0,
+            "", "pc", false, "", true, true, java.util.Map.of(guest, "Ubuntu"));
+        assertTrue(AndroidSshProtocol.advertisesSsh(windows, ID));
+        assertTrue(AndroidSshProtocol.advertisesSsh(windows, guest));
+        assertFalse(AndroidSshProtocol.advertisesSsh(windows, "unregistered"));
+    }
     private byte[] nonce() { byte[] nonce = new byte[32]; for (int i=0;i<32;i++) nonce[i]=(byte)i; return nonce; }
     private byte[] hash() throws Exception { return MessageDigest.getInstance("SHA-256").digest(KEY.getBytes(StandardCharsets.UTF_8)); }
     private String hex(byte[] bytes) { StringBuilder text=new StringBuilder(); for(byte b:bytes)text.append(String.format("%02x",b&255));return text.toString(); }

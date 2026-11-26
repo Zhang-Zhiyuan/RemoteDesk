@@ -7286,8 +7286,10 @@ class RemoteDeskLinuxApp:
         send_text_button = ttk.Button(text_frame, text="发送文本", command=self.send_viewer_text)
         send_text_button.grid(row=0, column=1, padx=(6, 0))
         text_frame.columnconfigure(0, weight=1)
+        direct_ssh = ttk.Button(buttons, text="SSH 直连…", command=self._open_direct_ssh)
         viewer_actions = (
             self.connect_button,
+            direct_ssh,
             self.disconnect_button,
             self.send_file_button,
             self.send_folder_button,
@@ -7304,6 +7306,64 @@ class RemoteDeskLinuxApp:
         self.viewer_status.pack(fill=tk.X)
         self.device_panel = DevicePanel(self, tab)
         self.device_panel.pack(fill=tk.X, before=form, pady=(0, 10))
+
+    def _open_direct_ssh(self):
+        device = self.viewer_host.get().strip()
+        try:
+            if device:
+                device = device_model.endpoint(device)[0]
+            history = [row for row in ssh_terminal.direct_history() if row[0] == device.casefold()]
+        except (OSError, ValueError) as error:
+            messagebox.showerror("SSH 直连", str(error), parent=self.root)
+            return
+        window = tk.Toplevel(self.root)
+        window.title("SSH 直连")
+        window.transient(self.root)
+        window.columnconfigure(0, weight=1)
+        form = ttk.Frame(window, padding=12)
+        form.grid(row=0, column=0, sticky=tk.EW)
+        system = tk.StringVar(window, history[0][1] if history else "主机系统")
+        host, port, user = (tk.StringVar(window) for _ in range(3))
+        ttk.Label(form, text="目标系统").grid(row=0, column=0, sticky=tk.W)
+        picker = ttk.Combobox(form, textvariable=system, state="readonly", width=10, values=("主机系统", "WSL"))
+        picker.grid(row=0, column=1, sticky=tk.EW)
+        self._row_entry(form, 1, "SSH 主机 / IP", host)
+        self._row_entry(form, 2, "SSH 端口", port)
+        self._row_entry(form, 3, "系统账号", user)
+        hint = self._wrapping_label(form, text="", wraplength=420, justify=tk.LEFT)
+        hint.grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=6)
+        def select(_event=None):
+            row = next((r for r in history if r[1] == system.get()), None)
+            host.set(row[2] if row else device); port.set(row[3] if row else ""); user.set(row[4] if row else "")
+            hint.configure(text="填写发行版可达的 IP，或 Windows 地址和已有的 WSL 映射端口。" if system.get() == "WSL"
+                           else "端口和账号可留空使用 SSH 配置。默认端口为 22。")
+        picker.bind("<<ComboboxSelected>>", select)
+        select()
+        def launch(editor=False):
+            try:
+                target = ssh_terminal.DirectTarget.parse(host.get(), port.get(), user.get())
+                if system.get() == "WSL" and not target.port and target.host.casefold() == device.casefold():
+                    raise ValueError("使用 Windows 地址连接 WSL 时，请填写 WSL 对外可达的 SSH 端口。")
+                ssh_terminal.open_direct(target, editor)
+            except (OSError, ValueError) as error:
+                hint.configure(text=str(error))
+                return
+            try:
+                ssh_terminal.remember_direct(device or target.host, system.get(), target)
+                if not device: self.viewer_host.set(target.host)
+            except (OSError, ValueError) as error:
+                self.viewer_status.configure(text=f"已打开 SSH，直连设置未保存：{error}")
+            window.destroy()
+        actions = ttk.Frame(window, padding=6)
+        actions.grid(row=1, column=0, sticky=tk.EW)
+        self._wrap_action_buttons(actions, (
+            ttk.Button(actions, text="打开终端", command=launch),
+            ttk.Button(actions, text="用 VS Code 打开", command=lambda: launch(True)),
+            ttk.Button(actions, text="取消", command=window.destroy)))
+        window.bind("<Escape>", lambda _: window.destroy())
+        window.bind("<Return>", lambda _: launch())
+        apply_adaptive_window_geometry(window, preferred_size=(490, 310), minimum_size=(330, 250), parent=self.root)
+        window.grab_set()
 
     def _row_entry(
         self,

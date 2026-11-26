@@ -53,35 +53,47 @@ final class AndroidSshConnection implements AutoCloseable {
         start(target, key, username, password, null);
     }
     void start(AndroidRelay.Options target, String key, String username, byte[] password, byte[] privateKey) {
-        AndroidRelay.thread("SshConnect", () -> run(target, key, username, password, privateKey)).start();
+        AndroidRelay.thread("SshConnect", () -> run(target, null, key, username, password, privateKey)).start();
     }
 
-    private void run(AndroidRelay.Options target, String key, String username, byte[] password, byte[] privateKey) {
+    void startDirect(AndroidDirectSshTarget address, String username, byte[] password, byte[] privateKey) {
+        AndroidRelay.thread("SshConnect", () -> run(null, address, "", username, password, privateKey)).start();
+    }
+
+    private Socket openRelay(AndroidRelay.Options target, String key) throws Exception {
+        boolean available = false;
+        for (AndroidRelay.Device device : AndroidRelay.listDevices(context, target, operation -> {
+            if (operation != null) try { dial.add(operation); } catch (IOException ex) { AndroidRelay.close(operation); }
+        })) if (AndroidSshProtocol.advertisesSsh(device, target.deviceId)) available = true;
+        if (!available) throw new IOException("目标未上线或未启用 SSH；请返回刷新在线列表。");
+        checkOpen();
+        SSLSocket socket = AndroidRelay.connectDirectoryPage(dial, page -> AndroidRelayNetworkSelector.connect(context, target, page));
+        socket.setSoTimeout(20000);
+        AndroidSshProtocol.paired(AndroidRelay.exchange(socket,
+            AndroidRelay.request(target, "ssh-viewer").put("deviceId", target.deviceId)));
+        AndroidSshProtocol.authenticate(socket.getInputStream(), socket.getOutputStream(), target.deviceId, key);
+        dial.checkOpen();
+        return socket;
+    }
+
+    private void run(AndroidRelay.Options target, AndroidDirectSshTarget direct, String key, String username, byte[] password, byte[] privateKey) {
         JSch jsch = new JSch();
         try {
-            listener.status("正在核对 SSH 能力与设备身份……");
+            listener.status(direct == null ? "正在核对 SSH 能力与设备身份……" : "正在直连 " + direct.address() + "……");
             ScheduledFuture<?> timeout = DEADLINES.schedule(dial::close, 20, TimeUnit.SECONDS);
-            SSLSocket socket;
+            Socket socket;
             try {
-                boolean available = false;
-                // A stale/forged entry must not open a desktop channel or probe SSH on an unadvertised device.
-                for (AndroidRelay.Device device : AndroidRelay.listDevices(context, target, operation -> {
-                    if (operation != null) try { dial.add(operation); } catch (IOException ex) { AndroidRelay.close(operation); }
-                })) if (device.deviceId.equals(target.deviceId)) available = device.sshAvailable;
-                if (!available) throw new IOException("目标未上线或未启用 SSH；请返回刷新在线列表。");
-                checkOpen();
-                socket = AndroidRelay.connectDirectoryPage(dial,
-                    page -> AndroidRelayNetworkSelector.connect(context, target, page));
-                socket.setSoTimeout(20000);
-                AndroidSshProtocol.paired(AndroidRelay.exchange(socket,
-                    AndroidRelay.request(target, "ssh-viewer").put("deviceId", target.deviceId)));
-                AndroidSshProtocol.authenticate(socket.getInputStream(), socket.getOutputStream(), target.deviceId, key);
-                key = null;
-                dial.checkOpen();
+                if (direct == null) socket = openRelay(target, key);
+                else {
+                    socket = AndroidTcpConnector.connect(direct.host, direct.port, 20000, dial, candidate -> {
+                        try { candidate.setTcpNoDelay(true); } catch (java.net.SocketException ignored) { }
+                    });
+                    dial.add(socket);
+                }
             } finally { timeout.cancel(false); }
             checkOpen();
             socket.setSoTimeout(0);
-            String alias = AndroidSshProtocol.alias(target);
+            String alias = direct == null ? AndroidSshProtocol.alias(target) : direct.alias();
             jsch.setHostKeyRepository(new HostKeyRepository() {
                 @Override public int check(String host, byte[] keyBytes) {
                     try {
