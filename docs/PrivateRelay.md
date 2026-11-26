@@ -64,8 +64,8 @@ Android 点击在线设备连接，长按可更改该设备密钥；桌面端先
 ### SSH 终端
 
 1.0.40 起支持。更新客户端和中继服务器后，在线设备旁会出现“SSH 终端”入口。
-Windows / Linux 目标需已有可用的 SSH 服务，并主动勾选“允许通过中继连接本机 SSH”。
-填写的是**目标本机 SSH 监听端口**，不是中继服务器的管理员 SSH 端口；默认关闭。
+Windows / Linux 的新配置默认允许通过中继连接本机 SSH。请在目标电脑启动 SSH 服务、填写设备密钥并在中继上线。
+填写**目标本机 SSH 监听端口**，默认 22。已有配置保留保存的开关。
 无需把目标的 SSH 端口映射到公网，也不要求先打开远程桌面。
 
 连接时先用该设备原有的 RemoteDesk 设备密钥授权通道，再用目标系统的 SSH 账号和
@@ -110,6 +110,8 @@ ssh 5090 whoami
 目标 IP 变化不影响连接：别名绑定中继和设备 ID。目标须保持中继在线、启用本机 SSH
 并运行 sshd；只有 RemoteDesk 设备密钥还不够，仍需目标系统的 SSH 密码或私钥。
 首次连接按 OpenSSH 提示核对目标主机指纹。
+
+在 Windows / Linux 的中继设备列表选中目标，点“用 VS Code 打开”。首次确认 SSH 账号与别名，以后复用同一别名。请在本机安装桌面版 VS Code 和 Remote - SSH 扩展。也可以在 VS Code 选择 **Remote-SSH: Connect to Host…** 并输入该别名。目标 sshd 需要允许 TCP 转发。
 
 生成的是标准 OpenSSH `ProxyCommand` 配置，也可供 VS Code Remote SSH、SFTP、SCP
 和 SSH 端口转发使用；目标 sshd 的登录和转发权限仍生效。VS Code 本身对目标系统的要求不变。

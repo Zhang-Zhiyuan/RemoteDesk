@@ -183,6 +183,18 @@ public final class AndroidSshTerminalActivity extends Activity {
         Button copy = button("复制", v -> terminal.evaluateJavascript("sshCopy()", null));
         copy.setContentDescription("复制终端所选文字；Ctrl+C 是远端中断，不是复制"); keys.addView(copy);
         keys.addView(button("粘贴", v -> pasteClipboard()));
+        keys.addView(button("账号登录", v -> {
+            AndroidSshConnection current = connection;
+            if (current == null) return;
+            new AlertDialog.Builder(this).setTitle("在当前 SSH 终端使用开发工具")
+                .setItems(new String[]{"打开 Codex（使用此机账号）", "打开 Claude Code（使用此机账号）", "在此机登录 Codex", "在此机登录 Claude Code"}, (dialog, index) -> {
+                    if (destroyed || connection != current) return;
+                    String command = new String[]{"codex", "claude", DeveloperLogin.CODEX, DeveloperLogin.CLAUDE}[index];
+                    String encoded = android.util.Base64.encodeToString(command.getBytes(java.nio.charset.StandardCharsets.UTF_8), android.util.Base64.NO_WRAP);
+                    terminal.evaluateJavascript("sshPaste(" + JSONObject.quote(encoded) + ")", null);
+                    status.setText("命令已填入。确认处于 shell 提示符后按回车。");
+                }).setNegativeButton("关闭", null).show();
+        }));
         horizontal.addView(keys); terminalPanel.addView(horizontal);
         root.addView(terminalPanel, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(root); root.requestApplyInsets();

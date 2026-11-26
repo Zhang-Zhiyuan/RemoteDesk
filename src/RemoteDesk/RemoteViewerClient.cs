@@ -206,6 +206,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
     private int _remoteCapabilitiesInitialized;
     private string? _remoteBuildStamp;
     private RemoteDeviceDescriptor? _remoteDeviceInfo;
+    internal RemoteDeviceDescriptor? CurrentDevice => Volatile.Read(ref _remoteDeviceInfo);
     private readonly WindowsH264VideoSignal _windowsVideoSignal = new();
     private bool _deviceIdentityRequested;
     private TaskCompletionSource<bool>? _remoteCapabilitiesReady;

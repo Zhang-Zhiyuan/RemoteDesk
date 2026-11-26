@@ -41,8 +41,8 @@ internal sealed class HostSettings
 
     public bool AllowRemoteStart { get; set; }
 
-    public bool AllowSsh { get; set; }
-    public bool AllowPrivacyScreen { get; set; }
+    public bool AllowSsh { get; set; } = true;
+    public bool AllowPrivacyScreen { get; set; } = true;
 
     public int SshPort { get; set; } = 22;
 

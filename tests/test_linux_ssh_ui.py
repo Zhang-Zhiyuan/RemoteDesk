@@ -81,11 +81,11 @@ class SshUiTests(unittest.TestCase):
 
     def test_ssh_only_registration_and_desktop_toggle_reuse_connector(self):
         with mock.patch.object(relay, "RelayHostConnector") as factory:
-            self.ui.host_password.set("owned-device-key")
-            self.ui.host_ssh_enabled.set(True)
-            self.ui._toggle_ssh_host()
             connector = factory.return_value
             connector.options = self.ui.relay_options
+            self.assertTrue(self.ui.host_ssh_enabled.get())
+            self.ui.host_password.set("owned-device-key")
+            self.ui._toggle_ssh_host()
             self.assertFalse(factory.call_args.kwargs["desktop_enabled"])
             self.assertTrue(factory.call_args.kwargs["ssh_enabled"])
             self.assertIsNone(self.ui.host_process)

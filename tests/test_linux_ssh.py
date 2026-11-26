@@ -261,15 +261,18 @@ class SshNativeArgumentsTests(unittest.TestCase):
                 ssh.load_username(self.options(), folder)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "private Unix state")
-    def test_ssh_enable_persists_only_with_remembered_device_key(self):
+    def test_ssh_preference_survives_without_persisting_an_unremembered_key(self):
         with tempfile.TemporaryDirectory() as directory:
             store = startup.HostPreferences(Path(directory) / "private")
             for remember in (False, True):
                 store.save(dict(remember=remember, armed=False, ssh_enabled=True, ssh_port="2222"), KEY)
                 value = store.load()
-                self.assertEqual(remember, value["ssh_enabled"])
+                self.assertTrue(value["ssh_enabled"])
+                self.assertEqual(KEY if remember else "", value["password"])
                 self.assertFalse(value["armed"])
                 self.assertEqual("2222", value["ssh_port"])
+            store.save(dict(remember=True, ssh_enabled=False), KEY)
+            self.assertFalse(store.load()["ssh_enabled"])
 
 
 class SshRelayIntegrationTests(unittest.IsolatedAsyncioTestCase):

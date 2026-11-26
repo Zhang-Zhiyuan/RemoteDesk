@@ -50,13 +50,13 @@ public sealed class PrivacyScreenTests
         Assert.Throws<InvalidDataException>(() => RemoteMessageCodec.DecodeControl(Convert.FromHexString("2E02696403")));
     }
     [Fact]
-    public async Task PermissionDefaultsOffAndRevocationRestoresImmediately()
+    public async Task BackendRequiresAppliedPermissionAndRevocationRestoresImmediately()
     {
         var backend = new Backend(); using var session = new PrivacyScreenSession(backend);
         var owner = new object();
         Assert.False((await session.RequestAsync(PrivacyScreenAction.Enable, owner, default)).Success);
         Assert.Equal(0, backend.Starts);
-        Assert.False(new HostSettings().AllowPrivacyScreen);
+        Assert.True(new HostSettings().AllowPrivacyScreen);
         await session.SetAllowedAsync(true);
         Assert.True((await session.RequestAsync(PrivacyScreenAction.Enable, owner, default)).Enabled);
         await session.SetAllowedAsync(false);

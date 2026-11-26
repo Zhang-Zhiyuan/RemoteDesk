@@ -91,7 +91,7 @@ class HostPreferences:
             payload = base64.b64decode(encrypted, validate=True)
             values["password"] = AESGCM(key).decrypt(payload[:12], payload[12:], AAD).decode("utf-8")
         values["armed"] = bool(values.get("armed") and values["password"])
-        values["ssh_enabled"] = bool(values.get("ssh_enabled") and values["password"])
+        values.setdefault("ssh_enabled", True)
         return values
 
     def save(self, values: dict, password: str) -> None:
@@ -99,7 +99,7 @@ class HostPreferences:
         data = {key: values[key] for key in FIELDS if key in values}
         data["version"] = 1
         data["armed"] = bool(data.get("remember") and data.get("armed") and password)
-        data["ssh_enabled"] = bool(data.get("remember") and data.get("ssh_enabled") and password)
+        data["ssh_enabled"] = bool(data.get("ssh_enabled", True))
         data["encrypted_password"] = ""
         if data.get("remember") and password:
             try:

@@ -254,21 +254,37 @@ def terminal_arguments(command, title="RemoteDesk SSH"):
     # Real terminal emulators supply a PTY and VT handling. No shell interpolation.
     for name, prefix in (("xterm", ["-T", title, "-e"]),
                          ("gnome-terminal", ["--wait", "--title", title, "--"]),
-                         ("konsole", ["--separate", "--nofork", "-p", "tabtitle=" + title, "-e"])):
+                         ("konsole", ["--separate", "--nofork", "-p", "tabtitle=" + title, "-e"]),
+                         ("x-terminal-emulator", ["-e"])):
         executable = shutil.which(name)
         if executable:
             return [executable, *prefix, *command]
     raise FileNotFoundError("需要系统真实终端：xterm、gnome-terminal 或 konsole。未自动安装。")
 
 
+LOGIN_COMMANDS = {"Codex": ("codex", "login", "--device-auth"), "Claude Code": ("claude", "auth", "login")}
+
+
+def launch_local_login(provider):
+    command = LOGIN_COMMANDS[provider]
+    binary = shutil.which(command[0])
+    if not binary:
+        raise FileNotFoundError(f"请先安装 {provider} CLI，并确认终端可以运行 {command[0]}。")
+    subprocess.Popen(terminal_arguments([binary, *command[1:]], provider + " 登录"), start_new_session=True)
+
+
 class TerminalSession:
     """One native terminal, one authenticated local adapter, one relay SSH bridge."""
-    def __init__(self, options, device_key, username, status=lambda value: None, config_directory=None, identity_file=None):
+    def __init__(self, options, device_key, username, status=lambda value: None, config_directory=None, identity_file=None,
+                 login_provider=None, use_existing=False):
         self.options, self.device_key, self.username = options.validate(), device_key, username
         gate_proof(device_key, "client", self.options.device_id, b"\0" * 32)
         self.status = status
         self.config_directory = Path(config_directory) if config_directory else ssh_config_directory()
         self.identity_file = identity_file
+        self.login_command = LOGIN_COMMANDS[login_provider] if login_provider is not None else ()
+        if use_existing:
+            self.login_command = self.login_command[:1]
         self.cancelled, self.done = threading.Event(), threading.Event()
         self.loop = self.task = self.thread = self.process = None
         self.window_title = "RemoteDesk SSH " + uuid.uuid4().hex
@@ -405,7 +421,8 @@ class TerminalSession:
             server = await asyncio.start_server(proxy, "127.0.0.1", 0, limit=16384)
             try:
                 port = server.sockets[0].getsockname()[1]
-                argv = terminal_arguments(ssh_arguments(self.options, self.username, port, token_path, known_hosts, identity_file), self.window_title)
+                command = ssh_arguments(self.options, self.username, port, token_path, known_hosts, identity_file)
+                argv = terminal_arguments([*command, *self.login_command], self.window_title)
                 self.process = subprocess.Popen(argv, start_new_session=True)
                 self._status("已打开系统 SSH 终端；首次连接需要在终端确认目标指纹。")
                 async def wait_or_terminal_exit(event):
@@ -526,6 +543,33 @@ def _config_quote(value, expand_tokens=False):
             raise AliasConfigurationError("SSH 身份文件路径含 ${，OpenSSH 会自行展开环境变量；请使用不含该序列的路径。")
         value = value.replace("%", "%%")
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def editor_alias(options, *, directory=None, ssh_directory=None):
+    import remotedesk_linux_relay as relay
+    from remotedesk_linux_startup import read_private
+    root, ssh_root = _alias_paths(directory, ssh_directory)
+    profiles = _alias_profiles(root)
+    profile = next((p for p in profiles if p["deviceId"] == options.device_id
+                    and p["relayScope"] == relay.device_key_scope(options)
+                    and p["hostKeyAlias"] == host_key_alias(options)), None)
+    if profile is None:
+        return None
+    fragment = ssh_root / "remotedesk_aliases.conf"
+    config, _ = _read_user_config(ssh_root / "config")
+    prefix = _include_prefix(fragment)
+    if not (config or b"").startswith(prefix) or read_private(fragment, 262144) != _alias_fragment(profiles, root):
+        raise AliasConfigurationError("SSH 受管配置已改变，请检查命令行别名后重试。")
+    _check_alias_conflicts(config[len(prefix):], profile["alias"])
+    return profile["alias"]
+
+
+def open_editor(alias):
+    alias = validate_alias(alias)
+    executable = shutil.which("code")
+    if not executable:
+        raise FileNotFoundError("请安装桌面版 VS Code 和 Remote - SSH 扩展，并将 code 加入 PATH。")
+    subprocess.Popen([executable, "--new-window", "--remote", "ssh-remote+" + alias], start_new_session=True)
 
 
 def _alias_fragment(profiles, directory):

@@ -741,18 +741,12 @@ public sealed partial class MainForm : Form
             Margin = new Padding(0)
         }, 0, 1);
 
-        _sendAccountPackageButton = CreateSecondaryButton(AccountLoginPackageUi.Action);
+        _sendAccountPackageButton = CreateSecondaryButton(DeveloperLogin.Action);
         _sendAccountPackageButton.Anchor = AnchorStyles.Right;
         _sendAccountPackageButton.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         _sendAccountPackageButton.Margin = new Padding(8, 0, 0, 0);
-        _sendAccountPackageButton.Click += async (_, _) =>
-        {
-            if (CanConnectedViewer(RemoteDeviceCapabilities.FileReceive))
-                await AccountLoginPackageUi.SendAsync(this, _viewerClient, ShowTransferTasks);
-            else
-                MessageBox.Show(this, _viewerClient.IsConnected ? "当前连接的设备不支持接收文件。"
-                    : AccountLoginPackageUi.OfflineGuide, AccountLoginPackageUi.Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
-        };
+        _sendAccountPackageButton.Click += async (_, _) => await DeveloperLogin.ShowAsync(this,
+            _viewerClient.IsConnected ? _viewerClient : null, ShowTransferTasks);
 
         header.Controls.Add(mark, 0, 0);
         header.Controls.Add(copy, 1, 0);
@@ -8276,9 +8270,7 @@ public sealed partial class MainForm : Form
             connected && capabilities.HasFlag(RemoteDeviceCapabilities.FileReceive)
                 ? $"选择本机文件发送到远端接收目录（一次最多 {MaxClipboardFilePasteCount} 项）；传输前确认清单，传输任务中可查看进度和取消。{checksumSuffix}"
                 : disconnected);
-        SetToolTip(_sendAccountPackageButton, !connected ? "查看如何导出登录包并发送到另一台设备。"
-            : capabilities.HasFlag(RemoteDeviceCapabilities.FileReceive) ? "选择加密登录包，发送到当前连接的设备。"
-            : "当前连接的设备不支持接收文件。");
+        SetToolTip(_sendAccountPackageButton, connected ? "在当前远端登录 Codex 或 Claude Code。" : "在本机终端打开 Codex 或 Claude Code 官方登录。");
         SetToolTip(
             _pasteFilesButton,
             connected && capabilities.HasFlag(RemoteDeviceCapabilities.FileReceive)

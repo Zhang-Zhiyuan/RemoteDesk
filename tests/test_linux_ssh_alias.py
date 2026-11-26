@@ -45,6 +45,19 @@ class TerminalAliasTests(unittest.TestCase):
                                 capture_output=True, check=True, text=True)
         return dict(line.split(" ", 1) for line in result.stdout.splitlines() if " " in line)
 
+    def test_editor_reuses_exact_enrolled_target_and_rejects_modified_config(self):
+        self.configure("rd-test")
+        self.assertEqual("rd-test", ssh.editor_alias(self.options, ssh_directory=self.ssh_root))
+        self.assertIsNone(ssh.editor_alias(replace(self.options, device_id=str(uuid.uuid4())), ssh_directory=self.ssh_root))
+        with mock.patch.object(ssh.shutil, "which", return_value="/opt/editor/code"), mock.patch.object(ssh.subprocess, "Popen") as start:
+            ssh.open_editor("rd-test")
+            start.assert_called_once_with(["/opt/editor/code", "--new-window", "--remote", "ssh-remote+rd-test"], start_new_session=True)
+            with self.assertRaises(ValueError):
+                ssh.open_editor("bad;alias")
+        self.config(b"Host *\n")
+        with self.assertRaises(ValueError):
+            ssh.editor_alias(self.options, ssh_directory=self.ssh_root)
+
     def test_native_parser_precedes_host_star_and_preserves_user_bytes_and_other_hosts(self):
         body = b"# preserved UTF-8 body\r\nHost *\r\n  User fallback\r\n  Port 2222\r\nHost other\r\n  HostName 192.0.2.42\r\n"
         path = self.config(body, 0o644)

@@ -17,7 +17,8 @@ internal static class SshAliasFixtureProbe
         if (!config.GetProperty("owned").GetBoolean() ||
             !IPAddress.TryParse(config.GetProperty("serverAddress").GetString(), out var address) || !IPAddress.IsLoopback(address))
             throw new InvalidOperationException("Only an owned loopback SSH fixture is permitted.");
-        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+        bool editorTest = config.TryGetProperty("vsCodePath", out var editorPath);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(editorTest ? 8 : 3));
         var token = deadline.Token;
         string root = Path.Combine(output, "config-root"), profiles = Path.Combine(root, "ssh");
         Directory.CreateDirectory(profiles);
@@ -83,6 +84,11 @@ internal static class SshAliasFixtureProbe
                 }
                 finally { if (!forwarding.HasExited) forwarding.Kill(entireProcessTree: true); await forwarding.WaitForExitAsync(token); }
             }
+            if (editorTest)
+            {
+                await VerifyEditorAsync(editorPath.GetString()!, output, userConfig, profile.Alias, token);
+                checks.Add("VS Code Remote - SSH connected its remote extension host through the relay");
+            }
             // Fail closed: normal SSH cannot start after device auth is revoked.
             SaveSettings("deliberately-invalid-owned-fixture-key");
             result = await Ssh(["-T", "5090", "printf forbidden"], null);
@@ -146,6 +152,59 @@ internal static class SshAliasFixtureProbe
     }
     private static void Require(bool success, string check, string detail)
     { if (!success) throw new InvalidOperationException(check + ": " + detail); }
+    private static async Task VerifyEditorAsync(string executable, string output, string config, string alias, CancellationToken token)
+    {
+        string data = Path.Combine(output, "editor-" + Guid.NewGuid().ToString("N"));
+        string settings = Path.Combine(data, "User");
+        Directory.CreateDirectory(settings);
+        File.WriteAllText(Path.Combine(settings, "settings.json"), JsonSerializer.Serialize(new Dictionary<string, object> {
+            ["remote.SSH.configFile"] = config, ["remote.SSH.path"] = SshTerminalLauncher.ExecutablePath,
+            ["remote.SSH.remotePlatform"] = new Dictionary<string, string> { [alias] = "linux" },
+            ["workbench.startupEditor"] = "none", ["extensions.autoUpdate"] = false
+        }));
+        var start = new ProcessStartInfo(executable) { UseShellExecute = false };
+        start.Environment.Remove("ELECTRON_RUN_AS_NODE");
+        foreach (string arg in new[] { "--user-data-dir", data, "--disable-updates", "--skip-welcome", "--skip-release-notes" }
+            .Concat(DesktopUserLaunch.EditorArguments(alias))) start.ArgumentList.Add(arg);
+        using var editor = Process.Start(start) ?? throw new IOException("VS Code did not start.");
+        try
+        {
+            string logs = Path.Combine(data, "logs");
+            while (!editor.HasExited)
+            {
+                await Task.Delay(1000, token);
+                if (!Directory.Exists(logs)) continue;
+                foreach (string log in Directory.EnumerateFiles(logs, "*.log", SearchOption.AllDirectories)
+                    .Where(path => Path.GetFileName(path).Contains("Remote - SSH", StringComparison.OrdinalIgnoreCase)))
+                {
+                    using var file = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    using var reader = new StreamReader(file);
+                    string content = await reader.ReadToEndAsync(token);
+                    if (!content.Contains($"Resolved \"ssh-remote+{alias}\" to \"port ", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (content.Contains("Extension host agent started", StringComparison.OrdinalIgnoreCase) ||
+                        content.Contains("Extension Host Process started", StringComparison.OrdinalIgnoreCase)) return;
+                    foreach (string renderer in Directory.EnumerateFiles(logs, "renderer.log", SearchOption.AllDirectories))
+                    {
+                        using var rendererFile = new FileStream(renderer, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                        using var rendererReader = new StreamReader(rendererFile);
+                        string events = await rendererReader.ReadToEndAsync(token);
+                        if (events.Split('\n').Any(line => line.Contains("renderer-ExtensionHost-", StringComparison.OrdinalIgnoreCase)
+                            && line.Contains("successful", StringComparison.OrdinalIgnoreCase))) return;
+                    }
+                }
+            }
+            throw new IOException("VS Code closed before its Remote - SSH resolver confirmed a remote port.");
+        }
+        finally
+        {
+            if (!editor.HasExited)
+            {
+                editor.CloseMainWindow();
+                if (!editor.WaitForExit(5000)) editor.Kill(entireProcessTree: true);
+            }
+        }
+    }
+
     private static void PrivateFile(string path)
     {
         var owner = WindowsIdentity.GetCurrent().User!;

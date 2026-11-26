@@ -38,13 +38,13 @@ public sealed class SshMainFormTests
     });
 
     [Fact]
-    public void HostProviderSnapshotDoesNotReadControlsAndDefaultsDisabled() => OnSta(() =>
+    public void HostProviderSnapshotDoesNotReadControlsAndDefaultsEnabled() => OnSta(() =>
     {
         using var main = CreatePreview();
         Field<TextBox>(main, "_hostPasswordBox").Text = "owned-host-key";
         Call(main, "ApplySshSettingsToUi"); // Preview deliberately skips the normal settings-load path.
         RelaySshHostOptions snapshot = Field<RelaySshHostOptions>(main, "_sshHostOptions");
-        Assert.False(snapshot.Enabled);
+        Assert.True(snapshot.IsAvailable);
         Assert.Equal(22, snapshot.Port);
         Assert.Equal("owned-host-key", snapshot.DeviceKey);
         Field<TextBox>(main, "_hostPasswordBox").Text = "unpublished-change";

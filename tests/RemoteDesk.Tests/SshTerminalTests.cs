@@ -185,10 +185,11 @@ public sealed class SshTerminalTests
     }
 
     [Fact]
-    public void HostSettingsDefaultOffAndInvalidPortsNormalizeWithoutChangingAdminSsh()
+    public void HostSettingsDefaultOnAndExplicitOptOutSurvivesPortNormalization()
     {
         var settings = new RemoteDeskSettings();
-        Assert.False(settings.Host.AllowSsh);
+        Assert.True(settings.Host.AllowSsh);
+        settings.Host.AllowSsh = false;
         Assert.Equal(22, settings.Host.SshPort);
         settings.Host.SshPort = 65536;
         settings.Relay.SshPort = 2222;
@@ -196,6 +197,25 @@ public sealed class SshTerminalTests
         Assert.Equal(22, settings.Host.SshPort);
         Assert.Equal(2222, settings.Relay.SshPort);
         Assert.False(settings.Host.AllowSsh);
+    }
+
+    [Theory]
+    [InlineData("{}", true)]
+    [InlineData("{\"Host\":{}}", true)]
+    [InlineData("{\"Host\":{\"AllowSsh\":false,\"AllowPrivacyScreen\":false}}", false)]
+    public void SavedHostPreferencesPreserveExplicitOptOut(string json, bool expected)
+    {
+        var settings = System.Text.Json.JsonSerializer.Deserialize<RemoteDeskSettings>(json)!;
+        AppSettingsService.NormalizeSettings(settings);
+        Assert.Equal(expected, settings.Host.AllowSsh);
+        Assert.Equal(expected, settings.Host.AllowPrivacyScreen);
+    }
+
+    [Fact]
+    public void EditorUsesValidatedAliasAsRemoteAuthority()
+    {
+        Assert.Equal(new[] { "--new-window", "--remote", "ssh-remote+rd-dev" }, DesktopUserLaunch.EditorArguments("rd-dev"));
+        Assert.Throws<ArgumentException>(() => DesktopUserLaunch.EditorArguments("rd-dev --other"));
     }
 
     [Fact]

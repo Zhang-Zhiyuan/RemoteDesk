@@ -19,6 +19,31 @@ FIXTURE = Path(__file__).parent / "data/account-login-v1.asxaccount"
 
 class AccountLoginPackageTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("REMOTEDESK_RUN_TK_TESTS") == "1", "requires owned Xvfb")
+    def test_login_action_targets_local_or_same_remote_generation(self):
+        root = app.tk.Tk()
+        self.addCleanup(root.destroy)
+        ui = object.__new__(app.RemoteDeskLinuxApp)
+        ui.root, ui.viewer_window, ui.viewer, ui.viewer_generation, ui.closing = root, None, None, 1, False
+        def codex_button():
+            ui.show_account_login(parent=root)
+            dialog = next(w for w in root.winfo_children() if isinstance(w, app.tk.Toplevel))
+            return next(w for w in dialog.winfo_children()[0].winfo_children()
+                        if isinstance(w, app.ttk.Button) and w.cget("text") == "登录 Codex")
+        with mock.patch.object(app.ssh_terminal, "launch_local_login") as launch:
+            codex_button().invoke()
+            launch.assert_called_once_with("Codex")
+            viewer = mock.Mock(remote_device_info={"platform": "Linux", "machineName": "target"},
+                               read_only=False, remote_capabilities=app.CAPABILITY_CLIPBOARD_TEXT)
+            ui.viewer = viewer
+            stale = codex_button()
+            ui.viewer_generation += 1
+            stale.invoke()
+            viewer.request_clipboard.assert_not_called()
+            codex_button().invoke()
+            viewer.request_clipboard.assert_called_once_with(read=False, text="codex login --device-auth")
+            launch.assert_called_once()
+
+    @unittest.skipUnless(os.environ.get("REMOTEDESK_RUN_TK_TESTS") == "1", "requires owned Xvfb")
     def test_account_action_remains_visible_in_wide_and_narrow_headers(self):
         root = app.tk.Tk()
         self.addCleanup(root.destroy)

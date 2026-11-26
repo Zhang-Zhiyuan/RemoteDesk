@@ -343,8 +343,7 @@ internal sealed partial class RemoteViewerWindow : Form
         _transferTasksButton = CreateStatusActionButton("传输任务");
         _transferTasksButton.AccessibleName = "查看文件传输进度和取消任务";
         _transferTasksButton.Click += (_, _) => ShowTransferTasks();
-        _sendAccountPackageButton = CreateStatusActionButton(AccountLoginPackageUi.Action);
-        _sendAccountPackageButton.Enabled = filePasteEnabled;
+        _sendAccountPackageButton = CreateStatusActionButton(DeveloperLogin.Action);
         _sendAccountPackageButton.Click += async (_, _) => await SendAccountPackageAsync();
         _remoteInputMethodButton =
             CreateStatusActionButton("远端输入法");
@@ -1879,10 +1878,9 @@ internal sealed partial class RemoteViewerWindow : Form
     public void SetFilePasteEnabled(bool enabled)
     {
         _filePasteEnabled = enabled;
-        _sendAccountPackageButton.Enabled = enabled;
     }
 
-    private Task SendAccountPackageAsync() => AccountLoginPackageUi.SendAsync(this, _client, ShowTransferTasks);
+    private Task SendAccountPackageAsync() => DeveloperLogin.ShowAsync(this, _client, ShowTransferTasks);
 
     public void SetFileDropPasteEnabled(bool enabled)
     {

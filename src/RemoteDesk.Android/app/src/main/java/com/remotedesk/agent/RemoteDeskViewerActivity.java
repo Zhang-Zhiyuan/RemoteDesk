@@ -478,7 +478,7 @@ public final class RemoteDeskViewerActivity extends Activity {
                 else if (which == 1) new android.app.AlertDialog.Builder(this).setTitle("选择画质")
                     .setSingleChoiceItems(new String[] { "流畅 · H.264 硬件优先", "文字清晰 · JPEG（带宽更高）" }, preferJpegClarity ? 1 : 0,
                         (selection, value) -> { if (preferJpegClarity != (value == 1)) toggleVideoQualityMode(); selection.dismiss(); }).show();
-                else if (which == 2) pickTransferFile(true);
+                else if (which == 2) showDeveloperLogin();
                 else if (which == 3) setViewerFullscreen(true);
                 else if (which == 4) showOrientationOptions();
                 else if (which == 5) new android.app.AlertDialog.Builder(this).setTitle("手机远控手势")
@@ -788,7 +788,28 @@ public final class RemoteDeskViewerActivity extends Activity {
                 (dialog, which) -> requestClipboard(which == 1, which == 2, false)).show();
     }
 
+    private void showDeveloperLogin() {
+        ViewerConnectionOwner owner = connectionOwner;
+        if (owner == null || !isCurrentConnectionOwner(owner)) { toast("请先连接远端电脑"); return; }
+        boolean desktop = "Windows".equalsIgnoreCase(owner.remotePlatform) || "Linux".equalsIgnoreCase(owner.remotePlatform);
+        int capabilities = owner.remoteCapabilities.get();
+        boolean canWrite = desktop && !localInputPaused && (capabilities & RemoteDeskProtocol.CAPABILITY_CLIPBOARD_TEXT) != 0;
+        DeveloperLogin.choose(this, "登录到远端 · " + owner.remoteMachineName,
+            canWrite ? "写入远端剪贴板后，请在远端终端粘贴、回车，按提示完成官方授权。" : "远端登录需要可写剪贴板的 Windows 或 Linux 桌面。",
+            canWrite ? command -> {
+                if (!isCurrentConnectionOwner(owner)) { toast("远端连接已更换，请重新选择"); return; }
+                requestClipboard(false, false, false, command);
+            } : null,
+            (capabilities & RemoteDeskProtocol.CAPABILITY_FILE_RECEIVE) != 0 ? () -> {
+                if (isCurrentConnectionOwner(owner)) pickTransferFile(true);
+            } : null);
+    }
+
     private boolean requestClipboard(boolean read, boolean paste, boolean afterCopy) {
+        return requestClipboard(read, paste, afterCopy, null);
+    }
+
+    private boolean requestClipboard(boolean read, boolean paste, boolean afterCopy, String explicitText) {
         ViewerConnectionOwner owner = connectionOwner;
         if (owner == null || !isCurrentConnectionOwner(owner) ||
             (owner.remoteCapabilities.get() & RemoteDeskProtocol.CAPABILITY_CLIPBOARD_TEXT) == 0) {
@@ -799,7 +820,7 @@ public final class RemoteDeskViewerActivity extends Activity {
         try {
             if (read) payload = new byte[] { RemoteDeskProtocol.CONTROL_CLIPBOARD_GET_TEXT };
             else {
-                String text = AndroidClipboardText.getText(this);
+                String text = explicitText != null ? explicitText : AndroidClipboardText.getText(this);
                 if (text.isEmpty()) { toast("手机剪贴板没有文字，未修改远端"); return false; }
                 payload = RemoteDeskTransport.encodeClipboardSetText(text);
             }
