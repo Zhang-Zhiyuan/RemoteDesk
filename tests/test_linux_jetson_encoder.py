@@ -82,6 +82,7 @@ class JetsonEncoderTests(unittest.TestCase):
         with mock.patch.object(host.shutil, "which", return_value="/usr/bin/ffmpeg"), \
                 mock.patch.object(host, "find_jetson_gstreamer_encoder", return_value="/usr/bin/gst-launch-1.0") as discovery, \
                 mock.patch.object(host, "detect_ffmpeg_h264_encoders", return_value={"h264_nvenc"}), \
+                mock.patch.object(host, "uses_legacy_nvenc", return_value=False), \
                 mock.patch.object(host.subprocess, "Popen", side_effect=OSError("synthetic unavailable encoder")) as start, \
                 mock.patch.dict(host.os.environ, {"DISPLAY": ":1"}), mock.patch.object(host, "log"):
             capture = host.ContinuousHardwareH264Capture(1920, 1080, 30, "x11")

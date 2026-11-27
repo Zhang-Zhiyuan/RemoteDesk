@@ -6955,6 +6955,10 @@ class RemoteDeskLinuxApp:
     def _wrap_action_buttons(parent, buttons):
         """Wrap natural-size actions without retaining the old row's width."""
         buttons = tuple(buttons)
+        content = parent
+        while content.master is not None and not isinstance(content.master, tk.Canvas):
+            content = content.master
+        viewport = content.master
         for button in buttons:
             button.pack_forget()
         for index, button in enumerate(buttons):
@@ -6963,6 +6967,11 @@ class RemoteDeskLinuxApp:
         def reflow(_event=None):
             nonlocal previous
             available = max(1, parent.winfo_width())
+            if viewport is not None:
+                # The page itself may still be wider than the viewport after
+                # a resize. Keep its padding and wrap to the visible width.
+                margins = max(0, content.winfo_width() - available)
+                available = max(1, min(available, viewport.winfo_width() - margins))
             # Grid columns share their maximum width across rows. Measuring
             # each row separately can make those shared columns wider than
             # the viewport and oscillate indefinitely between two layouts.
@@ -6978,6 +6987,10 @@ class RemoteDeskLinuxApp:
             for button, (row, column) in zip(buttons, positions):
                 button.grid(row=row, column=column, sticky=tk.W, padx=(0, 6), pady=(0, 6))
         parent.bind("<Configure>", reflow, add="+")
+        if viewport is not None:
+            binding = viewport.bind("<Configure>", reflow, add="+")
+            parent.bind("<Destroy>", lambda event: viewport.unbind("<Configure>", binding)
+                        if event.widget is parent else None, add="+")
         parent.after_idle(reflow)
 
     @staticmethod
@@ -7039,9 +7052,10 @@ class RemoteDeskLinuxApp:
         )
 
         pending_sync: str | None = None
+        applied_size: tuple[int, int] | None = None
 
         def sync_scroll_region() -> None:
-            nonlocal pending_sync
+            nonlocal pending_sync, applied_size
             if pending_sync is not None:
                 canvas.after_cancel(pending_sync)
             pending_sync = None
@@ -7062,8 +7076,13 @@ class RemoteDeskLinuxApp:
             # a too-wide form into the viewport permanently clips its inputs.
             width = max(1, canvas.winfo_width(), content.winfo_reqwidth())
             height = max(1, canvas.winfo_height(), content.winfo_reqheight())
-            canvas.itemconfigure(content_window, width=width, height=height)
-            canvas.configure(scrollregion=(0, 0, width, height))
+            if applied_size != (width, height):
+                applied_size = (width, height)
+                canvas.itemconfigure(content_window, width=width, height=height)
+                canvas.configure(scrollregion=(0, 0, width, height))
+                # Tk may rewrap buttons after the canvas has assigned a fixed
+                # width. A change in requested width alone emits no Configure.
+                queue_sync()
             if width > canvas.winfo_width():
                 horizontal.grid()
             else:

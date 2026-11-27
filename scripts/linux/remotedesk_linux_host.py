@@ -63,6 +63,10 @@ from remotedesk_protocol_probe import (
     CAPABILITY_HIGH_QUALITY_JPEG,
     CAPABILITY_INPUT_CONTROL,
     CAPABILITY_REMOTE_DESKTOP,
+    CAPABILITY_RELIABLE_VIDEO_FEEDBACK,
+    ENCRYPTED_RECORD_OVERHEAD,
+    RELIABLE_RECEIPT,
+    TRACKED_SEQUENCE_BYTES,
     CAPABILITY_SHORT_GOP_H264,
     CONTROL_CAPTURE_TARGET_CHANGED,
     CONTROL_CLIPBOARD_GET_TEXT,
@@ -99,6 +103,9 @@ from remotedesk_protocol_probe import (
     MESSAGE_PING,
     MESSAGE_PONG,
     MESSAGE_VIDEO_FRAME,
+    MESSAGE_TRACKED_VIDEO_FRAME,
+    MESSAGE_RELIABLE_VIDEO_FEEDBACK,
+    VIDEO_FRAME_HEADER_BYTES,
     IncomingFileTransferBudget,
     ProtocolError,
     SecureSession,
@@ -285,6 +292,7 @@ _input_capability_cache: InputCapabilityVerification | None = None
 _input_capability_probe_lock = threading.RLock()
 
 CAPABILITY_NAMES = (
+    (CAPABILITY_RELIABLE_VIDEO_FEEDBACK, "ReliableVideoFeedback"),
     (CAPABILITY_REMOTE_DESKTOP, "RemoteDesktop"),
     (CAPABILITY_INPUT_CONTROL, "InputControl"),
     (CAPABILITY_CLIPBOARD_TEXT, "ClipboardText"),
@@ -2081,6 +2089,33 @@ def detect_ffmpeg_h264_encoders(ffmpeg_path: str) -> set[str] | None:
     return available
 
 
+def uses_legacy_nvenc(ffmpeg_path: str) -> bool:
+    try:
+        help_text = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-h", "encoder=h264_nvenc"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True,
+            encoding="utf-8", errors="replace", timeout=2,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    choices = {line.split()[0] for line in help_text.splitlines() if line.strip()}
+    return "llhq" in choices and "p4" not in choices
+
+
+def ffmpeg_h264_backends(ffmpeg_path: str) -> list[tuple[str, set[str] | None, bool]]:
+    available = detect_ffmpeg_h264_encoders(ffmpeg_path)
+    backends = []
+    # A static build earlier on PATH may omit NVENC even on an NVIDIA host.
+    distro = "/usr/bin/ffmpeg"
+    if (available is not None and "h264_nvenc" not in available and
+            Path("/dev/nvidiactl").exists() and os.path.realpath(ffmpeg_path) != os.path.realpath(distro)
+            and os.access(distro, os.X_OK) and "h264_nvenc" in (detect_ffmpeg_h264_encoders(distro) or ())):
+        backends.append((distro, {"h264_nvenc"}, uses_legacy_nvenc(distro)))
+    probe_nvenc = available is None or "h264_nvenc" in available
+    backends.append((ffmpeg_path, available, probe_nvenc and uses_legacy_nvenc(ffmpeg_path)))
+    return backends
+
+
 def find_vaapi_render_device() -> str:
     render_directory = Path("/dev/dri")
     try:
@@ -2230,6 +2265,7 @@ def build_h264_hardware_encoder_commands(
     available_encoders: set[str] | None,
     vaapi_device: str | None = None,
     max_bitrate_bps: int = DEFAULT_H264_MAX_BITRATE_BPS,
+    legacy_nvenc: bool = False,
 ) -> list[H264EncoderCommand]:
     output_width = max(2, int(output_width)) & ~1
     output_height = max(2, int(output_height)) & ~1
@@ -2307,10 +2343,7 @@ def build_h264_hardware_encoder_commands(
             # This is still hardware encoding; quality/latency flags stay below.
             f"{scale_filter}format=nv12",
             [
-                "-preset",
-                "p4",
-                "-tune",
-                "ull",
+                *(["-preset", "llhq"] if legacy_nvenc else ["-preset", "p4", "-tune", "ull"]),
                 "-rc",
                 "vbr",
                 "-spatial-aq",
@@ -2451,6 +2484,7 @@ class ContinuousHardwareH264Capture:
         self.stall_timeout_seconds = max(H264_ENCODER_STALL_SECONDS, 3.0 / self.fps)
         self.mode = mode
         self.ffmpeg_path = shutil.which("ffmpeg")
+        self.ffmpeg_backends: list[tuple[str, set[str] | None, bool]] | None = None
         self.jetson_gstreamer_path: str | None = None
         self.jetson_gstreamer_probed = False
         self.condition = threading.Condition()
@@ -2709,18 +2743,13 @@ class ContinuousHardwareH264Capture:
                 self._mark_exhausted("X11 capture is unavailable")
                 return
 
-            available_encoders = detect_ffmpeg_h264_encoders(ffmpeg_path) if ffmpeg_path else set()
-            commands = build_h264_hardware_encoder_commands(
-                ffmpeg_path,
-                display,
-                source_width,
-                source_height,
-                self.width,
-                self.height,
-                self.fps,
-                available_encoders,
-                max_bitrate_bps=self.max_bitrate_bps,
-            ) if ffmpeg_path else []
+            if self.ffmpeg_backends is None:
+                self.ffmpeg_backends = ffmpeg_h264_backends(ffmpeg_path) if ffmpeg_path else []
+            commands = []
+            for executable, available, legacy_nvenc in self.ffmpeg_backends:
+                commands.extend(build_h264_hardware_encoder_commands(
+                    executable, display, source_width, source_height, self.width, self.height,
+                    self.fps, available, max_bitrate_bps=self.max_bitrate_bps, legacy_nvenc=legacy_nvenc))
             if not self.jetson_gstreamer_probed:
                 self.jetson_gstreamer_path = find_jetson_gstreamer_encoder()
                 self.jetson_gstreamer_probed = True
@@ -3239,6 +3268,86 @@ class ContinuousFrameCapture:
         log(f"ffmpeg continuous capture unavailable: {reason}; falling back to ImageMagick capture.")
 
 
+@dataclass(frozen=True)
+class PendingVideoFrame:
+    sequence: int
+    cumulative_bytes: int
+    sent_at: float
+    size: int
+    started_empty: bool
+
+
+class ReliableVideoSendWindow:
+    """Bound independent H.264 frames in flight until the actual viewer acknowledges receipt."""
+    MAX_BYTES = 8 * 1024 * 1024
+    QUEUE_BUDGET_MS = 60
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.pending: deque[PendingVideoFrame] = deque()
+        self.sequence = self.sent = self.acked = 0
+        self.credit = self.next_send = 0.0
+        self.min_rtt = self.isolated_min = float("inf")
+        self.isolated_samples = 0
+        self.last_ack = self.last_reduction = -float("inf")
+
+    def reserve(self, size: int, now: float) -> int | None:
+        with self.lock:
+            if not self.credit:
+                self.credit = min(self.MAX_BYTES, 2 * size)
+            if self.pending:
+                if (len(self.pending) >= 128 or (self.min_rtt == float("inf") and len(self.pending) >= 2)
+                        or now - self.pending[0].sent_at > self.min_rtt + self.QUEUE_BUDGET_MS
+                        or now < self.next_send or size > self.credit or self.sent - self.acked >= self.credit
+                        or self.sent - self.acked + size > self.MAX_BYTES):
+                    return None
+            elif now - self.last_ack > max(1000, self.min_rtt * 3):
+                self.credit = min(self.credit, size * 2)
+            self.sequence += 1
+            self.sent += size
+            self.pending.append(PendingVideoFrame(self.sequence, self.sent, now, size, not self.pending))
+            self.next_send = now if self.min_rtt == float("inf") else now + self.min_rtt * min(1, size / self.credit)
+            return self.sequence
+
+    def acknowledge(self, payload: bytes, now: float) -> None:
+        if len(payload) != RELIABLE_RECEIPT.size:
+            raise ProtocolError("Invalid reliable video receipt length")
+        magic, reserved, seq, total, delay, tail = RELIABLE_RECEIPT.unpack(payload)
+        if magic != b"RVF1" or reserved or tail or seq <= 0 or total <= 0 or not 0 <= delay <= 500:
+            raise ProtocolError("Invalid reliable video receipt")
+        with self.lock:
+            if not self.pending or now < self.last_ack:
+                return
+            index = seq - self.pending[0].sequence
+            if not 0 <= index < len(self.pending):
+                return
+            frame = self.pending[index]
+            if total != frame.cumulative_bytes or now < frame.sent_at or delay > now - frame.sent_at + 2:
+                return
+            size = frame.size
+            rtt = max(0, now - frame.sent_at - delay)
+            self.min_rtt = min(self.min_rtt, rtt)
+            congested = rtt > self.min_rtt + self.QUEUE_BUDGET_MS
+            if congested and frame.started_empty and len(self.pending) == 1:
+                self.isolated_samples += 1
+                self.isolated_min = min(self.isolated_min, rtt)
+                if self.isolated_samples >= 3:
+                    self.min_rtt = self.isolated_min
+                    self.credit = min(self.MAX_BYTES, max(self.credit, 2 * size))
+                    congested = rtt > self.min_rtt + self.QUEUE_BUDGET_MS
+                    self.isolated_min, self.isolated_samples = float("inf"), 0
+            else:
+                self.isolated_min, self.isolated_samples = float("inf"), 0
+            if not congested:
+                self.credit = min(self.MAX_BYTES, self.credit + min(size, (total - self.acked) / 2))
+            elif now - self.last_reduction >= max(100, self.min_rtt):
+                self.credit = min(self.MAX_BYTES, max(size, self.credit * .7))
+                self.last_reduction = now
+            self.acked, self.last_ack = total, now
+            for _ in range(index + 1):
+                self.pending.popleft()
+
+
 class LinuxHostSession:
     def __init__(
         self,
@@ -3274,9 +3383,11 @@ class LinuxHostSession:
         # after the session's actual backend failed (or hide one that passed).
         self.host_capabilities = get_host_capabilities(
             self.input_controller.available
-        )
+        ) | CAPABILITY_RELIABLE_VIDEO_FEEDBACK
         if getattr(args, "device_id", ""): self.host_capabilities |= CAPABILITY_DEVICE_IDENTITY
         self.viewer_capabilities = 0
+        self.reliable_video = ReliableVideoSendWindow()
+        self.wait_for_sent_keyframe = False
         self.video_lock = threading.Lock()
         self.viewer_video_codecs = VIDEO_CODEC_JPEG
         self.viewer_info_received = False
@@ -3485,6 +3596,10 @@ class LinuxHostSession:
         self._interrupt_socket_io()
 
     def _handle_message(self, message_type: int, payload: bytes) -> None:
+        if message_type == MESSAGE_RELIABLE_VIDEO_FEEDBACK:
+            if self.viewer_capabilities & CAPABILITY_RELIABLE_VIDEO_FEEDBACK:
+                self.reliable_video.acknowledge(payload, time.monotonic() * 1000)
+            return
         if message_type == MESSAGE_PING:
             self.heartbeat.request()
             return
@@ -3616,6 +3731,21 @@ class LinuxHostSession:
                     self.continuous_capture.pause()
                     self.continuous_frame_ready = False
                     self.last_continuous_frame_id = None
+                sequence = 0
+                recovery_flags = FRAME_FLAG_KEY_FRAME | FRAME_FLAG_CODEC_CONFIG
+                recoverable = h264_frame.flags & recovery_flags == recovery_flags
+                if self.viewer_capabilities & CAPABILITY_RELIABLE_VIDEO_FEEDBACK and recoverable:
+                    tracked_size = len(h264_frame.encoded) + VIDEO_FRAME_HEADER_BYTES + TRACKED_SEQUENCE_BYTES
+                    if tracked_size <= MAX_FRAME_PAYLOAD_BYTES:
+                        sequence = self.reliable_video.reserve(
+                            tracked_size + ENCRYPTED_RECORD_OVERHEAD, time.monotonic() * 1000)
+                    if sequence is None:
+                        self.wait_for_sent_keyframe = True
+                        return False
+                if recoverable:
+                    self.wait_for_sent_keyframe = False
+                elif self.wait_for_sent_keyframe:
+                    return False
                 with self.geometry_lock:
                     self.last_frame_width = h264_frame.width
                     self.last_frame_height = h264_frame.height
@@ -3626,8 +3756,9 @@ class LinuxHostSession:
                     h264_frame.encoded,
                     capture_ms=0.0,
                     encode_ms=0.0,
+                    sequence=sequence,
                 )
-                write_seconds = self._write_message(MESSAGE_VIDEO_FRAME, payload)
+                write_seconds = self._write_message(MESSAGE_TRACKED_VIDEO_FRAME if sequence else MESSAGE_VIDEO_FRAME, payload)
                 adaptive = getattr(self, "h264_resolution", None)
                 if adaptive is not None and isinstance(write_seconds, (int, float)):
                     if adaptive.record_frame(len(h264_frame.encoded), write_seconds,
@@ -4462,7 +4593,7 @@ class LinuxHostSession:
         if self.session_stop.is_set():
             raise ConnectionError("RemoteDesk Linux session is closed")
         priority = getattr(self, "write_priority", None)
-        admission = priority.enter(message_type in (MESSAGE_FRAME, MESSAGE_VIDEO_FRAME)) if priority else nullcontext()
+        admission = priority.enter(message_type in (MESSAGE_FRAME, MESSAGE_VIDEO_FRAME, MESSAGE_TRACKED_VIDEO_FRAME)) if priority else nullcontext()
         with admission:
             with self.write_lock:
                 if self.session_stop.is_set():

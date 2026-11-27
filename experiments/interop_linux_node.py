@@ -46,9 +46,10 @@ def source(output):
     def click():
         nonlocal clicks
         clicks += 1
-        button.configure(text=f"Remote click target: {clicks}")
+        button.configure(text=f"Remote click target: {clicks}", bg="#299853", activebackground="#299853")
         snapshot()
-    button = tk.Button(root, text="Remote click target: 0", command=click, font=("monospace", 24))
+    button = tk.Button(root, text="Remote click target: 0", command=click, font=("monospace", 24),
+                       bg="#bd5520", activebackground="#bd5520")
     button.place(x=100, y=350, width=700, height=100)
     editor = tk.Entry(root, textvariable=text, font=("monospace", 28))
     editor.place(x=100, y=580, width=750, height=80)

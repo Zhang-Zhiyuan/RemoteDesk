@@ -6,14 +6,17 @@ Key-authenticated SSH only; the test-session password stays in process pipes.
 """
 import argparse
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
 import secrets
+import shlex
 import subprocess
 import sys
 import tarfile
 import time
+import traceback
 import uuid
 from run_physical_interop import ROOT, WINDOWS, run
 
@@ -37,10 +40,28 @@ def read_relay_config(reader):
         raise ValueError("Invalid relay configuration on stdin; contents omitted") from None
 
 
+def click_feedback_ms(client):
+    timing = json.loads((client / "click-times.json").read_text())
+    samples = run(["ffmpeg", "-v", "error", "-i", str(client / "click.h264"), "-vf",
+                   "crop=12:12:120:380,scale=1:1", "-vsync", "0", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"])
+    pixels = list(zip(samples[::3], samples[1::3], samples[2::3]))
+    first_green = next((i for i, (r, g, b) in enumerate(pixels) if g > 110 and g > 2*r), None)
+    if (len(pixels) != len(timing["arrivals"]) or not pixels or pixels[0][0] < 140
+            or pixels[0][0] < 1.5*pixels[0][1] or first_green is None):
+        raise RuntimeError("Cannot verify the click transition in decoded frames")
+    elapsed_ms = round(timing["arrivals"][first_green] - timing["clickTime"], 1)
+    if elapsed_ms < 0:
+        raise RuntimeError("Changed frame preceded the click")
+    return elapsed_ms
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--linux", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--linux-path", help="Prepend these user-installed tools and Python to PATH on the test host")
+    parser.add_argument("--host-sources", type=Path, default=ROOT / "scripts/linux", help="Linux application files to test")
+    parser.add_argument("--measure-click", action="store_true", help="Measure click feedback in the decoded H.264 stream")
     parser.add_argument("--relay-stdin", action="store_true",
                         help="Read verified serverAddress/port/accessToken/tlsCertificateSha256 JSON on stdin; never deploys or falls back to LAN")
     args = parser.parse_args()
@@ -48,7 +69,7 @@ def main():
     route = dict(relay=relay) if relay else {}
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=False)
-    ssh_options = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5"]
+    ssh_options = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=10"]
     ssh = ["ssh", *ssh_options, args.linux]
     report = {"complete": False, "scope": "Actual Windows product client to physical Linux host on fresh owned Xvfb",
               "route": "native public relay TLS/TCP; no LAN fallback" if relay else "direct LAN"}
@@ -56,6 +77,7 @@ def main():
     child = None
     log = None
     def sh(command, **kwargs): return run(ssh + [command], **kwargs)
+    tool_path = ("export PATH=" + shlex.quote(args.linux_path) + ':"$PATH"; ') if args.linux_path else ""
     try:
         remote = sh("mktemp -d /tmp/remotedesk-feature-XXXXXXXX").decode().strip()
         if not re.fullmatch(r"/tmp/remotedesk-feature-[A-Za-z0-9]{8}", remote):
@@ -64,17 +86,21 @@ def main():
         report["ownedRemoteDirectory"] = remote
         archive = output / "sources.tar.gz"
         with tarfile.open(archive, "w:gz") as tar:
-            for path in (ROOT / "scripts/linux").glob("*.py"):
-                tar.add(path, arcname=path.relative_to(ROOT))
+            for path in args.host_sources.glob("*.py"):
+                tar.add(path, arcname="scripts/linux/" + path.name)
             path = ROOT / "experiments/interop_linux_node.py"
             tar.add(path, arcname=path.relative_to(ROOT))
         run(["scp", *ssh_options, "-q", str(archive), args.linux + ":" + remote + "/sources.tar.gz"])
         sh(f"tar -xzf {remote}/sources.tar.gz -C {remote}")
         password = secrets.token_urlsafe(24)
         log = (output / "host-process.log").open("wb")
-        child = subprocess.Popen(ssh + [f"python3 -u {remote}/experiments/interop_linux_node.py host --output {remote}/host"],
+        launch = (tool_path + f"umask 077; export XDG_CONFIG_HOME={remote}/config REMOTEDESK_ISOLATED_XVFB=1; "
+                  f'exec xvfb-run -a -s "-screen 0 1920x1080x24 -nolisten tcp -noreset" '
+                  f"python3 -u {remote}/experiments/interop_linux_node.py host --output {remote}/host")
+        child = subprocess.Popen(ssh + [launch],
                                  stdin=subprocess.PIPE, stdout=log, stderr=log)
-        child.stdin.write(json.dumps(dict(password=password, featureFixtures=True, **route)).encode() + b"\n")
+        child.stdin.write(json.dumps(dict(password=password, featureFixtures=True, useOwnedDisplay=True,
+                                          bindAddress="127.0.0.1" if relay else "0.0.0.0", **route)).encode() + b"\n")
         child.stdin.close()
         endpoint = None
         for _ in range(70):
@@ -86,7 +112,8 @@ def main():
         if not endpoint or not re.fullmatch(r":\d+", endpoint["display"]):
             raise RuntimeError("Owned Linux Xvfb endpoint is unavailable")
         report["endpoint"] = endpoint
-        config = dict(host=args.linux.split("@")[-1], port=endpoint["port"], password=password, output=str(output / "client"), **route)
+        config = dict(host=args.linux.split("@")[-1], port=endpoint["port"], password=password,
+                      output=str(output / "client"), ownedInputFixture=True, measureClick=args.measure_click, **route)
         result = subprocess.run([str(WINDOWS), "features"], input=json.dumps(config).encode(), capture_output=True,
                                 timeout=500 if relay else 260)
         print(result.stdout.decode(errors="replace"), flush=True)
@@ -104,10 +131,13 @@ for path in sorted((root / 'receive').rglob('*')):
         with zipfile.ZipFile(path) as archive:
             row['entries'] = {{entry: hashlib.sha256(archive.read(entry)).hexdigest() for entry in archive.namelist() if not entry.endswith('/')}}
     files.append(row)
-clipboard = subprocess.run(['xclip', '-selection', 'clipboard', '-o'], env={{**os.environ, 'DISPLAY': {endpoint['display']!r}}}, capture_output=True, timeout=5)
-print(json.dumps(dict(files=files, clipboardMatched=clipboard.returncode == 0 and clipboard.stdout.decode('utf-8') == 'RemoteDesk clipboard 中文😀')))
+clipboard = subprocess.run(['xclip', '-selection', 'clipboard', '-o'], env={{**os.environ, 'DISPLAY': {endpoint['display']!r},
+    'XAUTHORITY': {endpoint['xauthority']!r}}}, capture_output=True, timeout=5)
+target = json.loads((root / 'target.json').read_text())
+print(json.dumps(dict(files=files, inputMatched=target['clicks'] >= 1 and target['text'] == 'A RemoteDesk 中文😀',
+    clipboardMatched=clipboard.returncode == 0 and clipboard.stdout.decode('utf-8') == 'RemoteDesk clipboard 中文😀')))
 """
-        verified = json.loads(sh("python3 -", data=inspect.encode("utf-8")))
+        verified = json.loads(sh(tool_path + "python3 -", data=inspect.encode("utf-8")))
         report["remoteVerification"] = verified
         expected = hashlib.sha256(bytes(i % 239 for i in range(128 * 1024 + 31))).hexdigest()
         uploads = [row for row in verified["files"] if row["sha256"] == expected]
@@ -119,15 +149,39 @@ print(json.dumps(dict(files=files, clipboardMatched=clipboard.returncode == 0 an
         report["directoryContentsVerified"] = len(directories) == 1
         report["client"] = json.loads((output / "client/features.json").read_text())
         report["complete"] = (result.returncode == 0 and report["client"]["complete"] and
-            report["uploadHashesVerified"] and report["emptyFileVerified"] and report["directoryContentsVerified"] and verified["clipboardMatched"])
+            report["uploadHashesVerified"] and report["emptyFileVerified"] and report["directoryContentsVerified"]
+            and verified["clipboardMatched"] and verified["inputMatched"])
+        if not report["complete"]:
+            report["failure"] = report["client"].get("failure") or "Feature or remote-state verification failed"
+        if args.measure_click and (output / "client/click-times.json").is_file():
+            report["clickToChangedFrameMs"] = click_feedback_ms(output / "client")
     except Exception as error:
+        report["complete"] = False
         report["failure"] = type(error).__name__ + ": " + str(error)
+        report["failureLocation"] = [
+            f"{Path(frame.filename).name}:{frame.lineno} in {frame.name}"
+            for frame in traceback.extract_tb(error.__traceback__)
+        ]
     finally:
         if remote:
             try:
                 sh(f"touch {remote}/host/stop", check=False)
                 if child: child.wait(timeout=15)
-                run(["scp", *ssh_options, "-q", "-r", args.linux + ":" + remote + "/host", str(output / "linux-evidence")], timeout=20)
+                if sh(f"if test -d {remote}/host; then echo present; fi").strip():
+                    packed = sh(f"tar -czf - -C {remote}/host .", timeout=90)
+                    with tarfile.open(fileobj=io.BytesIO(packed), mode="r:gz") as tar:
+                        tar.extractall(output / "linux-evidence", filter="data")
+                cleanup = f"""
+import os, re, shutil
+from pathlib import Path
+p = Path({remote!r})
+if (p.parent != Path('/tmp') or not re.fullmatch(r'remotedesk-feature-[A-Za-z0-9]{{8}}', p.name)
+        or p.resolve() != p or p.stat().st_uid != os.getuid()):
+    raise RuntimeError('Unexpected fixture directory during cleanup')
+shutil.rmtree(p)
+"""
+                sh("python3 -", data=cleanup.encode())
+                report["removedOwnedRemoteDirectory"] = True
             except Exception as error:
                 report["cleanupFailure"] = type(error).__name__ + ": " + str(error)
                 report["complete"] = False

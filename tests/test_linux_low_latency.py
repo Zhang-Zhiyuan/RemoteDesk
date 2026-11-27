@@ -4,6 +4,7 @@ import json
 import sys
 import queue
 import struct
+import subprocess
 import threading
 import time
 import unittest
@@ -22,6 +23,26 @@ import remotedesk_protocol_probe as protocol  # noqa: E402
 
 
 class LinuxLowLatencyPolicyTests(unittest.TestCase):
+    def test_older_nvenc_uses_llhq_without_unsupported_tuning(self):
+        result = subprocess.CompletedProcess([], 0, "  llhq 7 low latency hq\n   -rc flags\n")
+        with mock.patch.object(host.subprocess, "run", return_value=result):
+            self.assertTrue(host.uses_legacy_nvenc("ffmpeg"))
+            result.stdout += "    p4  15  default\n"
+            self.assertFalse(host.uses_legacy_nvenc("ffmpeg"))
+        cmd = host.build_h264_hardware_encoder_commands("ffmpeg", ":91", 1920, 1080,
+            1920, 1080, 30, {"h264_nvenc"}, legacy_nvenc=True)[0].command
+        self.assertEqual("llhq", cmd[cmd.index("-preset") + 1])
+        self.assertNotIn("-tune", cmd)
+        self.assertEqual("1", cmd[cmd.index("-g") + 1])
+
+    def test_distribution_nvenc_can_fill_a_gap_in_the_preferred_ffmpeg(self):
+        with mock.patch.object(host, "detect_ffmpeg_h264_encoders", side_effect=[{"h264_qsv"}, {"h264_nvenc"}]), \
+                mock.patch.object(host.Path, "exists", return_value=True), \
+                mock.patch.object(host.os, "access", return_value=True), \
+                mock.patch.object(host, "uses_legacy_nvenc", return_value=True):
+            self.assertEqual([("/usr/bin/ffmpeg", {"h264_nvenc"}, True), ("/custom/ffmpeg", {"h264_qsv"}, False)],
+                             host.ffmpeg_h264_backends("/custom/ffmpeg"))
+
     def test_frame_parsers_reject_dimensions_above_pixel_budget(self) -> None:
         legacy = struct.pack("<iidd", 8192, 8192, 0.0, 0.0) + b"x"
         video = struct.pack(
@@ -991,6 +1012,7 @@ class LinuxLowLatencyPolicyTests(unittest.TestCase):
         session = host.LinuxHostSession.__new__(host.LinuxHostSession)
         session.video_lock = threading.Lock()
         session.viewer_video_codecs = host.VIDEO_CODEC_JPEG | host.VIDEO_CODEC_H264_ANNEX_B
+        session.viewer_capabilities = 0
         session.viewer_info_received = True
         session.h264_stream_active = False
         session.last_h264_frame_id = None
@@ -1025,6 +1047,7 @@ class LinuxLowLatencyPolicyTests(unittest.TestCase):
         session.video_lock = threading.Lock()
         session.geometry_lock = threading.Lock()
         session.viewer_video_codecs = host.VIDEO_CODEC_JPEG
+        session.viewer_capabilities = 0
         session.viewer_info_received = False
         session.startup_jpeg_sent = False
         session.codec_negotiation_deadline = float("inf")
@@ -1040,6 +1063,37 @@ class LinuxLowLatencyPolicyTests(unittest.TestCase):
         session.hardware_h264_capture.is_starting.return_value = True
         session._write_message = mock.Mock()
         return session
+
+    def test_receiver_credit_resumes_with_a_fresh_recoverable_frame(self):
+        session = self.startup_preview_session()
+        session.viewer_info_received = True
+        session.viewer_video_codecs = host.VIDEO_CODEC_H264_ANNEX_B
+        session.viewer_capabilities = protocol.CAPABILITY_RELIABLE_VIDEO_FEEDBACK
+        session.reliable_video = host.ReliableVideoSendWindow()
+        session.wait_for_sent_keyframe = False
+        session.continuous_capture.is_running.return_value = False
+        recovery_flags = host.FRAME_FLAG_KEY_FRAME | host.FRAME_FLAG_CODEC_CONFIG
+        frames = [(640, recovery_flags), (640, recovery_flags), (1280, recovery_flags),
+                  (1280, 0), (1280, host.FRAME_FLAG_KEY_FRAME), (1280, recovery_flags)]
+        session.hardware_h264_capture.read_frame.side_effect = [
+            host.H264EncodedFrame(width, 480, flags, b"owned-frame", index, "fixture")
+            for index, (width, flags) in enumerate(frames, 1)]
+        with mock.patch.object(host.time, "monotonic", return_value=10):
+            self.assertTrue(session._send_frame())
+            self.assertTrue(session._send_frame())
+            self.assertFalse(session._send_frame())
+            self.assertEqual(640, session.last_frame_width)
+            message, payload = session._write_message.call_args.args
+            self.assertEqual(protocol.MESSAGE_TRACKED_VIDEO_FRAME, message)
+            wire_bytes = 2 * (len(payload) + protocol.ENCRYPTED_RECORD_OVERHEAD)
+            session._handle_message(protocol.MESSAGE_RELIABLE_VIDEO_FEEDBACK,
+                protocol.RELIABLE_RECEIPT.pack(b"RVF1", 0, 2, wire_bytes, 0, 0))
+            self.assertFalse(session._send_frame())
+            self.assertFalse(session._send_frame())
+            self.assertTrue(session._send_frame())
+        self.assertEqual(1280, session.last_frame_width)
+        self.assertEqual([1, 2, 3], [struct.unpack_from("<q", call.args[1])[0]
+                                    for call in session._write_message.call_args_list])
 
     def test_startup_sends_one_unchanged_jpeg_until_codec_negotiation(self):
         session = self.startup_preview_session()

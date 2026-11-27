@@ -44,6 +44,8 @@ MESSAGE_CONTROL = 3
 MESSAGE_PING = 4
 MESSAGE_PONG = 5
 MESSAGE_VIDEO_FRAME = 6
+MESSAGE_TRACKED_VIDEO_FRAME = 14
+MESSAGE_RELIABLE_VIDEO_FEEDBACK = 15
 
 INPUT_KEY_DOWN = 5
 INPUT_KEY_UP = 6
@@ -68,6 +70,7 @@ CONTROL_FILE_RECEIVE_LOCATION = 39
 CONTROL_PRIVACY_SCREEN_REQUEST = 46
 CONTROL_PRIVACY_SCREEN_STATUS = 47
 CAPABILITY_PRIVACY_SCREEN = 1 << 30
+CAPABILITY_RELIABLE_VIDEO_FEEDBACK = 1 << 31
 CONTROL_CLIPBOARD_SNAPSHOT_REQUEST = 40
 CONTROL_CLIPBOARD_SNAPSHOT = 41
 CAPABILITY_FILE_RECEIVE_LOCATION = 1 << 27
@@ -112,6 +115,9 @@ LOW_LATENCY_DATAGRAM_KIND_MOUSE_MOVE = 7
 LOW_LATENCY_DATAGRAM_KIND_MOUSE_MOVE_APPLIED_ACK = 8
 LOW_LATENCY_DATAGRAM_KIND_HEARTBEAT = 9
 VIDEO_FRAME_HEADER_BYTES = 32
+TRACKED_SEQUENCE_BYTES = 8
+ENCRYPTED_RECORD_OVERHEAD = 25
+RELIABLE_RECEIPT = struct.Struct("<4sIqqiI")
 FILE_TRANSFER_CHUNK_BYTES = 128 * 1024
 RECOMMENDED_FILE_TRANSFER_CHUNK_BYTES = 32 * 1024
 MAX_FILE_TRANSFER_BYTES = 1024 * 1024 * 1024
@@ -193,6 +199,7 @@ CAPABILITIES = [
     (1 << 25, "HostVideoDiagnostics"),
     (CAPABILITY_FILE_RECEIVE_LOCATION, "FileReceiveLocation"),
     (CAPABILITY_CLIPBOARD_SNAPSHOT_V1, "ClipboardSnapshotV1"),
+    (CAPABILITY_RELIABLE_VIDEO_FEEDBACK, "ReliableVideoFeedback"),
 ]
 
 RESERVED_FILE_NAMES = {
@@ -592,6 +599,8 @@ def max_message_payload_bytes(message_type: int) -> int:
         return MAX_FRAME_PAYLOAD_BYTES
     if message_type == MESSAGE_INPUT:
         return INPUT_PAYLOAD_LENGTH
+    if message_type == MESSAGE_RELIABLE_VIDEO_FEEDBACK:
+        return RELIABLE_RECEIPT.size
     if message_type == MESSAGE_CONTROL:
         return MAX_CONTROL_PAYLOAD_BYTES
     if message_type in (MESSAGE_PING, MESSAGE_PONG):
@@ -603,8 +612,12 @@ def encode_viewer_info(codecs: int) -> bytes:
     return bytes([CONTROL_VIEWER_INFO]) + struct.pack("<i", codecs)
 
 
+def encode_capability_bits(capabilities: int) -> bytes:
+    return struct.pack("<i" if capabilities < 0 else "<I", capabilities)
+
+
 def encode_viewer_capabilities(capabilities: int) -> bytes:
-    return bytes([CONTROL_VIEWER_CAPABILITIES]) + struct.pack("<i", capabilities)
+    return bytes([CONTROL_VIEWER_CAPABILITIES]) + encode_capability_bits(capabilities)
 
 
 def encode_video_key_frame_request() -> bytes:
@@ -618,6 +631,7 @@ def encode_video_frame(
     encoded: bytes,
     capture_ms: float = 0.0,
     encode_ms: float = 0.0,
+    sequence: int = 0,
 ) -> bytes:
     validate_frame_dimensions(width, height)
     if not encoded:
@@ -625,18 +639,9 @@ def encode_video_frame(
     known_flags = FRAME_FLAG_KEY_FRAME | FRAME_FLAG_CODEC_CONFIG
     if flags & ~known_flags:
         raise ValueError("video frame contains unsupported flags")
-    return (
-        struct.pack(
-            "<iiiidd",
-            FRAME_ENCODING_H264_ANNEX_B,
-            width,
-            height,
-            flags,
-            capture_ms,
-            encode_ms,
-        )
-        + encoded
-    )
+    prefix = struct.pack("<q", sequence) if sequence else b""
+    header = struct.pack("<iiiidd", FRAME_ENCODING_H264_ANNEX_B, width, height, flags, capture_ms, encode_ms)
+    return prefix + header + encoded
 
 
 def encode_device_info(machine_name: str, platform: str, capabilities: int) -> bytes:
@@ -644,7 +649,7 @@ def encode_device_info(machine_name: str, platform: str, capabilities: int) -> b
         bytes([CONTROL_DEVICE_INFO])
         + encode_bounded_dotnet_string(machine_name, "RemoteDesk")
         + encode_bounded_dotnet_string(platform, "Unknown")
-        + struct.pack("<i", capabilities)
+        + encode_capability_bits(capabilities)
     )
 
 
@@ -921,6 +926,7 @@ def encode_7bit_int(value: int) -> bytes:
 
 
 def capability_names(capabilities: int) -> list[str]:
+    capabilities &= 0xffffffff
     names = [name for bit, name in CAPABILITIES if capabilities & bit]
     unknown = capabilities & ~sum(bit for bit, _ in CAPABILITIES)
     if unknown:

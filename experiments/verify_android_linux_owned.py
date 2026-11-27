@@ -54,7 +54,16 @@ def main():
             return {}
 
     def target():
-        return json.loads((args.peer_directory / "target.json").read_text(encoding="utf-8-sig"))
+        # WSL can be replacing the fixture snapshot while Windows opens it.
+        # Retry that brief sharing violation without hiding a persistent error.
+        deadline = time.monotonic() + 1
+        while True:
+            try:
+                return json.loads((args.peer_directory / "target.json").read_text(encoding="utf-8-sig"))
+            except PermissionError as error:
+                if getattr(error, "winerror", None) not in (5, 32, 33) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(.025)
 
     def wait(predicate, timeout=20):
         deadline = time.monotonic() + timeout

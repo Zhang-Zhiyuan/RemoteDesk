@@ -162,7 +162,9 @@ class RealServerDpiLayoutTests(unittest.TestCase):
             window.geometry(f"{width}x{height}+0+0")
             self.settle()
             footer = ui.viewer_window_status.master
-            more = next(widget for widget in self.descendants(footer) if isinstance(widget, app.ttk.Menubutton))
+            more = next(widget for widget in self.descendants(footer)
+                        if isinstance(widget, app.ttk.Menubutton) and widget.cget("text") == "更多操作")
+            self.assertTrue(more.winfo_ismapped())
             menu = more.nametowidget(more.cget("menu"))
             self.root.tk.call(menu.cget("postcommand"))
             labels = {menu.entrycget(index, "label") for index in range(menu.index("end") + 1) if menu.type(index) == "command"}

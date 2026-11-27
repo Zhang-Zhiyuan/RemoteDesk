@@ -122,8 +122,10 @@ def main():
         if display is not None:
             stop(display)
         (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(json.dumps(report), flush=True)
+    overflowing = [case["name"] for case in report["cases"] if case.get("overflow")]
+    print(json.dumps({"cases": len(report["cases"]), "overflow": overflowing}), flush=True)
+    return int(bool(overflowing))
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

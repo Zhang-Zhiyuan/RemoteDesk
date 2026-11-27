@@ -14,7 +14,7 @@ internal static class FeatureAuditProbe
         var checks = new List<object>();
         string? failure = null;
         bool relayAudit = Program.RelayOptions(config) is not null;
-        // A deliberately slow real WAN may need >35s to deliver five JPEGs.
+        // Allow the owned host to start hardware encoding on a slow WAN.
         // This expands only the bounded harness, never product reply deadlines.
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(relayAudit ? 8 : 4));
         var token = deadline.Token;
@@ -34,11 +34,31 @@ internal static class FeatureAuditProbe
         client.ClipboardStatusReceived += text => { lock (logLock) log.WriteLine($"{DateTimeOffset.Now:O} CLIPBOARD: {text}"); };
         client.FileTransferStatusReceived += (ok, text) => { lock (logLock) log.WriteLine($"FILE {ok}: {text}"); };
         int frames = 0, jpeg = 0, h264 = 0, targetChanges = 0;
+        bool measureClick = config.TryGetProperty("measureClick", out var measure) && measure.GetBoolean();
+        var clock = Stopwatch.StartNew();
+        var arrivals = new List<double>();
+        using var trace = measureClick ? File.Create(Path.Combine(output, "click.h264")) : null;
+        bool recording = false;
+        double clickTime = 0;
         CaptureTargetInfo[] targets = [];
         RemoteDeviceDescriptor? descriptor = null;
         client.FrameReceived += frame => {
             Interlocked.Increment(ref frames);
-            if (frame.Encoding == RemoteFrameEncoding.H264AnnexB) Interlocked.Increment(ref h264);
+            if (frame.Encoding == RemoteFrameEncoding.H264AnnexB)
+            {
+                Interlocked.Increment(ref h264);
+                if (trace != null)
+                {
+                    lock (arrivals)
+                    {
+                        if (recording && trace.Length + frame.EncodedLength <= 32 * 1024 * 1024)
+                        {
+                            arrivals.Add(clock.Elapsed.TotalMilliseconds);
+                            trace.Write(frame.EncodedBuffer, frame.EncodedOffset, frame.EncodedLength);
+                        }
+                    }
+                }
+            }
             else Interlocked.Increment(ref jpeg);
         };
         client.DeviceInfoReceived += info => descriptor = info;
@@ -60,8 +80,8 @@ internal static class FeatureAuditProbe
         RelayConnectionOptions? relay = Program.RelayOptions(config);
         Task Connect(RemoteViewerClient target, string password) => relay is null
             ? target.ConnectAsync(config.GetProperty("host").GetString()!, config.GetProperty("port").GetInt32(),
-                password, ViewerVideoMode.StableJpeg, token)
-            : target.ConnectViaRelayAsync(relay, password, ViewerVideoMode.StableJpeg, token);
+                password, ViewerVideoMode.Automatic, token)
+            : target.ConnectViaRelayAsync(relay, password, ViewerVideoMode.Automatic, token);
         string password = config.GetProperty("password").GetString()!;
         try
         {
@@ -70,9 +90,9 @@ internal static class FeatureAuditProbe
             catch (UnauthorizedAccessException) { rejected = true; }
             Check("Wrong password rejected without opening a session", rejected && !client.IsConnected);
             await Connect(client, password);
-            await Until(() => descriptor != null && jpeg >= 5 && targets.Length > 0);
-            Check("Actual Linux capability negotiation and continuous JPEG frames", descriptor!.Platform == "Linux",
-                new { capabilities = descriptor.Capabilities.ToString(), frames, jpeg, targets });
+            await Until(() => descriptor != null && h264 >= 5 && targets.Length > 0);
+            Check("Linux capability negotiation and continuous H.264 frames", descriptor!.Platform == "Linux",
+                new { capabilities = descriptor.Capabilities.ToString(), frames, h264, targets });
             int before = targetChanges, beforeFrames = frames;
             await client.SelectCaptureTargetAsync(targets[0].Id);
             await Until(() => targetChanges > before && frames > beforeFrames + 3);
@@ -83,10 +103,23 @@ internal static class FeatureAuditProbe
                 {
                     await client.SendInputAsync(RemoteInputCommand.MouseMove(x, y));
                     await client.SendInputAsync(RemoteInputCommand.MouseDown(RemoteMouseButton.Left, x, y));
+                    if (measureClick && x == 350 && y == 400)
+                        clickTime = clock.Elapsed.TotalMilliseconds;
                     await client.SendInputAsync(RemoteInputCommand.MouseUp(RemoteMouseButton.Left, x, y));
                     await Task.Delay(500, token);
                 }
+                if (measureClick)
+                {
+                    lock (arrivals) recording = true;
+                    await Until(() => { lock (arrivals) return arrivals.Count > 0; });
+                }
                 await Click(350, 400);
+                if (measureClick)
+                {
+                    await Task.Delay(8000, token);
+                    lock (arrivals) recording = false;
+                    Program.Save(Path.Combine(output, "click-times.json"), new { clickTime, arrivals });
+                }
                 await Click(350, 620);
                 await client.SendInputAsync(RemoteInputCommand.KeyDown(0xa2));
                 await client.SendInputAsync(RemoteInputCommand.KeyDown(0x41));
@@ -127,14 +160,10 @@ internal static class FeatureAuditProbe
                 returned.Success && returned.LocalPaths.Count == 1 && isolatedClipboardCalls == 1 &&
                 (await File.ReadAllBytesAsync(returned.LocalPaths[0], token)).AsSpan().SequenceEqual(returnedBytes),
                 new { returned.Outcome, isolatedClipboardCalls, actualWindowsClipboardTouched = false });
-            await client.UpdateViewerVideoCodecsAsync(RemoteVideoCodecs.Jpeg | RemoteVideoCodecs.H264AnnexB);
+            int beforeRecovery = h264;
             await client.RequestVideoKeyFrameAsync();
-            await Until(() => h264 >= 5);
-            Check("JPEG to H264 negotiation and keyframe request", true, new { h264 });
-            int beforeJpeg = jpeg;
-            await client.UpdateViewerVideoCodecsAsync(RemoteVideoCodecs.Jpeg);
-            await Until(() => jpeg >= beforeJpeg + 5);
-            Check("H264 to JPEG returns live frames", true);
+            await Until(() => h264 >= beforeRecovery + 5);
+            Check("H.264 continues after a keyframe request", true, new { h264 });
             using (var replacement = new RemoteViewerClient(() => incoming, _ => Task.CompletedTask))
             {
                 int replacementFrames = 0;
