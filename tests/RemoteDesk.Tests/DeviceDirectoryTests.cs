@@ -154,6 +154,39 @@ public sealed class DeviceDirectoryTests
     }
 
     [Fact]
+    public void RoutedPeersUseDistinctAdvertisedAddressesAndKeepOneRowAfterLanConfirmation()
+    {
+        var a = new RelayOnlineDevice(MachineId, "Node A", "Linux", null, false, 0)
+            { SupportsSsh = true, DirectAddresses = ["10.1.2.3", "172.17.0.1", "2001:db8::1"], DirectPort = 56565 };
+        var b = a with { DeviceId = Guid.NewGuid().ToString(), MachineName = "Node B", SupportsDesktop = false,
+            DirectAddresses = ["172.17.0.1", "10.8.1.2", "localhost", "127.0.0.1"] };
+        var self = a with { DeviceId = Guid.NewGuid().ToString(), DirectAddresses = ["10.1.2.200"] };
+        var invalid = a with { DeviceId = Guid.NewGuid().ToString(), DirectPort = 0 };
+        var endpoints = RelayDirectEndpoint.FromDirectory([a,b,self,invalid], self.DeviceId);
+        Assert.Equal(3, endpoints.Length);
+        Assert.DoesNotContain(endpoints, e => e.Address == "172.17.0.1" || e.DeviceId == self.DeviceId);
+        var local = new HashSet<string>();
+        var recent = new SavedRemoteDevice { Address = "10.0.0.1", Port = 56565, DeviceId = a.DeviceId, Remark = "本地备注" };
+        var reported = MainForm.BuildRemoteDeviceList([], [recent], local, new Dictionary<string,string> { [a.DeviceId] = "共享名" }, endpoints);
+        Assert.Equal(2, reported.Count);
+        var row = Assert.Single(reported, d => d.DeviceId == a.DeviceId);
+        Assert.Equal("共享名", row.DisplayName); Assert.Equal("10.1.2.3", row.Address);
+        Assert.True(row.IsRelayReported); Assert.False(row.IsHostRunning); Assert.Contains("待验证", row.GetShortStatus());
+        Assert.False(Assert.Single(reported, d => d.DeviceId == b.DeviceId).CanOpenViewerNow);
+        var targets = MainForm.BuildDiscoveryProbeTargets("192.0.2.9", 40565, [recent], local, endpoints);
+        Assert.Equal("192.0.2.9", targets[0].Address);
+        Assert.Contains(targets.Take(3), t => t.Address == "10.8.1.2");
+        Assert.Contains(targets.Take(3), t => t.Address == "10.1.2.3");
+        Assert.Contains(targets, t => t.Address == "2001:db8::1");
+        var live = new DiscoveredHost("Node A", "10.1.2.3", 56565, "", true, false, "Linux",
+            RemoteDeviceCapabilities.DeviceIdentity, DeviceId: a.DeviceId);
+        var tcp = live with { DeviceId = null, Address = "10.8.1.2", CaptureTarget = NetworkDiscoveryService.TcpProbeCaptureTarget };
+        var rows = MainForm.BuildRemoteDeviceList([live,tcp], [recent], local, relayEndpoints: endpoints);
+        Assert.Equal(2, rows.Count); Assert.True(rows[0].IsHostRunning); Assert.False(rows[0].IsRelayReported);
+        Assert.Equal("10.0.0.1", recent.Address);
+    }
+
+    [Fact]
     public void LegacyPortMigrationDoesNotMergeReusedAddressesWithConflictingIdentities()
     {
         var first = new SavedRemoteDevice { Address = "192.0.2.10", Port = 56565, DeviceId = MachineId };
@@ -199,9 +232,12 @@ public sealed class DeviceDirectoryTests
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task LoopbackRequestsIdentityOnlyWhenHostAdvertisesSupport(bool supported)
+    [InlineData(true, null, true)]
+    [InlineData(false, null, true)]
+    [InlineData(true, MachineId, true)]
+    [InlineData(false, MachineId, false)]
+    [InlineData(true, "fedcba98-7654-3210-ffff-000000000001", false)]
+    public async Task LoopbackChecksReportedIdentityBeforePublishingDevice(bool supported, string? expectedId, bool allowed)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         using var listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
@@ -221,7 +257,9 @@ public sealed class DeviceDirectoryTests
             {
                 Task<ProtocolMessage> read = Protocol.ReadMessageAsync(stream, session, timeout.Token);
                 if (await Task.WhenAny(read, release.Task) != read) break;
-                ProtocolMessage message = await read;
+                ProtocolMessage message;
+                try { message = await read; }
+                catch (IOException) when (!allowed) { break; }
                 if (message.Type != MessageType.Control) continue;
                 if (RemoteMessageCodec.DecodeControl(message.PayloadMemory).Kind == RemoteControlKind.DeviceIdentityRequest)
                 {
@@ -231,10 +269,23 @@ public sealed class DeviceDirectoryTests
             }
         }
         Task host = Host(); using var client = new RemoteViewerClient(allowLocalConnectionsForTesting: true);
-        client.DeviceInfoReceived += info => { if (!supported || info.DeviceId is not null) gotInfo.TrySetResult(info); };
+        client.DeviceInfoReceived += info => { if (expectedId is not null || !supported || info.DeviceId is not null) gotInfo.TrySetResult(info); };
         try
         {
-            await client.ConnectAsync("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port, "test-password", ViewerVideoMode.StableJpeg, timeout.Token);
+            var snapshot = new ViewerConnectionSnapshot("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port,
+                "test-password", ViewerVideoMode.Automatic) { ExpectedDeviceId = expectedId };
+            async Task ConnectAndWait()
+            {
+                await client.ConnectDirectAsync(snapshot, timeout.Token);
+                Assert.True(await client.WaitForCurrentDeviceInfoAsync(TimeSpan.FromSeconds(4), timeout.Token));
+            }
+            if (!allowed)
+            {
+                await Assert.ThrowsAsync<RemoteSessionRejectedException>(ConnectAndWait);
+                Assert.False(gotInfo.Task.IsCompleted);
+                return;
+            }
+            await ConnectAndWait();
             var info = await gotInfo.Task.WaitAsync(timeout.Token);
             await Task.Delay(150, timeout.Token);
             Assert.Equal(supported ? MachineId : null, info.DeviceId);

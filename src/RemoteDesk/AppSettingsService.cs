@@ -16,6 +16,9 @@ internal sealed class RemoteDeskSettings
     public ViewerSettings Viewer { get; set; } = new();
 
     public RelaySettings Relay { get; set; } = new();
+
+    // Snapshot of the protected entries read by this caller, never serialized.
+    internal List<RelayDeviceKey>? LoadedDeviceKeys { get; set; }
 }
 
 internal sealed class AppBehaviorSettings
@@ -188,7 +191,9 @@ internal sealed class AppSettingsService
             RemoteDeskSettings? settings =
                 JsonSerializer.Deserialize<RemoteDeskSettings>(json, JsonOptions);
             MigrateSettings(settings);
-            return NormalizeSettings(settings);
+            var normalized = NormalizeSettings(settings);
+            normalized.LoadedDeviceKeys = RelayDeviceKeys.Normalize(normalized.Relay.DeviceKeys);
+            return normalized;
         }
         catch (JsonException)
         {
@@ -203,7 +208,7 @@ internal sealed class AppSettingsService
 
     private static RemoteDeskSettings CreateDefaultSettings()
     {
-        var settings = new RemoteDeskSettings();
+        var settings = new RemoteDeskSettings { LoadedDeviceKeys = [] };
         settings.SchemaVersion = CurrentSettingsSchemaVersion;
         return NormalizeSettings(settings);
     }
@@ -251,32 +256,49 @@ internal sealed class AppSettingsService
         try
         {
             settings = NormalizeSettings(settings);
-            string? settingsDirectory = Path.GetDirectoryName(_settingsPath);
-            if (!string.IsNullOrWhiteSpace(settingsDirectory))
-            {
-                Directory.CreateDirectory(settingsDirectory);
-            }
-
-            string json = JsonSerializer.Serialize(settings, JsonOptions);
-            string temporaryPath = Path.Combine(
-                string.IsNullOrWhiteSpace(settingsDirectory) ? "." : settingsDirectory,
-                $"{Path.GetFileName(_settingsPath)}.{Guid.NewGuid():N}.tmp");
-
-            try
-            {
-                File.WriteAllText(temporaryPath, json);
-                File.Move(temporaryPath, _settingsPath, overwrite: true);
-            }
-            finally
-            {
-                TryDeleteFile(temporaryPath);
-            }
+            string path = Path.GetFullPath(_settingsPath);
+            string id = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(path.ToUpperInvariant())));
+            using var mutex = new Mutex(false, @"Local\RemoteDesk-Settings-" + id);
+            try { if (!mutex.WaitOne(500)) throw new IOException("另一 RemoteDesk 进程正在保存配置，请稍后重试。"); }
+            catch (AbandonedMutexException) { } // Atomic replacement leaves either complete file readable.
+            try { SaveLocked(settings, path); }
+            finally { mutex.ReleaseMutex(); }
             return new SettingsSaveResult(Success: true);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException)
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException or NotSupportedException or ArgumentException)
         {
             return new SettingsSaveResult(Success: false, ex.Message);
         }
+    }
+
+    private static void SaveLocked(RemoteDeskSettings settings, string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var requested = settings.Relay.DeviceKeys;
+        string temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            if (settings.LoadedDeviceKeys is { } baseline && File.Exists(path))
+            {
+                using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var document = JsonDocument.Parse(file);
+                List<RelayDeviceKey> current = [];
+                if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                    document.RootElement.TryGetProperty("Relay", out var relay) && relay.ValueKind == JsonValueKind.Object &&
+                    relay.TryGetProperty("DeviceKeys", out var keys) && keys.ValueKind == JsonValueKind.Array)
+                    current = RelayDeviceKeys.Normalize(keys.Deserialize<List<RelayDeviceKey>>());
+                settings.Relay.DeviceKeys = RelayDeviceKeys.MergeChanges(baseline, requested, current);
+            }
+            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(settings, JsonOptions));
+            File.Move(temporaryPath, path, overwrite: true);
+            settings.LoadedDeviceKeys = RelayDeviceKeys.Normalize(settings.Relay.DeviceKeys);
+        }
+        catch
+        {
+            settings.Relay.DeviceKeys = requested;
+            throw;
+        }
+        finally { TryDeleteFile(temporaryPath); }
     }
 
     public static string? ProtectSecret(string? secret)

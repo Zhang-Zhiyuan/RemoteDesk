@@ -27,7 +27,7 @@ internal static class SshCommandProxy
             return 0;
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { return 130; }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or
             CryptographicException or System.ComponentModel.Win32Exception or System.Net.Sockets.SocketException or TimeoutException or System.Security.Authentication.AuthenticationException)
         {
             // stdout belongs entirely to OpenSSH. Never emit a log, banner,
@@ -42,7 +42,11 @@ internal static class SshCommandProxy
         public override string ToString() => "SshCommandCredentials(<redacted>)";
     }
 
-    internal static Credentials ReadCredentials(SshCommandProfile profile, string settingsPath)
+    internal static Credentials ReadCredentials(SshCommandProfile profile, string settingsPath) =>
+        ReadAvailableCredentials(profile, settingsPath) ?? throw new InvalidDataException(
+            $"尚未保存 {profile.Alias} 的设备密钥。请在 RemoteDesk 的「公网中继」选中该设备，点击「用 VS Code 打开」补全。");
+
+    internal static Credentials? ReadAvailableCredentials(SshCommandProfile profile, string settingsPath)
     {
         profile = profile.Validate();
         try
@@ -78,9 +82,7 @@ internal static class SshCommandProxy
                 localId.ToString("D") == profile.DeviceId && document.RootElement.TryGetProperty("Host", out var host) &&
                 host.ValueKind == JsonValueKind.Object)
                 protectedDeviceKey = OptionalText(host, "ProtectedPassword");
-            if (string.IsNullOrEmpty(protectedDeviceKey))
-                throw new InvalidDataException("未保存此设备的密钥，请在 RemoteDesk 中重新配置该 SSH 别名。");
-            return new Credentials(options, Unprotect(protectedDeviceKey));
+            return string.IsNullOrEmpty(protectedDeviceKey) ? null : new Credentials(options, Unprotect(protectedDeviceKey));
         }
         catch (JsonException) { throw new InvalidDataException("RemoteDesk 配置无法读取，原文件未修改；请在应用中检查配置。"); }
     }

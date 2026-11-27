@@ -5,6 +5,33 @@ namespace RemoteDesk.Tests;
 public sealed class AppSettingsServiceTests
 {
     [Fact]
+    public async Task StaleWindowSavePreservesIndependentPairingsRotationsAndExplicitRemovals()
+    {
+        using var temp = TemporaryDirectory.Create();
+        string path = Path.Combine(temp.Path, "settings.json");
+        var service = new AppSettingsService(path);
+        var first = new RelayConnectionOptions("relay.invalid", 56567, new string('t', 32), new string('A', 64), Guid.NewGuid().ToString());
+        var second = first with { DeviceId = Guid.NewGuid().ToString() };
+        var left = service.Load();
+        var right = new AppSettingsService(path).Load();
+        left.Relay.DeviceKeys = RelayDeviceKeys.Remember([], first, "protected-a");
+        right.Relay.DeviceKeys = RelayDeviceKeys.Remember([], second, "protected-b");
+        var results = await Task.WhenAll(Task.Run(() => service.Save(left)), Task.Run(() => new AppSettingsService(path).Save(right)));
+        Assert.All(results, result => Assert.True(result.Success));
+        var stale = service.Load();
+        Assert.Equal(2, stale.Relay.DeviceKeys.Count);
+        var fresh = service.Load();
+        fresh.Relay.DeviceKeys = RelayDeviceKeys.Remember([], second, "rotated-b");
+        Assert.True(service.Save(fresh).Success);
+        stale.Host.Fps = 45;
+        Assert.True(service.Save(stale).Success);
+        var final = service.Load();
+        Assert.Equal(45, final.Host.Fps);
+        Assert.Single(final.Relay.DeviceKeys);
+        Assert.Equal("rotated-b", RelayDeviceKeys.Find(final.Relay.DeviceKeys, second));
+        Assert.Null(RelayDeviceKeys.Find(final.Relay.DeviceKeys, first));
+    }
+    [Fact]
     public void RelayRouteOptimizationDefaultsOnAndOptOutIsPersisted()
     {
         using var temp = TemporaryDirectory.Create();

@@ -4,7 +4,7 @@ public sealed partial class MainForm
 {
     private Button _directSshButton = null!;
 
-    private RemoteDeviceListItem? DirectSshDevice()
+    private RemoteDeviceListItem? SelectedDirectEndpoint()
     {
         var row = GetSelectedRemoteDevice();
         return row is not null && DirectSshTarget.SameHost(row.Address, _viewerHostBox.Text) &&
@@ -31,7 +31,7 @@ public sealed partial class MainForm
     private void UpdateDirectSshButton()
     {
         if (_directSshButton is null) return;
-        var row = DirectSshDevice();
+        var row = SelectedDirectEndpoint();
         bool wsl = MayChooseWsl(row) && DirectSshHistory(_viewerHostBox.Text.Trim(), row).FirstOrDefault()?.Wsl == true;
         string label = wsl ? "WSL" : row?.KnownPlatform is null or "" or RemoteDevicePlatforms.Unknown ? "选择系统" : DirectHostSystem(row);
         _directSshButton.Text = $"SSH · {label}…";
@@ -50,7 +50,7 @@ public sealed partial class MainForm
     private Form CreateDirectSshDialog()
     {
         string device = _viewerHostBox.Text.Trim();
-        var row = DirectSshDevice();
+        var row = SelectedDirectEndpoint();
         var history = DirectSshHistory(device, row).ToList();
         string native = DirectHostSystem(row);
         var peer = row?.DirectoryDeviceId is { } knownId ? RelayRow(knownId)?.Tag as RelayOnlineDevice : null;

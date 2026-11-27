@@ -27,6 +27,7 @@ internal sealed class ViewerConnectionSnapshot
     public ViewerVideoMode VideoMode { get; }
 
     public RelayConnectionOptions? RelayRoute { get; }
+    public string? ExpectedDeviceId { get; init; }
 }
 
 internal static class ViewerReconnectPolicy

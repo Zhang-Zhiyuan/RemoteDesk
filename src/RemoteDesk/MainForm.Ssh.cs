@@ -387,37 +387,69 @@ public sealed partial class MainForm
             IReadOnlyList<SshCommandProfile> profiles = SshCommandProfiles.ReadAll();
             SshCommandProfile? previous = profiles.FirstOrDefault(item => item.DeviceId == route.DeviceId && item.RelayScope == scope);
             string config = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ssh", "config");
-            if (openEditor && previous is not null)
+            string display = selected.MachineName + " · " + system.Label;
+            var onDisk = previous is null ? null : SshCommandProxy.ReadAvailableCredentials(previous, SshCommandProfiles.DefaultSettingsPath);
+            string selectedKey = GetSshDeviceKey(selected, route);
+            bool editedKey = _relayKeySelection == RelayDeviceKeys.Scope(route) + ":" + selected.DeviceId &&
+                _relayViewerPasswordBox.Text.Length > 0 && _relayViewerPasswordBox.Text != AppSettingsService.UnprotectSecret(
+                    RelayDeviceKeys.Find(_settings.Relay.DeviceKeys, route with { DeviceId = selected.DeviceId }));
+            string key = editedKey ? selectedKey : onDisk?.DeviceKey ?? selectedKey;
+            SshCommandProfile profile;
+            bool quickOpen = openEditor && previous is not null;
+            if (quickOpen)
             {
-                SshAliasConfig.Install(previous, SshProxyDeployment.EnsureInstalled(), config,
-                    SshCommandProfiles.ManagedConfigPath, SshCommandProfiles.KnownHostsPath);
-                OpenSshEditor(previous.Alias);
-                return;
+                profile = previous!;
             }
-            string hostAlias = SshTerminalLauncher.HostKeyAlias(route.TlsCertificateSha256, route.DeviceId);
-            var preferences = previous is null ? _settings.Viewer.SshProfiles.FirstOrDefault(item => item.HostKeyAlias == hostAlias)
-                : new SshTerminalProfile(hostAlias, previous.Username, previous.IdentityFile);
-            string suggestedAlias = previous?.Alias ?? (SshAliasConfig.IsValidAlias(selected.MachineName) ? selected.MachineName.ToLowerInvariant() : "rd-" + route.DeviceId[..8]);
-            if (previous is null && system.Id != selected.DeviceId)
-                suggestedAlias = suggestedAlias[..Math.Min(46, suggestedAlias.Length)] + "-wsl-" + system.Id[..8];
-            if (openEditor && !suggestedAlias.StartsWith("rd-", StringComparison.Ordinal))
-                suggestedAlias = "rd-" + suggestedAlias[..Math.Min(61, suggestedAlias.Length)];
-            using var dialog = CreateSshAliasDialog(selected.MachineName + " · " + system.Label, Font, GetSshDeviceKey(selected, route), preferences, suggestedAlias,
-                out TextBox username, out TextBox deviceKey, out TextBox identityFile, out TextBox commandAlias);
-            if (dialog.ShowDialog(this) != DialogResult.OK || _isClosing) return;
-            SshCommandProfile profile = new SshCommandProfile(previous?.Id ?? Guid.NewGuid(), commandAlias.Text.Trim(), route.DeviceId,
-                scope, route.TlsCertificateSha256, username.Text.Trim(), string.IsNullOrWhiteSpace(identityFile.Text) ? null : Path.GetFullPath(identityFile.Text.Trim())).Validate();
+            else
+            {
+                string hostAlias = SshTerminalLauncher.HostKeyAlias(route.TlsCertificateSha256, route.DeviceId);
+                var preferences = previous is null ? _settings.Viewer.SshProfiles.FirstOrDefault(item => item.HostKeyAlias == hostAlias)
+                    : new SshTerminalProfile(hostAlias, previous.Username, previous.IdentityFile);
+                string suggestedAlias = previous?.Alias ?? (SshAliasConfig.IsValidAlias(selected.MachineName) ? selected.MachineName.ToLowerInvariant() : "rd-" + route.DeviceId[..8]);
+                if (previous is null && system.Id != selected.DeviceId)
+                    suggestedAlias = suggestedAlias[..Math.Min(46, suggestedAlias.Length)] + "-wsl-" + system.Id[..8];
+                if (openEditor && !suggestedAlias.StartsWith("rd-", StringComparison.Ordinal))
+                    suggestedAlias = "rd-" + suggestedAlias[..Math.Min(61, suggestedAlias.Length)];
+                using var dialog = CreateSshAliasDialog(display, Font, key, preferences, suggestedAlias,
+                    out TextBox username, out TextBox deviceKey, out TextBox identityFile, out TextBox commandAlias);
+                if (dialog.ShowDialog(this) != DialogResult.OK || _isClosing) return;
+                key = deviceKey.Text;
+                profile = new SshCommandProfile(previous?.Id ?? Guid.NewGuid(), commandAlias.Text.Trim(), route.DeviceId,
+                    scope, route.TlsCertificateSha256, username.Text.Trim(), string.IsNullOrWhiteSpace(identityFile.Text) ? null : Path.GetFullPath(identityFile.Text.Trim())).Validate();
+            }
             if (profiles.Any(item => item.Id != profile.Id && string.Equals(item.Alias, profile.Alias, StringComparison.OrdinalIgnoreCase)))
                 throw new InvalidOperationException("此终端 SSH 别名已存在，请换一个别名；不会替换其他设备。");
             string helper = SshProxyDeployment.EnsureInstalled();
             pending = CancellationTokenSource.CreateLinkedTokenSource(_relayOperationCancellation.Token);
             _sshOpening = pending; UpdateRelayActionState();
-            SetRelayStatus($"正在验证 {selected.MachineName} 的 SSH 设备密钥...", MutedTextColor);
-            using (SshRelayConnection connection = await SshRelayClient.OpenAsync(route, deviceKey.Text, pending.Token))
+            SetRelayStatus($"正在验证 {display} 的 SSH 中继…", MutedTextColor);
+            bool allowKeyCorrection = quickOpen && key.Length > 0;
+            while (true)
             {
-                if (_isClosing || IsDisposed || generation != _relayConfigurationGeneration) return;
-                pending.Token.ThrowIfCancellationRequested();
-                string protectedKey = AppSettingsService.ProtectSecret(deviceKey.Text) ?? throw new IOException("设备密钥无法安全保存，未配置 SSH 别名。");
+                if (key.Length == 0)
+                {
+                    using var prompt = CreateRelayDeviceKeyDialog(display, Font, out TextBox input);
+                    if (prompt.ShowDialog(this) != DialogResult.OK) throw new OperationCanceledException();
+                    key = input.Text;
+                }
+                try
+                {
+                    using var connection = await SshRelayClient.OpenAsync(route, key, pending.Token);
+                    break;
+                }
+                catch (UnauthorizedAccessException) when (allowKeyCorrection && !_isClosing && !IsDisposed &&
+                    generation == _relayConfigurationGeneration && !pending.IsCancellationRequested)
+                {
+                    SetRelayStatus($"{display} 拒绝了已保存的设备密钥，请输入该设备的当前密钥。", DangerColor);
+                    allowKeyCorrection = false;
+                    key = "";
+                }
+            }
+            if (_isClosing || IsDisposed || generation != _relayConfigurationGeneration) return;
+            pending.Token.ThrowIfCancellationRequested();
+            if (onDisk?.DeviceKey != key)
+            {
+                string protectedKey = AppSettingsService.ProtectSecret(key) ?? throw new IOException("设备密钥无法安全保存，未配置 SSH 别名。");
                 var oldKeys = _settings.Relay.DeviceKeys;
                 _settings.Relay.DeviceKeys = RelayDeviceKeys.Remember(oldKeys, route, protectedKey);
                 if (!TrySaveSettings())
@@ -426,11 +458,14 @@ public sealed partial class MainForm
                     throw new IOException("设备密钥未保存，未配置 SSH 别名。");
                 }
             }
+            if (_relayKeySelection == RelayDeviceKeys.Scope(route) + ":" + selected.DeviceId)
+                _relayViewerPasswordBox.Text = key;
             SshAliasConfigResult result;
-            SshCommandProfiles.Save(profile);
+            if (!quickOpen) SshCommandProfiles.Save(profile);
             try { result = SshAliasConfig.Install(profile, helper, config, SshCommandProfiles.ManagedConfigPath, SshCommandProfiles.KnownHostsPath); }
             catch (Exception failure)
             {
+                if (quickOpen) throw;
                 try
                 {
                     if (previous is null) SshCommandProfiles.Remove(profile.Id);
@@ -441,14 +476,19 @@ public sealed partial class MainForm
                 throw;
             }
             SetRelayStatus($"终端 SSH 已配置：ssh {profile.Alias}", SuccessTextColor);
-            if (openEditor) { OpenSshEditor(profile.Alias); return; }
+            if (openEditor)
+            {
+                string platform = system.Id == selected.DeviceId ? selected.Platform : RemoteDevicePlatforms.Linux;
+                OpenSshEditor(profile.Alias, platform);
+                return;
+            }
             MessageBox.Show(this, $"现在可在 PowerShell / Windows Terminal 中运行：\n\nssh {profile.Alias}\n\n" +
                 $"在 VS Code 中可选择“Remote-SSH: Connect to Host…”并输入 {profile.Alias}。首次连接请核对 SSH 主机指纹。\n\n" +
                 "配置：" + config + (result.BackupPath is null ? "" : "\n原配置备份：" + result.BackupPath),
                 "终端 SSH 已配置", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (OperationCanceledException) { if (!_isClosing && !IsDisposed) SetRelayStatus("终端 SSH 配置已取消。", MutedTextColor); }
-        catch (Exception error) when (error is IOException or SocketException or InvalidOperationException or UnauthorizedAccessException or
+        catch (Exception error) when (error is IOException or InvalidDataException or SocketException or InvalidOperationException or UnauthorizedAccessException or
             ArgumentException or Win32Exception or TimeoutException or System.Security.Authentication.AuthenticationException)
         {
             if (!_isClosing && !IsDisposed)
@@ -465,12 +505,14 @@ public sealed partial class MainForm
         }
     }
 
-    private void OpenSshEditor(string alias)
+    private void OpenSshEditor(string alias, string platform)
     {
         try
         {
             DesktopUserLaunch.OpenEditor(alias);
-            SetRelayStatus($"已请求 VS Code 连接 {alias}。请在编辑器中确认 SSH 登录并选择远程文件夹。", SuccessTextColor);
+            string hint = platform is RemoteDevicePlatforms.Linux or RemoteDevicePlatforms.Windows or RemoteDevicePlatforms.MacOS
+                ? $"首次询问远端系统时请选择 {platform}。" : "";
+            SetRelayStatus($"已请求 VS Code 连接 {alias}。{hint}", SuccessTextColor);
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {

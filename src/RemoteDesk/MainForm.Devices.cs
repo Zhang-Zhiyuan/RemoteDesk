@@ -26,7 +26,29 @@ public sealed partial class MainForm
         // Do not decrypt/reload a saved key over an in-progress edit when the
         // same device is refreshed. Another device must never inherit its key.
         if (!sameSelection)
-            _viewerPasswordBox.Text = AppSettingsService.UnprotectSecret(saved?.ProtectedPassword);
+            _viewerPasswordBox.Text = AppSettingsService.UnprotectSecret(saved?.ProtectedPassword ?? DirectDirectoryKey(device));
+    }
+
+    private string? DirectDirectoryKey(RemoteDeviceListItem device)
+    {
+        if (device.ReplacedAtAddress || device.DirectoryDeviceId is not string id ||
+            !_relayDirectEndpoints.Any(e => e.DeviceId == id)) return null;
+        var relay = _settings.Relay;
+        if (string.IsNullOrEmpty(relay.ServerAddress) || string.IsNullOrEmpty(relay.TlsCertificateSha256) ||
+            string.IsNullOrEmpty(relay.ProtectedAccessToken)) return null;
+        return RelayDeviceKeys.Find(relay.DeviceKeys, RelayDeviceKeys.Scope(relay.ServerAddress, relay.RelayPort, relay.TlsCertificateSha256), id);
+    }
+
+    private async Task RefreshDirectDevicesAsync(bool silent)
+    {
+        if (_isClosing || IsDisposed || _layoutPreview || _viewerActionInProgress || _viewerClient.IsConnected) return;
+        var before = _relayDirectEndpoints;
+        Task directory = !_relayOperationInProgress && IsRelayConfigured()
+            ? RefreshRelayDevicesAsync(silent: true, optimizeRoute: false) : Task.CompletedTask;
+        await Task.WhenAll(DiscoverHostsAsync(silent), directory);
+        if (!ReferenceEquals(before, _relayDirectEndpoints) && _relayDirectEndpoints.Length > 0 &&
+            !_isClosing && !IsDisposed && _tabs.SelectedIndex == 1 && !_viewerActionInProgress && _discoveryScanCancellation is null)
+            await DiscoverHostsAsync(silent);
     }
 
     private void InitializeDeviceRefresh()
@@ -37,11 +59,7 @@ public sealed partial class MainForm
             if (ShouldPollDirectDevices(Visible, WindowState == FormWindowState.Minimized, _tabs.SelectedIndex == 1,
                     _viewerClient.IsConnected || _viewerActionInProgress || _isClosing) &&
                 _discoveryScanCancellation is null)
-            {
-                await DiscoverHostsAsync(silent: true);
-                if (!_isClosing && !IsDisposed && _tabs.SelectedIndex == 1 && !_relayOperationInProgress && IsRelayConfigured())
-                    await RefreshRelayDevicesAsync(silent: true, optimizeRoute: false);
-            }
+                await RefreshDirectDevicesAsync(silent: true);
         };
         timer.Start();
         Disposed += (_, _) => timer.Dispose();
@@ -124,6 +142,7 @@ public sealed partial class MainForm
     {
         cancellationToken.ThrowIfCancellationRequested();
         _confirmedHistorySource = null;
+        var reported = SelectedDirectEndpoint() is { IsRelayReported: true } row ? row : null;
         var endpoint = ParseDeviceEndpoint(_viewerHostBox.Text, _viewerAutoPortBox.Checked ? "" : _viewerPortBox.Value.ToString());
         using (var selfCheckTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
         {
@@ -135,6 +154,7 @@ public sealed partial class MainForm
         _viewerHostBox.Text = endpoint.Host;
         if (endpoint.ExplicitPort) _viewerPortBox.Value = endpoint.Port;
         int requestedPort = (int)_viewerPortBox.Value;
+        if (reported is not null) return await ResolveReportedEndpointAsync(reported, cancellationToken);
         SavedRemoteDevice? saved = _selectedHistoryDevice;
         if (saved is not null && !string.Equals(saved.Address, endpoint.Host, StringComparison.OrdinalIgnoreCase) &&
             !_lastDiscoveredHosts.Any(h => h.Address == endpoint.Host && RemoteDeviceIdentity.Same(h.DeviceId, saved.DeviceId))) saved = null;
@@ -177,6 +197,38 @@ public sealed partial class MainForm
         if (chosen is null || !ConfirmMovedSavedDevice(saved, chosen.Address, chosen.Port)) return false;
         _viewerHostBox.Text = chosen.Address; _viewerPortBox.Value = ClampToRange(chosen.Port, _viewerPortBox);
         UpdateDiscoveredHosts(MergeDiscoveredHosts(_lastDiscoveredHosts, found), silent: true);
+        return true;
+    }
+
+    private async Task<bool> ResolveReportedEndpointAsync(RemoteDeviceListItem row, CancellationToken cancellationToken)
+    {
+        long generation = _relayConfigurationGeneration;
+        var local = NetworkUtils.GetLocalAddresses().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var targets = _relayDirectEndpoints.Where(e => e.DeviceId == row.DeviceId && !NetworkUtils.IsLikelyLocalEndpoint(e.Address, null, local))
+            .OrderByDescending(e => e.Address == row.Address).Select(e => new DiscoveryProbeTarget(e.Address, e.Port)).ToArray();
+        SetViewerStatus($"正在确认 {row.DisplayName} 的直连地址…", MutedTextColor);
+        var found = await Task.Run(() => NetworkDiscoveryService.DiscoverAsync(TimeSpan.FromMilliseconds(1100), cancellationToken,
+            directTargets: targets, hostProbePort: row.Port, includeBroadcast: false), cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_isClosing || IsDisposed) return false;
+        var current = _relayDirectEndpoints.Where(e => e.DeviceId == row.DeviceId)
+            .Select(e => new DiscoveryProbeTarget(e.Address, e.Port)).ToHashSet();
+        if (generation != _relayConfigurationGeneration || !current.Contains(new(row.Address, row.Port)))
+            throw new InvalidOperationException("中继上报的地址已变化，请重新选择设备。");
+        var matching = targets.Where(current.Contains).SelectMany(t => found.Where(h => h.Address == t.Address &&
+            h.Port == t.HostPort && RemoteDeviceIdentity.Same(h.DeviceId, row.DeviceId))).FirstOrDefault();
+        UpdateDiscoveredHosts(MergeDiscoveredHosts(_lastDiscoveredHosts, found), silent: true);
+        if (matching is not null)
+        {
+            _viewerHostBox.Text = matching.Address;
+            _viewerPortBox.Value = matching.Port;
+            if (!matching.IsHostRunning && !matching.CanRemoteStart)
+                throw new InvalidOperationException("已找到目标设备，但它尚未开启桌面被控端。");
+        }
+        else if (found.Any(h => h.Address == row.Address && h.Port == row.Port && RemoteDeviceIdentity.Conflicts(h.DeviceId, row.DeviceId)))
+            throw new InvalidOperationException("此地址上的设备 ID 与所选设备不同。请刷新直连列表，或通过中继连接所选设备。");
+        // A firewall may allow RemoteDesk TCP but block UDP discovery. Keep the
+        // advertised endpoint for the ordinary authenticated direct connection.
         return true;
     }
 

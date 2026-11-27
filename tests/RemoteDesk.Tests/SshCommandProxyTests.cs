@@ -133,6 +133,28 @@ public sealed class SshCommandProxyTests
     }
 
     [Fact]
+    public async Task ExistingAliasWithoutPairingGivesActionableStderrAndNoProtocolBytes()
+    {
+        using var fixture = new Fixture();
+        var profile = Profile;
+        SshCommandProfiles.Save(profile, Path.Combine(fixture.Directory, "ssh"));
+        string path = fixture.WriteSettings();
+        var settings = JsonSerializer.Deserialize<RemoteDeskSettings>(File.ReadAllText(path))!;
+        settings.Relay.DeviceKeys[0].DeviceId = Guid.NewGuid().ToString();
+        File.WriteAllText(path, JsonSerializer.Serialize(settings));
+        Assert.Null(SshCommandProxy.ReadAvailableCredentials(profile, path));
+        using var stdout = new MemoryStream();
+        using var stderr = new StringWriter();
+        Assert.Equal(1, await SshCommandProxy.RunAsync(["--stdio", profile.Id.ToString(), "--config-root", fixture.Directory],
+            Stream.Null, stdout, stderr, CancellationToken.None));
+        Assert.Equal(0, stdout.Length);
+        Assert.Contains(profile.Alias, stderr.ToString());
+        Assert.Contains("用 VS Code 打开", stderr.ToString());
+        Assert.DoesNotContain("Exception", stderr.ToString());
+        Assert.DoesNotContain("owned-device-key", stderr.ToString());
+    }
+
+    [Fact]
     public void CorruptGuiSettingsAreNeverRenamedByProxy()
     {
         using var fixture = new Fixture();

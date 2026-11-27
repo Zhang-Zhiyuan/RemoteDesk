@@ -8,6 +8,34 @@ namespace RemoteDesk.Tests;
 public sealed class SshMainFormTests
 {
     [Fact]
+    public void DirectPickerTracksUnseenRoutedPeersWithoutLosingSelectionOnHeartbeatOrDhcp() => OnSta(() =>
+    {
+        using var main = CreatePreview();
+        var a = Device with { MachineName = "Lab A", Platform = "Linux", DirectAddresses = ["192.0.2.12"], DirectPort = 56565 };
+        var b = a with { DeviceId = Guid.NewGuid().ToString(), MachineName = "Lab B", DirectAddresses = ["192.0.2.13"] };
+        Assert.True(main.ApplyRelayDeviceList([a,b], 0));
+        var combo = Field<ComboBox>(main, "_discoveredHostsBox");
+        var list = Field<ListBox>(main, "_discoveredHostsList");
+        var host = Field<TextBox>(main, "_viewerHostBox");
+        var key = Field<TextBox>(main, "_viewerPasswordBox");
+        var target = list.Items.Cast<MainForm.RemoteDeviceListItem>().Single(i => i.DeviceId == a.DeviceId);
+        Assert.Equal(2, list.Items.Count); Assert.Contains(target, combo.Items.Cast<object>());
+        combo.SelectedIndex = -1; combo.SelectedItem = target;
+        Assert.Equal("192.0.2.12", host.Text); Assert.Equal("owned-device-key", key.Text);
+        key.Text = "unsaved-edit";
+        Assert.True(main.ApplyRelayDeviceList([a with { LastSeenSeconds = 3 },b], 0));
+        Assert.Same(target, combo.SelectedItem); Assert.Same(target, list.SelectedItem);
+        a = a with { DirectAddresses = ["192.0.2.33"] };
+        Assert.True(main.ApplyRelayDeviceList([a,b], 0));
+        Assert.Equal("192.0.2.33", host.Text); Assert.Equal("unsaved-edit", key.Text);
+        Assert.Contains("Linux", Field<Button>(main, "_directSshButton").Text);
+        Assert.False(main.ApplyRelayDeviceList([], -1));
+        Assert.Equal(2, list.Items.Count);
+        Assert.True(main.ApplyRelayDeviceList([b], 0));
+        Assert.Single(list.Items.Cast<object>()); Assert.Null(combo.SelectedItem); Assert.Empty(key.Text);
+        Assert.Empty(Field<RemoteDeskSettings>(main, "_settings").Viewer.RecentDevices);
+    });
+    [Fact]
     public void DirectAndRelayShowSameMachineAndKeepWindowsAndWslRoutesDistinct() => OnSta(() =>
     {
         using var main = CreatePreview();

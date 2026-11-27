@@ -88,7 +88,7 @@ public sealed partial class MainForm
             if (connection.RelayRoute is { } relay)
                 await client.ConnectViaRelayAsync(relay, connection.Password, connection.VideoMode, cancellation);
             else
-                await client.ConnectAsync(connection.Host, connection.Port, connection.Password, connection.VideoMode, cancellation);
+                await client.ConnectDirectAsync(connection, cancellation);
             if (!await client.WaitForCurrentDeviceInfoAsync(RemoteViewerClient.DeviceInfoHandshakeTimeout, cancellation))
                 throw new TimeoutException("独立屏幕连接未完成握手。");
             if (!Current()) throw new OperationCanceledException("主连接已改变。");

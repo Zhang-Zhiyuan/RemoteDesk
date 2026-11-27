@@ -3,6 +3,15 @@ namespace RemoteDesk;
 public sealed partial class MainForm
 {
     private bool _relayDeviceListUpdating;
+    private RelayDirectEndpoint[] _relayDirectEndpoints = [];
+
+    private void ClearRelayDeviceDirectory(bool keepDirectHints = false)
+    {
+        _relayDevicesList.Items.Clear();
+        if (keepDirectHints || _relayDirectEndpoints.Length == 0) return;
+        _relayDirectEndpoints = [];
+        UpdateDiscoveredHosts(_lastDiscoveredHosts, silent: true);
+    }
 
     internal bool ApplyRelayDeviceList(IReadOnlyList<RelayOnlineDevice> devices, long configurationGeneration)
     {
@@ -13,12 +22,16 @@ public sealed partial class MainForm
         try { UpdateRelayDeviceList(_relayDevicesList, devices, _settings.Relay.DeviceId); }
         finally { _relayDeviceListUpdating = false; }
         SelectRelayDeviceKey();
-        if (RelayDeviceName.UpdateCache(_settings.Relay, devices))
+        var endpoints = RelayDirectEndpoint.FromDirectory(devices, _settings.Relay.DeviceId);
+        bool addressesChanged = !_relayDirectEndpoints.SequenceEqual(endpoints);
+        if (addressesChanged) _relayDirectEndpoints = endpoints;
+        bool namesChanged = RelayDeviceName.UpdateCache(_settings.Relay, devices);
+        if (namesChanged)
         {
             if (!_layoutPreview) TrySaveSettings();
-            UpdateDiscoveredHosts(_lastDiscoveredHosts, silent: true);
             RefreshViewerWindowTitles();
         }
+        if (addressesChanged || namesChanged) UpdateDiscoveredHosts(_lastDiscoveredHosts, silent: true);
         return true;
     }
 

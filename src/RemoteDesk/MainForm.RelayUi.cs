@@ -101,7 +101,7 @@ public sealed partial class MainForm
         }
         _relayConfigurationGeneration++;
         _relayOperationInProgress = true;
-        _relayDevicesList.Items.Clear(); _relayKeySelection = null; _relayViewerPasswordBox.Clear();
+        ClearRelayDeviceDirectory(); _relayKeySelection = null; _relayViewerPasswordBox.Clear();
         UpdateDiscoveredHosts(_lastDiscoveredHosts, silent: true);
         UpdateRelayServerSummary();
         UpdateRelayActionState();

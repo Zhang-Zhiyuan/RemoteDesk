@@ -449,7 +449,7 @@ internal static class NetworkDiscoveryService
     private const int MaxConcurrentTcpProbes = 192;
     private const int RemoteStartNonceBytes = 16;
     private const int TcpProbeTimeoutMilliseconds = 300;
-    private const string TcpProbeCaptureTarget = "TCP 被控端";
+    internal const string TcpProbeCaptureTarget = "TCP 被控端";
     private static readonly TimeSpan RemoteStartClockSkew = TimeSpan.FromMinutes(2);
     private static readonly byte[] DiscoveryRequest = Encoding.UTF8.GetBytes("RemoteDesk.Discover.v1");
     private const string DiscoveryResponseType = "RemoteDesk.Discover.Response.v1";

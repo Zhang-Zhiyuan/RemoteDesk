@@ -511,6 +511,10 @@ internal sealed partial class RemoteViewerClient : IDisposable
             .ConfigureAwait(false);
     }
 
+    internal Task ConnectDirectAsync(ViewerConnectionSnapshot connection, CancellationToken cancellationToken) =>
+        ConnectCoreAsync(connection.Host, connection.Port, connection.Password, connection.VideoMode,
+            null, cancellationToken, connection.ExpectedDeviceId);
+
     public async Task ConnectViaRelayAsync(
         RelayConnectionOptions relayRoute,
         string password,
@@ -534,7 +538,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
         string password,
         ViewerVideoMode videoMode,
         RelayConnectionOptions? relayRoute,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, string? expectedDeviceId = null)
     {
         if (string.IsNullOrWhiteSpace(host))
         {
@@ -562,7 +566,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
                         password,
                         videoMode,
                         relayRoute,
-                        cancellationToken)
+                        cancellationToken,
+                        expectedDeviceId)
                     .ConfigureAwait(false);
             if (attempt.Outcome is
                     ConnectAttemptOutcome.ExistingConnection or
@@ -583,7 +588,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
         string password,
         ViewerVideoMode videoMode,
         RelayConnectionOptions? relayRoute,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? expectedDeviceId)
     {
         string? connectedLog = null;
         string? videoCapabilityLog = null;
@@ -789,7 +795,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
                         cancellationTokenSource,
                         inputConnectionGeneration,
                         remoteCapabilitiesReady,
-                        receiveProgress), CancellationToken.None);
+                        receiveProgress, expectedDeviceId), CancellationToken.None);
                     if (!ReferenceEquals(_cancellationTokenSource, cancellationTokenSource))
                     {
                         throw new IOException("连接在后台接收循环启动时已中断。");
@@ -2666,7 +2672,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
         CancellationTokenSource ownerCancellationTokenSource,
         long inputConnectionGeneration,
         TaskCompletionSource<bool> remoteCapabilitiesReady,
-        ProtocolReceiveProgress receiveProgress)
+        ProtocolReceiveProgress receiveProgress, string? expectedDeviceId)
     {
         try
         {
@@ -2736,7 +2742,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
                                 message.PayloadMemory,
                                 ownerCancellationTokenSource,
                                 inputConnectionGeneration,
-                                remoteCapabilitiesReady);
+                                remoteCapabilitiesReady, expectedDeviceId);
                         }
                         catch (Exception ex) when (
                             ex is not RemoteSessionRejectedException &&
@@ -3068,7 +3074,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
         ReadOnlyMemory<byte> payload,
         CancellationTokenSource ownerConnection,
         long inputConnectionGeneration,
-        TaskCompletionSource<bool> remoteCapabilitiesReady)
+        TaskCompletionSource<bool> remoteCapabilitiesReady, string? expectedDeviceId)
     {
         if (!IsCurrentConnection(ownerConnection))
         {
@@ -3122,6 +3128,9 @@ internal sealed partial class RemoteViewerClient : IDisposable
                         control.Capabilities,
                         control.BuildStamp ?? _remoteBuildStamp,
                         _remoteDeviceInfo?.DeviceId);
+                    bool waitForIdentity = expectedDeviceId is not null && device.DeviceId is null;
+                    if (waitForIdentity && !device.Capabilities.HasFlag(RemoteDeviceCapabilities.DeviceIdentity))
+                        throw new RemoteSessionRejectedException("此地址的被控端无法确认中继目录中的设备 ID。请核对地址，或通过中继连接。");
                     if (IsCurrentConnection(ownerConnection) &&
                         IsCurrentInputConnectionGeneration(
                             inputConnectionGeneration))
@@ -3135,18 +3144,16 @@ internal sealed partial class RemoteViewerClient : IDisposable
                                     .FileChecksum);
                         // ConnectAsync has already written our viewer
                         // safeguards before starting this receive loop.
-                        Volatile.Write(
-                            ref _remoteCapabilitiesInitialized,
-                            1);
-                        remoteCapabilitiesReady.TrySetResult(true);
-                        DeviceInfoUpdated?.Invoke(
-                            new RemoteDeviceInfoUpdate(
-                                inputConnectionGeneration,
-                                device));
+                        if (!waitForIdentity)
+                        {
+                            Volatile.Write(ref _remoteCapabilitiesInitialized, 1);
+                            remoteCapabilitiesReady.TrySetResult(true);
+                            DeviceInfoUpdated?.Invoke(new RemoteDeviceInfoUpdate(inputConnectionGeneration, device));
+                        }
                     }
 
                     // Preserve the original event for API compatibility.
-                    DeviceInfoReceived?.Invoke(device);
+                    if (!waitForIdentity) DeviceInfoReceived?.Invoke(device);
                     if (!_deviceIdentityRequested && control.Capabilities.HasFlag(RemoteDeviceCapabilities.DeviceIdentity) &&
                         IsCurrentConnection(ownerConnection) && IsCurrentInputConnectionGeneration(inputConnectionGeneration))
                     {
@@ -3167,7 +3174,14 @@ internal sealed partial class RemoteViewerClient : IDisposable
                     // Identity is a final stop, not a pre-auth takeover guard.
                     if (!_allowLocalConnectionsForTesting)
                         SelfConnectionGuard.RejectLocalDevice(control.Text);
+                    if (expectedDeviceId is not null && !RemoteDeviceIdentity.Same(expectedDeviceId, control.Text))
+                        throw new RemoteSessionRejectedException("此地址上的设备 ID 与所选设备不同。请刷新直连列表，或通过中继连接所选设备。");
                     _remoteDeviceInfo = _remoteDeviceInfo with { DeviceId = control.Text };
+                    if (expectedDeviceId is not null)
+                    {
+                        Volatile.Write(ref _remoteCapabilitiesInitialized, 1);
+                        remoteCapabilitiesReady.TrySetResult(true);
+                    }
                     DeviceInfoUpdated?.Invoke(new RemoteDeviceInfoUpdate(inputConnectionGeneration, _remoteDeviceInfo));
                     DeviceInfoReceived?.Invoke(_remoteDeviceInfo);
                 }

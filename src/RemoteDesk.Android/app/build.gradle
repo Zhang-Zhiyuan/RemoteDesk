@@ -47,8 +47,8 @@ android {
         minSdk 26
         targetSdk 36
         buildConfigField "boolean", "ALLOW_LOOPBACK_FIXTURES", "false"
-        versionCode 70
-        versionName "1.0.67"
+        versionCode 71
+        versionName "1.0.68"
     }
 
     compileOptions {
