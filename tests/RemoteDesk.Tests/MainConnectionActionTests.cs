@@ -86,14 +86,13 @@ public sealed class MainConnectionActionTests
         Field("_viewerClient").SetValue(ui.Form, client);
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
-        Get<TextBox>(ui.Form, "_viewerHostBox").Text = "127.0.0.1";
-        Get<NumericUpDown>(ui.Form, "_viewerPortBox").Value = ((IPEndPoint)listener.LocalEndpoint).Port;
-        Get<TextBox>(ui.Form, "_viewerPasswordBox").Text = "owned-fixture";
+        var snapshot = new ViewerConnectionSnapshot("127.0.0.1", ((IPEndPoint)listener.LocalEndpoint).Port,
+            "owned-fixture", ViewerVideoMode.Automatic);
         var attempt = (CancellationTokenSource)Call(ui.Form, "BeginViewerConnectionAction", false)!;
         try
         {
             Task<TcpClient> accepted = listener.AcceptTcpClientAsync();
-            Task connecting = (Task)Call(ui.Form, "ConnectViewerAsync", attempt.Token)!;
+            Task connecting = (Task)Call(ui.Form, "ConnectViewerAsync", snapshot, attempt.Token)!;
             Pump(accepted);
             using TcpClient peer = accepted.Result;
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
