@@ -24,7 +24,8 @@ internal static class SshLanRoute
             !CryptographicOperations.FixedTimeEquals(Proof("offer"u8, offer, key), offer.AsSpan(38))) return null;
         int port = BinaryPrimitives.ReadUInt16BigEndian(offer.AsSpan(4, 2));
         if (port < 1024) return null;
-        var client = new TcpClient(AddressFamily.InterNetwork) { NoDelay = true };
+        var client = new TcpClient(AddressFamily.InterNetwork);
+        NetworkUtils.ConfigureLowLatencyTcpClient(client, receiveBufferSize: 0, sendBufferSize: 0);
         SslStream? tls = null;
         bool transferred = false;
         try

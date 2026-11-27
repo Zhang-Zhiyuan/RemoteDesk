@@ -218,6 +218,16 @@ async def try_candidate(offer, key, relay_elapsed):
 async def keep_relay_lease(relay_reader, relay_writer, data_writer, *, allow_prefix=False):
     # Either side closing (including a disabled service or cancelled terminal)
     # must release the other socket and the existing relay SSH quota.
+    # Once payload takes the LAN route, the control socket can be silent for hours.
+    # Keep its NAT mapping alive and detect a lost peer without injecting SSH bytes.
+    for writer in (relay_writer, data_writer):
+        sock = writer.get_extra_info("socket")
+        if sock is not None:
+            for level, option, value in ((socket.SOL_SOCKET, "SO_KEEPALIVE", 1), (socket.IPPROTO_TCP, "TCP_KEEPIDLE", 20),
+                                         (socket.IPPROTO_TCP, "TCP_KEEPINTVL", 5), (socket.IPPROTO_TCP, "TCP_KEEPCNT", 4)):
+                with contextlib.suppress(OSError, AttributeError):
+                    sock.setsockopt(level, getattr(socket, option), value)
+
     async def watch_control():
         remaining = MAX_PREFIX if allow_prefix else 0
         while remaining >= 0:
