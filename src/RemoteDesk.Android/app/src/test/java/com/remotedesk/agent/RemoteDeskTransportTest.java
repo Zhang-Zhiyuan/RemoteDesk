@@ -174,6 +174,14 @@ public final class RemoteDeskTransportTest {
     }
 
     @Test
+    public void windowsNativeDetailAdvertisementStillSelectsH264() throws IOException {
+        // Windows ViewerInfo, H264AnnexB with its optional native text refinement bit.
+        byte[] wire = {(byte) RemoteDeskProtocol.CONTROL_VIEWER_INFO, 0x06, 0, 0, 0};
+        assertEquals(RemoteDeskProtocol.VIDEO_CODEC_H264_ANNEX_B,
+            RemoteDeskTransport.decodeControl(wire).videoCodecs);
+    }
+
+    @Test
     public void decodeControlRejectsTrailingBytes() {
         byte[] payload = new byte[] {
             (byte) RemoteDeskProtocol.CONTROL_CLIPBOARD_GET_TEXT,
