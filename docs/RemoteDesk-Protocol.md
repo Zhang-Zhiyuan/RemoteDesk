@@ -9,10 +9,11 @@ This document captures the RemoteDesk protocol surface that Windows, Android, an
 ### Reliable H.264 receipts
 
 Capability bit 31 (`ReliableVideoFeedback`) is a **signed int32** bit, preserving
-the existing little-endian capability field. Windows advertises it; older
-Windows, Linux and Android peers ignore the unknown bit and keep their existing
-video records. Both endpoints must advertise support before tracked video is
-sent. UDP, native-detail records and dependent H.264 chains keep their own rules.
+the existing little-endian capability field. Windows supports sending and receiving
+tracked video. The Linux host also sends tracked video to a viewer advertising
+this capability. Linux and Android viewers currently receive ordinary video
+records. Both endpoints must advertise support before tracked video is sent.
+UDP, native-detail records and dependent H.264 chains keep their own rules.
 
 - Message `14`: positive int64 sequence, followed by the existing 32-byte video
   header and an independent H.264 access unit. Sequences start at 1 per connection
@@ -30,6 +31,28 @@ never grants more credit, and unrelated control/heartbeat traffic remains live.
 One larger recovery frame may pass an empty window to avoid a scene-change
 deadlock. Capture, resolution and encoded image bytes are not modified by this
 flow control. Existing write-pressure pacing remains a second limit.
+
+### Windows native text refinement
+
+The Windows viewer advertises codec flag `NativeDetailH264` together with
+`H264AnnexB` and the existing `NativeDetailV1` capability. The host echoes
+the extension in byte 5 of the offer. The viewer sets byte 5 in its request
+only after receiving that offer. Older peers use the existing reliable
+native-frame records and the pointer-centered 64-tile viewport.
+
+With the extension, a native base can use the authenticated UDP video channel.
+Each independent H.264 frame and its source manifest share one reassembled
+payload. Input invalidates the overlay immediately. UDP video and input
+remain live when the user enables or disables refinement. The reliable route
+continues to carry base frames when the session uses a TCP relay.
+
+The decoder matches the manifest to the actual presented frame. A receipt
+can describe up to 144 visible tiles, 64 at a time, with the page number in
+the last int32 of the existing receipt. Reliable base sessions may use
+256-byte compressed fragments (kind 4). Messages 16 and 17 carry reliable
+fragments and cumulative receipts for UDP-base sessions. Their byte counter
+covers only the reliable fragments. Packet loss or a retired request cannot
+grant credit for an unreceived fragment or display its pixels on a new frame.
 
 ### Privacy screen
 

@@ -2,30 +2,36 @@ using System.Drawing;
 
 namespace RemoteDesk;
 
-// Renderer-only immutable inputs. No wire capability is advertised yet. A
-// session owner must validate native content versions before constructing a
+// Renderer-only immutable inputs. The session validates native content versions before constructing a
 // batch, and pair it with the EXACT decoded base sample, not an arrival time.
 internal sealed class NativeDetailTile
 {
-    private readonly byte[] _rgba;
     internal Rectangle Bounds { get; }
     internal long Version { get; }
-    internal ReadOnlyMemory<byte> Rgba => _rgba;
+    internal ReadOnlyMemory<byte> Rgba { get; }
 
     internal NativeDetailTile(Rectangle bounds, long version, ReadOnlySpan<byte> rgba)
+        : this(bounds, version, rgba.Length) => Rgba = rgba.ToArray();
+
+    // The cache exclusively owns its inflated buffer and never mutates it. The
+    // atlas upload can share that snapshot even after a newer cache generation.
+    internal NativeDetailTile(RemoteDesk.NativeDetail.DetailPatch patch)
+        : this(new(patch.Rect.X, patch.Rect.Y, patch.Rect.Width, patch.Rect.Height), patch.Version, patch.Rgba.Length) => Rgba = patch.Rgba;
+
+    private NativeDetailTile(Rectangle bounds, long version, int length)
     {
         if (bounds.X < 0 || bounds.Y < 0 || bounds.X % 128 != 0 || bounds.Y % 128 != 0 ||
             bounds.Width is <= 0 or > 128 || bounds.Height is <= 0 or > 128 ||
             (long)bounds.X + bounds.Width > 8192 || (long)bounds.Y + bounds.Height > 8192 ||
-            version <= 0 || rgba.Length != bounds.Width * bounds.Height * 4)
+            version <= 0 || length != bounds.Width * bounds.Height * 4)
             throw new ArgumentException("Invalid native RGBA tile.");
-        Bounds = bounds; Version = version; _rgba = rgba.ToArray();
+        Bounds = bounds; Version = version;
     }
 }
 
 internal sealed class NativeDetailPresentation
 {
-    internal const int MaximumTiles = 64;
+    internal const int MaximumTiles = RemoteDesk.NativeDetail.DetailCache.ExtendedMaxCachedTiles;
     private readonly NativeDetailTile[] _tiles;
     internal long Epoch { get; }
     internal long Request { get; }

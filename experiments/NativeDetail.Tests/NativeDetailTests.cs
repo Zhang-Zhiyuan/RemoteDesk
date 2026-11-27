@@ -29,6 +29,24 @@ public sealed class NativeDetailTests
         Assert.True(cache.Present(manifest)); return cache;
     }
 
+    [Fact]
+    public void NarrowLinkChunksRequireNegotiationAndReassembleToTheOriginalPixels()
+    {
+        var manifest = Manifest(Context);
+        var transfer = Transfer(manifest, random: true);
+        const int size = DetailWire.NarrowLinkChunkBytes;
+        Assert.Equal(DetailReceiveResult.Invalid, Cache(manifest).Receive(transfer.Chunk(0, size), 0));
+        var cache = new DetailCache();
+        cache.Reset(Context, new(0, 0, Context.Width, Context.Height), extended: true);
+        Assert.True(cache.Present(manifest));
+        DetailReceiveResult last = default;
+        for (int i = 0; i < transfer.Encoded.Length; i += size)
+            last = cache.Receive(transfer.Chunk(i, size), 1);
+        Assert.Equal(DetailReceiveResult.Applied, last);
+        var patch = Assert.Single(cache.Patches);
+        Assert.Equal(DetailWire.DecodeRgba(transfer.Encoded.Span, patch.Rgba.Length), patch.Rgba.ToArray());
+    }
+
     [Theory]
     [InlineData(128, 128, false)]
     [InlineData(127, 73, false)]

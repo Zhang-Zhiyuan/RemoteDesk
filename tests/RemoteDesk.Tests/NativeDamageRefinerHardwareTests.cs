@@ -11,6 +11,29 @@ public sealed class NativeDamageRefinerHardwareTests
 {
     [Fact]
     [Trait("Category", "HardwareSmoke")]
+    public void DuplicationRepeatCanProveAnIdenticalImmutableLeaseWithoutGpuWork()
+    {
+        if (!Enabled) return;
+        using var device = Device();
+        using var refiner = new D3D11NativeDamageRefiner(device);
+        using var texture = Texture(device, new byte[257 * 259 * 4]);
+        refiner.Begin(texture, Coarse(1), [8], Budget());
+        refiner.Complete(1, Budget());
+        using var same = texture.QueryInterface<ID3D11Texture2D>();
+        Assert.True(refiner.Begin(same, Coarse(2), [8], Budget(), repeatedImmutableSource: true));
+        Assert.Equal(1, refiner.Complete(2, Budget())[8]);
+        Assert.Equal(0, refiner.SubmittedComparisons);
+        var changed = new byte[257 * 259 * 4];
+        changed[^4] = 255;
+        using var different = Texture(device, changed);
+        Assert.True(refiner.Begin(different, Coarse(3), [8], Budget(), repeatedImmutableSource: true));
+        FinishGpu(device, refiner);
+        Assert.Equal(3, refiner.Complete(3, Budget())[8]);
+        Assert.Equal(1, refiner.SubmittedComparisons);
+    }
+
+    [Fact]
+    [Trait("Category", "HardwareSmoke")]
     public void ExactGpuComparisonDetectsOneBitChangesEdgesAndRestoresNoOldVersions()
     {
         if (!Enabled) return;
@@ -36,7 +59,7 @@ public sealed class NativeDamageRefinerHardwareTests
         Assert.True(refiner.Begin(first, Coarse(4), tiles, Budget()));
         FinishGpu(device, refiner);
         Assert.Equal(new long[] { 4, 1, 1, 1, 4, 1, 1, 1, 4 }, refiner.Complete(4, Budget()).CopyVersions());
-        Assert.Equal(256, refiner.StagingBytes);
+        Assert.Equal(144 * sizeof(int), refiner.StagingBytes);
         Assert.Equal(3, refiner.CompletedComparisons);
         Assert.NotEqual(nint.Zero, first.Device.NativePointer);
     }
@@ -92,7 +115,7 @@ public sealed class NativeDamageRefinerHardwareTests
         Assert.Throws<ArgumentException>(() => refiner.Begin(texture, Coarse(1), [-1], Budget()));
         Assert.Throws<ArgumentException>(() => refiner.Begin(texture, Coarse(1), [9], Budget()));
         Assert.Throws<ArgumentException>(() => refiner.Begin(texture, Coarse(1), [0, 0], Budget()));
-        Assert.Throws<ArgumentOutOfRangeException>(() => refiner.Begin(texture, Coarse(1), new int[65], Budget()));
+        Assert.Throws<ArgumentOutOfRangeException>(() => refiner.Begin(texture, Coarse(1), new int[145], Budget()));
         Assert.Equal(0, refiner.PendingCount);
         refiner.Begin(texture, Coarse(1), [0], Budget()); refiner.Complete(1, Budget());
         Assert.Throws<ArgumentException>(() => refiner.Begin(texture, Coarse(1), [0], Budget()));

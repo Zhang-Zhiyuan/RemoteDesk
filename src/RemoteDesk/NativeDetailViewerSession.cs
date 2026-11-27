@@ -25,10 +25,10 @@ internal sealed class NativeDetailViewerSession : IDisposable
     private long _appliedChunks;
     private long _lastPresented;
 
-    private sealed record RequestState(DetailContext Context, DetailRect Viewport, bool Enabled)
+    private sealed record RequestState(DetailContext Context, DetailRect Viewport, bool Enabled, bool Extended)
     {
         internal int NativeBaseObserved;
-        internal int[] TileOrder { get; } = NativeDetailCaptureWorker.SelectTiles(new(Context, Viewport, true));
+        internal int[] TileOrder { get; } = NativeDetailCaptureWorker.SelectTiles(new(Context, Viewport, true, Extended));
     }
     private sealed record QueuedChunk(RequestState Owner, byte[] Bytes, long EnqueuedAt);
     private sealed record BaseOnlyGrace(RequestState Previous, RequestState Pending);
@@ -38,7 +38,7 @@ internal sealed class NativeDetailViewerSession : IDisposable
     internal bool IsStopRequest(DetailContext context) => Volatile.Read(ref _requested) is { Enabled: false } request && request.Context == context;
     internal long AppliedChunks => Interlocked.Read(ref _appliedChunks);
     internal long LastPresentedSequence => Interlocked.Read(ref _lastPresented);
-    internal (long Sequence, ulong Tiles) ReadReceipt(DetailContext expected)
+    internal (long Sequence, ulong Tiles, int Page) ReadReceipt(DetailContext expected, int nextPage = 0)
     {
         if (!Monitor.TryEnter(_cacheGate)) return default;
         try
@@ -46,9 +46,11 @@ internal sealed class NativeDetailViewerSession : IDisposable
             RequestState? state = Volatile.Read(ref _active);
             if (state is null || state.Context != expected || _lastPresented == 0) return default;
             ulong mask = 0;
-            for (int i = 0; i < state.TileOrder.Length; i++)
-                if (_tiles.ContainsKey(state.TileOrder[i])) mask |= 1UL << i;
-            return (_lastPresented, mask);
+            int page = nextPage % ((state.TileOrder.Length + 63) / 64);
+            int start = page * 64;
+            for (int i = start; i < Math.Min(start + 64, state.TileOrder.Length); i++)
+                if (_tiles.ContainsKey(state.TileOrder[i])) mask |= 1UL << (i - start);
+            return (_lastPresented, mask, page);
         }
         finally { Monitor.Exit(_cacheGate); }
     }
@@ -66,11 +68,11 @@ internal sealed class NativeDetailViewerSession : IDisposable
                 (request.Context.Epoch == _lastContext.Epoch && request.Context.Request <= _lastContext.Request)))
                 throw new InvalidDataException("Native requests must advance their local context.");
             Volatile.Write(ref _active, null);
-            _cache.Reset(request.Context, request.Viewport);
+            _cache.Reset(request.Context, request.Viewport, request.Extended);
             _tiles.Clear(); _future.Clear();
             lock (_queueGate) _queue.Clear();
             _lastContext = request.Context;
-            var state = new RequestState(request.Context, request.Viewport, request.Enabled);
+            var state = new RequestState(request.Context, request.Viewport, request.Enabled, request.Extended);
             RequestState? previous = Volatile.Read(ref _requested);
             Volatile.Write(ref _previousBaseOnly, previous is not null &&
                 previous.Context.Epoch == request.Context.Epoch &&
@@ -223,8 +225,7 @@ internal sealed class NativeDetailViewerSession : IDisposable
         foreach (DetailPatch patch in patches)
         {
             if (_tiles.TryGetValue(patch.Tile, out var existing) && ReferenceEquals(existing.Patch, patch)) continue;
-            var rect = patch.Rect;
-            _tiles[patch.Tile] = (patch, new(new(rect.X, rect.Y, rect.Width, rect.Height), patch.Version, patch.Rgba.Span));
+            _tiles[patch.Tile] = (patch, new(patch));
         }
     }
 

@@ -66,6 +66,8 @@ public sealed record DetailPatch(int Tile, long Version, DetailRect Rect, ReadOn
 public sealed class DetailCache
 {
     public const int MaxCachedTiles = 64, MaxAssemblies = 2;
+    public const int ExtendedMaxCachedTiles = 144;
+    private int _capacity = MaxCachedTiles;
     public const long AssemblyLifetimeMilliseconds = 1500;
     private DetailContext _context;
     private DetailRect _viewport;
@@ -81,13 +83,14 @@ public sealed class DetailCache
 
     // Context changes originate in the local authenticated session/viewport
     // lifecycle, never from an unsolicited patch or incoming frame header.
-    public void Reset(DetailContext context, DetailRect viewport)
+    public void Reset(DetailContext context, DetailRect viewport, bool extended = false)
     {
         context.Validate(); viewport.Validate(context);
         if (_context.Epoch != 0 && (context.Epoch < _context.Epoch ||
             (context.Epoch == _context.Epoch && context.Request <= _context.Request)))
             throw new InvalidDataException("A reset must advance the epoch or request token.");
         Clear(); _context = context; _viewport = viewport; _enabled = true;
+        _capacity = extended ? ExtendedMaxCachedTiles : MaxCachedTiles;
         _displayed = null; _minimumReference = 0;
     }
     public void Disable() { Clear(); _enabled = false; _displayed = null; }
@@ -131,6 +134,8 @@ public sealed class DetailCache
         DetailChunk chunk;
         try { chunk = DetailWire.DecodeChunk(payload); }
         catch (InvalidDataException) { return DetailReceiveResult.Invalid; }
+        if (chunk.ChunkDataBytes == DetailWire.NarrowLinkChunkBytes && _capacity != ExtendedMaxCachedTiles)
+            return DetailReceiveResult.Invalid;
         if (chunk.Context != _context || chunk.ReferenceSequence < _minimumReference) return DetailReceiveResult.Stale;
         if (chunk.ReferenceSequence > _displayed.Sequence) return DetailReceiveResult.Future;
         if (chunk.Version != _displayed[chunk.Tile]) return DetailReceiveResult.Stale;
@@ -163,7 +168,7 @@ public sealed class DetailCache
         byte[] rgba;
         try { rgba = DetailWire.DecodeRgba(assembly.Data, rect.Width * rect.Height * 4); }
         catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException) { return DetailReceiveResult.Invalid; }
-        while (_patches.Count >= MaxCachedTiles) _patches.Remove(_insertionOrder.Dequeue());
+        while (_patches.Count >= _capacity) _patches.Remove(_insertionOrder.Dequeue());
         _patches.Add(chunk.Tile, new(chunk.Tile, chunk.Version, rect, rgba)); _insertionOrder.Enqueue(chunk.Tile);
         return DetailReceiveResult.Applied;
     }
@@ -185,7 +190,7 @@ public sealed class DetailSendQueue
     private readonly int _chunkBytes;
     public DetailSendQueue(int chunkBytes = DetailWire.ChunkBytes)
     {
-        if (chunkBytes is not (512 or DetailWire.ChunkBytes)) throw new ArgumentOutOfRangeException(nameof(chunkBytes));
+        if (chunkBytes is not (DetailWire.NarrowLinkChunkBytes or 512 or DetailWire.ChunkBytes)) throw new ArgumentOutOfRangeException(nameof(chunkBytes));
         _chunkBytes = chunkBytes;
     }
     public const int MaxQueuedBytes = 256 * 1024, MaxQueuedTiles = 64;

@@ -15,13 +15,14 @@ internal sealed record NativeDetailFrameIdentity(DetailManifest Manifest, long? 
         explicitSampleTime.HasValue && DecoderSampleTime == explicitSampleTime ? this : null;
 }
 
-internal sealed record NativeDetailRequest(DetailContext Context, DetailRect Viewport, bool Enabled);
-internal sealed record NativeDetailOffer(int TargetGeneration, Size NativeSize, bool Available);
+internal sealed record NativeDetailRequest(DetailContext Context, DetailRect Viewport, bool Enabled, bool Extended = false);
+internal sealed record NativeDetailOffer(int TargetGeneration, Size NativeSize, bool Available, bool Extended = false);
 internal sealed record NativeDetailUdpResume(DetailContext Context, ulong ChannelId, uint Epoch, long MinimumFrameSequence);
 internal sealed record NativeDetailFeedback(DetailContext Context, long ReceivedSequence,
     long PresentedSequence, long ReceivedWireBytes, ulong CachedTileMask = 0, int AcknowledgementDelayMilliseconds = 0)
 {
     internal long LocalReceivedAt { get; init; }
+    internal int TilePage { get; init; }
 }
 
 internal static class NativeDetailSessionProtocol
@@ -76,6 +77,7 @@ internal static class NativeDetailSessionProtocol
         byte[] bytes = new byte[OfferBytes];
         BinaryPrimitives.WriteUInt32LittleEndian(bytes, 0x314F444E);
         bytes[4] = offer.Available ? (byte)1 : (byte)0;
+        bytes[5] = offer.Extended ? (byte)1 : (byte)0;
         BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8), offer.TargetGeneration);
         BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(12), offer.NativeSize.Width);
         BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(16), offer.NativeSize.Height);
@@ -85,21 +87,22 @@ internal static class NativeDetailSessionProtocol
     internal static NativeDetailOffer DecodeOffer(ReadOnlySpan<byte> bytes)
     {
         if (bytes.Length != OfferBytes || BinaryPrimitives.ReadUInt32LittleEndian(bytes) != 0x314F444E ||
-            bytes[4] > 1 || bytes[5] != 0 || bytes[6] != 0 || bytes[7] != 0 ||
+            bytes[4] > 1 || bytes[5] > 1 || bytes[6] != 0 || bytes[7] != 0 ||
             BinaryPrimitives.ReadInt32LittleEndian(bytes[20..]) != 0)
             throw new InvalidDataException("Invalid native offer.");
         var offer = new NativeDetailOffer(BinaryPrimitives.ReadInt32LittleEndian(bytes[8..]),
-            new(BinaryPrimitives.ReadInt32LittleEndian(bytes[12..]), BinaryPrimitives.ReadInt32LittleEndian(bytes[16..])), bytes[4] == 1);
+            new(BinaryPrimitives.ReadInt32LittleEndian(bytes[12..]), BinaryPrimitives.ReadInt32LittleEndian(bytes[16..])), bytes[4] == 1, bytes[5] == 1);
         _ = EncodeOffer(offer);
         return offer;
     }
 
-    internal static byte[] EncodeFeedback(NativeDetailFeedback feedback)
+    internal static byte[] EncodeFeedback(NativeDetailFeedback feedback, bool datagramBase = false, bool extendedViewport = false)
     {
         feedback.Context.Validate();
         if (feedback.ReceivedSequence <= 0 || feedback.PresentedSequence < 0 ||
-            feedback.PresentedSequence > feedback.ReceivedSequence || feedback.ReceivedWireBytes <= 0 ||
-            (feedback.PresentedSequence == 0 && feedback.CachedTileMask != 0) || feedback.AcknowledgementDelayMilliseconds is < 0 or > 500)
+            feedback.PresentedSequence > feedback.ReceivedSequence || feedback.ReceivedWireBytes < (datagramBase ? 0 : 1) ||
+            feedback.TilePage is < 0 or > 2 || (feedback.TilePage != 0 && !datagramBase && !extendedViewport) ||
+            (feedback.PresentedSequence == 0 && (feedback.CachedTileMask != 0 || feedback.TilePage != 0)) || feedback.AcknowledgementDelayMilliseconds is < 0 or > 500)
             throw new InvalidDataException("Invalid native feedback counters.");
         byte[] bytes = new byte[FeedbackBytes];
         BinaryPrimitives.WriteUInt32LittleEndian(bytes, 0x3146444E);
@@ -112,30 +115,41 @@ internal static class NativeDetailSessionProtocol
         BinaryPrimitives.WriteInt64LittleEndian(bytes.AsSpan(48), feedback.ReceivedWireBytes);
         BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(56), feedback.CachedTileMask);
         BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(64), feedback.AcknowledgementDelayMilliseconds);
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(68), feedback.TilePage);
         return bytes;
     }
 
-    internal static NativeDetailFeedback DecodeFeedback(ReadOnlySpan<byte> bytes)
+    internal static NativeDetailFeedback DecodeFeedback(ReadOnlySpan<byte> bytes, bool datagramBase = false, bool extendedViewport = false)
     {
         if (bytes.Length != FeedbackBytes || BinaryPrimitives.ReadUInt32LittleEndian(bytes) != 0x3146444E ||
-            BinaryPrimitives.ReadInt32LittleEndian(bytes[4..]) != 0 || BinaryPrimitives.ReadInt32LittleEndian(bytes[68..]) != 0)
+            BinaryPrimitives.ReadInt32LittleEndian(bytes[4..]) != 0)
             throw new InvalidDataException("Invalid native feedback.");
         var value = new NativeDetailFeedback(new(BinaryPrimitives.ReadInt64LittleEndian(bytes[8..]),
             BinaryPrimitives.ReadInt64LittleEndian(bytes[16..]), BinaryPrimitives.ReadInt32LittleEndian(bytes[24..]),
             BinaryPrimitives.ReadInt32LittleEndian(bytes[28..])), BinaryPrimitives.ReadInt64LittleEndian(bytes[32..]),
             BinaryPrimitives.ReadInt64LittleEndian(bytes[40..]), BinaryPrimitives.ReadInt64LittleEndian(bytes[48..]),
             BinaryPrimitives.ReadUInt64LittleEndian(bytes[56..]), BinaryPrimitives.ReadInt32LittleEndian(bytes[64..]));
-        _ = EncodeFeedback(value);
+        value = value with { TilePage = BinaryPrimitives.ReadInt32LittleEndian(bytes[68..]) };
+        _ = EncodeFeedback(value, datagramBase, extendedViewport);
         return value;
     }
 
     internal static byte[] EncodeBase(DetailManifest manifest, RemoteFrame frame)
     {
+        byte[] header = EncodeBaseHeader(manifest, frame);
+        byte[] payload = new byte[header.Length + frame.EncodedLength];
+        header.CopyTo(payload, 0);
+        frame.EncodedBuffer.AsSpan(frame.EncodedOffset, frame.EncodedLength).CopyTo(payload.AsSpan(header.Length));
+        return payload;
+    }
+
+    internal static byte[] EncodeBaseHeader(DetailManifest manifest, RemoteFrame frame)
+    {
         ArgumentNullException.ThrowIfNull(manifest);
         ValidateBase(manifest, frame);
         byte[] encodedManifest = DetailWire.EncodeManifest(manifest);
         int videoBytes = RemoteMessageCodec.VideoFrameHeaderLength + frame.EncodedLength;
-        byte[] result = new byte[12 + encodedManifest.Length + videoBytes];
+        byte[] result = new byte[12 + encodedManifest.Length + RemoteMessageCodec.VideoFrameHeaderLength];
         BinaryPrimitives.WriteUInt32LittleEndian(result, BaseMagic);
         BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(4), encodedManifest.Length);
         BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(8), videoBytes);
@@ -144,8 +158,6 @@ internal static class NativeDetailSessionProtocol
         RemoteMessageCodec.WriteVideoFrameHeader(video[..RemoteMessageCodec.VideoFrameHeaderLength],
             frame.Width, frame.Height, frame.Encoding, frame.Flags,
             frame.CaptureMilliseconds, frame.EncodeMilliseconds);
-        frame.EncodedBuffer.AsSpan(frame.EncodedOffset, frame.EncodedLength)
-            .CopyTo(video[RemoteMessageCodec.VideoFrameHeaderLength..]);
         return result;
     }
 
@@ -186,6 +198,7 @@ internal static class NativeDetailSessionProtocol
         byte[] result = new byte[RequestBytes];
         BinaryPrimitives.WriteUInt32LittleEndian(result, RequestMagic);
         result[4] = request.Enabled ? (byte)1 : (byte)0;
+        result[5] = request.Extended ? (byte)1 : (byte)0;
         BinaryPrimitives.WriteInt64LittleEndian(result.AsSpan(8), request.Context.Epoch);
         BinaryPrimitives.WriteInt64LittleEndian(result.AsSpan(16), request.Context.Request);
         BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(24), request.Context.Width);
@@ -200,7 +213,7 @@ internal static class NativeDetailSessionProtocol
     internal static NativeDetailRequest DecodeRequest(ReadOnlySpan<byte> payload)
     {
         if (payload.Length != RequestBytes || BinaryPrimitives.ReadUInt32LittleEndian(payload) != RequestMagic ||
-            payload[4] > 1 || payload[5] != 0 || payload[6] != 0 || payload[7] != 0)
+            payload[4] > 1 || payload[5] > 1 || payload[6] != 0 || payload[7] != 0)
             throw new InvalidDataException("Invalid native detail request.");
         var context = new DetailContext(BinaryPrimitives.ReadInt64LittleEndian(payload[8..]),
             BinaryPrimitives.ReadInt64LittleEndian(payload[16..]),
@@ -209,6 +222,6 @@ internal static class NativeDetailSessionProtocol
             BinaryPrimitives.ReadInt32LittleEndian(payload[36..]),
             BinaryPrimitives.ReadInt32LittleEndian(payload[40..]), BinaryPrimitives.ReadInt32LittleEndian(payload[44..]));
         context.Validate(); viewport.Validate(context);
-        return new(context, viewport, payload[4] == 1);
+        return new(context, viewport, payload[4] == 1, payload[5] == 1);
     }
 }

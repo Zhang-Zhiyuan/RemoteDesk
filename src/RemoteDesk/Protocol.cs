@@ -23,7 +23,9 @@ internal enum MessageType : byte
     NativeDetailUdpResume = 12,
     NativeDetailUdpResumeAck = 13,
     TrackedVideoFrame = 14,
-    ReliableVideoFeedback = 15
+    ReliableVideoFeedback = 15,
+    NativeDetailUdpChunk = 16,
+    NativeDetailUdpFeedback = 17
 }
 
 // Buffer is the dedicated decrypted message array returned by SecureSession.Decrypt; it is never
@@ -259,7 +261,7 @@ internal static class Protocol
     // checked under the same encryption lock before consuming a nonce.
     internal static async Task<bool> TryWriteNativeChunkAsync(NetworkStream stream,
         ReadOnlyMemory<byte> payload, SecureSession session, SemaphoreSlim writeLock,
-        Func<bool> mayWrite, Action beforeWrite, CancellationToken cancellationToken)
+        Func<bool> mayWrite, Action beforeWrite, CancellationToken cancellationToken, bool datagramBase = false)
     {
         if (payload.Length is <= 0 or > NativeDetailSessionProtocol.MaximumChunkPayloadBytes)
             throw new InvalidDataException("Invalid native fragment size.");
@@ -272,7 +274,7 @@ internal static class Protocol
             if (!mayWrite()) return false;
             plain = ArrayPool<byte>.Shared.Rent(plainBytes);
             packet = ArrayPool<byte>.Shared.Rent(EncryptedHeaderLength + encryptedBytes);
-            plain[0] = (byte)MessageType.NativeDetailChunk;
+            plain[0] = (byte)(datagramBase ? MessageType.NativeDetailUdpChunk : MessageType.NativeDetailChunk);
             BinaryPrimitives.WriteInt32LittleEndian(plain.AsSpan(1), payload.Length);
             payload.CopyTo(plain.AsMemory(HeaderLength));
             BinaryPrimitives.WriteInt32LittleEndian(packet, encryptedBytes);
@@ -612,9 +614,9 @@ internal static class Protocol
             MessageType.Frame or MessageType.VideoFrame or MessageType.TrackedVideoFrame => MaxFramePayloadBytes,
             MessageType.ReliableVideoFeedback => ReliableVideoFeedbackProtocol.ReceiptBytes,
             MessageType.NativeVideoFrame => NativeDetailSessionProtocol.MaximumBasePayloadBytes,
-            MessageType.NativeDetailChunk => NativeDetailSessionProtocol.MaximumChunkPayloadBytes,
+            MessageType.NativeDetailChunk or MessageType.NativeDetailUdpChunk => NativeDetailSessionProtocol.MaximumChunkPayloadBytes,
             MessageType.NativeDetailRequest => NativeDetailSessionProtocol.RequestBytes,
-            MessageType.NativeDetailFeedback => NativeDetailSessionProtocol.FeedbackBytes,
+            MessageType.NativeDetailFeedback or MessageType.NativeDetailUdpFeedback => NativeDetailSessionProtocol.FeedbackBytes,
             MessageType.NativeDetailOffer => NativeDetailSessionProtocol.OfferBytes,
             MessageType.NativeDetailUdpResume or MessageType.NativeDetailUdpResumeAck => NativeDetailSessionProtocol.ResumeBytes,
             MessageType.Input => RemoteMessageCodec.InputPayloadLength,

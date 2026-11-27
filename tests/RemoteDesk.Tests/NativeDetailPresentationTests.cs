@@ -64,9 +64,9 @@ public sealed class NativeDetailPresentationTests
         Assert.Throws<ArgumentException>(() => new NativeDetailPresentation(1, 1, 1, 0, new(128, 128), new(int.MaxValue, 0, 128, 128), []));
         Assert.Throws<ArgumentException>(() => new NativeDetailPresentation(1, 1, 1, 0, new(128, 128), Rectangle.Empty, []));
         Assert.Throws<ArgumentException>(() => new NativeDetailPresentation(1, 1, 1, -1, new(128, 128), new(0, 0, 128, 128), []));
-        var tiles = Enumerable.Range(0, 65).Select(i => Tile(i % 9 * 128, i / 9 * 128)).ToArray();
-        Assert.Throws<ArgumentException>(() => new NativeDetailPresentation(1, 1, 1, 0, new(1152, 1024), new(0, 0, 1152, 1024), tiles));
-        Assert.Equal(4 * 1024 * 1024, D3D11NativeDetailCompositor.AtlasBytes);
+        var tiles = Enumerable.Range(0, 145).Select(i => Tile(i % 15 * 128, i / 15 * 128)).ToArray();
+        Assert.Throws<ArgumentException>(() => new NativeDetailPresentation(1, 1, 1, 0, new(1920, 1280), new(0, 0, 1920, 1280), tiles));
+        Assert.Equal(9 * 1024 * 1024, D3D11NativeDetailCompositor.AtlasBytes);
     }
 
     [Fact]

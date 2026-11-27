@@ -745,7 +745,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 await Protocol.WriteMessageAsync(
                     stream,
                     MessageType.Control,
-                    RemoteMessageCodec.EncodeViewerInfo(supportedVideoCodecs),
+                    EncodeViewerVideoInfo(supportedVideoCodecs),
                     session,
                     _writeLock,
                     connectionAttemptToken);
@@ -1949,7 +1949,7 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
     public async Task UpdateViewerVideoCodecsAsync(RemoteVideoCodecs supportedVideoCodecs)
     {
-        if (await SendControlAsync(RemoteMessageCodec.EncodeViewerInfo(supportedVideoCodecs)))
+        if (await SendControlAsync(EncodeViewerVideoInfo(supportedVideoCodecs)))
         {
             Log?.Invoke($"已更新查看端视频能力：{FormatVideoCodecs(supportedVideoCodecs)}");
         }
@@ -2696,7 +2696,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
                         { Log?.Invoke($"已忽略无效原生补清底图：{ex.Message}"); }
                         break;
                     case MessageType.NativeDetailChunk:
-                        ReceiveNativeChunk(ownerCancellationTokenSource, message.PayloadSpan);
+                    case MessageType.NativeDetailUdpChunk:
+                        ReceiveNativeChunk(ownerCancellationTokenSource, message.PayloadSpan, message.Type == MessageType.NativeDetailUdpChunk);
                         break;
                     case MessageType.Frame:
                         try
@@ -3617,7 +3618,8 @@ internal sealed partial class RemoteViewerClient : IDisposable
                 localAddress: localAddress,
                 abortConnection: () =>
                     AbortConnectionOwner(ownerConnection),
-                framePublicationGate: _framePublishLock);
+                framePublicationGate: _framePublishLock,
+                allowNativeDetail: EnableNativeDetailReception && _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.NativeDetailV1));
 
             bool installed;
             lock (_connectionStateLock)
@@ -3702,7 +3704,13 @@ internal sealed partial class RemoteViewerClient : IDisposable
 
             if (publish)
             {
-                PublishObservedVideoFrame(ownerConnection, frame);
+                bool nativeEnvelope = frame.NativeDetails is not null;
+                if (nativeEnvelope)
+                {
+                    if (!ObserveNativeFrame(ownerConnection, ref frame, 0, datagramBase: true)) return;
+                }
+                else NativeDetails.ObserveLegacyBase();
+                PublishObservedVideoFrame(ownerConnection, frame, nativeEnvelope);
             }
         }
     }

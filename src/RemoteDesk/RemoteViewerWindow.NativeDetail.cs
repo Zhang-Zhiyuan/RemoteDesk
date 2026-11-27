@@ -54,7 +54,9 @@ internal sealed partial class RemoteViewerWindow
             _nativeDetailTimer.Start();
             _nativeStopPending = false;
             _nativeRequestedOffer = null; _nativeIdleSince = Environment.TickCount64;
-            SetStatus("原生补清已开启：停下操作后补充鼠标附近的原始像素；拥塞或硬件不支持时保持普通画面。", MutedTextColor);
+            SetStatus(_client.NativeOffer is { Extended: true }
+                ? "文字补清已开启。停下操作后，可见区域会逐步变清。"
+                : "文字补清已开启。此版本的被控端会补清鼠标附近。", MutedTextColor);
             await RefreshNativeRequestAsync();
         }
         if (!_isClosing && !IsDisposed) _pictureBox.Focus();
@@ -68,7 +70,8 @@ internal sealed partial class RemoteViewerWindow
         bool paused = _nativeDetailWanted && (!available || _nativeViewportTooSmall);
         _nativeDetailMenuItem.Text = paused ? "静止时补清文字（已暂停）" : "静止时补清文字";
         _nativeDetailMenuItem.ToolTipText = _nativeViewportTooSmall ? "放大窗口后会自动恢复。"
-            : "空闲时从被控 Windows 获取鼠标附近的原始像素。开启后使用可靠视频传输。";
+            : _client.NativeOffer is { Extended: true } ? "停下操作后补清可见区域。操作和视频优先。"
+            : "此版本的被控端使用可靠视频补清鼠标附近。";
     }
 
     private async Task RefreshNativeRequestAsync()
@@ -106,14 +109,16 @@ internal sealed partial class RemoteViewerWindow
             _nativeObservedInputRevision = revision; _nativeIdleSince = now; return;
         }
         if (now - _nativeIdleSince < 350) return;
-        Point pointer = _pictureBox.PointToClient(Cursor.Position);
-        // A local pointer outside the picture should not move the requested
-        // region to a toolbar or oscillate the request after every tick.
-        if (!displayed.Contains(pointer)) pointer = new(displayed.Left + displayed.Width / 2, displayed.Top + displayed.Height / 2);
-        Point nativePoint = new(
-            Math.Clamp((int)((long)(pointer.X - displayed.X) * offer.NativeSize.Width / displayed.Width), 0, offer.NativeSize.Width - 1),
-            Math.Clamp((int)((long)(pointer.Y - displayed.Y) * offer.NativeSize.Height / displayed.Height), 0, offer.NativeSize.Height - 1));
-        Rectangle viewport = CalculateNativeDetailViewport(offer.NativeSize, nativePoint);
+        Rectangle viewport = VisibleNativeArea(offer.NativeSize, displayed, _pictureBox.ClientRectangle);
+        if (viewport.IsEmpty) return;
+        if (!offer.Extended)
+        {
+            Point pointer = _pictureBox.PointToClient(Cursor.Position);
+            if (!displayed.Contains(pointer)) pointer = new(displayed.Left + displayed.Width / 2, displayed.Top + displayed.Height / 2);
+            Point focus = new((int)((long)(pointer.X - displayed.X) * offer.NativeSize.Width / displayed.Width),
+                              (int)((long)(pointer.Y - displayed.Y) * offer.NativeSize.Height / displayed.Height));
+            viewport = CalculateNativeDetailViewport(offer.NativeSize, focus);
+        }
         if (_client.NativeDetails.IsEnabled && _nativeRequestedOffer == offer && _nativeRequestedViewport == viewport) return;
         _nativeRequestPending = true;
         try
@@ -150,6 +155,16 @@ internal sealed partial class RemoteViewerWindow
         native.Width > 0 && native.Height > 0 &&
         native.Width <= (long)displayed.Width * D3D11NativeDetailCompositor.MaxNativePixelsPerDisplayPixel &&
         native.Height <= (long)displayed.Height * D3D11NativeDetailCompositor.MaxNativePixelsPerDisplayPixel;
+
+    internal static Rectangle VisibleNativeArea(Size native, Rectangle displayed, Rectangle client)
+    {
+        var visible = Rectangle.Intersect(displayed, client);
+        if (visible.Width <= 0 || visible.Height <= 0 || native.Width <= 0 || native.Height <= 0) return Rectangle.Empty;
+        return Rectangle.FromLTRB((int)((long)(visible.Left - displayed.Left) * native.Width / displayed.Width),
+            (int)((long)(visible.Top - displayed.Top) * native.Height / displayed.Height),
+            (int)(((long)(visible.Right - displayed.Left) * native.Width + displayed.Width - 1) / displayed.Width),
+            (int)(((long)(visible.Bottom - displayed.Top) * native.Height + displayed.Height - 1) / displayed.Height));
+    }
 
     internal static Rectangle CalculateNativeDetailViewport(Size size, Point focus)
     {

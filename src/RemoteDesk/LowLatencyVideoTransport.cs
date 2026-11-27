@@ -311,6 +311,8 @@ internal sealed partial class LowLatencyVideoHostTransport : IAsyncDisposable
     internal bool HasPendingFrame =>
         Volatile.Read(ref _pendingFrame) is not null;
 
+    internal bool CanSendVideo => Volatile.Read(ref _videoRouteDisabled) == 0 && IsRouteActive;
+
     internal bool IsPeerSocketConnected =>
         Volatile.Read(ref _peerSocketConnected) != 0;
 
@@ -349,7 +351,7 @@ internal sealed partial class LowLatencyVideoHostTransport : IAsyncDisposable
         const RemoteFrameFlags recoveryFlags =
             RemoteFrameFlags.KeyFrame | RemoteFrameFlags.CodecConfig;
         return frameKind == MessageType.Frame ||
-            (frameKind == MessageType.VideoFrame &&
+            (frameKind is MessageType.VideoFrame or MessageType.NativeVideoFrame &&
                 flags == recoveryFlags);
     }
 
@@ -797,7 +799,8 @@ internal sealed partial class LowLatencyVideoHostTransport : IAsyncDisposable
         double captureMilliseconds,
         double encodeMilliseconds,
         ReadOnlyMemory<byte> encodedBytes,
-        bool allowLatencyBudgetDrop)
+        bool allowLatencyBudgetDrop,
+        ReadOnlySpan<byte> nativeHeader = default)
     {
         long nativePauseGeneration = Interlocked.Read(ref _nativePauseGeneration);
         if (!IsRouteActive ||
@@ -862,6 +865,7 @@ internal sealed partial class LowLatencyVideoHostTransport : IAsyncDisposable
         {
             MessageType.Frame => RemoteMessageCodec.FrameHeaderLength,
             MessageType.VideoFrame => RemoteMessageCodec.VideoFrameHeaderLength,
+            MessageType.NativeVideoFrame => nativeHeader.Length,
             _ => throw new ArgumentOutOfRangeException(
                 nameof(frameKind),
                 frameKind,
@@ -891,7 +895,11 @@ internal sealed partial class LowLatencyVideoHostTransport : IAsyncDisposable
         }
 
         byte[] frameBuffer = ArrayPool<byte>.Shared.Rent(frameLength);
-        if (frameKind == MessageType.Frame)
+        if (frameKind == MessageType.NativeVideoFrame)
+        {
+            nativeHeader.CopyTo(frameBuffer);
+        }
+        else if (frameKind == MessageType.Frame)
         {
             RemoteMessageCodec.WriteFrameHeader(
                 frameBuffer.AsSpan(0, frameHeaderLength),
@@ -2187,7 +2195,7 @@ internal sealed partial class LowLatencyVideoHostTransport : IAsyncDisposable
             ? ArrayPool<byte>.Shared.Rent(maxPayload)
             : null;
         bool allowLargeIndependentVideoBurst =
-            frame.FrameKind == MessageType.VideoFrame &&
+            frame.FrameKind is MessageType.VideoFrame or MessageType.NativeVideoFrame &&
             frame.IsIndependentlyRecoverable;
         bool peerSocketConnected =
             Volatile.Read(ref _peerSocketConnected) != 0;
@@ -2923,7 +2931,7 @@ internal sealed partial class LowLatencyVideoHostTransport : IAsyncDisposable
     {
         internal long NativePauseGeneration { get; init; }
         public bool IsGop1Video =>
-            FrameKind == MessageType.VideoFrame &&
+            FrameKind is MessageType.VideoFrame or MessageType.NativeVideoFrame &&
             IsIndependentlyRecoverable &&
             !IsShortGopVideo;
 
@@ -3314,11 +3322,13 @@ internal sealed partial class LowLatencyVideoViewerTransport : IAsyncDisposable
         Action? abortConnection = null,
         Func<TimeSpan, CancellationToken, Task>?
             fallbackBarrierDelayAsync = null,
-        object? framePublicationGate = null)
+        object? framePublicationGate = null,
+        bool allowNativeDetail = false)
     {
         ArgumentNullException.ThrowIfNull(expectedHostAddress);
         ArgumentNullException.ThrowIfNull(sendTcpControl);
         ArgumentNullException.ThrowIfNull(publishFrame);
+        _allowNativeDetail = allowNativeDetail;
         ArgumentNullException.ThrowIfNull(log);
         LowLatencyVideoProtocol.ValidateOffer(offer);
         features = LowLatencyVideoFeatureNegotiation.Normalize(features);
@@ -3986,7 +3996,8 @@ internal sealed partial class LowLatencyVideoViewerTransport : IAsyncDisposable
             return;
         }
 
-        _reassembler.TryAdd(packet);
+        if (packet.FrameKind != MessageType.NativeVideoFrame || _allowNativeDetail)
+            _reassembler.TryAdd(packet);
     }
 
     private void PublishCompletedFrame(
@@ -4006,9 +4017,13 @@ internal sealed partial class LowLatencyVideoViewerTransport : IAsyncDisposable
         if (frameSequence < (ulong)Interlocked.Read(ref _nativeResumeMinimumFrame)) return;
         try
         {
-            RemoteFrame frame = frameKind == MessageType.Frame
-                ? RemoteMessageCodec.DecodeFrame(payload)
-                : RemoteMessageCodec.DecodeVideoFrame(payload);
+            RemoteFrame frame = frameKind switch
+            {
+                MessageType.Frame => RemoteMessageCodec.DecodeFrame(payload),
+                MessageType.VideoFrame => RemoteMessageCodec.DecodeVideoFrame(payload),
+                MessageType.NativeVideoFrame when _allowNativeDetail => NativeDetailSessionProtocol.DecodeBase(payload),
+                _ => throw new InvalidDataException("Unnegotiated UDP frame")
+            };
             Volatile.Write(
                 ref _highestCompleteFrameSequence,
                 checked((long)frameSequence));

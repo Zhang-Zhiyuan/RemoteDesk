@@ -9,6 +9,49 @@ namespace RemoteDesk.Tests;
 public sealed class NativeDetailHostTests
 {
     private static readonly DetailContext Context = new(1, 1, 3840, 2160);
+
+    [Theory]
+    [InlineData(1920, 1080)] [InlineData(1080, 1920)]
+    public void ExtendedViewportIncludesEveryVisible1080pTile(int width, int height)
+    {
+        var size = new Size(width, height);
+        var displayed = new Rectangle(200, 140, width * 2, height * 2);
+        var viewport = RemoteViewerWindow.VisibleNativeArea(size, displayed, new Rectangle(0, 0, displayed.Right, displayed.Bottom + 80));
+        Assert.Equal(new Rectangle(Point.Empty, size), viewport);
+        var req = new NativeDetailRequest(new(1, 1, width, height), new(0, 0, width, height), true, true);
+        Assert.Equal(135, NativeDetailCaptureWorker.SelectTiles(req).Distinct().Count());
+        Assert.Equal(64, NativeDetailCaptureWorker.SelectTiles(req with { Extended = false }).Length);
+        Assert.Equal(new Rectangle(50, 40, 301, 101),
+            RemoteViewerWindow.VisibleNativeArea(size, displayed, new Rectangle(300, 220, 601, 201)));
+        Assert.Equal(Rectangle.Empty, RemoteViewerWindow.VisibleNativeArea(size, displayed, new Rectangle(0, 0, 20, 20)));
+    }
+
+    [Fact]
+    public void LostUdpBasesNeverBlockNewVideoOrGrantUnboundedReliableFragments()
+    {
+        var budget = new NativeDetailUdpLinkBudget();
+        budget.BeginCapture();
+        var healthy = new LowLatencyVideoNetworkSnapshot(true, 0, 0, 0, 30, 40, false, 0, 0);
+        budget.ObserveNetwork(healthy);
+        budget.RecordBase(Context, 3);
+        budget.RecordBase(Context, 19);
+        Assert.Equal(0, budget.DetailBitsPerSecond(100));
+        Assert.False(budget.Observe(new(Context, 17, 17, 0), 105));
+        Assert.True(budget.Observe(new(Context, 19, 3, 0), 110));
+        Assert.True(budget.DetailBitsPerSecond(110) > 0);
+        budget.RecordChunk(3900);
+        Assert.Equal(0, budget.DetailBitsPerSecond(111));
+        budget.RecordBase(Context, 23);
+        Assert.False(budget.Observe(new(Context, 24, 24, 3900), 120));
+        Assert.False(budget.Observe(new(Context, 23, 23, 3901), 120));
+        Assert.True(budget.Observe(new(Context, 23, 23, 3900), 130));
+        Assert.True(budget.DetailBitsPerSecond(130) > 0);
+        Assert.Equal(0, budget.DetailBitsPerSecond(330));
+        budget.ObserveNetwork(healthy with { PacketLossRatio = .08 });
+        Assert.Equal(0, budget.DetailBitsPerSecond(131));
+        Assert.Equal(0, NativeDetailSessionProtocol.DecodeFeedback(
+            NativeDetailSessionProtocol.EncodeFeedback(new(Context, 1, 1, 0), true), true).ReceivedWireBytes);
+    }
     [Theory]
     [InlineData(3840, 2160, 1920, 1080, 1920, 1080)]
     [InlineData(2560, 1440, 1920, 1080, 1920, 1080)]
@@ -61,7 +104,8 @@ public sealed class NativeDetailHostTests
         var link = HealthyLink();
         Assert.InRange(link.DetailBitsPerSecond(700), 1, 1_000_000);
         Assert.Equal(0, link.DetailBitsPerSecond(1000));
-        link.RecordSent(Context, 50, 500_000, 710);
+        foreach (long sequence in new long[] { 11, 23, 39, 50 })
+            link.RecordSent(Context, sequence, 50_000, 710);
         Assert.True(link.Observe(new(Context, 50, 4, link.SentBytes), 730));
         Assert.Equal(0, link.DetailBitsPerSecond(730));
     }
@@ -80,6 +124,46 @@ public sealed class NativeDetailHostTests
         Assert.True(link.Observe(new(Context, 9, 9, link.SentBytes), 832));
         // One burst is not a link capacity measurement.
         Assert.Equal(0, link.DetailBitsPerSecond(832));
+    }
+
+    [Fact]
+    public void StableLongRttDoesNotCountSkippedCapturesOrTheNetworkFlightAsRenderBacklog()
+    {
+        var link = new NativeDetailLinkBudget();
+        for (int i = 1; i <= 36; i++)
+        {
+            link.RecordSent(Context, i * 4, 40_000, i * 60);
+            if (i <= 12) continue;
+            int delivered = i - 12;
+            Assert.True(link.Observe(new(Context, delivered * 4, Math.Max(1, delivered - 1) * 4,
+                delivered * 40_000), i * 60 + 10));
+        }
+        Assert.True(link.DetailBitsPerSecond(2170) > 0); // 480 KB still in flight on this 730 ms path
+        Assert.True(link.CanSendBase(2170));
+        link.RecordSent(Context, 144, 633, 2170, isBase: false);
+        Assert.True(link.CanSendBase(2170));
+    }
+
+    [Fact]
+    public void LongRttLimitsBurstsAndRecognizesProgressWhileOldFramesAreInFlight()
+    {
+        var link = new NativeDetailLinkBudget();
+        for (int i = 1; i <= 24; i++)
+        {
+            link.RecordSent(Context, i, 12_000, i * 120);
+            if (i > 6)
+            {
+                int delivered = i - 6;
+                Assert.True(link.Observe(new(Context, delivered, delivered, delivered * 12_000), i * 120 + 10));
+            }
+        }
+        for (int i = 19; i <= 24; i++)
+            Assert.True(link.Observe(new(Context, i, i, i * 12_000), i * 120 + 730));
+        for (int i = 25; i <= 29; i++) link.RecordSent(Context, i, 70_000, 3620 + (i - 25) * 30);
+        Assert.True(link.Observe(new(Context, 25, 25, 24 * 12_000 + 70_000), 4510)); // RTT rose to 890 ms
+        Assert.False(link.CanSendBase(4511, 70_000));
+        Assert.False(link.FeedbackStalled(5400)); // oldest frame is late but receipts made progress
+        Assert.True(link.FeedbackStalled(6700));
     }
 
     [Fact]
@@ -171,6 +255,9 @@ public sealed class NativeDetailHostTests
         Assert.Throws<InvalidDataException>(() => NativeDetailSessionProtocol.EncodeFeedback(feedback with { PresentedSequence = 0 }));
         byte[] packet = NativeDetailSessionProtocol.EncodeFeedback(feedback); packet[68] = 1;
         Assert.Throws<InvalidDataException>(() => NativeDetailSessionProtocol.DecodeFeedback(packet));
+        Assert.Equal(1, NativeDetailSessionProtocol.DecodeFeedback(packet, extendedViewport: true).TilePage);
+        packet[68] = 3;
+        Assert.Throws<InvalidDataException>(() => NativeDetailSessionProtocol.DecodeFeedback(packet, extendedViewport: true));
         var link = new NativeDetailLinkBudget(); link.RecordSent(Context, 9, 90_000, 100);
         Assert.False(link.Observe(feedback, 120)); // peer claims 30 ms delay after only 20 ms elapsed
         Assert.Equal(0, link.AcknowledgedBytes);

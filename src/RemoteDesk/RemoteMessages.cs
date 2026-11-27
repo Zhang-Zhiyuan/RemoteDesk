@@ -44,7 +44,9 @@ internal enum RemoteVideoCodecs
 {
     None = 0,
     Jpeg = 1 << 0,
-    H264AnnexB = 1 << 1
+    H264AnnexB = 1 << 1,
+    // Extension of H.264. Old viewers/hosts mask unknown ViewerInfo bits.
+    NativeDetailH264 = 1 << 2
 }
 
 internal enum RemoteFrameEncoding : byte
@@ -1668,10 +1670,12 @@ internal static class RemoteMessageCodec
         return algorithm.Trim().Replace("-", string.Empty, StringComparison.Ordinal).ToUpperInvariant();
     }
 
-    private static RemoteVideoCodecs NormalizeVideoCodecs(RemoteVideoCodecs codecs)
+    internal static RemoteVideoCodecs NormalizeVideoCodecs(RemoteVideoCodecs codecs)
     {
         const RemoteVideoCodecs knownCodecs = RemoteVideoCodecs.Jpeg | RemoteVideoCodecs.H264AnnexB;
         RemoteVideoCodecs normalized = codecs & knownCodecs;
+        if (normalized.HasFlag(RemoteVideoCodecs.H264AnnexB))
+            normalized |= codecs & RemoteVideoCodecs.NativeDetailH264;
         return normalized == RemoteVideoCodecs.None ? RemoteVideoCodecs.Jpeg : normalized;
     }
 }

@@ -905,7 +905,7 @@ internal sealed class LowLatencyVideoFrameReassembler
         LowLatencyVideoDatagram packet)
     {
         if (packet.Flags != 0 ||
-            packet.FrameKind is not (MessageType.Frame or MessageType.VideoFrame) ||
+            packet.FrameKind is not (MessageType.Frame or MessageType.VideoFrame or MessageType.NativeVideoFrame) ||
             packet.FrameSequence > long.MaxValue ||
             packet.FrameLength <= 0 ||
             packet.FrameLength > _maxFrameBytes ||
@@ -936,7 +936,7 @@ internal sealed class LowLatencyVideoFrameReassembler
         LowLatencyVideoDatagram packet)
     {
         if (packet.Flags != 0 ||
-            packet.FrameKind is not (MessageType.Frame or MessageType.VideoFrame) ||
+            packet.FrameKind is not (MessageType.Frame or MessageType.VideoFrame or MessageType.NativeVideoFrame) ||
             packet.FrameSequence > long.MaxValue ||
             packet.FrameLength <= 0 ||
             packet.FrameLength > _maxFrameBytes ||

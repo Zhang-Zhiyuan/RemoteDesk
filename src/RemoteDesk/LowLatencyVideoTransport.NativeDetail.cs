@@ -8,6 +8,17 @@ internal sealed partial class LowLatencyVideoHostTransport
     private long _nativePauseGeneration;
     private NativeDetailUdpResume? _pendingNativeResume;
 
+    internal bool TryQueueNativeVideoFrame(DetailManifest manifest, RemoteFrame frame)
+    {
+        var header = NativeDetailSessionProtocol.EncodeBaseHeader(manifest, frame);
+        int bytes = header.Length + frame.EncodedLength;
+        if (_offer is not { } offer || bytes > offer.MaxFrameBytes ||
+            (_congestionController is { } congestion && bytes > congestion.GetFrameBudgetBytes())) return false;
+        return TryQueueFrame(MessageType.NativeVideoFrame, frame.Width, frame.Height, frame.Encoding, frame.Flags,
+            frame.CaptureMilliseconds, frame.EncodeMilliseconds, frame.EncodedBuffer.AsMemory(frame.EncodedOffset, frame.EncodedLength),
+            allowLatencyBudgetDrop: true, nativeHeader: header);
+    }
+
     internal NativeDetailUdpResume? PrepareNativeResume(DetailContext stopContext)
     {
         lock (_setupStateLock)
@@ -36,6 +47,7 @@ internal sealed partial class LowLatencyVideoHostTransport
 internal sealed partial class LowLatencyVideoViewerTransport
 {
     private readonly object _framePublicationGate;
+    private readonly bool _allowNativeDetail;
     private long _nativeResumeMinimumFrame;
     private int _nativeResumePendingFirstFrame;
 

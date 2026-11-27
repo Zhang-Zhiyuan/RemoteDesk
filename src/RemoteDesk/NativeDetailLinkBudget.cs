@@ -10,15 +10,25 @@ internal sealed class NativeDetailLinkBudget
 {
     private readonly object _gate = new();
     private readonly Queue<Sent> _history = new();
+    private readonly Queue<(DetailContext Context, long Sequence)> _recentBases = new();
+    private int _inFlightBases, _renderLag;
     private long _sentBytes, _ackedBytes, _lastAckAt, _lastSequence, _presented, _firstAckAt;
     private double _minimumRtt = double.MaxValue, _lastRtt, _rate;
     private int _samples;
     private long _captureStartedBytes;
     private long _rateWindowAt, _rateWindowBytes;
-    private sealed record Sent(DetailContext Context, long Sequence, long Bytes, long At);
+    private sealed record Sent(DetailContext Context, long Sequence, long Bytes, long At, bool Base);
 
     internal long SentBytes { get { lock (_gate) return _sentBytes; } }
     internal long AcknowledgedBytes { get { lock (_gate) return _ackedBytes; } }
+
+    internal string DescribeDelivery(long now)
+    {
+        lock (_gate)
+            return _samples == 0 ? "等待首个接收回执" :
+                $"回执 RTT {_lastRtt:F0}/{_minimumRtt:F0} ms，实收 {_rate / 1_000_000:F1} Mbps，在途 {_inFlightBases} 帧，" +
+                $"待呈现 {(_renderLag == int.MaxValue ? "未知" : _renderLag.ToString())} 帧，上次回执距今 {Math.Max(0, now - _lastAckAt)} ms";
+    }
 
     internal void BeginCapture()
     {
@@ -26,7 +36,7 @@ internal sealed class NativeDetailLinkBudget
         {
             // Keep the connection's absolute wire counter, but do not let a
             // retired capture's missing final ACK deadlock a later re-enable.
-            _history.Clear(); _captureStartedBytes = _sentBytes;
+            _history.Clear(); _recentBases.Clear(); _inFlightBases = _renderLag = 0; _captureStartedBytes = _sentBytes;
             _samples = 0; _rate = 0; _minimumRtt = double.MaxValue;
             _lastAckAt = _firstAckAt = _presented = 0;
         }
@@ -34,18 +44,32 @@ internal sealed class NativeDetailLinkBudget
 
     internal bool FeedbackStalled(long now)
     {
-        lock (_gate) return _history.TryPeek(out var first) && now - first.At > 1500;
+        lock (_gate)
+        {
+            if (!_history.TryPeek(out var first)) return false;
+            // A late oldest frame on a long-haul path is not a silent peer.
+            // Stop adding frames in CanSendBase, and retire the encoder only
+            // after cumulative receipts themselves stop making progress.
+            double timeout = _samples == 0 ? 1500 : Math.Clamp(2 * _minimumRtt + 650, 1500, 5000);
+            return now - Math.Max(first.At, _lastAckAt) > timeout;
+        }
     }
 
-    internal void RecordSent(DetailContext context, long sequence, int wireBytes, long now)
+    internal void RecordSent(DetailContext context, long sequence, int wireBytes, long now, bool isBase = true)
     {
         if (sequence <= 0 || wireBytes <= 0 || now < 0) throw new ArgumentOutOfRangeException(nameof(sequence));
         lock (_gate)
         {
             _sentBytes = checked(_sentBytes + wireBytes);
             _lastSequence = Math.Max(_lastSequence, sequence);
-            _history.Enqueue(new(context, sequence, _sentBytes, now));
-            while (_history.Count > 128) _history.Dequeue();
+            if (isBase)
+            {
+                _inFlightBases++;
+                _recentBases.Enqueue((context, sequence));
+                if (_recentBases.Count > 128) _recentBases.Dequeue();
+            }
+            _history.Enqueue(new(context, sequence, _sentBytes, now, isBase));
+            if (_history.Count > 256 && _history.Dequeue().Base) _inFlightBases--;
         }
     }
 
@@ -64,7 +88,7 @@ internal sealed class NativeDetailLinkBudget
                 feedback.AcknowledgementDelayMilliseconds > now - exact.At + 2) return false;
             _lastRtt = Math.Max(0, now - exact.At - feedback.AcknowledgementDelayMilliseconds);
             _minimumRtt = Math.Min(_minimumRtt, _lastRtt);
-            if (_samples > 0 && now - _rateWindowAt >= 300)
+            if (_samples > 0 && now - _rateWindowAt >= Math.Clamp(1.5 * _minimumRtt, 300, 1500))
             {
                 // A coalesced ACK may contain only one 512-byte fragment. Use
                 // a sustained window, not that single tiny ACK interval, or
@@ -77,17 +101,38 @@ internal sealed class NativeDetailLinkBudget
             if (_samples++ == 0)
             { _firstAckAt = _rateWindowAt = now; _rateWindowBytes = feedback.ReceivedWireBytes; }
             _lastAckAt = now; _ackedBytes = feedback.ReceivedWireBytes; _presented = feedback.PresentedSequence;
-            while (_history.TryPeek(out var item) && item.Bytes <= _ackedBytes) _history.Dequeue();
+            // Sequence numbers include captures which were never transmitted. Only bases
+            // which actually reached the peer can be part of its decoder/display backlog.
+            _renderLag = _recentBases.Contains((feedback.Context, _presented))
+                ? _recentBases.Count(item => item.Context == feedback.Context &&
+                    item.Sequence > _presented && item.Sequence <= feedback.ReceivedSequence)
+                : int.MaxValue;
+            while (_history.TryPeek(out var item) && item.Bytes <= _ackedBytes)
+                if (_history.Dequeue().Base) _inFlightBases--;
             return true;
         }
     }
 
-    internal bool CanSendBase(long now)
+    internal bool CanSendBase(long now, int nextWireBytes = 0)
     {
         lock (_gate)
         {
             // Bootstrap is bounded too, even if the peer never sends ACKs.
-            if (_history.Count >= 4 || _sentBytes - Math.Max(_ackedBytes, _captureStartedBytes) > 1024 * 1024) return false;
+            int baseWindow = _samples < 4 ? 4 : Math.Clamp((int)Math.Ceiling((_minimumRtt + 40) / 40), 4, 16);
+            long inFlight = _sentBytes - Math.Max(_ackedBytes, _captureStartedBytes);
+            if (_inFlightBases >= baseWindow || _history.Count >= 256 || inFlight > 1024 * 1024) return false;
+            // A burst of large IDRs must not get one full frame of credit for
+            // every 40 ms of RTT. Bound their bytes by observed delivery too,
+            // while allowing one replacement frame through an empty window.
+            if (nextWireBytes > 0 && inFlight > 0)
+            {
+                if (inFlight + nextWireBytes > 1024 * 1024) return false;
+                // With stable RTT a quiet, application-limited sample is not a
+                // capacity ceiling. Applying it here would lower the next sample
+                // further until every interactive change waited a complete RTT.
+                if (_rate > 0 && _lastRtt > _minimumRtt + Math.Max(40, _minimumRtt * .08) &&
+                    inFlight > Math.Max(nextWireBytes, _rate * (_minimumRtt + 60) / 8000d)) return false;
+            }
             return !_history.TryPeek(out var first) || now - first.At < Math.Max(120, _minimumRtt == double.MaxValue ? 120 : _minimumRtt + 80);
         }
     }
@@ -97,12 +142,92 @@ internal sealed class NativeDetailLinkBudget
     {
         lock (_gate)
         {
-            if (_samples < 4 || now - _firstAckAt < 300 || now - _lastAckAt > 150 ||
-                _lastRtt > _minimumRtt + 20 || _sentBytes - _ackedBytes > 128 * 1024 ||
-                _lastSequence - _presented > 4 || _presented == 0 ||
+            if (_samples < 4 || now - _firstAckAt < 300 ||
+                now - _lastAckAt > Math.Clamp(100 + _minimumRtt * .4, 150, 450) ||
+                _lastRtt > _minimumRtt + Math.Clamp(_minimumRtt * .1, 20, 80) || _history.Count >= 192 ||
+                _sentBytes - _ackedBytes > Math.Min(896 * 1024, _rate * _minimumRtt / 8000d) + 128 * 1024 ||
+                _renderLag > 4 || _presented == 0 ||
                 _rate <= 0 || nextWireBytes * 8000d / _rate > 2)
                 return 0;
             return (long)Math.Min(1_000_000, _rate * .04);
         }
+    }
+}
+
+// UDP bases are latest-only: counting queued frames as delivered would overestimate bandwidth
+// after replacement or packet loss. Use the transport's measured goodput for the base, and
+// count only ordered optional TCP fragments in this lane's cumulative byte receipts.
+internal sealed class NativeDetailUdpLinkBudget
+{
+    private readonly object _gate = new();
+    private readonly Queue<long> _recentBases = new();
+    private DetailContext _context;
+    private int _renderLag;
+    private long _lastBase, _received, _presented, _lastReceiptAt, _sentBytes, _ackedBytes, _rate;
+
+    internal void BeginCapture()
+    {
+        lock (_gate)
+        {
+            _context = default;
+            _recentBases.Clear(); _renderLag = 0;
+            _rate = _lastBase = _received = _presented = _lastReceiptAt = 0;
+            // Fragment counters belong to the ordered connection and survive an off/on cycle.
+        }
+    }
+
+    internal void ObserveNetwork(LowLatencyVideoNetworkSnapshot network)
+    {
+        lock (_gate)
+        {
+            double delivered = network.DeliveryMegabitsPerSecond * 1_000_000;
+            _rate = network.IsComfortable && delivered >= NativeDetailLinkBudget.SmallChunkWireBytes * 4000d
+                ? (long)Math.Min(1_000_000, delivered * .04) : 0;
+        }
+    }
+
+    internal void RecordBase(DetailContext context, long sequence)
+    {
+        lock (_gate)
+        {
+            if (context != _context)
+            {
+                _context = context;
+                _recentBases.Clear(); _renderLag = 0;
+                _received = _presented = _lastReceiptAt = 0;
+            }
+            _lastBase = sequence;
+            _recentBases.Enqueue(sequence);
+            if (_recentBases.Count > 128) _recentBases.Dequeue();
+        }
+    }
+
+    internal void RecordChunk(int bytes) { lock (_gate) _sentBytes = checked(_sentBytes + bytes); }
+
+    internal bool Observe(NativeDetailFeedback feedback, long now)
+    {
+        lock (_gate)
+        {
+            if (feedback.Context != _context || feedback.ReceivedSequence <= 0 ||
+                feedback.ReceivedSequence < _received || feedback.ReceivedSequence > _lastBase ||
+                feedback.PresentedSequence < _presented || feedback.PresentedSequence > feedback.ReceivedSequence ||
+                feedback.ReceivedWireBytes < _ackedBytes || feedback.ReceivedWireBytes > _sentBytes ||
+                (feedback.ReceivedSequence == _received && feedback.ReceivedWireBytes == _ackedBytes) ||
+                !_recentBases.Contains(feedback.ReceivedSequence)) return false;
+            _received = feedback.ReceivedSequence;
+            _presented = feedback.PresentedSequence;
+            _renderLag = _recentBases.Contains(_presented)
+                ? _recentBases.Count(sent => sent > _presented && sent <= _received) : int.MaxValue;
+            _ackedBytes = feedback.ReceivedWireBytes;
+            _lastReceiptAt = now;
+            return true;
+        }
+    }
+
+    internal long DetailBitsPerSecond(long now)
+    {
+        lock (_gate)
+            return _presented > 0 && now - _lastReceiptAt <= 180 && _renderLag <= 4 &&
+                _sentBytes - _ackedBytes + NativeDetailLinkBudget.SmallChunkWireBytes <= 4096 ? _rate : 0;
     }
 }

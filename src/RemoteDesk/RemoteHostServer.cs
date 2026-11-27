@@ -1888,12 +1888,7 @@ internal sealed partial class RemoteHostServer : IDisposable
 
         public void SetSupportedVideoCodecs(RemoteVideoCodecs codecs)
         {
-            const RemoteVideoCodecs knownCodecs =
-                RemoteVideoCodecs.Jpeg | RemoteVideoCodecs.H264AnnexB;
-            RemoteVideoCodecs normalized = codecs & knownCodecs;
-            normalized = normalized == RemoteVideoCodecs.None
-                ? RemoteVideoCodecs.Jpeg
-                : normalized;
+            RemoteVideoCodecs normalized = RemoteMessageCodec.NormalizeVideoCodecs(codecs);
 
             CancellationTokenSource changed;
             lock (_videoSelectionChangeLock)
@@ -5083,6 +5078,7 @@ internal sealed partial class RemoteHostServer : IDisposable
                             try
                             {
                                 var request = NativeDetailSessionProtocol.DecodeRequest(message.PayloadSpan);
+                                if (request.Extended && !viewerState.SupportedVideoCodecs.HasFlag(RemoteVideoCodecs.NativeDetailH264)) break;
                                 if (viewerState.NativeDetails?.Accept(request) == true && !request.Enabled &&
                                     lowLatencyVideo.PrepareNativeResume(request.Context) is { } resume)
                                 {
@@ -5108,10 +5104,14 @@ internal sealed partial class RemoteHostServer : IDisposable
                             { clipboardLog("已忽略无效视频恢复确认：" + ex.Message); }
                         }
                         break;
+                    case MessageType.NativeDetailUdpFeedback:
                     case MessageType.NativeDetailFeedback:
                         if (viewerState.Capabilities.HasFlag(RemoteDeviceCapabilities.NativeDetailV1))
                         {
-                            try { viewerState.NativeDetails?.ObserveFeedback(NativeDetailSessionProtocol.DecodeFeedback(message.PayloadSpan)); }
+                            bool udp = message.Type == MessageType.NativeDetailUdpFeedback;
+                            bool extended = viewerState.SupportedVideoCodecs.HasFlag(RemoteVideoCodecs.NativeDetailH264);
+                            if (udp && !extended) break;
+                            try { viewerState.NativeDetails?.ObserveFeedback(NativeDetailSessionProtocol.DecodeFeedback(message.PayloadSpan, udp, extended), udp); }
                             catch (Exception ex) when (ex is InvalidDataException or ArgumentException)
                             { clipboardLog("已忽略无效原生补清反馈：" + ex.Message); }
                         }

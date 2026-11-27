@@ -23,6 +23,7 @@ internal sealed class NativeDetailCaptureWorker
     private readonly Func<NativeDetailRequest?> _request;
     private readonly Func<bool> _allowDetail;
     private readonly Func<bool> _allowContentTracking;
+    private readonly RemoteInteractionActivity _input;
     private readonly Func<NativeDetailFeedback?> _receipt;
     private readonly Action<long> _observeSequence;
     private readonly Action _ready;
@@ -31,7 +32,11 @@ internal sealed class NativeDetailCaptureWorker
         { SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.Wait });
     private readonly ConcurrentQueue<DetailTransfer> _compressed = new();
     private int _compressedCount;
+    private bool _sendQueueFull;
+    internal void ObserveSendBacklog(int count, int bytes, long bitsPerSecond) =>
+        Volatile.Write(ref _sendQueueFull, count >= 3 || (count > 0 && bytes * 8000L > bitsPerSecond * 350));
     private NativeCapturedFrame? _latest;
+    private readonly SemaphoreSlim _frameReady = new(0, 1);
     private DetailManifest? _latestManifest;
     private int _readySignaled;
     private string? _failure;
@@ -41,10 +46,11 @@ internal sealed class NativeDetailCaptureWorker
 
     internal NativeDetailCaptureWorker(NativeCaptureProfile profile, long sequenceSeed,
         Func<NativeDetailRequest?> request, Func<bool> allowDetail, Func<bool> allowContentTracking,
-        Func<NativeDetailFeedback?> receipt, Action<long> observeSequence, Action ready)
+        Func<NativeDetailFeedback?> receipt, Action<long> observeSequence, Action ready, RemoteInteractionActivity input)
     {
         Profile = profile; _request = request; _allowDetail = allowDetail;
         _allowContentTracking = allowContentTracking;
+        _input = input;
         _receipt = receipt;
         _observeSequence = observeSequence; _ready = ready;
         Completion = Task.Run(async () =>
@@ -71,6 +77,8 @@ internal sealed class NativeDetailCaptureWorker
         catch (ObjectDisposedException) { /* The owner already completed shutdown. */ }
     }
     internal NativeCapturedFrame? TakeLatest() => Interlocked.Exchange(ref _latest, null);
+    internal Task<bool> WaitForFrameAsync(int milliseconds, CancellationToken token) =>
+        _frameReady.WaitAsync(milliseconds, token);
     internal bool TryTakeTransfer(out DetailTransfer? transfer)
     {
         if (!_compressed.TryDequeue(out transfer)) return false;
@@ -116,8 +124,9 @@ internal sealed class NativeDetailCaptureWorker
             var stability = new Dictionary<int, (long Version, long At, long QueuedAt)>();
             var confirmed = new Dictionary<int, long>();
             NativeDetailRequest? active = null, submittedRequest = null;
+            NativeDetailFeedback? processedReceipt = null;
             int[] tiles = [];
-            long nextFrameAt = 0, startedAt = Stopwatch.GetTimestamp();
+            long nextFrameAt = 0, nextIdlePollAt = 0, lastSubmitAt = 0, handledInputAt = 0, startedAt = Stopwatch.GetTimestamp();
             long period = Stopwatch.Frequency / Profile.FramesPerSecond;
 
             while (!_stop.IsCancellationRequested)
@@ -133,11 +142,14 @@ internal sealed class NativeDetailCaptureWorker
                     while (TryTakeTransfer(out _)) { }
                 }
                 bool allowed = _allowDetail();
-                if (_receipt() is { } receipt && receipt.Context == active.Context &&
+                if (_receipt() is { } receipt && !ReferenceEquals(receipt, processedReceipt) && receipt.Context == active.Context &&
                     receipt.PresentedSequence <= long.MaxValue / 166_667L &&
                     manifests.TryGetValue(receipt.PresentedSequence * 166_667L, out var acknowledged))
-                    for (int i = 0; i < tiles.Length; i++)
-                        if ((receipt.CachedTileMask & (1UL << i)) != 0) confirmed[tiles[i]] = acknowledged[tiles[i]];
+                {
+                    processedReceipt = receipt;
+                    for (int i = receipt.TilePage * 64; i < Math.Min(tiles.Length, (receipt.TilePage + 1) * 64); i++)
+                        if ((receipt.CachedTileMask & (1UL << (i % 64))) != 0) confirmed[tiles[i]] = acknowledged[tiles[i]];
+                }
                 long deadline = pending is null ? nextFrameAt : pending.CapturedAtTimestamp + period;
                 var budget = new NativeDetailRenderBudget(deadline, TransportCongested: !allowed);
                 // Sender congestion suppresses NEW bytes/readback, not the
@@ -165,16 +177,20 @@ internal sealed class NativeDetailCaptureWorker
                         var manifest = new DetailManifest(active.Context, refined.Sequence, refined.CopyVersions());
                         Volatile.Write(ref _latestManifest, manifest);
                         Interlocked.Exchange(ref _latest, new(manifest, encoded, surface.CapturedAtTimestamp));
+                        // One capture producer and one bounded wakeup. A finished input
+                        // frame can leave immediately, even between network timer ticks.
+                        if (_frameReady.CurrentCount == 0) _frameReady.Release();
                         if (Interlocked.Exchange(ref _readySignaled, 1) == 0) _ready();
                         manifests[encoded.SourceTime100Nanoseconds] = manifest;
-                        while (manifests.Count > 16) manifests.Remove(manifests.Keys.Min());
+                        while (manifests.Count > 64) manifests.Remove(manifests.Keys.Min());
                         int copies = 0;
                         foreach (int tile in tiles)
                         {
                             if (!stability.TryGetValue(tile, out var stable) || stable.Version != manifest[tile])
                             { stability[tile] = stable = (manifest[tile], now, 0); Interlocked.Increment(ref _contentChanges); }
                             if (confirmed.TryGetValue(tile, out long confirmedVersion) && confirmedVersion == manifest[tile]) continue;
-                            if (!allowed || Stopwatch.GetElapsedTime(stable.At, now).TotalMilliseconds < 250 ||
+                            if (!allowed || Volatile.Read(ref _sendQueueFull) || Volatile.Read(ref _compressedCount) >= 2 ||
+                                Stopwatch.GetElapsedTime(stable.At, now).TotalMilliseconds < 250 ||
                                 (stable.QueuedAt != 0 && Stopwatch.GetElapsedTime(stable.QueuedAt, now).TotalSeconds < 2)) continue;
                             DetailRect r = active.Context.Tile(tile);
                             Rectangle bounds = new(r.X, r.Y, r.Width, r.Height);
@@ -197,9 +213,19 @@ internal sealed class NativeDetailCaptureWorker
                     if (allowed && IsCurrent(pixelManifest, tile))
                         _raw.Writer.TryWrite((pixelManifest, tile, pixels.Rgba));
                 }
-                if (pending is null && now >= nextFrameAt)
+                long inputAt = _input.LastActivityAt;
+                bool scheduled = now >= nextFrameAt;
+                // Seek the first actual desktop change after input. An empty early poll must
+                // neither consume the input trigger nor move the regularly scheduled frame.
+                bool earlyInput = active.Extended && inputAt > handledInputAt && now - inputAt < Stopwatch.Frequency / 10 &&
+                    now - lastSubmitAt >= Math.Max(Stopwatch.Frequency / 60, period / 2);
+                if (pending is null && ((scheduled && now >= nextIdlePollAt) || earlyInput))
                 {
-                    var surface = source.TryAcquire(repeatUnchanged: true);
+                    // A static desktop still needs periodic base presentations for later patches.
+                    // Poll for real desktop changes independently of these duplicate IDRs.
+                    bool repeatDue = !active.Extended || now - lastSubmitAt >= Stopwatch.Frequency / 11;
+                    var surface = source.TryAcquire(repeatUnchanged: scheduled && repeatDue);
+                    if (surface is null && scheduled) nextIdlePollAt = now + Stopwatch.Frequency / 120;
                     if (source.IsFailed) throw new IOException(source.Failure);
                     if (surface is not null)
                     {
@@ -208,9 +234,12 @@ internal sealed class NativeDetailCaptureWorker
                         {
                             if (encoder.TrySubmit(surface.Texture, surface.Manifest.Sequence * 166_667L))
                             {
-                                nextFrameAt = Stopwatch.GetTimestamp() + period;
+                                lastSubmitAt = Stopwatch.GetTimestamp();
+                                nextFrameAt = lastSubmitAt + period;
+                                if (surface.DesktopPresentedAtTimestamp >= inputAt) handledInputAt = inputAt;
                                 refiner.Begin(surface.Texture, surface.Manifest, tiles,
-                                    new(surface.CapturedAtTimestamp + period, InputPending: !_allowContentTracking()));
+                                    new(surface.CapturedAtTimestamp + period, InputPending: !_allowContentTracking()),
+                                    repeatedImmutableSource: surface.DesktopPresentedAtTimestamp == 0);
                                 submittedRequest = active; pending = surface; surface = null;
                             }
                         }
@@ -234,13 +263,12 @@ internal sealed class NativeDetailCaptureWorker
     internal static int[] SelectTiles(NativeDetailRequest request)
     {
         request.Context.Validate(); request.Viewport.Validate(request.Context);
-        // Bounded cache: closest visible tiles first, not an unbounded whole
-        // desktop download. UI narrows the region around the pointer/viewport.
+        // The first receipt page keeps the original center-first order for older viewers.
         double x = request.Viewport.X + request.Viewport.Width / 2d;
         double y = request.Viewport.Y + request.Viewport.Height / 2d;
         return Enumerable.Range(0, request.Context.TileCount)
             .Where(index => request.Context.Tile(index).Intersects(request.Viewport))
             .OrderBy(index => { var r = request.Context.Tile(index); return Math.Abs(r.X + r.Width / 2d - x) + Math.Abs(r.Y + r.Height / 2d - y); })
-            .Take(64).ToArray();
+            .Take(request.Extended ? DetailCache.ExtendedMaxCachedTiles : DetailCache.MaxCachedTiles).ToArray();
     }
 }

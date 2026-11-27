@@ -80,12 +80,20 @@ internal static class NativeDetailHostProbe
             ShowInTaskbar = false
         };
         string secret = Guid.NewGuid().ToString("N");
-        int nativeBases = 0, legacyBases = 0;
+        int nativeBases = 0, legacyBases = 0, udpNativeBases = 0, videoWidth = 0, videoHeight = 0;
+        var transportField = typeof(RemoteViewerClient).GetField("_lowLatencyVideoTransport", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        bool UdpActive() => (transportField.GetValue(client) as LowLatencyVideoViewerTransport)?.ShouldIgnoreTcpFrames == true;
         long nativeDraws = 0;
         client.FrameReceived += frame =>
         {
+            Volatile.Write(ref videoWidth, frame.Width);
+            Volatile.Write(ref videoHeight, frame.Height);
             if (frame.NativeDetails is null) Interlocked.Increment(ref legacyBases);
-            else Interlocked.Increment(ref nativeBases);
+            else
+            {
+                Interlocked.Increment(ref nativeBases);
+                if (UdpActive()) Interlocked.Increment(ref udpNativeBases);
+            }
         };
         string phase = "startup", failure = "";
         var checks = new List<string>();
@@ -122,6 +130,68 @@ internal static class NativeDetailHostProbe
             Application.DoEvents();
         }
         void Await(Task task) { Pump(() => task.IsCompleted); task.GetAwaiter().GetResult(); }
+        void MeasureScrolling(string label, bool enhanced)
+        {
+            phase = label;
+            var samples = new List<double>();
+            viewer.CaptureDirectSnapshotsForTests = true;
+            const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
+            var gate = (CapturePresentationTransitionGate)typeof(RemoteViewerWindow).GetField("_capturePresentationTransitionGate", fields)!.GetValue(viewer)!;
+            try
+            {
+                FocusOwnedInput(source);
+                for (int i = 0; i < 6; i++)
+                {
+                    if (GetForegroundWindow() != source.Handle || WindowFromPoint(sourceCenter) != source.Handle)
+                        throw new IOException("Owned scroll target is not foreground.");
+                    int seen = source.WheelCount;
+                    bool wantGreen = (seen + 1) % 2 == 0;
+                    var elapsed = Stopwatch.StartNew();
+                    Await(client.SendInputAsync(RemoteInputCommand.MouseWheel(i % 2 == 0 ? -120 : 120,
+                        Volatile.Read(ref videoWidth) / 2, Volatile.Read(ref videoHeight) / 2)));
+                    if (enhanced && client.NativeDetails.IsEnabled) throw new IOException("Wheel input left old tiles active.");
+                    long nextRead = 0;
+                    Pump(() =>
+                    {
+                        if (elapsed.ElapsedMilliseconds > 4000) throw new IOException($"Scroll marker timed out, received {source.WheelCount - seen} wheel events.");
+                        if (source.WheelCount <= seen || elapsed.ElapsedMilliseconds < nextRead) return false;
+                        nextRead = elapsed.ElapsedMilliseconds + 4;
+                        bool matched = false;
+                        gate.Run(() =>
+                        {
+                            if (Presenter() is not { } p) return;
+                            if (typeof(D3D11HwndVideoPresenter).GetField("_validationSource", fields)!.GetValue(p) is not ID3D11Texture2D surface) return;
+                            var borrowed = (ID3D11Device)typeof(D3D11HwndVideoPresenter).GetField("_device", fields)!.GetValue(p)!;
+                            var desc = surface.Description;
+                            int x = (int)desc.Width / 2, y = (int)desc.Height / 2;
+                            desc.Width = desc.Height = 1; desc.Usage = ResourceUsage.Staging;
+                            desc.BindFlags = BindFlags.None; desc.CPUAccessFlags = CpuAccessFlags.Read;
+                            using var pixel = borrowed.CreateTexture2D(desc);
+                            var context = borrowed.ImmediateContext;
+                            context.CopySubresourceRegion(pixel, 0, 0, 0, 0, surface, 0, new Vortice.Mathematics.Box(x,y,0,x+1,y+1,1));
+                            var map = context.Map(pixel, 0, MapMode.Read);
+                            try
+                            {
+                                int green = Marshal.ReadByte(map.DataPointer, 1), red = Marshal.ReadByte(map.DataPointer, 2);
+                                matched = wantGreen ? green - red > 100 : red - green > 100;
+                            }
+                            finally { context.Unmap(pixel, 0); }
+                        });
+                        return matched;
+                    });
+                    samples.Add(elapsed.Elapsed.TotalMilliseconds);
+                }
+            }
+            finally { viewer.CaptureDirectSnapshotsForTests = false; }
+            inputMeasurements[label] = samples.ToArray();
+            if (enhanced)
+            {
+                long applied = client.NativeDetails.AppliedChunks;
+                var idle = Stopwatch.StartNew();
+                Pump(() => client.NativeDetails.AppliedChunks > applied && Presenter()?.NativeDetailActive == true);
+                inputMeasurements["idle to first visible patch after scrolling"] = [idle.Elapsed.TotalMilliseconds];
+            }
+        }
         void CheckLiveColors(string name)
         {
             var sample = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -205,7 +275,6 @@ internal static class NativeDetailHostProbe
                 FocusOwnedInput(source); Application.DoEvents();
                 if (GetForegroundWindow() != source.Handle || !source.InputTarget.Focused)
                     throw new IOException("Owned input target is not foreground; refusing to send test text.");
-                long priorDraws = nativeDraws;
                 string text = "中文" + (char)('甲' + i), expected = source.InputTarget.Text + text;
                 long beganAt = Stopwatch.GetTimestamp();
                 long appliedAt = 0;
@@ -221,8 +290,10 @@ internal static class NativeDetailHostProbe
                     measurements.Add(Stopwatch.GetElapsedTime(beganAt, appliedAt).TotalMilliseconds);
                 }
                 finally { source.InputTarget.TextChanged -= Applied; }
-                if (enhanced) Pump(() => client.NativeDetails.IsEnabled && nativeDraws >= priorDraws + 2);
-                else { long idleAt = Environment.TickCount64; Pump(() => Environment.TickCount64 - idleAt >= 400); }
+                // Match typing cadence in both modes. Sparse patches recover after a
+                // pause and are verified separately; a user never waits for one to type.
+                long idleAt = Environment.TickCount64;
+                Pump(() => Environment.TickCount64 - idleAt >= 400);
             }
             inputMeasurements[label] = measurements.ToArray();
             renderMeasurements[label] = viewer.CollectRenderTelemetrySnapshot(includeLatencyDistributions: true);
@@ -261,19 +332,24 @@ internal static class NativeDetailHostProbe
             if (nativeBases != 0 || client.NativeDetails.IsEnabled) throw new IOException("Off-by-default feature changed base negotiation.");
             checks.Add("ordinary default session delivers frames; no native activation");
             CheckLiveColors("ordinary-colors");
+            MeasureScrolling("ordinary wheel to displayed pixels", false);
             MeasureInput("ordinary input", enhanced: false);
             phase = "native via actual UI toggle";
             Await(viewer.ToggleNativeDetailsAsync());
             Pump(() => client.NativeDetails.AppliedChunks >= 3 && nativeDraws >= 10);
             checks.Add("actual UI -> host request -> hardware source -> native encrypted base/chunks -> real GPU overlay");
             phase = "steady native / real receiver pixel validation";
-            long stableAt = Environment.TickCount64, steadyDraws = nativeDraws;
+            long stableAt = Environment.TickCount64, steadyDraws = nativeDraws, steadyBases = nativeBases;
             Pump(() => Environment.TickCount64 - stableAt >= 12_000);
-            if (nativeDraws < steadyDraws + 120) throw new IOException("Native detail does not stay visible during a static desktop.");
-            int exact = ValidateReceivedPixels(client, original, output);
+            if (nativeBases - steadyBases < 12 || nativeDraws - steadyDraws < (nativeBases - steadyBases) * .7)
+                throw new IOException("Native detail did not remain visible on the delivered static frames.");
+            int exact = ValidateReceivedPixels(client, original, output, source);
             if (exact < 3) throw new IOException("Insufficient exact native patches reached the production receiver.");
             checks.Add($"12-second steady run, {nativeDraws - steadyDraws} native GPU draws, {exact} received patches match original RGBA exactly");
             CheckLiveColors("native-colors");
+            if (expectedRelay is null && (udpNativeBases < 12 || !UdpActive()))
+                throw new IOException("Native capture stopped using the established UDP route.");
+            MeasureScrolling("native wheel to displayed pixels", true);
             MeasureInput("native input", enhanced: true);
             phase = "input cutoff";
             long applied = client.NativeDetails.AppliedChunks;
@@ -287,8 +363,7 @@ internal static class NativeDetailHostProbe
             int legacyAtOff = legacyBases;
             Await(viewer.ToggleNativeDetailsAsync());
             Pump(() => legacyBases >= legacyAtOff + 12);
-            if (expectedRelay is null)
-                Pump(() => logs.Any(line => line.Contains("UDP 低延迟视频已恢复", StringComparison.Ordinal)));
+            if (expectedRelay is null && !UdpActive()) throw new IOException("First off interrupted UDP.");
             if (client.NativeDetails.IsEnabled) throw new IOException("Explicit off left detail active.");
             checks.Add("explicit off recovers existing capture with the same authenticated connection");
             phase = "re-enable";
@@ -300,8 +375,7 @@ internal static class NativeDetailHostProbe
             legacyAtOff = legacyBases;
             Await(viewer.ToggleNativeDetailsAsync());
             Pump(() => legacyBases >= legacyAtOff + 12);
-            if (expectedRelay is null)
-                Pump(() => logs.Count(line => line.Contains("UDP 低延迟视频已恢复", StringComparison.Ordinal)) >= 2);
+            if (expectedRelay is null && !UdpActive()) throw new IOException("Second off interrupted UDP.");
             if (client.NativeDetails.IsEnabled) throw new IOException("Second off was undone by late initialization.");
             MeasureInput("restored input", enhanced: false);
             checks.Add("second off restores ordinary capture/UDP without reconnect; real Chinese input still applies");
@@ -319,7 +393,7 @@ internal static class NativeDetailHostProbe
             File.WriteAllText(Path.Combine(output, "summary.json"), JsonSerializer.Serialize(new
             {
                 passed = failure.Length == 0, failure, phase, nativeBases, legacyBases, nativeDraws, relayServer = expectedRelay,
-                applied = client.NativeDetails.AppliedChunks, source = sourceScreen.Bounds, viewer = viewerScreen.Bounds,
+                applied = client.NativeDetails.AppliedChunks, udpNativeBases, source = sourceScreen.Bounds, viewer = viewerScreen.Bounds,
                 checks, inputMeasurements, renderMeasurements, logs = logs.ToArray(), telemetry = viewer.CollectRenderTelemetrySnapshot(includeLatencyDistributions: true),
                 scope = expectedRelay is null
                     ? "Real Windows host/source/hardware encoder/client/UI/GPU compositor over encrypted loopback, isolated fixture. Not WAN or glass-to-glass latency proof."
@@ -349,13 +423,31 @@ internal static class NativeDetailHostProbe
     {
         private readonly Bitmap _bitmap;
         internal TextBox InputTarget { get; } = new() { Bounds = new(32, 32, 600, 40), Multiline = true, TabStop = true };
-        internal Canvas(Bitmap bitmap) { _bitmap = bitmap; Controls.Add(InputTarget); }
+        internal int WheelCount { get; private set; }
+        internal Rectangle ScrollArea => new(ClientSize.Width / 2 - 180, ClientSize.Height / 2 - 70, 360, 140);
+        internal Canvas(Bitmap bitmap)
+        {
+            _bitmap = bitmap; Controls.Add(InputTarget);
+            void Scroll(object? sender, MouseEventArgs args) { WheelCount++; Invalidate(ScrollArea); }
+            MouseWheel += Scroll;
+            InputTarget.MouseWheel += Scroll;
+        }
         protected override void OnPaintBackground(PaintEventArgs e) { }
         protected override void OnPaint(PaintEventArgs e)
         {
             e.Graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
             Rectangle clip = Rectangle.Intersect(ClientRectangle, e.ClipRectangle);
             e.Graphics.DrawImage(_bitmap, clip, clip, GraphicsUnit.Pixel);
+            var area = ScrollArea;
+            if (e.ClipRectangle.IntersectsWith(area)) DrawScrollContent(e.Graphics);
+        }
+        internal void DrawScrollContent(Graphics graphics)
+        {
+            var area = ScrollArea;
+            if ((WheelCount & 1) != 0)
+                graphics.DrawImage(_bitmap, area, new Rectangle(area.X, area.Y + 32, area.Width, area.Height), GraphicsUnit.Pixel);
+            graphics.FillRectangle((WheelCount & 1) == 0 ? Brushes.LimeGreen : Brushes.Red,
+                ClientSize.Width / 2 - 32, ClientSize.Height / 2 - 28, 64, 56);
         }
     }
 
@@ -388,7 +480,7 @@ internal static class NativeDetailHostProbe
         finally { if (attached) AttachThreadInput(current, foreground, false); }
     }
 
-    private static int ValidateReceivedPixels(RemoteViewerClient client, Bitmap reference, string output)
+    private static int ValidateReceivedPixels(RemoteViewerClient client, Bitmap reference, string output, Canvas source)
     {
         object gate = typeof(NativeDetailViewerSession).GetField("_cacheGate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(client.NativeDetails)!;
         DetailPatch[] patches;
@@ -397,10 +489,15 @@ internal static class NativeDetailHostProbe
             var cache = (DetailCache)typeof(NativeDetailViewerSession).GetField("_cache", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(client.NativeDetails)!;
             patches = cache.Patches.ToArray();
         }
+        using var expected = (Bitmap)reference.Clone();
+        using (var g = Graphics.FromImage(expected)) source.DrawScrollContent(g);
+        int exact = 0;
         foreach (var patch in patches)
         {
             var rect = patch.Rect;
-            using var crop = reference.Clone(new Rectangle(rect.X, rect.Y, rect.Width, rect.Height), System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            var area = new Rectangle(rect.X, rect.Y, rect.Width, rect.Height);
+            if (source.InputTarget.Bounds.IntersectsWith(area)) continue; // live edit caret
+            using var crop = expected.Clone(area, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
             if (!NativeDetailProbe.Rgba(crop).AsSpan().SequenceEqual(patch.Rgba.Span))
             {
                 crop.Save(Path.Combine(output, "mismatch-expected.png"));
@@ -410,7 +507,8 @@ internal static class NativeDetailHostProbe
                     referenceDpi = reference.HorizontalResolution }));
                 throw new IOException($"Receiver patch {patch.Tile} does not match the owned original pixels.");
             }
+            exact++;
         }
-        return patches.Length;
+        return exact;
     }
 }

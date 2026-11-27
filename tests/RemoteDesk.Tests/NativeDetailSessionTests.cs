@@ -23,6 +23,39 @@ public sealed class NativeDetailSessionTests
     private static byte[] TileBytes(byte color = 37) => Enumerable.Repeat(color, 128 * 128 * 4).ToArray();
 
     [Fact]
+    public async Task Whole1080pViewportRetainsBothCornersAndAcknowledgesAllThreePages()
+    {
+        var context = new DetailContext(1, 1, 1920, 1080);
+        var versions = Enumerable.Repeat(1L, context.TileCount).ToArray();
+        var manifest = new DetailManifest(context, 1, versions);
+        using var receiver = new NativeDetailViewerSession();
+        receiver.BeginRequest(new(context, new(0, 0, 1920, 1080), true, true));
+        await PresentWhenReady(receiver, new(manifest, 100));
+        for (int tile = 0; tile < context.TileCount; tile++)
+        {
+            DetailRect rect = context.Tile(tile);
+            byte[] rgba = new byte[rect.Width * rect.Height * 4];
+            Array.Fill(rgba, (byte)(tile + 1));
+            var transfer = DetailTransfer.Encode(manifest, tile, rgba);
+            Assert.True(receiver.TryQueueChunk(transfer.Chunk(0)));
+            long count = tile + 1;
+            await Until(() => receiver.AppliedChunks == count);
+        }
+        var batch = await PresentWhenReady(receiver, new(new(context, 2, versions), 200));
+        Assert.Equal(135, batch.Tiles.Length);
+        foreach (var tile in batch.Tiles.ToArray())
+        {
+            int index = tile.Bounds.Y / 128 * context.Columns + tile.Bounds.X / 128;
+            Assert.Equal((byte)(index + 1), tile.Rgba.Span[0]);
+        }
+        Assert.Equal(ulong.MaxValue, receiver.ReadReceipt(context, 0).Tiles);
+        Assert.Equal(ulong.MaxValue, receiver.ReadReceipt(context, 1).Tiles);
+        Assert.Equal(0x7fUL, receiver.ReadReceipt(context, 2).Tiles);
+        receiver.Invalidate();
+        Assert.Equal(0, receiver.ReadReceipt(context, 2).Sequence);
+    }
+
+    [Fact]
     public void AtomicBaseRoundTripRetainsPayloadSliceAndSurvivesPoolOwnership()
     {
         RemoteFrame frame = BaseFrame();

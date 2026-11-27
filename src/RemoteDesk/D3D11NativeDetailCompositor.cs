@@ -6,7 +6,7 @@ using Vortice.DXGI;
 
 namespace RemoteDesk;
 
-// Sparse native RGB overlay: one 4 MiB atlas, not a full-size CPU/GPU image.
+// Sparse native RGB overlay with a bounded atlas allocated only when enabled.
 // Prepare independently of presentation; render/dispose under the owner's lock.
 // Each draw sees only current immutable tiles, never an outdated recycled slot.
 // Uploads are paced, not a reason to hold back a base frame. No readback or flush.

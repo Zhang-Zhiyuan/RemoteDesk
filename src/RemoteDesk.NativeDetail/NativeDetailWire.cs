@@ -108,6 +108,7 @@ public sealed record DetailChunk(DetailContext Context, long ReferenceSequence, 
 public static class DetailWire
 {
     public const int ChunkBytes = 4096;
+    public const int NarrowLinkChunkBytes = 256;
     public const int ChunkHeaderBytes = 96;
     public const int MaxCompressedBytes = 96 * 1024;
     public const int OuterRecordBytes = 25; // RDK1 length + envelope + AES-GCM tag.
@@ -155,10 +156,11 @@ public static class DetailWire
 
     internal static byte[] EncodeChunk(DetailTransfer transfer, int offset, int chunkBytes = ChunkBytes)
     {
-        if (chunkBytes is not (512 or ChunkBytes) || offset < 0 || offset >= transfer.Encoded.Length || offset % chunkBytes != 0)
+        if (offset < 0 || offset >= transfer.Encoded.Length || chunkBytes is not (NarrowLinkChunkBytes or 512 or ChunkBytes) || offset % chunkBytes != 0)
             throw new InvalidDataException("Invalid chunk offset.");
         int length = Math.Min(chunkBytes, transfer.Encoded.Length - offset);
-        byte[] result = Header(chunkBytes == 512 ? (byte)3 : (byte)2, transfer.Context, transfer.ReferenceSequence, ChunkHeaderBytes + length);
+        byte kind = chunkBytes switch { NarrowLinkChunkBytes => 4, 512 => 3, _ => 2 };
+        byte[] result = Header(kind, transfer.Context, transfer.ReferenceSequence, ChunkHeaderBytes + length);
         BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(40), transfer.Tile);
         BinaryPrimitives.WriteInt64LittleEndian(result.AsSpan(44), transfer.Version);
         BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(52), transfer.Encoded.Length);
@@ -171,8 +173,10 @@ public static class DetailWire
 
     public static DetailChunk DecodeChunk(ReadOnlySpan<byte> payload)
     {
-        int chunkBytes = payload.Length > 4 && payload[4] == 3 ? 512 : ChunkBytes;
-        var (context, sequence) = ReadHeader(payload, chunkBytes == 512 ? (byte)3 : (byte)2, ChunkHeaderBytes);
+        if (payload.Length < ChunkHeaderBytes) throw new InvalidDataException("Incomplete tile chunk.");
+        int chunkBytes = payload[4] switch { 2 => ChunkBytes, 3 => 512, 4 => NarrowLinkChunkBytes,
+            _ => throw new InvalidDataException("Unknown tile chunk size.") };
+        var (context, sequence) = ReadHeader(payload, payload[4], ChunkHeaderBytes);
         int tile = BinaryPrimitives.ReadInt32LittleEndian(payload[40..]);
         long version = BinaryPrimitives.ReadInt64LittleEndian(payload[44..]);
         int total = BinaryPrimitives.ReadInt32LittleEndian(payload[52..]);

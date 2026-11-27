@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Sockets;
 using RemoteDesk.NativeDetail;
 
 namespace RemoteDesk;
@@ -20,9 +21,29 @@ internal sealed class NativeDetailHostSession : IAsyncDisposable
     private int _disposed;
     private long _retryAt;
     private NativeDetailFeedback? _receipt;
-    internal void ObserveFeedback(NativeDetailFeedback feedback)
+    internal bool DatagramBase { get => Volatile.Read(ref _datagramBase); set => Volatile.Write(ref _datagramBase, value); }
+    private bool _datagramBase;
+    internal NativeDetailUdpLinkBudget UdpLink { get; } = new();
+    private Task<bool> _udpChunkWrite = Task.FromResult(false);
+    // Only the capture sender enters here. Once a fragment has acquired the lock and begun
+    // its socket write, keep sending UDP bases independently. Never enqueue another writer.
+    internal bool TryWriteUdpChunk(NetworkStream stream, byte[] payload, SecureSession session, SemaphoreSlim writeLock,
+        Func<bool> mayWrite, CancellationToken token)
     {
-        if (Link.Observe(feedback, Environment.TickCount64)) Volatile.Write(ref _receipt, feedback);
+        if (!_udpChunkWrite.IsCompleted) return false;
+        _udpChunkWrite.GetAwaiter().GetResult();
+        _udpChunkWrite = Protocol.TryWriteNativeChunkAsync(stream, payload, session, writeLock, mayWrite,
+            () => UdpLink.RecordChunk(payload.Length + 25), token, datagramBase: true);
+        return !_udpChunkWrite.IsCompleted || _udpChunkWrite.GetAwaiter().GetResult();
+    }
+    internal long DetailBitsPerSecond(long now) => DatagramBase ? UdpLink.DetailBitsPerSecond(now) :
+        Link.DetailBitsPerSecond(now, (Request?.Extended == true ? DetailWire.NarrowLinkChunkBytes : 512) +
+            DetailWire.ChunkHeaderBytes + DetailWire.OuterRecordBytes);
+    internal void ObserveFeedback(NativeDetailFeedback feedback, bool datagramBase = false)
+    {
+        long now = Environment.TickCount64;
+        bool accepted = datagramBase ? UdpLink.Observe(feedback, now) : Link.Observe(feedback, now);
+        if (accepted && DatagramBase == datagramBase) Volatile.Write(ref _receipt, feedback);
     }
     internal NativeDetailHostSession(Action selectionChanged, RemoteInteractionActivity input, Action<string> log,
         Func<NativeCaptureProfile, NativeCaptureProfile>? adjustProfile = null)
@@ -43,7 +64,7 @@ internal sealed class NativeDetailHostSession : IAsyncDisposable
     internal void Configure(NativeCaptureProfile? profile) => Volatile.Write(ref _profile, profile);
     internal bool Interacting => _input.LastActivityAt > 0 &&
         Stopwatch.GetElapsedTime(_input.LastActivityAt).TotalMilliseconds < 300;
-    internal bool CanEnhance => !Interacting && Link.DetailBitsPerSecond(Environment.TickCount64) > 0;
+    internal bool CanEnhance => !Interacting && DetailBitsPerSecond(Environment.TickCount64) > 0;
     internal bool Accept(NativeDetailRequest request)
     {
         request.Context.Validate(); request.Viewport.Validate(request.Context);
@@ -86,7 +107,7 @@ internal sealed class NativeDetailHostSession : IAsyncDisposable
                     var next = new NativeDetailCaptureWorker(profile!, Interlocked.Read(ref _sequence), () => Request,
                         () => CanEnhance, () => !Interacting, () => Volatile.Read(ref _receipt),
                         value => Interlocked.Exchange(ref _sequence, value),
-                        () => { if (Volatile.Read(ref _disposed) == 0) _selectionChanged(); });
+                        () => { if (Volatile.Read(ref _disposed) == 0) _selectionChanged(); }, _input);
                     Volatile.Write(ref _worker, next);
                 }
                 await Task.Delay(25, _stop.Token).ConfigureAwait(false);
@@ -102,6 +123,9 @@ internal sealed class NativeDetailHostSession : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        _stop.Cancel(); await _manager.ConfigureAwait(false); _stop.Dispose();
+        _stop.Cancel();
+        try { await _manager.ConfigureAwait(false); await _udpChunkWrite.ConfigureAwait(false); }
+        catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or IOException) { }
+        finally { _stop.Dispose(); }
     }
 }

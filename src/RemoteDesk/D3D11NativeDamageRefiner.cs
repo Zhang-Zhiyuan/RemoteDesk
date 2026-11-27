@@ -8,11 +8,11 @@ using MapFlags = Vortice.Direct3D11.MapFlags;
 namespace RemoteDesk;
 
 /// <summary>
-/// Exact RGB comparison of at most 64 requested tiles, not a probabilistic hash
+/// Exact RGB comparison of a bounded set of requested tiles, not a probabilistic hash
 /// or a whole-desktop CPU download. Begin AFTER submitting the base encoder;
 /// Complete as soon as that base is ready. A not-ready GPU result is discarded,
 /// never a reason to wait or to reuse unverified detail. Single capture owner,
-/// one pending base, one previous immutable source lease, 256 B staging memory.
+/// one pending base, one previous immutable source lease, one flag per tile.
 /// Poll nonblocking while the encoder works. One asynchronous Flush submits the
 /// trailing optional GPU batch (without a completion wait or encoder drain);
 /// otherwise drivers may buffer it until after the corresponding base is sent.
@@ -72,15 +72,24 @@ internal sealed class D3D11NativeDamageRefiner : IDisposable
     // A false return means "no optional GPU comparison", NOT "drop this base".
     // Complete must still commit the conservative manifest for this frame.
     public bool Begin(ID3D11Texture2D immutableSource, NativeSurfaceManifest manifest,
-        ReadOnlySpan<int> requestedTiles, NativeDetailRenderBudget budget)
+        ReadOnlySpan<int> requestedTiles, NativeDetailRenderBudget budget, bool repeatedImmutableSource = false)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_pending is not null) throw new InvalidOperationException("Only one native base may be pending.");
         _versions.ValidateNext(manifest);
         if (requestedTiles.Length > MaximumTiles) throw new ArgumentOutOfRangeException(nameof(requestedTiles));
-        for (int i = 0; i < requestedTiles.Length; i++)
-            if (requestedTiles[i] < 0 || requestedTiles[i] >= manifest.Count || requestedTiles[..i].Contains(requestedTiles[i]))
-                throw new ArgumentException("Expected unique, in-bounds native tiles.", nameof(requestedTiles));
+        if (!_requestedTiles.AsSpan().SequenceEqual(requestedTiles))
+        {
+            Span<byte> seen = stackalloc byte[manifest.Count];
+            seen.Clear();
+            foreach (int tile in requestedTiles)
+            {
+                if ((uint)tile >= (uint)manifest.Count || seen[tile] != 0)
+                    throw new ArgumentException("Expected unique, in-bounds native tiles.", nameof(requestedTiles));
+                seen[tile] = 1;
+            }
+            _requestedTiles = requestedTiles.ToArray();
+        }
         var description = immutableSource.Description;
         if (description.Width != manifest.Size.Width || description.Height != manifest.Size.Height ||
             description.Format != Format.B8G8R8A8_UNorm || description.ArraySize != 1 || description.MipLevels != 1 ||
@@ -89,8 +98,14 @@ internal sealed class D3D11NativeDamageRefiner : IDisposable
             throw new ArgumentException("Expected an immutable native BGRA texture on the owning device.", nameof(immutableSource));
         _candidate = immutableSource.QueryInterface<ID3D11Texture2D>();
         _pending = manifest; _comparedTiles = null; _proof = null;
-        _requestedTiles = requestedTiles.ToArray();
         if (IsFailed || _reference is null || requestedTiles.IsEmpty || !budget.Allows(Stopwatch.GetTimestamp())) return false;
+        // DXGI timeout/cursor-only repeats lease the same immutable snapshot. Both leases
+        // are alive here. This is exact source identity, independent of dirty rectangles.
+        if (repeatedImmutableSource && _reference.NativePointer == _candidate.NativePointer)
+        {
+            _proof = new(manifest.Sequence, _versions.Current!.Sequence, _requestedTiles);
+            return true;
+        }
         try
         {
             int columns = (manifest.Size.Width + 127) / 128;
@@ -178,7 +193,7 @@ internal sealed class D3D11NativeDamageRefiner : IDisposable
         if (_comparedTiles is not null && proof is null) UnreadyComparisons++;
         var manifest = _versions.Commit(_pending, proof, _requestedTiles);
         _reference?.Dispose(); _reference = _candidate; _candidate = null;
-        _pending = null; _proof = null; _comparedTiles = null; _requestedTiles = [];
+        _pending = null; _proof = null; _comparedTiles = null;
         return manifest;
     }
 
@@ -194,11 +209,11 @@ internal sealed class D3D11NativeDamageRefiner : IDisposable
         _multithread.Dispose(); _context.Dispose(); _device.Dispose();
     }
 
-    private const string Shader = """
+    private static string Shader => $$"""
         Texture2D<float4> previousImage : register(t0);
         Texture2D<float4> currentImage : register(t1);
         RWStructuredBuffer<uint> differences : register(u0);
-        cbuffer Regions : register(b0) { int4 rectangles[64]; };
+        cbuffer Regions : register(b0) { int4 rectangles[{{MaximumTiles}}]; };
         groupshared uint different;
         [numthreads(16, 16, 1)]
         void cs(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID) {

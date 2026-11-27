@@ -47,7 +47,8 @@ internal sealed partial class RemoteHostServer
         native.Configure(profile);
         if (!viewer.Capabilities.HasFlag(RemoteDeviceCapabilities.NativeDetailV1)) return;
         Size offeredSize = profile?.NativeSize ?? new Size(48, 48);
-        var offer = new NativeDetailOffer(snapshot.Version, offeredSize, profile is not null && native.MayStart);
+        var offer = new NativeDetailOffer(snapshot.Version, offeredSize, profile is not null && native.MayStart,
+            codecs.HasFlag(RemoteVideoCodecs.NativeDetailH264));
         if (viewer.LastNativeOffer == offer) return;
         viewer.LastNativeOffer = offer;
         using (priority.BeginControlWritePriority())
@@ -63,17 +64,18 @@ internal sealed partial class RemoteHostServer
     {
         NativeDetailHostSession native = viewer.NativeDetails!;
         NativeCaptureProfile profile = worker.Profile;
-        // Existing authenticated barrier discards late UDP video while keeping
-        // the independent UDP mouse input/ACK route. Never switch at capability
-        // negotiation alone; default/off sessions keep their existing UDP path.
-        await lowLatencyVideo.StopVideoForCaptureTargetChangeAsync().ConfigureAwait(false);
+        bool extended = native.Request is { Extended: true } && viewer.SupportedVideoCodecs.HasFlag(RemoteVideoCodecs.NativeDetailH264);
+        if (!extended) await lowLatencyVideo.StopVideoForCaptureTargetChangeAsync().ConfigureAwait(false);
+        native.UdpLink.BeginCapture();
         native.Link.BeginCapture();
-        var queue = new DetailSendQueue(chunkBytes: 512);
+        DetailSendQueue NewQueue(bool udp) => new(extended && !udp ? DetailWire.NarrowLinkChunkBytes : 512);
+        var queue = NewQueue(native.DatagramBase);
         byte[]? pendingChunk = null;
         DetailChunk? pendingHeader = null;
         long pendingAt = 0;
         DetailManifest? sentManifest = null;
-        long checkedDesktopAt = 0, loggedAt = Environment.TickCount64;
+        NativeCapturedFrame? latestBase = null;
+        long checkedDesktopAt = 0, networkSampleAt = 0, loggedAt = Environment.TickCount64;
         int frames = 0, chunks = 0;
         log($"原生补清已接入：GPU 同源采集 / 硬编 {profile.OutputSize.Width}×{profile.OutputSize.Height}，接收反馈限速。");
         while (!token.IsCancellationRequested && !viewer.ScreenStreamPaused && ReferenceEquals(native.Worker, worker) && worker.IsReady &&
@@ -81,7 +83,19 @@ internal sealed partial class RemoteHostServer
             viewer.SupportedVideoCodecs.HasFlag(RemoteVideoCodecs.H264AnnexB))
         {
             long now = Environment.TickCount64;
-            if (native.Link.FeedbackStalled(now))
+            bool udp = extended && lowLatencyVideo.CanSendVideo;
+            if (udp != native.DatagramBase)
+            {
+                native.DatagramBase = udp;
+                queue = NewQueue(udp); pendingChunk = null; pendingHeader = null; sentManifest = null;
+                if (!udp) native.Link.BeginCapture();
+            }
+            if (udp && now >= networkSampleAt)
+            {
+                native.UdpLink.ObserveNetwork(lowLatencyVideo.CollectNetworkSnapshot());
+                networkSampleAt = now + 250;
+            }
+            if (!udp && native.Link.FeedbackStalled(now))
             {
                 native.Suspend("原生补清缺少接收反馈，已回退普通画面，避免无反馈时持续排队。");
                 break;
@@ -94,40 +108,68 @@ internal sealed partial class RemoteHostServer
                 capture.RefreshCaptureBounds();
                 if (!capture.IsTargetAvailable || capture.TargetVersion != profile.TargetGeneration) break;
             }
-            NativeCapturedFrame? frame = worker.TakeLatest();
-            if (frame is not null && native.Request?.Context == frame.Manifest.Context &&
-                native.Link.CanSendBase(now) && !priority.HasPendingControlWrite)
+            // Credit can open between captures. Keep the latest fresh IDR for that
+            // instant instead of throwing away a scroll update and awaiting a repeat.
+            latestBase = worker.TakeLatest() ?? latestBase;
+            if (latestBase is { } waiting && (native.Request?.Context != waiting.Manifest.Context ||
+                Stopwatch.GetElapsedTime(waiting.CapturedAt).TotalMilliseconds > 100))
+                latestBase = null;
+            if (latestBase is { } frame &&
+                (udp || (native.Link.CanSendBase(now, frame.Video.AnnexBBytes.Length) && !priority.HasPendingControlWrite)))
             {
+                latestBase = null;
                 var video = frame.Video;
-                if (Stopwatch.GetElapsedTime(frame.CapturedAt).TotalMilliseconds > 100)
-                    continue; // latest all-IDR base; no old-frame catch-up queue
                 if (!capture.TryObserveEncodedFrame(profile.TargetGeneration, profile.Target.Bounds, video.OutputSize,
                         Math.Clamp((int)(video.OutputSize.Width * 100L / profile.NativeSize.Width), 25, 100))) break;
-                byte[] payload = NativeDetailSessionProtocol.EncodeBase(frame.Manifest,
-                    new(video.OutputSize.Width, video.OutputSize.Height, RemoteFrameEncoding.H264AnnexB,
+                var baseFrame = new RemoteFrame(video.OutputSize.Width, video.OutputSize.Height, RemoteFrameEncoding.H264AnnexB,
                         RemoteFrameFlags.KeyFrame | RemoteFrameFlags.CodecConfig, video.AnnexBBytes, 0,
                         video.AnnexBBytes.Length, 0,
-                        Stopwatch.GetElapsedTime(video.SubmittedAtTimestamp, video.CompletedAtTimestamp).TotalMilliseconds));
+                        Stopwatch.GetElapsedTime(video.SubmittedAtTimestamp, video.CompletedAtTimestamp).TotalMilliseconds);
                 bool admitted = await publication.AdmitFrameIfCurrentAsync(profile.TargetGeneration,
                     capture.IsCurrentTargetGeneration, async sendToken =>
                     {
-                        native.Link.RecordSent(frame.Manifest.Context, frame.Manifest.Sequence, payload.Length + 25, Environment.TickCount64);
-                        await Protocol.WriteMessageAsync(stream, MessageType.NativeVideoFrame, payload, session, priority.Lock, sendToken).ConfigureAwait(false);
+                        if (udp)
+                        {
+                            // Viewer input invalidates its overlay immediately. The same encoder
+                            // can supply a normal H.264 IDR without serializing any tile metadata.
+                            if (native.Interacting)
+                            {
+                                if (lowLatencyVideo.TryQueueVideoFrame(baseFrame.Width, baseFrame.Height, baseFrame.Encoding,
+                                    baseFrame.Flags, baseFrame.CaptureMilliseconds, baseFrame.EncodeMilliseconds,
+                                    video.AnnexBBytes, allowLatencyBudgetDrop: true)) frames++;
+                                return;
+                            }
+                            if (!lowLatencyVideo.TryQueueNativeVideoFrame(frame.Manifest, baseFrame))
+                            {
+                                if (lowLatencyVideo.CanSendVideo)
+                                    native.Suspend("当前 UDP 预算不足以发送原生补清底图，恢复普通 H.264。");
+                                return;
+                            }
+                            native.UdpLink.RecordBase(frame.Manifest.Context, frame.Manifest.Sequence);
+                        }
+                        else
+                        {
+                            byte[] payload = NativeDetailSessionProtocol.EncodeBase(frame.Manifest, baseFrame);
+                            native.Link.RecordSent(frame.Manifest.Context, frame.Manifest.Sequence, payload.Length + 25, Environment.TickCount64);
+                            await Protocol.WriteMessageAsync(stream, MessageType.NativeVideoFrame, payload, session, priority.Lock, sendToken).ConfigureAwait(false);
+                        }
                         sentManifest = frame.Manifest; frames++;
                     }, token).ConfigureAwait(false);
                 if (!admitted) break;
             }
+            now = Environment.TickCount64;
             if (native.Interacting || native.Request?.Context != sentManifest?.Context)
             { queue.Clear(); pendingChunk = null; pendingHeader = null; }
             while (worker.TryTakeTransfer(out DetailTransfer? transfer))
                 if (transfer is not null && !native.Interacting) queue.Enqueue(transfer, Environment.TickCount64);
+            worker.ObserveSendBacklog(queue.Count, queue.QueuedBytes, native.DetailBitsPerSecond(now));
             if (sentManifest is not null && !priority.HasPendingControlWrite && native.CanEnhance)
             {
                 if (pendingHeader is { } held && (now - pendingAt > 200 || held.Context != sentManifest.Context ||
                     sentManifest[held.Tile] != held.Version || worker.LatestManifest is not { } current ||
                     current.Context != held.Context || current[held.Tile] != held.Version))
                 { pendingChunk = null; pendingHeader = null; queue.Clear(); }
-                byte[]? chunk = pendingChunk ?? queue.TryTake(Environment.TickCount64, native.Link.DetailBitsPerSecond(Environment.TickCount64),
+                byte[]? chunk = pendingChunk ?? queue.TryTake(Environment.TickCount64, native.DetailBitsPerSecond(Environment.TickCount64),
                     priority.HasPendingControlWrite, native.Interacting, 0,
                     transfer => native.Request?.Context == transfer.Context && sentManifest.Context == transfer.Context &&
                         sentManifest.Sequence >= transfer.ReferenceSequence && sentManifest[transfer.Tile] == transfer.Version &&
@@ -138,10 +180,13 @@ internal sealed partial class RemoteHostServer
                     { pendingChunk = chunk; pendingHeader = DetailWire.DecodeChunk(chunk); pendingAt = now; }
                     // Only the capture sender handles optional writes: no
                     // background fragment competes with the next base.
-                    if (await Protocol.TryWriteNativeChunkAsync(stream, chunk, session, priority.Lock,
-                            () => !priority.HasPendingControlWrite && native.CanEnhance && native.Request?.Context == sentManifest.Context,
-                            () => native.Link.RecordSent(sentManifest.Context, sentManifest.Sequence, chunk.Length + 25, Environment.TickCount64),
-                            token).ConfigureAwait(false))
+                    bool MayWrite() => !priority.HasPendingControlWrite && native.CanEnhance && native.Request?.Context == sentManifest.Context;
+                    bool accepted = udp
+                        ? native.TryWriteUdpChunk(stream, chunk, session, priority.Lock, MayWrite, token)
+                        : await Protocol.TryWriteNativeChunkAsync(stream, chunk, session, priority.Lock, MayWrite,
+                            () => native.Link.RecordSent(sentManifest.Context, sentManifest.Sequence, chunk.Length + 25, Environment.TickCount64, isBase: false),
+                            token).ConfigureAwait(false);
+                    if (accepted)
                     { chunks++; pendingChunk = null; pendingHeader = null; }
                     // A racing control/ACK wins this iteration. Keep just this
                     // small fragment, not a socket waiter and not a lost hole
@@ -150,11 +195,12 @@ internal sealed partial class RemoteHostServer
             }
             if (now - loggedAt >= 2000)
             {
-                log($"原生补清统计：{frames} 底图 / {chunks} 细节分片，未确认 {native.Link.SentBytes - native.Link.AcknowledgedBytes} B，" +
-                    $"细节预算 {native.Link.DetailBitsPerSecond(now) / 1000} kbps（无余量时暂停），{worker.Diagnostics}。");
+                log($"原生补清统计：{(udp ? "UDP" : "TCP")}，{frames} 底图 / {chunks} 细节分片，" +
+                    $"细节预算 {native.DetailBitsPerSecond(now) / 1000} kbps，" +
+                    (udp ? "" : native.Link.DescribeDelivery(now) + "，") + worker.Diagnostics + "。");
                 loggedAt = now; frames = chunks = 0;
             }
-            await Task.Delay(2, token).ConfigureAwait(false);
+            await worker.WaitForFrameAsync(2, token).ConfigureAwait(false);
         }
         queue.Clear();
         log("原生补清退出，恢复兼容捕获链路。");

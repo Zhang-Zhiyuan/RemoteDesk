@@ -8,6 +8,8 @@ internal sealed partial class RemoteViewerClient
     // Capability availability is not activation. The UI switch is off by
     // default and ordinary sessions retain their existing codec/UDP route.
     internal bool EnableNativeDetailReception { get; init; } = true;
+    private byte[] EncodeViewerVideoInfo(RemoteVideoCodecs codecs) => RemoteMessageCodec.EncodeViewerInfo(
+        EnableNativeDetailReception ? codecs | RemoteVideoCodecs.NativeDetailH264 : codecs & ~RemoteVideoCodecs.NativeDetailH264);
     internal NativeDetailViewerSession NativeDetails { get; } = new();
     private readonly SemaphoreSlim _nativeRequestLock = new(1, 1);
     private long _nativeRequestSequence;
@@ -19,9 +21,11 @@ internal sealed partial class RemoteViewerClient
     internal NativeDetailOffer? NativeOffer => Volatile.Read(ref _nativeOffer);
     internal long NativeInputRevision => Interlocked.Read(ref _nativeInputRevision);
     private NativeFeedbackOwner? _nativeFeedbackOwner;
-    private sealed class NativeFeedbackOwner(CancellationTokenSource connection)
+    private NativeFeedbackOwner? _nativeUdpFeedbackOwner;
+    private sealed class NativeFeedbackOwner(CancellationTokenSource connection, bool datagramBase)
     {
         internal CancellationTokenSource Connection { get; } = connection;
+        internal bool DatagramBase { get; } = datagramBase;
         internal NativeDetailFeedback? Latest;
         internal long WireBytes;
     }
@@ -75,7 +79,7 @@ internal sealed partial class RemoteViewerClient
                 inputRevision = Interlocked.Read(ref _nativeInputRevision);
                 request = new(new(_inputConnectionGeneration, checked(++_nativeRequestSequence),
                     nativeSize.Width, nativeSize.Height),
-                    new(viewport.X, viewport.Y, viewport.Width, viewport.Height), enabled);
+                    new(viewport.X, viewport.Y, viewport.Width, viewport.Height), enabled, NativeOffer is { Extended: true });
             }
             // Inflation may hold the cache lock; never hold the input lock
             // while resetting it. A racing input invalidates this request.
@@ -103,30 +107,36 @@ internal sealed partial class RemoteViewerClient
             if (!EnableNativeDetailReception || !IsCurrentConnection(owner) ||
                 !_remoteCapabilities.HasFlag(RemoteDeviceCapabilities.NativeDetailV1)) return;
             RemoteFrame frame = NativeDetailSessionProtocol.DecodeBase(payload);
-            ObserveNativeWire(owner, frame.NativeDetails!.Manifest, payload.Length + 25);
-            if (!NativeDetails.Requested(frame.NativeDetails)) return;
-            NativeDetails.ObserveNativeBase(frame.NativeDetails!);
-            // Input/off disables overlays immediately, but does not freeze the
-            // independently decodable base while the host processes stop.
-            if (!NativeDetails.Accepts(frame.NativeDetails)) frame = frame with { NativeDetails = null };
-            PublishTcpVideoFrame(owner, frame, nativeEnvelope: true);
+            if (ObserveNativeFrame(owner, ref frame, payload.Length + 25, datagramBase: false))
+                PublishTcpVideoFrame(owner, frame, nativeEnvelope: true);
         }
     }
 
-    private void ReceiveNativeChunk(CancellationTokenSource owner, ReadOnlySpan<byte> payload)
+    // Caller holds _framePublishLock, including for borrowed UDP reassembly buffers.
+    private bool ObserveNativeFrame(CancellationTokenSource owner, ref RemoteFrame frame, int reliableBytes, bool datagramBase)
+    {
+        if (datagramBase && NativeOffer is not { Extended: true }) return false;
+        var identity = frame.NativeDetails!;
+        ObserveNativeWire(owner, identity.Manifest, reliableBytes, datagramBase);
+        if (!NativeDetails.Requested(identity)) return false;
+        NativeDetails.ObserveNativeBase(identity);
+        if (!NativeDetails.Accepts(identity)) frame = frame with { NativeDetails = null };
+        return true;
+    }
+
+    private void ReceiveNativeChunk(CancellationTokenSource owner, ReadOnlySpan<byte> payload, bool datagramBase = false)
     {
         lock (_framePublishLock)
         {
             if (EnableNativeDetailReception && IsCurrentConnection(owner) &&
-                _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.NativeDetailV1))
+                _remoteCapabilities.HasFlag(RemoteDeviceCapabilities.NativeDetailV1) &&
+                (!datagramBase || NativeOffer is { Extended: true }))
             {
-                NativeFeedbackOwner? feedback = _nativeFeedbackOwner;
-                if (feedback is not null && ReferenceEquals(feedback.Connection, owner) && feedback.Latest is { } previous)
-                {
-                    feedback.WireBytes = checked(feedback.WireBytes + payload.Length + 25);
+                var feedback = GetNativeFeedbackOwner(owner, datagramBase);
+                feedback.WireBytes = checked(feedback.WireBytes + payload.Length + 25);
+                if (feedback.Latest is { } previous)
                     Volatile.Write(ref feedback.Latest, previous with { ReceivedWireBytes = feedback.WireBytes,
                         LocalReceivedAt = Stopwatch.GetTimestamp() });
-                }
                 NativeDetails.TryQueueChunk(payload);
             }
         }
@@ -159,21 +169,29 @@ internal sealed partial class RemoteViewerClient
         Interlocked.Exchange(ref _reliableFeedbackOwner, null);
         NativeDetails.ResetConnection();
         Interlocked.Exchange(ref _nativeFeedbackOwner, null);
+        Interlocked.Exchange(ref _nativeUdpFeedbackOwner, null);
         Volatile.Write(ref _nativeOffer, null);
         NativeDetailOfferChanged?.Invoke(null);
     }
 
     // Called only by the owning receive loop. The worker coalesces ACKs and
     // never makes decoding, rendering or input wait on a network write.
-    private void ObserveNativeWire(CancellationTokenSource owner, DetailManifest manifest, int wireBytes)
+    private NativeFeedbackOwner GetNativeFeedbackOwner(CancellationTokenSource owner, bool datagramBase)
     {
-        NativeFeedbackOwner? feedback = _nativeFeedbackOwner;
+        ref NativeFeedbackOwner? lane = ref (datagramBase ? ref _nativeUdpFeedbackOwner : ref _nativeFeedbackOwner);
+        NativeFeedbackOwner? feedback = lane;
         if (feedback is null || !ReferenceEquals(feedback.Connection, owner))
         {
-            feedback = new(owner);
-            _nativeFeedbackOwner = feedback;
+            feedback = new(owner, datagramBase);
+            lane = feedback;
             _ = Task.Run(() => SendNativeFeedbackAsync(feedback));
         }
+        return feedback;
+    }
+
+    private void ObserveNativeWire(CancellationTokenSource owner, DetailManifest manifest, int wireBytes, bool datagramBase)
+    {
+        NativeFeedbackOwner feedback = GetNativeFeedbackOwner(owner, datagramBase);
         feedback.WireBytes = checked(feedback.WireBytes + wireBytes);
         Volatile.Write(ref feedback.Latest, new(manifest.Context, manifest.Sequence, 0, feedback.WireBytes)
             { LocalReceivedAt = Stopwatch.GetTimestamp() });
@@ -181,21 +199,27 @@ internal sealed partial class RemoteViewerClient
 
     private async Task SendNativeFeedbackAsync(NativeFeedbackOwner feedback)
     {
-        long sent = 0;
+        long sent = 0, receivedSequence = 0;
+        int nextPage = 0;
         try
         {
             while (IsCurrentConnection(feedback.Connection) && !feedback.Connection.IsCancellationRequested)
             {
                 await Task.Delay(30, feedback.Connection.Token).ConfigureAwait(false);
                 NativeDetailFeedback? latest = Volatile.Read(ref feedback.Latest);
-                if (latest is null || latest.ReceivedWireBytes <= sent) continue;
-                var receipt = NativeDetails.ReadReceipt(latest.Context);
+                if (latest is null || (latest.ReceivedWireBytes <= sent &&
+                    (!feedback.DatagramBase || latest.ReceivedSequence == receivedSequence))) continue;
+                var receipt = NativeDetails.ReadReceipt(latest.Context, nextPage);
+                nextPage = receipt.Page + 1;
                 var message = latest with { PresentedSequence = Math.Min(latest.ReceivedSequence, receipt.Sequence),
                     CachedTileMask = receipt.Sequence <= latest.ReceivedSequence ? receipt.Tiles : 0,
+                    TilePage = receipt.Sequence <= latest.ReceivedSequence ? receipt.Page : 0,
                     AcknowledgementDelayMilliseconds = Math.Clamp((int)Stopwatch.GetElapsedTime(latest.LocalReceivedAt).TotalMilliseconds, 0, 500) };
-                if (!await SendControlAsync(NativeDetailSessionProtocol.EncodeFeedback(message), feedback.Connection,
-                        MessageType.NativeDetailFeedback).ConfigureAwait(false)) return;
+                // ReadReceipt assigns a nonzero page only to an explicitly negotiated request.
+                if (!await SendControlAsync(NativeDetailSessionProtocol.EncodeFeedback(message, feedback.DatagramBase, extendedViewport: message.TilePage != 0), feedback.Connection,
+                        feedback.DatagramBase ? MessageType.NativeDetailUdpFeedback : MessageType.NativeDetailFeedback).ConfigureAwait(false)) return;
                 sent = latest.ReceivedWireBytes;
+                receivedSequence = latest.ReceivedSequence;
             }
         }
         catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException) { }

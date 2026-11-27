@@ -43,7 +43,7 @@ public sealed class NativeSurfaceContentTrackerTests
     [Fact]
     public void MalformedAndExcessProofsFailClosed()
     {
-        foreach (int[] invalid in new int[][] { [-1], [3], [0, 0], Enumerable.Range(0, 65).ToArray() })
+        foreach (int[] invalid in new int[][] { [-1], [3], [0, 0], Enumerable.Range(0, NativeDetailPresentation.MaximumTiles + 1).ToArray() })
         {
             var tracker = new NativeSurfaceContentTracker();
             tracker.Commit(Manifest(1, 1, 1, 1), null);
@@ -77,7 +77,8 @@ public sealed class NativeSurfaceContentTrackerTests
         Assert.Equal(new long[] { 4, 1, 4 }, tracker.Commit(Manifest(4, 1, 1, 1), new(3, 2, [0, 2]), [0, 2]).CopyVersions());
         Assert.Throws<ArgumentException>(() => tracker.Commit(Manifest(5, 1, 1, 1), null, [3]));
         Assert.Throws<ArgumentException>(() => tracker.Commit(Manifest(5, 1, 1, 1), null, [0, 0]));
-        Assert.Throws<ArgumentOutOfRangeException>(() => tracker.Commit(Manifest(5, 1, 1, 1), null, new int[65]));
+        Assert.Throws<ArgumentOutOfRangeException>(() => tracker.Commit(Manifest(5, 1, 1, 1), null,
+            new int[NativeDetailPresentation.MaximumTiles + 1]));
         Assert.Equal(4, tracker.Current!.Sequence);
     }
 

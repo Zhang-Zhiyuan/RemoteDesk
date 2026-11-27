@@ -8,6 +8,42 @@ namespace RemoteDesk.Tests;
 public sealed class NativeDetailUdpResumeTests
 {
     [Fact]
+    public async Task NativeAndOrdinaryH264ShareOneAuthenticatedUdpChannel()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var features = LowLatencyVideoFeatures.CongestionFeedback | LowLatencyVideoFeatures.XorFec |
+            LowLatencyVideoFeatures.AuthenticatedHeartbeat | LowLatencyVideoFeatures.ShortGopH264;
+        var seen = System.Threading.Channels.Channel.CreateUnbounded<(long Sequence, byte[] Video)>();
+        await using var host = new LowLatencyVideoHostTransport(_ => { }, timeout.Token);
+        var offer = Assert.IsType<LowLatencyVideoOffer>(host.TryCreateOffer(IPAddress.Loopback, features));
+        var peerOffer = RemoteMessageCodec.DecodeControl(RemoteMessageCodec.EncodeLowLatencyVideoOffer(offer)).LowLatencyVideoOffer!;
+        host.MarkOfferSent(); host.ClearOfferSecrets();
+        await using var viewer = new LowLatencyVideoViewerTransport(peerOffer, IPAddress.Loopback,
+            bytes =>
+            {
+                var control = RemoteMessageCodec.DecodeControl(bytes);
+                if (control.Kind == RemoteControlKind.LowLatencyVideoReady)
+                    host.TryMarkReady(control.LowLatencyVideoChannelId, control.LowLatencyVideoEpoch);
+                return Task.FromResult(true);
+            },
+            frame => seen.Writer.TryWrite((frame.NativeDetails?.Manifest.Sequence ?? 0,
+                frame.EncodedBuffer.AsSpan(frame.EncodedOffset, frame.EncodedLength).ToArray())),
+            _ => { }, timeout.Token, features, allowNativeDetail: true);
+        while (!host.CanSendVideo) await Task.Delay(5, timeout.Token);
+        var bytes = new byte[40_000];
+        new Random(135).NextBytes(bytes);
+        var frame = NativeDetailSessionTests.BaseFrame() with { EncodedBuffer = bytes, EncodedOffset = 0, EncodedLength = bytes.Length };
+        Assert.True(host.TryQueueNativeVideoFrame(NativeDetailSessionTests.Manifest(4), frame));
+        var native = await seen.Reader.ReadAsync(timeout.Token);
+        Assert.Equal(4, native.Sequence); Assert.Equal(bytes, native.Video);
+        Assert.True(host.TryQueueVideoFrame(frame.Width, frame.Height, frame.Encoding, frame.Flags, 0, 0, bytes));
+        var ordinary = await seen.Reader.ReadAsync(timeout.Token);
+        Assert.Equal(0, ordinary.Sequence); Assert.Equal(bytes, ordinary.Video);
+        Assert.True(host.CanSendVideo); Assert.True(viewer.ShouldIgnoreTcpFrames);
+        Assert.Null(host.PrepareNativeResume(NativeDetailSessionTests.Context));
+    }
+
+    [Fact]
     public async Task ResumeNeedsBothPeersAndRejectsLateFramesAndReplayedBoundaries()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));

@@ -28,7 +28,9 @@ public sealed class NativeDetailClientLoopbackTests
             using var session = await Protocol.AuthenticateServerAsync(stream, Password, timeout.Token);
             Assert.NotNull(session);
             var info = await Protocol.ReadMessageAsync(stream, session, timeout.Token);
-            Assert.Equal(RemoteControlKind.ViewerInfo, RemoteMessageCodec.DecodeControl(info.PayloadMemory).Kind);
+            var codecs = RemoteMessageCodec.DecodeControl(info.PayloadMemory);
+            Assert.Equal(RemoteControlKind.ViewerInfo, codecs.Kind);
+            Assert.True(codecs.SupportedVideoCodecs.HasFlag(RemoteVideoCodecs.NativeDetailH264));
             var capabilities = RemoteMessageCodec.DecodeControl((await Protocol.ReadMessageAsync(stream, session, timeout.Token)).PayloadMemory);
             Assert.True(capabilities.Capabilities.HasFlag(RemoteDeviceCapabilities.NativeDetailV1));
             Assert.True(capabilities.Capabilities.HasFlag(RemoteDeviceCapabilities.LowLatencyUdpVideo));
@@ -116,7 +118,9 @@ public sealed class NativeDetailClientLoopbackTests
             using var write = new SemaphoreSlim(1, 1);
             using var session = await Protocol.AuthenticateServerAsync(stream, Password, timeout.Token);
             Assert.NotNull(session);
-            await Protocol.ReadMessageAsync(stream, session, timeout.Token);
+            var info = RemoteMessageCodec.DecodeControl((await Protocol.ReadMessageAsync(stream, session, timeout.Token)).PayloadMemory);
+            Assert.Equal(optIn && info.SupportedVideoCodecs.HasFlag(RemoteVideoCodecs.H264AnnexB),
+                info.SupportedVideoCodecs.HasFlag(RemoteVideoCodecs.NativeDetailH264));
             var capabilities = RemoteMessageCodec.DecodeControl((await Protocol.ReadMessageAsync(stream, session, timeout.Token)).PayloadMemory);
             Assert.Equal(optIn, capabilities.Capabilities.HasFlag(RemoteDeviceCapabilities.NativeDetailV1));
             await Protocol.WriteMessageAsync(stream, MessageType.Control, RemoteMessageCodec.EncodeDeviceInfo(
