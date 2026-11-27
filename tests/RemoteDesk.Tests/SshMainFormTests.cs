@@ -229,6 +229,7 @@ public sealed class SshMainFormTests
         Assert.Same(primary.Parent, Field<Button>(main, "_sshMoreButton").Parent);
         Assert.Contains(Field<ToolStripMenuItem>(main, "_configureSshAliasButton"), primary.ContextMenuStrip!.Items.Cast<ToolStripItem>());
         Assert.Contains(Field<ToolStripMenuItem>(main, "_sshLoginSettingsButton"), primary.ContextMenuStrip.Items.Cast<ToolStripItem>());
+        Assert.Contains(Field<ToolStripMenuItem>(main, "_sshPairKeyButton"), primary.ContextMenuStrip.Items.Cast<ToolStripItem>());
     });
 
     [Fact]

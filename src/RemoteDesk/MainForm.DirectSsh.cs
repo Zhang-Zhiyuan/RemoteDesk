@@ -76,6 +76,8 @@ public sealed partial class MainForm
         var endpoint = new Label { Name = "sshEndpointPreview", AutoSize = true, Dock = DockStyle.Top, UseMnemonic = false, Margin = new Padding(3, 8, 3, 4) };
         var hint = new Label { Name = "sshEndpointHint", AutoSize = true, Dock = DockStyle.Top, UseMnemonic = false };
         panel.Controls.Add(endpoint); panel.Controls.Add(hint);
+        var pair = new LinkLabel { Text = "配置 Linux / WSL 的 SSH 免密登录…", AutoSize = true, Dock = DockStyle.Top };
+        panel.Controls.Add(pair);
         panel.ClientSizeChanged += (_, _) => endpoint.MaximumSize = hint.MaximumSize = new Size(
             Math.Max(1, panel.ClientSize.Width - panel.Padding.Horizontal - hint.Margin.Horizontal), 0);
         string reportedPort = row?.WindowsSshPort is > 0 ? row.WindowsSshPort.ToString()! : "";
@@ -95,6 +97,7 @@ public sealed partial class MainForm
                 ? NetworkUtils.FormatEndpoint(host.Text.Trim(), number) : $"{host.Text.Trim()}（端口无效）";
         void RefreshEndpoint()
         {
+            pair.Visible = IsWsl() || row?.KnownPlatform is null or "" or RemoteDevicePlatforms.Unknown or RemoteDevicePlatforms.Linux;
             bool sameHost = DirectSshTarget.SameHost(host.Text, device);
             bool needsPort = sameHost && string.IsNullOrWhiteSpace(port.Text);
             string connection = needsPort && (IsWsl() || row?.WindowsSshPort == 0) ? $"{host.Text.Trim()}（请填写映射端口）" :
@@ -114,11 +117,11 @@ public sealed partial class MainForm
             try
             {
                 ValidateDirectSshSystem(IsWsl(), DirectSshTarget.Create(host.Text, port.Text, user.Text), device, row?.WindowsSshPort, hasWsl);
-                terminal.Enabled = editor.Enabled = true;
+                terminal.Enabled = editor.Enabled = pair.Enabled = true;
             }
             catch (ArgumentException error)
             {
-                terminal.Enabled = editor.Enabled = false;
+                terminal.Enabled = editor.Enabled = pair.Enabled = false;
                 if (!string.IsNullOrWhiteSpace(host.Text)) hint.Text = error.Message;
             }
         }
@@ -190,6 +193,18 @@ public sealed partial class MainForm
             catch (Exception ex) when (ex is not OutOfMemoryException) { hint.Text = ex.Message; }
         }
         terminal.Click += (_, _) => Launch(false); editor.Click += (_, _) => Launch(true);
+        pair.LinkClicked += (_, _) =>
+        {
+            try
+            {
+                var target = DirectSshTarget.Create(host.Text, port.Text, user.Text);
+                ValidateDirectSshSystem(IsWsl(), target, device, row?.WindowsSshPort, hasWsl);
+                DesktopUserLaunch.PairDirectSshKey(target);
+                hint.Text = "请在打开的终端查看公钥登录检查结果。";
+            }
+            catch (Exception ex) when (ex is IOException or ArgumentException or InvalidOperationException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+            { hint.Text = ex.Message; }
+        };
         actions.Controls.AddRange([terminal, editor, cancel]); ConfigureWrappingDialogActions(actions);
         dialog.Controls.Add(panel); dialog.Controls.Add(actions); dialog.AcceptButton = terminal; dialog.CancelButton = cancel;
         ResponsiveWindowLayout.ConfigureDialog(dialog, new Size(560, 460), new Size(340, 310));

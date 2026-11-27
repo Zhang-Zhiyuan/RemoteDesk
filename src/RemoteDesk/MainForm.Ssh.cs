@@ -17,6 +17,7 @@ public sealed partial class MainForm
     private Button _prepareWindowsSshButton = null!;
     private bool _sshPreparing, _sshServiceDisabled;
     private ToolStripMenuItem _sshLoginSettingsButton = null!;
+    private ToolStripMenuItem _sshPairKeyButton = null!;
     private ToolStripMenuItem _configureSshAliasButton = null!;
     private ToolStripMenuItem _manageSshAliasesButton = null!;
     private ToolStripMenuItem _closeSshTerminalsButton = null!;
@@ -59,6 +60,7 @@ public sealed partial class MainForm
         _sshEditorButton = CreateSecondaryButton("用 VS Code 打开");
         _sshMoreButton = CreateSecondaryButton("终端选项 ▾");
         _sshLoginSettingsButton = new ToolStripMenuItem("换账号连接…");
+        _sshPairKeyButton = new ToolStripMenuItem("配置 SSH 免密登录…");
         _configureSshAliasButton = new ToolStripMenuItem("设置命令行别名（可选）…");
         _manageSshAliasesButton = new ToolStripMenuItem("管理命令行别名…");
         _closeSshTerminalsButton = new ToolStripMenuItem("断开所有 SSH 终端…");
@@ -68,6 +70,8 @@ public sealed partial class MainForm
         var terminalMenu = new ContextMenuStrip();
         terminalMenu.Items.Add("新建终端（保留已有连接）", null, async (_, _) => await OpenSshTerminalCoreAsync(forceNew: true));
         terminalMenu.Items.Add(_sshLoginSettingsButton);
+        terminalMenu.Items.Add(_sshPairKeyButton);
+        _sshPairKeyButton.Click += async (_, _) => await ConfigureSshAliasAsync(pairKey: true);
         var loginMenu = new ToolStripMenuItem("远端 Codex / Claude");
         foreach (bool codex in new[] { true, false })
         {
@@ -231,6 +235,9 @@ public sealed partial class MainForm
         _sshMoreButton.Enabled = !_isClosing;
         _sshLoginSettingsButton.Enabled = _sshOpening is null && !_isClosing && IsRelayConfigured() && !_relayOperationInProgress && reason is null;
         _sshLoginSettingsButton.ToolTipText = "修改登录信息并新建终端，不打断已有连接。";
+        _sshPairKeyButton.Enabled = _sshLoginSettingsButton.Enabled && selected is not null &&
+            (selected.Platform == RemoteDevicePlatforms.Linux || destination?.Id != selected.DeviceId);
+        _sshPairKeyButton.ToolTipText = "检查本机已有公钥。首次配对时用目标 Linux 或 WSL 账号登录一次，终端和 VS Code 均可使用。";
         _configureSshAliasButton.Enabled = _sshOpening is null && !_isClosing && IsRelayConfigured() && !_relayOperationInProgress && reason is null;
         _sshEditorButton.Enabled = _configureSshAliasButton.Enabled;
         SetToolTip(_sshEditorButton, reason ?? "使用 VS Code Remote - SSH 打开这台设备。首次确认 SSH 账号和别名。");
@@ -292,6 +299,18 @@ public sealed partial class MainForm
         { SetRelayStatus("最多同时打开 8 个 SSH 终端，请先关闭不再使用的会话。", MutedTextColor); return; }
         long generation = _relayConfigurationGeneration;
         var profile = _settings.Viewer.SshProfiles.FirstOrDefault(item => item.HostKeyAlias == alias);
+        if (profile is null)
+        {
+            try
+            {
+                var commandProfile = SshCommandProfiles.ReadAll().FirstOrDefault(p => p.DeviceId == route.DeviceId &&
+                    p.RelayScope == SshCommandProfiles.ComputeRelayScope(route));
+                if (commandProfile is not null) profile = new(alias, commandProfile.Username, commandProfile.IdentityFile);
+            }
+            catch (IOException) { } // The native terminal can still run without a managed alias.
+            catch (InvalidDataException) { }
+            catch (UnauthorizedAccessException) { }
+        }
         string key = GetSshDeviceKey(selected, route), user = profile?.Username ?? "", identity = profile?.IdentityFile ?? "";
         if (configure || profile?.CanQuickConnect(alias, key) != true)
         {
@@ -372,7 +391,7 @@ public sealed partial class MainForm
         }
     }
 
-    private async Task ConfigureSshAliasAsync(bool openEditor = false)
+    private async Task ConfigureSshAliasAsync(bool openEditor = false, bool pairKey = false)
     {
         RelayOnlineDevice? selected = GetSelectedRelayDevice();
         if (_sshOpening is not null || _isClosing || _relayOperationInProgress || !IsRelayConfigured() || selected is null || SshConnectionBlockReason(selected) is not null) return;
@@ -382,6 +401,7 @@ public sealed partial class MainForm
             if (!File.Exists(SshTerminalLauncher.ExecutablePath))
                 throw new InvalidOperationException("请先在 Windows 可选功能中安装 OpenSSH 客户端。");
             if (SelectedSshSystem(selected) is not { Available: true } system) return;
+            if (pairKey && system.Id == selected.DeviceId && selected.Platform != RemoteDevicePlatforms.Linux) return;
             RelayConnectionOptions route = CreateRelayOptions(system.Id);
             long generation = _relayConfigurationGeneration;
             string scope = SshCommandProfiles.ComputeRelayScope(route);
@@ -396,7 +416,7 @@ public sealed partial class MainForm
                     RelayDeviceKeys.Find(_settings.Relay.DeviceKeys, route with { DeviceId = selected.DeviceId }));
             string key = editedKey ? selectedKey : onDisk?.DeviceKey ?? selectedKey;
             SshCommandProfile profile;
-            bool quickOpen = openEditor && previous is not null;
+            bool quickOpen = (openEditor || pairKey) && previous is not null;
             if (quickOpen)
             {
                 profile = previous!;
@@ -409,7 +429,7 @@ public sealed partial class MainForm
                 string suggestedAlias = previous?.Alias ?? (SshAliasConfig.IsValidAlias(selected.MachineName) ? selected.MachineName.ToLowerInvariant() : "rd-" + route.DeviceId[..8]);
                 if (previous is null && system.Id != selected.DeviceId)
                     suggestedAlias = suggestedAlias[..Math.Min(46, suggestedAlias.Length)] + "-wsl-" + system.Id[..8];
-                if (openEditor && !suggestedAlias.StartsWith("rd-", StringComparison.Ordinal))
+                if ((openEditor || pairKey) && !suggestedAlias.StartsWith("rd-", StringComparison.Ordinal))
                     suggestedAlias = "rd-" + suggestedAlias[..Math.Min(61, suggestedAlias.Length)];
                 using var dialog = CreateSshAliasDialog(display, Font, key, preferences, suggestedAlias,
                     out TextBox username, out TextBox deviceKey, out TextBox identityFile, out TextBox commandAlias);
@@ -477,6 +497,16 @@ public sealed partial class MainForm
                 throw;
             }
             SetRelayStatus($"终端 SSH 已配置：ssh {profile.Alias}", SuccessTextColor);
+            if (pairKey)
+            {
+                DesktopUserLaunch.PairSshKey(helper, profile.Id);
+                var login = new SshTerminalProfile(SshTerminalLauncher.HostKeyAlias(profile.RelayPin, profile.DeviceId),
+                    profile.Username, profile.IdentityFile);
+                _settings.Viewer.SshProfiles = SshTerminalProfile.Normalize(_settings.Viewer.SshProfiles.Prepend(login));
+                TrySaveSettings();
+                SetRelayStatus($"正在终端检查 {profile.Username}@{profile.Alias} 的免密登录。", MutedTextColor);
+                return;
+            }
             if (openEditor)
             {
                 string platform = system.Id == selected.DeviceId ? selected.Platform : RemoteDevicePlatforms.Linux;
@@ -652,7 +682,7 @@ public sealed partial class MainForm
         };
         identityRow.Controls.Add(identity, 0, 0); identityRow.Controls.Add(browse, 1, 0);
         advanced.Controls.Add(identityRow); identityFile = identity;
-        advanced.Controls.Add(new Label { Text = "无需填写中继端口或配置别名；SSH 密码与私钥内容不会保存到此设置。", AutoSize = true, Dock = DockStyle.Top });
+        advanced.Controls.Add(new Label { Text = "Linux 或 WSL 每次都提示系统密码时，可在“终端选项”中配置 SSH 免密登录。", AutoSize = true, Dock = DockStyle.Top });
         var more = new CheckBox { Name = "sshMoreSettings", Appearance = Appearance.Button, AutoSize = true,
             Text = "更多设置 ▸", AccessibleName = "展开可选的 SSH 登录设置" };
         void ShowAdvanced()

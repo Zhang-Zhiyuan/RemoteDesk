@@ -5866,6 +5866,9 @@ class RemoteDeskLinuxApp:
         self.relay_ssh_settings_button = ttk.Button(self.relay_ssh_advanced, text="换账号连接…",
             command=lambda: self._open_relay_ssh(configure=True, force_new=True), state=tk.DISABLED)
         self.relay_ssh_settings_button.pack(anchor=tk.W, pady=(8, 0))
+        self.relay_ssh_pair_button = ttk.Button(self.relay_ssh_advanced, text="配置 SSH 免密登录…",
+            command=lambda: self._configure_terminal_ssh_alias(pair_key=True), state=tk.DISABLED)
+        self.relay_ssh_pair_button.pack(anchor=tk.W, pady=(8, 0))
         ssh_menu = tk.Menu(self.relay_ssh_button, tearoff=False)
         ssh_menu.add_command(label="新建终端（保留已有连接）", command=lambda: self._open_relay_ssh(force_new=True))
         self.relay_ssh_button.bind("<Button-3>", lambda event: ssh_menu.tk_popup(event.x_root, event.y_root))
@@ -6268,6 +6271,9 @@ class RemoteDeskLinuxApp:
                  and "ssh" in target.get("services", [])),
                 ("relay_editor_button", getattr(self, "ssh_alias_pending", None) is None and target is not None
                  and target.get("sshTunneling") is True and "ssh" in target.get("services", [])),
+                ("relay_ssh_pair_button", getattr(self, "ssh_alias_pending", None) is None and ssh_target is not None
+                 and (ssh_target.get("platform") == "Linux" or ssh_target["deviceId"] != target["deviceId"])
+                 and ssh_target.get("sshTunneling") is True and "ssh" in ssh_target.get("services", [])),
                 ("relay_ssh_alias_button", getattr(self, "ssh_alias_pending", None) is not None or
                  (target is not None and target.get("sshTunneling") is True and "ssh" in target.get("services", [])))):
             button = getattr(self, attribute, None)
@@ -6577,7 +6583,7 @@ class RemoteDeskLinuxApp:
                 dialog.result = ssh_terminal.validate_alias(dialog.alias.get())
         return AliasDialog(self.root, "移除终端 SSH 别名" if remove else "配置终端 SSH 别名").result
 
-    def _configure_terminal_ssh_alias(self, *, open_editor=False):
+    def _configure_terminal_ssh_alias(self, *, open_editor=False, pair_key=False):
         if self.ssh_alias_pending is not None:
             self._cancel_ssh_alias_verification()
             self.relay_status.config(text="已取消 SSH 别名验证；未更改现有别名或设备密钥。")
@@ -6585,16 +6591,24 @@ class RemoteDeskLinuxApp:
         selected = self.relay_list.selection()
         target = self.relay_devices.get(selected[0]) if selected else None
         current = self.relay_options
+        parent = target
         target = self._selected_ssh_system(target)
         if current is None or target is None or target.get("sshTunneling") is not True or "ssh" not in target.get("services", []):
             self.relay_status.config(text="请选择已开启 SSH 的在线设备。")
             return
         options = replace(current, device_id=target["deviceId"])
-        if open_editor:
+        if pair_key and target.get("platform") != "Linux" and target["deviceId"] == parent["deviceId"]:
+            self.relay_status.config(text="请选择 Linux 设备或 WSL 发行版。")
+            return
+        if open_editor or pair_key:
             try:
                 existing = ssh_terminal.editor_alias(options)
                 if existing:
-                    self._launch_ssh_editor(existing)
+                    if pair_key:
+                        ssh_terminal.open_key_pairing(existing, options)
+                        self.relay_status.config(text=f"正在终端检查 {existing} 的免密登录。")
+                    else:
+                        self._launch_ssh_editor(existing)
                     return
             except (OSError, ValueError) as error:
                 messagebox.showerror("SSH 别名不可用", str(error), parent=self.root)
@@ -6604,16 +6618,16 @@ class RemoteDeskLinuxApp:
             self.relay_status.config(text="请填写所选设备的设备密钥；别名仅引用本用户加密保存的设备密钥。")
             return
         suggested = target["machineName"] if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", target["machineName"]) else "rd-" + options.device_id[:8]
-        alias = ("rd-" + suggested[:61] if not suggested.startswith("rd-") else suggested) if open_editor else self._ask_terminal_alias(initial=suggested)
+        alias = ("rd-" + suggested[:61] if not suggested.startswith("rd-") else suggested) if open_editor or pair_key else self._ask_terminal_alias(initial=suggested)
         if not alias or self.closing or current != self.relay_options:
             return
         try:
             alias = ssh_terminal.validate_alias(alias)
-            initial_user = ssh_terminal.load_username(options)
+            preferences = ssh_terminal.load_login(options)
         except (OSError, ValueError) as error:
             messagebox.showerror("SSH 别名未配置", str(error), parent=self.root)
             return
-        login = self._ask_ssh_login(initial_user, for_alias=True)
+        login = self._ask_ssh_login(preferences["username"], identity_file=preferences["identityFile"] or "", for_alias=True)
         if not login or self.closing or current != self.relay_options:
             return
         username, identity_file = login
@@ -6625,7 +6639,8 @@ class RemoteDeskLinuxApp:
         operation = ssh_terminal.GateVerification(options, key,
             lambda verified: put_ui_event(events, "ssh_alias_verified", (token, verified)))
         self.ssh_alias_pending = dict(token=token, current=current, generation=self.relay_setup_generation,
-            alias=alias, username=username.strip(), options=options, key=key, identity_file=identity_file or None, operation=operation, open_editor=open_editor)
+            alias=alias, username=username.strip(), options=options, key=key, identity_file=identity_file or None, operation=operation,
+            open_editor=open_editor, pair_key=pair_key)
         self.relay_ssh_alias_button.configure(text="取消 SSH 别名验证", state=tk.NORMAL)
         self.relay_status.config(text="正在验证中继与目标 SSH 设备门禁（最多 20 秒）；再次点击可取消，尚未保存配置。")
         operation.start()
@@ -6667,6 +6682,12 @@ class RemoteDeskLinuxApp:
                                  (" 原配置备份：" + result["backup"] if result["backup"] else ""))
         if pending.get("open_editor"):
             self._launch_ssh_editor(pending["alias"])
+        elif pending.get("pair_key"):
+            try:
+                ssh_terminal.open_key_pairing(pending["alias"], pending["options"])
+                self.relay_status.config(text=f"正在终端检查 {pending['alias']} 的免密登录。")
+            except (OSError, ValueError) as error:
+                messagebox.showerror("SSH 免密登录", str(error), parent=self.root)
 
     def _launch_ssh_editor(self, alias):
         try:
@@ -7369,11 +7390,15 @@ class RemoteDeskLinuxApp:
                            else "端口和账号可留空使用 SSH 配置。默认端口为 22。")
         picker.bind("<<ComboboxSelected>>", select)
         select()
-        def launch(editor=False):
+        def launch(editor=False, pair_key=False):
             try:
                 target = ssh_terminal.DirectTarget.parse(host.get(), port.get(), user.get())
                 if system.get() == "WSL" and not target.port and target.host.casefold() == device.casefold():
                     raise ValueError("使用 Windows 地址连接 WSL 时，请填写 WSL 对外可达的 SSH 端口。")
+                if pair_key:
+                    ssh_terminal.open_key_pairing(target)
+                    hint.configure(text="请在打开的终端查看公钥登录检查结果。")
+                    return
                 ssh_terminal.open_direct(target, editor)
             except (OSError, ValueError) as error:
                 hint.configure(text=str(error))
@@ -7389,6 +7414,7 @@ class RemoteDeskLinuxApp:
         self._wrap_action_buttons(actions, (
             ttk.Button(actions, text="打开终端", command=launch),
             ttk.Button(actions, text="用 VS Code 打开", command=lambda: launch(True)),
+            ttk.Button(actions, text="Linux / WSL 免密登录…", command=lambda: launch(pair_key=True)),
             ttk.Button(actions, text="取消", command=window.destroy)))
         window.bind("<Escape>", lambda _: window.destroy())
         window.bind("<Return>", lambda _: launch())

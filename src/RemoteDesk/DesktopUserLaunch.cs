@@ -66,6 +66,12 @@ internal static class DesktopUserLaunch
 
     internal static void OpenEditor(string alias) => StartEditor(string.Join(" ", EditorArguments(alias)));
 
+    internal static void PairSshKey(string helper, Guid profile) =>
+        Open(helper, "--pair " + profile.ToString("D"));
+
+    internal static void PairDirectSshKey(DirectSshTarget target) =>
+        Open(SshProxyDeployment.EnsureInstalled(), $"--pair-direct {target.Host} {target.Port?.ToString() ?? "-"} {(target.Username.Length == 0 ? "-" : target.Username)}");
+
     internal static void OpenDirectSsh(DirectSshTarget target, bool editor)
     {
         if (editor) { StartEditor("--new-window --remote " + target.EditorAuthority()); return; }

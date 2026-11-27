@@ -14,6 +14,10 @@
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
     <PackageReference Include="SSH.NET" Version="2026.0.0" />
     <Compile Include="..\RemoteDesk\SshCommandProfiles.cs" Link="Core\SshCommandProfiles.cs" />
+    <Compile Include="..\RemoteDesk\DirectSshTarget.cs" Link="Core\DirectSshTarget.cs" />
+    <Compile Include="..\RemoteDesk\RemoteDeviceIdentity.cs" Link="Core\RemoteDeviceIdentity.cs" />
+    <Compile Include="..\RemoteDesk\SshTerminalLauncher.cs" Link="Core\SshTerminalLauncher.cs" />
+    <EmbeddedResource Include="..\..\scripts\linux\remotedesk_authorize_key.py" LogicalName="RemoteDesk.AuthorizeKey.py" />
     <Compile Include="..\RemoteDesk\SshCommandProxy.cs" Link="Core\SshCommandProxy.cs" />
     <Compile Include="..\RemoteDesk\SshFileSafety.cs" Link="Core\SshFileSafety.cs" />
     <Compile Include="..\RemoteDesk\SshRelayClient.cs" Link="Core\SshRelayClient.cs" />

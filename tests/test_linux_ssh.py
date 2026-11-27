@@ -243,12 +243,12 @@ class SshNativeArgumentsTests(unittest.TestCase):
         terminal.assert_not_called()
         self.assertIsNone(session.thread)
 
-    def test_selected_private_key_is_a_literal_argument_and_disables_agent_identity_mix(self):
+    def test_selected_identity_allows_agent_to_unlock_only_the_specified_key(self):
         arguments = ssh.ssh_arguments(self.options(), "owned", 12345, "/tmp/token", "/tmp/records",
                                       identity_file="/tmp/key with space;literal")
         self.assertEqual("/tmp/key with space;literal", arguments[arguments.index("-i") + 1])
         self.assertIn("IdentitiesOnly=yes", arguments)
-        self.assertIn("IdentityAgent=none", arguments)
+        self.assertNotIn("IdentityAgent=none", arguments)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "private Unix profiles")
     def test_username_profiles_are_scoped_to_pin_uuid_and_bounded_to_fifty(self):

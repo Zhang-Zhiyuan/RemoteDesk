@@ -291,7 +291,7 @@ def ssh_arguments(options, username, proxy_port, token_path, known_hosts, identi
         identity = str(Path(identity_file).expanduser().absolute())
         if any(ord(char) < 32 or ord(char) == 127 for char in identity):
             raise ValueError("SSH 私钥路径不能包含控制字符。")
-        identity_args = ["-i", identity, "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none"]
+        identity_args = ["-i", identity, "-o", "IdentitiesOnly=yes"]
     return [executable, "-F", "/dev/null", "-tt", *identity_args, "-o", "ProxyCommand=" + proxy,
             "-o", "HostKeyAlias=" + host_key_alias(options), "-o", "UserKnownHostsFile=" + records,
             "-o", "GlobalKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=ask", "-o", "CheckHostIP=no",
@@ -429,6 +429,9 @@ class TerminalSession:
                 # preserves the selected literal path without copying its key.
                 identity_file = Path(directory) / "selected-identity"
                 identity_file.symlink_to(Path(self.identity_file).expanduser().absolute())
+                public = Path(str(Path(self.identity_file).expanduser().absolute()) + ".pub")
+                if public.is_file():
+                    Path(str(identity_file) + ".pub").symlink_to(public)
             token = secrets.token_bytes(32)
             token_path = Path(directory) / "proxy-token"
             fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -684,6 +687,22 @@ def remember_direct(device, system, target, directory=None):
 
 def open_editor(alias):
     _open_editor_authority("ssh-remote+" + validate_alias(alias))
+
+
+def open_key_pairing(target, options=None):
+    if isinstance(target, DirectTarget):
+        args = ["--pair-direct", target.host, str(target.port or ""), target.user]
+    else:
+        alias = validate_alias(target)
+        if options is None or editor_alias(options) != alias:
+            raise AliasConfigurationError("此设备的 SSH 别名已变化，请重新配置。")
+        profile = next((p for p in _alias_profiles(ssh_config_directory()) if p["alias"] == alias), None)
+        if profile is None:
+            raise AliasConfigurationError("此设备的 SSH 别名已移除，请重新配置。")
+        save_username(options, profile["user"], identity_file=profile.get("identityFile"))
+        args = ["--pair", alias]
+    script = Path(__file__).with_name("remotedesk_ssh_pair.py")
+    subprocess.Popen(terminal_arguments([sys.executable, str(script), *args], "SSH 免密登录"), start_new_session=True)
 
 
 def _open_editor_authority(authority):
