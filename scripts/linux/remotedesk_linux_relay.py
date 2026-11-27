@@ -3,7 +3,8 @@
 
 The asyncio owner serializes TLS I/O; a private loopback socket adapts it to the
 existing synchronous RemoteDesk protocol, just like the Windows product does.
-There is no LAN fallback, external proxy process, or SSH/ADB tunnel.
+An authenticated SSH session may select a private TLS data connection while the
+relay retains ownership. Desktop sessions continue to use their selected relay.
 """
 from __future__ import annotations
 
@@ -1177,8 +1178,9 @@ class RelayHostConnector:
             await close_writer(writer)
 
     async def _ssh_data(self, session_id, expected_generation=None):
-        from remotedesk_linux_ssh import accept_gate
-        remote_writer = local_writer = None
+        from remotedesk_linux_ssh import accept_gate, gate_challenge
+        import remotedesk_ssh_lan as ssh_lan
+        remote_writer = local_writer = direct_writer = None
         with self.service_lock:
             enabled, port, key = self.ssh_settings
             generation = self.ssh_generation
@@ -1186,8 +1188,16 @@ class RelayHostConnector:
             return
         try:
             reader, remote_writer = await connect_tls(self.options)
-            paired = await hello(reader, remote_writer, self.options, "host-data",
-                                 deviceId=self.options.device_id, sessionId=session_id, service="ssh")
+            lan_address = ssh_lan.local_address(remote_writer)
+            nonce, greeting = gate_challenge(self.options.device_id, key, lan=bool(lan_address))
+            await write_json(remote_writer, dict(version=1, role="host-data", token=self.options.access_token,
+                                                 deviceId=self.options.device_id, sessionId=session_id, service="ssh"))
+            # The relay buffers host data while pairing. The public challenge can travel with the
+            # registration, saving a host-to-relay round trip. Still require the SSH pairing reply.
+            remote_writer.write(greeting)
+            await remote_writer.drain()
+            paired = await asyncio.wait_for(read_json(reader), TIMEOUT)
+            ensure_success(paired)
             if paired.get("type") != "paired" or paired.get("service") != "ssh":
                 raise PermissionError("中继未确认独立 SSH 通道。")
             with self.service_lock:
@@ -1198,18 +1208,35 @@ class RelayHostConnector:
                     if generation != self.ssh_generation or not self.ssh_settings[0]:
                         raise asyncio.CancelledError()
                 return await asyncio.open_connection(address, local_port)
+            direct = None
+            async def select_route(local, session_key):
+                nonlocal direct, direct_writer
+                direct = await ssh_lan.choose_host_route(lan_address, session_key, reader, remote_writer, local[0])
+                if direct:
+                    direct_writer = direct[1]
+
             local_reader, local_writer = await accept_gate(reader, remote_writer, self.options.device_id, key, port,
-                                                           connect=connect_current)
+                                                          connect=connect_current, sent_nonce=nonce,
+                                                          lan_address=lan_address, select_route=select_route)
             key = ""
             with self.service_lock:
                 if generation != self.ssh_generation or not self.ssh_settings[0]:
                     return
-            await bridge((local_reader, local_writer), (reader, remote_writer))
+            if direct:
+                lease = asyncio.create_task(ssh_lan.keep_relay_lease(reader, remote_writer, direct_writer))
+                try:
+                    await bridge((local_reader, local_writer), direct)
+                finally:
+                    direct_writer.close()
+                    await lease
+            else:
+                await bridge((local_reader, local_writer), (reader, remote_writer))
         except (OSError, ValueError, asyncio.IncompleteReadError, TimeoutError, asyncio.TimeoutError):
             self._status("SSH 门禁或本机 SSH 服务不可用；桌面会话不受影响。")
         finally:
             key = ""
-            await asyncio.gather(close_writer(local_writer, abort=True), close_writer(remote_writer, abort=True))
+            await asyncio.gather(close_writer(local_writer, abort=True), close_writer(remote_writer, abort=True),
+                                 close_writer(direct_writer, abort=True))
 
     async def _data(self, session_id):
         local_writer = remote_writer = None

@@ -18,6 +18,7 @@
     <Compile Include="..\RemoteDesk\SshFileSafety.cs" Link="Core\SshFileSafety.cs" />
     <Compile Include="..\RemoteDesk\SshRelayClient.cs" Link="Core\SshRelayClient.cs" />
     <Compile Include="..\RemoteDesk\SshGateProtocol.cs" Link="Core\SshGateProtocol.cs" />
+    <Compile Include="..\RemoteDesk\SshLanRoute.cs" Link="Core\SshLanRoute.cs" />
     <Compile Include="..\RemoteDesk\WslSshTargets.cs" Link="Core\WslSshTargets.cs" />
     <EmbeddedResource Include="..\..\scripts\linux\remotedesk_ssh_endpoint.py" LogicalName="RemoteDesk.WslSshGuest.py" />
     <Compile Include="..\RemoteDesk\RelayCoreModels.cs" Link="Core\RelayCoreModels.cs" />

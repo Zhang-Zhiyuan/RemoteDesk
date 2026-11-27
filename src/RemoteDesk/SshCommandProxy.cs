@@ -23,6 +23,8 @@ internal static class SshCommandProxy
             SshCommandProfile profile = SshCommandProfiles.Read(id, root is null ? null : Path.Combine(root, "ssh"));
             var credentials = ReadCredentials(profile, root is null ? SshCommandProfiles.DefaultSettingsPath : Path.Combine(root, "settings.json"));
             using var connection = await SshRelayClient.OpenAsync(credentials.Options, credentials.DeviceKey, token).ConfigureAwait(false);
+            if (Environment.GetEnvironmentVariable("REMOTEDESK_SSH_ROUTE_DIAGNOSTICS") == "1")
+                await error.WriteLineAsync(connection.UsesLan ? "RemoteDesk SSH: LAN" : "RemoteDesk SSH: relay");
             await BridgeAsync(input, output, connection.Stream, connection, token).ConfigureAwait(false);
             return 0;
         }

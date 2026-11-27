@@ -301,7 +301,7 @@ class SshRelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
     asyncTearDown = fixtures.LinuxRelayTlsTests.asyncTearDown
     wait_for = fixtures.LinuxRelayTlsTests.wait_for
 
-    async def start_ssh_host(self, desktop=True):
+    async def start_ssh_host(self, desktop=True, banner=b""):
         self.local_connections = 0
         self.local_tasks = set()
         async def echo(reader, writer):
@@ -309,6 +309,9 @@ class SshRelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.local_tasks.add(task)
             self.local_connections += 1
             try:
+                if banner:
+                    writer.write(banner)
+                    await writer.drain()
                 while data := await reader.read(65536):
                     writer.write(data)
                     await writer.drain()
@@ -343,6 +346,39 @@ class SshRelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.to_thread(relay.connect_viewer, self.options)
         finally:
             await relay.close_writer(connection[1], abort=True)
+
+    async def test_lan_ssh_banner_once_and_disabling_ssh_revokes_direct_stream(self):
+        banner = b"SSH-2.0-RemoteDeskFixture\r\n"
+        with mock.patch.object(ssh.ssh_lan, "eligible", side_effect=lambda address: address == "127.0.0.1"):
+            await self.start_ssh_host(banner=banner)
+            reader, writer = await ssh.connect_ssh(self.options, KEY)
+            try:
+                self.assertIsNotNone(getattr(writer, "_remotedesk_ssh_lease", None))
+                self.assertEqual(banner, await asyncio.wait_for(reader.readexactly(len(banner)), 2))
+                await self.exchange((reader, writer), bytes(range(256)) * 70)
+                self.host.configure_services(desktop_enabled=True, ssh_enabled=False, ssh_port=self.ssh_port, device_key=KEY)
+                self.assertEqual(b"", await asyncio.wait_for(reader.read(1), 2))
+            finally:
+                await relay.close_writer(writer, abort=True)
+
+    async def test_mismatched_lan_tls_pin_uses_same_relay_with_banner_intact(self):
+        banner = b"SSH-2.0-RelayFixture\r\n"
+        original = ssh.ssh_lan.SshLanOffer.listen
+        async def wrong_pin(offer, address):
+            endpoint = await original(offer, address)
+            binding = endpoint[:6] + bytes(32)
+            return binding + ssh.hmac.digest(offer.key, b"offer" + binding, "sha256")
+        with mock.patch.object(ssh.ssh_lan, "eligible", return_value=True), \
+                mock.patch.object(ssh.ssh_lan.SshLanOffer, "listen", wrong_pin):
+            await self.start_ssh_host(banner=banner)
+            reader, writer = await ssh.connect_ssh(self.options, KEY)
+            try:
+                self.assertFalse(hasattr(writer, "_remotedesk_ssh_lease"))
+                self.assertEqual(banner, await asyncio.wait_for(reader.readexactly(len(banner)), 2))
+                await self.exchange((reader, writer))
+                self.assertEqual(1, self.local_connections)
+            finally:
+                await relay.close_writer(writer, abort=True)
 
     async def test_wrong_device_key_never_reaches_sshd(self):
         await self.start_ssh_host()
@@ -452,7 +488,7 @@ class SshTerminalLifecycleTests(unittest.IsolatedAsyncioTestCase):
         import threading
         entered, completed = threading.Event(), []
         options = relay.RelayOptions("127.0.0.1", 12345, fixtures.TOKEN, "ab" * 32, ID).validate()
-        async def gate(*args):
+        async def gate(*args, **kwargs):
             entered.set()
             await asyncio.Event().wait()
         verification = ssh.GateVerification(options, KEY, completed.append)

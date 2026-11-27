@@ -116,6 +116,10 @@ ssh 5090 whoami
 
 在 Windows / Linux 的中继设备列表选中目标，点“用 VS Code 打开”。首次确认 SSH 账号与别名，以后复用同一别名。请在本机安装桌面版 VS Code 和 Remote - SSH 扩展。也可以在 VS Code 选择 **Remote-SSH: Connect to Host…** 并输入该别名。目标 sshd 需要允许 TCP 转发。
 
+从 Windows 或 Linux 连接新版 Linux 主机时，同一个别名会先通过中继验证设备密钥，再尝试主机内网地址。内网握手足够快时，SSH 数据走独立的加密连接。内网临时端口被防火墙拦截、地址不可达或对端版本较旧时，继续通过公网中继传输。已建立的会话保持原线路。关闭被控端的 SSH 开关会同时断开内网加速会话。
+
+Windows 内置终端的连接状态会显示所用线路。使用命令行别名时，设置环境变量 `REMOTEDESK_SSH_ROUTE_DIAGNOSTICS=1` 可在新连接时查看 `LAN` 或 `relay`。需要固定走公网时，可为客户端设置 `REMOTEDESK_SSH_RELAY_ONLY=1`。自动直达目前适用于 IPv4 私有地址。
+
 生成的是标准 OpenSSH `ProxyCommand` 配置，也可供 VS Code Remote SSH、SFTP、SCP
 和 SSH 端口转发使用；目标 sshd 的登录和转发权限仍生效。VS Code 本身对目标系统的要求不变。
 配置后无需启动本机 RemoteDesk 图形界面，但需保留配置时的系统用户及其已保存的中继登录、

@@ -6,14 +6,14 @@ namespace RemoteDesk;
 internal static class SshHostBridge
 {
     internal static async Task RunAsync(Stream relay, IDisposable relayOwner, RelaySshHostOptions options,
-        string deviceId, CancellationToken cancellationToken, WslSshTarget? distro = null)
+        string deviceId, CancellationToken cancellationToken, WslSshTarget? distro = null, byte[]? sentNonce = null)
     {
         if (!options.IsAvailable) throw new InvalidOperationException("本机未开启 SSH 中继。");
         using (relayOwner)
         using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
         {
             deadline.CancelAfter(TimeSpan.FromSeconds(10));
-            if (!await SshGateProtocol.AuthenticateServerAsync(relay, options.DeviceKey, deviceId, deadline.Token).ConfigureAwait(false)) return;
+            if (!await SshGateProtocol.AuthenticateServerAsync(relay, options.DeviceKey, deviceId, deadline.Token, sentNonce).ConfigureAwait(false)) return;
             if (distro is not null) deadline.CancelAfter(TimeSpan.FromSeconds(16));
             Stream? local = null;
             try

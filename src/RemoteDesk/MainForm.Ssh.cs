@@ -319,6 +319,7 @@ public sealed partial class MainForm
             }
             string hosts = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RemoteDesk", "ssh", "known_hosts");
             Directory.CreateDirectory(Path.GetDirectoryName(hosts)!);
+            string dataRoute = connection.UsesLan ? "内网直达" : "公网中继";
             forwarder = new SshLocalForwarder(connection.Stream, connection);
             connection = null;
             var start = SshTerminalLauncher.CreateStartInfo(SshTerminalLauncher.ExecutablePath, forwarder.Port, user,
@@ -339,7 +340,7 @@ public sealed partial class MainForm
                     .Concat(_settings.Viewer.SshProfiles));
             TrySaveSettings();
             _ = ObserveSshTerminalAsync(terminal, display);
-            SetRelayStatus($"已打开 {display} 的 SSH 终端。最小化后可返回同一连接。", SuccessTextColor);
+            SetRelayStatus($"已打开 {display} 的 SSH 终端（{dataRoute}）。最小化后可返回同一连接。", SuccessTextColor);
         }
         catch (OperationCanceledException) { if (!_isClosing && !IsDisposed) SetRelayStatus("SSH 连接已取消。", MutedTextColor); }
         catch (Exception error) when (error is IOException or SocketException or InvalidOperationException or
@@ -434,7 +435,7 @@ public sealed partial class MainForm
                 }
                 try
                 {
-                    using var connection = await SshRelayClient.OpenAsync(route, key, pending.Token);
+                    using var connection = await SshRelayClient.OpenAsync(route, key, pending.Token, allowLan: false);
                     break;
                 }
                 catch (UnauthorizedAccessException) when (allowKeyCorrection && !_isClosing && !IsDisposed &&

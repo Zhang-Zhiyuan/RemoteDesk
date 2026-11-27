@@ -23,6 +23,7 @@ import sys
 import tempfile
 import threading
 import uuid
+import remotedesk_ssh_lan as ssh_lan
 
 MAGIC = b"RDS1"
 HOST_DEADLINE = 10
@@ -36,7 +37,7 @@ class AliasConfigurationError(ValueError):
 
 
 def gate_proof(device_key, role, device_id, nonce):
-    if role not in ("server", "client") or len(nonce) != 32:
+    if role not in ("server", "client", "client-lan", "lan-session") or len(nonce) != 32:
         raise ValueError("SSH 门禁参数无效。")
     if not device_key or len(device_key.encode("utf-8")) > 16384:
         raise ValueError("请设置非空设备密钥；不是 SSH 登录密码。")
@@ -48,20 +49,29 @@ def gate_proof(device_key, role, device_id, nonce):
     return hmac.new(key, message, hashlib.sha256).digest()
 
 
-async def accept_gate(reader, writer, device_id, device_key, local_port, connect=None):
-    """Return a loopback SSH connection ONLY after mutual device authentication."""
+def gate_challenge(device_id, device_key, lan=False):
+    nonce = ssh_lan.CAPABILITY + secrets.token_bytes(24) if lan else secrets.token_bytes(32)
+    return nonce, MAGIC + nonce + device_id.encode("ascii") + gate_proof(device_key, "server", device_id, nonce)
+
+
+async def accept_gate(reader, writer, device_id, device_key, local_port, connect=None, *,
+                      sent_nonce=None, lan_address=None, select_route=None):
+    """Return the local SSH stream only after accepting a proof for this session."""
     if type(local_port) is not int or not 1 <= local_port <= 65535:
         raise ValueError("本机 SSH 端口无效。")
     async def handshake():
-        nonce = secrets.token_bytes(32)
-        writer.write(MAGIC + nonce + device_id.encode("ascii") + gate_proof(device_key, "server", device_id, nonce))
-        await writer.drain()
+        nonce = sent_nonce
+        if nonce is None:
+            nonce, greeting = gate_challenge(device_id, device_key)
+            writer.write(greeting)
+            await writer.drain()
         received = await reader.readexactly(32)
-        if not hmac.compare_digest(received, gate_proof(device_key, "client", device_id, nonce)):
+        wants_lan = bool(lan_address and select_route and nonce.startswith(ssh_lan.CAPABILITY) and
+                         hmac.compare_digest(received, gate_proof(device_key, "client-lan", device_id, nonce)))
+        if not wants_lan and not hmac.compare_digest(received, gate_proof(device_key, "client", device_id, nonce)):
             writer.write(b"\0")
             await writer.drain()
             raise PermissionError("SSH 设备密钥验证失败。")
-        local = None
         try:
             # Neither the viewer nor relay supplies a target address or port.
             dial = connect or asyncio.open_connection
@@ -81,8 +91,11 @@ async def accept_gate(reader, writer, device_id, device_key, local_port, connect
             await writer.drain()
             raise ConnectionError("设备已验证，但本机 SSH 服务不可达。") from None
         try:
-            writer.write(b"\1")
-            await writer.drain()
+            if wants_lan:
+                await select_route(local, gate_proof(device_key, "lan-session", device_id, nonce))
+            else:
+                writer.write(b"\1")
+                await writer.drain()
             return local
         except BaseException:
             local[1].close()
@@ -90,7 +103,7 @@ async def accept_gate(reader, writer, device_id, device_key, local_port, connect
     return await asyncio.wait_for(handshake(), HOST_DEADLINE)
 
 
-async def authenticate_gate(reader, writer, device_id, device_key):
+async def authenticate_gate(reader, writer, device_id, device_key, *, allow_lan=False):
     greeting = await reader.readexactly(104)
     if greeting[:4] != MAGIC or greeting[36:72] != device_id.encode("ascii"):
         raise PermissionError("SSH 目标身份不匹配；未发送 SSH 凭据。")
@@ -98,9 +111,19 @@ async def authenticate_gate(reader, writer, device_id, device_key):
     expected = gate_proof(device_key, "server", device_id, nonce)
     if not hmac.compare_digest(greeting[72:], expected):
         raise PermissionError("SSH 目标设备密钥不匹配；未发送 SSH 凭据。")
-    writer.write(gate_proof(device_key, "client", device_id, nonce))
+    wants_lan = allow_lan and nonce.startswith(ssh_lan.CAPABILITY) and os.environ.get("REMOTEDESK_SSH_RELAY_ONLY") != "1"
+    started = asyncio.get_running_loop().time()
+    writer.write(gate_proof(device_key, "client-lan" if wants_lan else "client", device_id, nonce))
     await writer.drain()
     result = await reader.readexactly(1)
+    if result == b"\4" and wants_lan:
+        offer = await reader.readexactly(ssh_lan.OFFER_SIZE)
+        direct = await ssh_lan.try_candidate(offer, gate_proof(device_key, "lan-session", device_id, nonce),
+                                             asyncio.get_running_loop().time() - started)
+        if direct is None:
+            writer.write(b"\0")
+            await writer.drain()
+        return direct
     if result == b"\2":
         raise ConnectionError("设备已验证，但本机 SSH 服务不可达。")
     if result == b"\3":
@@ -116,20 +139,30 @@ async def authenticate_gate(reader, writer, device_id, device_key):
         raise PermissionError("SSH 设备门禁拒绝连接。")
 
 
-async def connect_ssh(options, device_key):
+async def connect_ssh(options, device_key, *, allow_lan=True):
     import remotedesk_linux_relay as relay
-    async def connect():
+    async def connect(offer_lan):
         reader, writer = await relay.connect_tls(options)
         try:
             result = await relay.hello(reader, writer, options, "ssh-viewer", deviceId=options.device_id)
             if result.get("type") != "paired" or result.get("service") != "ssh":
                 raise PermissionError("中继不支持独立 SSH 通道；未回退到桌面。")
-            await authenticate_gate(reader, writer, options.device_id, device_key)
+            direct = await authenticate_gate(reader, writer, options.device_id, device_key, allow_lan=offer_lan)
+            if direct:
+                lease = asyncio.create_task(ssh_lan.keep_relay_lease(reader, writer, direct[1], allow_prefix=True))
+                # The existing API returns asyncio streams. Retain the lease for their lifetime.
+                direct[1]._remotedesk_ssh_lease = lease
+                return direct
             return reader, writer
         except BaseException:
             await relay.close_writer(writer, abort=True)
             raise
-    return await asyncio.wait_for(connect(), CLIENT_DEADLINE)
+    async def open_route():
+        try:
+            return await connect(allow_lan)
+        except ssh_lan.CommitFailed:
+            return await connect(False)
+    return await asyncio.wait_for(open_route(), CLIENT_DEADLINE)
 
 
 class GateVerification:
@@ -154,7 +187,7 @@ class GateVerification:
         self.loop, self.task = asyncio.get_running_loop(), asyncio.current_task()
         if self.cancelled.is_set():
             raise asyncio.CancelledError
-        _reader, writer = await connect_ssh(self.options, self.device_key)
+        _reader, writer = await connect_ssh(self.options, self.device_key, allow_lan=False)
         try:
             if self.cancelled.is_set():
                 raise asyncio.CancelledError
@@ -905,6 +938,8 @@ async def stdio_proxy(profile_id):
     options, key = load_stdio_profile(profile_id)
     reader, writer = await connect_ssh(options, key)
     key = ""
+    if os.environ.get("REMOTEDESK_SSH_ROUTE_DIAGNOSTICS") == "1":
+        print("RemoteDesk SSH: LAN" if hasattr(writer, "_remotedesk_ssh_lease") else "RemoteDesk SSH: relay", file=sys.stderr)
     loop = asyncio.get_running_loop()
     input_transport = output_transport = None
     tasks = []

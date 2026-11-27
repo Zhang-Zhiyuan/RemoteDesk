@@ -12,6 +12,35 @@ public sealed class SshGateProtocolTests
     private const string Id = "01234567-89ab-cdef-0123-456789abcdef";
 
     [Theory]
+    [InlineData("10.0.0.1", true)]
+    [InlineData("172.31.1.2", true)]
+    [InlineData("192.168.0.1", true)]
+    [InlineData("127.0.0.1", false)]
+    [InlineData("169.254.1.1", false)]
+    [InlineData("172.32.0.1", false)]
+    [InlineData("203.0.113.1", false)]
+    [InlineData("::1", false)]
+    public void SshShortcutOnlyConsidersPrivateIpv4(string address, bool expected) =>
+        Assert.Equal(expected, SshLanRoute.IsPrivateAddress(IPAddress.Parse(address).GetAddressBytes()));
+
+    [Fact]
+    public async Task UnverifiedOfferKeepsTheOriginalStreamAndItsFirstSshBytes()
+    {
+        byte[] nonce = "RDLAN1\0\0"u8.ToArray().Concat(RandomNumberGenerator.GetBytes(24)).ToArray();
+        byte[] invalidOffer = new byte[SshLanRoute.OfferSize];
+        invalidOffer[0] = 10;
+        invalidOffer[4] = 128;
+        using var stream = new ScriptedStream("RDS1"u8.ToArray().Concat(nonce)
+            .Concat(Encoding.ASCII.GetBytes(Id)).Concat(SshGateProtocol.ComputeProof("key", "server", Id, nonce))
+            .Append((byte)4).Concat(invalidOffer).Concat("SSH-"u8.ToArray()).ToArray());
+        Assert.Null(await SshGateProtocol.OpenClientTransportAsync(stream, "key", Id, true, CancellationToken.None));
+        Assert.Equal(SshGateProtocol.ComputeProof("key", "client-lan", Id, nonce).Append((byte)0), stream.Written.ToArray());
+        byte[] banner = new byte[4];
+        await stream.ReadExactlyAsync(banner);
+        Assert.Equal("SSH-"u8.ToArray(), banner);
+    }
+
+    [Theory]
     [InlineData("server", "1f3698cd93105499cee01ff797ef4a2e5b67f88602361194c42e7e818003d145")]
     [InlineData("client", "2cd865b69b18ae31b0848a8cf9d76c5ce72a013a2844355f8514bfbeca4da792")]
     public void SharedCrossPlatformProofVector(string role, string expected) =>

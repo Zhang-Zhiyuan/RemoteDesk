@@ -452,10 +452,13 @@ internal sealed class RelayHostConnector : IDisposable
             await RelayTls.WriteJsonAsync(stream, new { version = 1, role = "host-data", service = "ssh",
                 token = options.AccessToken, deviceId = options.DeviceId, sessionId,
                 sshTarget = distro?.RouteId(options.DeviceId) }, deadline.Token).ConfigureAwait(false);
+            string targetId = distro?.RouteId(options.DeviceId) ?? options.DeviceId;
+            byte[] nonce = await SshGateProtocol.SendServerChallengeAsync(stream, ssh.DeviceKey, targetId, deadline.Token)
+                .ConfigureAwait(false);
             using (JsonDocument response = await RelayTls.ReadJsonAsync(stream, deadline.Token).ConfigureAwait(false))
                 SshRelayClient.EnsureSshPair(response.RootElement);
             deadline.CancelAfter(Timeout.InfiniteTimeSpan);
-            await SshHostBridge.RunAsync(stream, client, ssh, distro?.RouteId(options.DeviceId) ?? options.DeviceId, token, distro).ConfigureAwait(false);
+            await SshHostBridge.RunAsync(stream, client, ssh, targetId, token, distro, nonce).ConfigureAwait(false);
         }
     }
 
