@@ -24,6 +24,7 @@ public sealed class SshMainFormTests
         var list = Field<ListBox>(main, "_discoveredHostsList");
         var current = Assert.IsType<MainForm.RemoteDeviceListItem>(list.Items[0]);
         Assert.Equal("Lab", current.ListTitle);
+        Assert.Contains("已选择 Lab", Field<Label>(main, "_viewerStatusLabel").Text);
         Assert.Equal("DESKTOP-LAB", current.MachineName);
         Assert.Contains("旧记录", Assert.IsType<MainForm.RemoteDeviceListItem>(list.Items[1]).ListTitle);
         Assert.Contains("Windows 原生", Field<Button>(main, "_directSshButton").Text);

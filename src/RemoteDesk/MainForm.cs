@@ -5842,6 +5842,8 @@ public sealed partial class MainForm : Form
         else if (selected is not null && selected.Port == currentPort && DirectSshTarget.SameHost(selected.Address, currentAddress))
         {
             _viewerPasswordBox.PlaceholderText = $"{selected.DisplayName} 的设备密钥";
+            if (previous is not null && previous.DisplayName != selected.DisplayName && _viewerStatusLabel.Text == previous.SelectionStatus)
+                SetViewerStatus(selected.SelectionStatus, MutedTextColor);
         }
 
         UpdateSavedDeviceActionState();
@@ -6000,7 +6002,7 @@ public sealed partial class MainForm : Form
         {
             _viewerAutoPortBox.Checked = _selectedHistoryDevice.AutoDetectPort;
         }
-        SetViewerStatus($"已选择 {device.DisplayName} ({NetworkUtils.FormatEndpoint(device.Address, device.Port)})，{device.GetLongStatus()}", MutedTextColor);
+        SetViewerStatus(device.SelectionStatus, MutedTextColor);
         UpdateViewerActionState();
     }
 
@@ -8884,6 +8886,7 @@ public sealed partial class MainForm : Form
         public string? KnownPlatform { get; private init; }
         public string DisplayName => SharedName ?? Remark ?? MachineName;
         public string ListTitle => ReplacedAtAddress ? DisplayName + "（旧记录）" : DisplayName;
+        public string SelectionStatus => $"已选择 {ListTitle} ({NetworkUtils.FormatEndpoint(Address, Port)})，{GetLongStatus()}";
 
         public string Address { get; }
 

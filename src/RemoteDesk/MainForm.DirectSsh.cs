@@ -96,8 +96,9 @@ public sealed partial class MainForm
         void RefreshEndpoint()
         {
             bool sameHost = DirectSshTarget.SameHost(host.Text, device);
-            string connection = string.IsNullOrWhiteSpace(port.Text) && sameHost && (IsWsl() || row?.WindowsSshPort == 0)
-                ? $"{host.Text.Trim()}（请填写映射端口）" : EndpointText();
+            bool needsPort = sameHost && string.IsNullOrWhiteSpace(port.Text);
+            string connection = needsPort && (IsWsl() || row?.WindowsSshPort == 0) ? $"{host.Text.Trim()}（请填写映射端口）" :
+                needsPort && hasWsl && row?.WindowsSshPort is null ? $"{host.Text.Trim()}（Windows SSH 端口待确认）" : EndpointText();
             endpoint.Text = string.IsNullOrWhiteSpace(host.Text) ? "请填写 SSH 地址" : $"目标 {TargetLabel()} · {connection}";
             hint.Text = IsWsl()
                 ? "使用 WSL 可达的地址，或 Windows 地址和已映射到 WSL 的 SSH 端口。具体发行版由该入口决定。"
