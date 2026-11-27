@@ -7,6 +7,18 @@ namespace RemoteDesk.Tests;
 
 public sealed class WindowsSshListenersTests
 {
+    [Fact]
+    public void LanAnnouncementDistinguishesWindowsListenerFromLoopbackAndOtherAdapters()
+    {
+        var peer = new IPEndPoint(IPAddress.Parse("192.0.2.15"), 40000);
+        Assert.Null(WindowsSshListeners.PortForPeer(null, peer, 22));
+        Assert.Equal(0, WindowsSshListeners.PortForPeer([new(IPAddress.Loopback, 2223), new(IPAddress.IPv6Loopback, 22)], peer, 22));
+        var local = IPAddress.Parse("192.0.2.11");
+        IPEndPoint[] listeners = [new(IPAddress.Loopback, 22), new(local, 2223), new(IPAddress.IPv6Any, 2224)];
+        Assert.Equal(2223, WindowsSshListeners.PortForAddress(listeners, local, 22));
+        Assert.Null(WindowsSshListeners.PortForAddress(listeners, peer.Address, 22));
+        Assert.Equal(2224, WindowsSshListeners.PortForAddress(listeners, IPAddress.Parse("2001:db8::a"), 22));
+    }
     [Theory]
     [InlineData(false, "0.0.0.0", 0, "127.0.0.1")]
     [InlineData(false, "192.0.2.12", 0, "192.0.2.12")]

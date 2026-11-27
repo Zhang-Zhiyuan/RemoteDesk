@@ -48,6 +48,28 @@ internal static class WindowsSshListeners
         }
     }
 
+    internal static int? PortForPeer(IPEndPoint[]? listeners, IPEndPoint peer, int preferred)
+    {
+        if (listeners is not { Length: > 0 }) return null;
+        if (listeners.All(ep => IPAddress.IsLoopback(ep.Address))) return 0;
+        // Connecting a UDP socket selects the source interface without sending a packet.
+        // A listener bound to a different adapter must not be advertised on this LAN.
+        try
+        {
+            using var route = new Socket(peer.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+            route.Connect(peer);
+            return PortForAddress(listeners, ((IPEndPoint)route.LocalEndPoint!).Address, preferred);
+        }
+        catch (SocketException) { return null; }
+    }
+
+    internal static int? PortForAddress(IEnumerable<IPEndPoint> listeners, IPAddress address, int preferred)
+    {
+        IPAddress any = address.AddressFamily == AddressFamily.InterNetwork ? IPAddress.Any : IPAddress.IPv6Any;
+        return listeners.Where(ep => !IPAddress.IsLoopback(ep.Address) && (ep.Address.Equals(address) || ep.Address.Equals(any)))
+            .Select(ep => (int?)ep.Port).OrderByDescending(port => port == preferred).ThenBy(port => port).FirstOrDefault();
+    }
+
     private static bool IsEnabled(nint service)
     {
         const int maxConfigBytes = 8192; // QUERY_SERVICE_CONFIGW's documented maximum.

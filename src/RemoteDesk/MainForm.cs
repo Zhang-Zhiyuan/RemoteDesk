@@ -1207,9 +1207,9 @@ public sealed partial class MainForm : Form
         toolbar.Controls.Add(_viewerInputPauseButton);
         toolbar.Controls.Add(_remoteUpdateButton);
         toolbar.Controls.Add(_viewerToggleButton);
-        var directSsh = CreateSecondaryButton("SSH 直连…");
-        directSsh.Click += (_, _) => OpenDirectSsh();
-        toolbar.Controls.Add(directSsh);
+        _directSshButton = CreateSecondaryButton("SSH · 选择系统…");
+        _directSshButton.Click += (_, _) => OpenDirectSsh();
+        toolbar.Controls.Add(_directSshButton);
         long toolbarPopulatedAt = Stopwatch.GetTimestamp();
 
         // This section lives in an AutoSize root row. It must shrink after
@@ -2358,7 +2358,7 @@ public sealed partial class MainForm : Form
         string status = device.GetShortStatus();
         TextRenderer.DrawText(
             args.Graphics,
-            device.DisplayName,
+            device.ListTitle,
             _discoveredHostsList.Font,
             new Rectangle(content.Left, content.Top, content.Width, primaryLineHeight),
             primaryTextColor,
@@ -2544,6 +2544,8 @@ public sealed partial class MainForm : Form
             {
                 await RefreshRelayDevicesAsync(silent: true);
             }
+            else if (_tabs.SelectedIndex == 1 && !_relayOperationInProgress && IsRelayConfigured())
+                await RefreshRelayDevicesAsync(silent: true, optimizeRoute: false);
         };
         WireViewerKeyboardShortcuts();
         KeyDown += MainForm_KeyDown;
@@ -3592,6 +3594,7 @@ public sealed partial class MainForm : Form
 
     private DiscoveryPresence GetDiscoveryPresence()
     {
+        var ssh = Volatile.Read(ref _sshHostOptions);
         lock (_presenceLock)
         {
             int listeningPort =
@@ -3605,7 +3608,7 @@ public sealed partial class MainForm : Form
                 _presenceAllowRemoteStart && !string.IsNullOrWhiteSpace(_presencePassword),
                 RemoteDevicePlatforms.Current,
                 RemoteDeviceCapabilityInfo.LocalWindows(_presenceAllowRemoteStart && !string.IsNullOrWhiteSpace(_presencePassword)),
-                RemoteDeskBuildInfo.BuildStamp);
+                RemoteDeskBuildInfo.BuildStamp, ssh.IsAvailable ? ssh.Port : null);
         }
     }
 
@@ -4108,6 +4111,7 @@ public sealed partial class MainForm : Form
             _relayConfigurationGeneration++;
             _relayDevicesList.Items.Clear();
             bool settingsSaved = TrySaveSettings();
+            UpdateDiscoveredHosts(_lastDiscoveredHosts, silent: true);
             UpdateRelayServerSummary();
             await ApplyRelayHostRegistrationAsync();
             SetRelayStatus(
@@ -4171,7 +4175,7 @@ public sealed partial class MainForm : Form
         !operationInProgress && isRelayConfigured();
 
     private async Task RefreshRelayDevicesAsync(
-        bool silent)
+        bool silent, bool optimizeRoute = true)
     {
         if (_relayRefreshInProgress ||
             _isClosing ||
@@ -4207,7 +4211,7 @@ public sealed partial class MainForm : Form
 
         try
         {
-            await OptimizeRelayNetworkAsync(options);
+            if (optimizeRoute) await OptimizeRelayNetworkAsync(options);
             if (_isClosing || IsDisposed || configurationGeneration != _relayConfigurationGeneration) return;
             IReadOnlyList<RelayOnlineDevice> devices =
                 await RelayTunnelClient.ListDevicesAsync(
@@ -5482,8 +5486,10 @@ public sealed partial class MainForm : Form
         }
         string? sharedName = connection?.RelayRoute is { } route
             ? _relayDevicesList.Items.Cast<ListViewItem>().Select(item => item.Tag).OfType<RelayOnlineDevice>()
-                .FirstOrDefault(device => string.Equals(device.DeviceId, route.DeviceId, StringComparison.OrdinalIgnoreCase))?.MachineName
+                .FirstOrDefault(device => RemoteDeviceIdentity.Same(device.DeviceId, route.DeviceId))?.MachineName
             : null;
+        if (sharedName is null && RemoteDeviceIdentity.Normalize(connection?.RelayRoute?.DeviceId ?? _lastConnectedDeviceInfo?.DeviceId) is string id)
+            _settings.Relay.SharedDeviceNames.TryGetValue(id, out sharedName);
         return ViewerWindowTitle.Format(connection, _lastConnectedDeviceInfo, sharedName);
     }
 
@@ -5833,8 +5839,13 @@ public sealed partial class MainForm : Form
         {
             ApplyRemoteDevice(selected);
         }
+        else if (selected is not null && selected.Port == currentPort && DirectSshTarget.SameHost(selected.Address, currentAddress))
+        {
+            _viewerPasswordBox.PlaceholderText = $"{selected.DisplayName} 的设备密钥";
+        }
 
         UpdateSavedDeviceActionState();
+        UpdateDirectSshButton();
     }
 
     internal static bool
@@ -6287,11 +6298,12 @@ public sealed partial class MainForm : Form
     private IReadOnlyList<RemoteDeviceListItem> BuildRemoteDeviceList(IReadOnlyList<DiscoveredHost> hosts)
     {
         return BuildRemoteDeviceList(hosts, GetRecentDevices(), NetworkUtils.GetLocalAddresses()
-            .ToHashSet(StringComparer.OrdinalIgnoreCase));
+            .ToHashSet(StringComparer.OrdinalIgnoreCase), _settings.Relay.SharedDeviceNames);
     }
 
     internal static IReadOnlyList<RemoteDeviceListItem> BuildRemoteDeviceList(IReadOnlyList<DiscoveredHost> hosts,
-        IReadOnlyList<SavedRemoteDevice> recentDevices, IReadOnlySet<string> localAddresses)
+        IReadOnlyList<SavedRemoteDevice> recentDevices, IReadOnlySet<string> localAddresses,
+        IReadOnlyDictionary<string, string>? sharedNames = null)
     {
         var devices = new List<RemoteDeviceListItem>(hosts.Count + recentDevices.Count);
         var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -6305,15 +6317,12 @@ public sealed partial class MainForm : Form
             if (RemoteDeviceIdentity.Same(host.DeviceId, RemoteDeviceIdentity.LocalId) ||
                 NetworkUtils.IsLikelyLocalEndpoint(host.Address, host.MachineName, localAddresses)) continue;
             SavedRemoteDevice? savedDevice = FindSavedForDiscovery(savedDevices, host.Address, host.Port, host.DeviceId);
-            devices.Add(RemoteDeviceListItem.FromDiscovered(host, savedDevice));
+            devices.Add(RemoteDeviceListItem.FromDiscovered(host, savedDevice, SharedName(host.DeviceId)));
             seenKeys.Add(MakeDeviceListKey(host.Address, host.Port, host.DeviceId ?? savedDevice?.DeviceId));
             if (savedDevice is not null) seenKeys.Add(MakeDeviceListKey(savedDevice.Address!, savedDevice.Port, savedDevice.DeviceId));
         }
 
-        foreach (SavedRemoteDevice savedDevice in recentDevices
-            .Where(IsValidSavedRemoteDevice)
-            .Where(device => !IsLocalSavedRemoteDevice(device, localAddresses))
-            .OrderByDescending(device => device.LastConnectedAt))
+        foreach (SavedRemoteDevice savedDevice in savedDevices.OrderByDescending(device => device.LastConnectedAt))
         {
             string key = MakeDeviceListKey(savedDevice.Address!, savedDevice.Port, savedDevice.DeviceId);
             if (seenKeys.Contains(key))
@@ -6321,11 +6330,17 @@ public sealed partial class MainForm : Form
                 continue;
             }
 
-            devices.Add(RemoteDeviceListItem.FromSaved(savedDevice));
+            bool replaced = devices.Any(live => !live.IsSavedOnly && live.Port == savedDevice.Port &&
+                string.Equals(live.Address, savedDevice.Address?.Trim(), StringComparison.OrdinalIgnoreCase) &&
+                RemoteDeviceIdentity.Conflicts(live.DeviceId, savedDevice.DeviceId));
+            devices.Add(RemoteDeviceListItem.FromSaved(savedDevice, SharedName(savedDevice.DeviceId), replaced));
             seenKeys.Add(key);
         }
 
         return devices;
+
+        string? SharedName(string? id) => RemoteDeviceIdentity.Normalize(id) is string key
+            ? sharedNames?.GetValueOrDefault(key) : null;
     }
 
     internal static IReadOnlyList<DiscoveredHost> MergeDiscoveredHosts(
@@ -7010,6 +7025,7 @@ public sealed partial class MainForm : Form
 
     private void UpdateViewerActionState()
     {
+        UpdateDirectSshButton();
         UpdateRelayActionState();
         if (IsViewerReconnecting())
         {
@@ -8131,7 +8147,7 @@ public sealed partial class MainForm : Form
 
             RemoteDeviceDescriptor device = update.Device;
             _lastConnectedDeviceInfo = device;
-            if (_viewerWindow is { IsDisposed: false }) _viewerWindow.Text = GetViewerWindowTitle();
+            RefreshViewerWindowTitles();
             _connectedViewerCapabilities = NormalizeCapabilities(device.Capabilities);
             ApplyViewerCapabilityState(_viewerClient.IsConnected);
             _viewerWindow?.SetRemotePlatform(device.Platform);
@@ -8861,10 +8877,13 @@ public sealed partial class MainForm : Form
 
         public string? Remark { get; }
 
-        public string DisplayName =>
-            string.IsNullOrWhiteSpace(Remark)
-                ? MachineName
-                : Remark;
+        public string? SharedName { get; private init; }
+        public string? DirectoryDeviceId { get; private init; }
+        public bool ReplacedAtAddress { get; private init; }
+        public int? WindowsSshPort { get; private init; }
+        public string? KnownPlatform { get; private init; }
+        public string DisplayName => SharedName ?? Remark ?? MachineName;
+        public string ListTitle => ReplacedAtAddress ? DisplayName + "（旧记录）" : DisplayName;
 
         public string Address { get; }
 
@@ -8892,12 +8911,14 @@ public sealed partial class MainForm : Form
 
         internal bool HasSameSnapshot(RemoteDeviceListItem other) =>
             MachineName == other.MachineName && DeviceId == other.DeviceId && Remark == other.Remark &&
+            SharedName == other.SharedName && DirectoryDeviceId == other.DirectoryDeviceId && ReplacedAtAddress == other.ReplacedAtAddress &&
+            WindowsSshPort == other.WindowsSshPort && KnownPlatform == other.KnownPlatform &&
             Address == other.Address && Port == other.Port && CaptureTarget == other.CaptureTarget &&
             Platform == other.Platform && Capabilities == other.Capabilities && BuildStamp == other.BuildStamp &&
             IsHostRunning == other.IsHostRunning && CanRemoteStart == other.CanRemoteStart &&
             IsSaved == other.IsSaved && IsSavedOnly == other.IsSavedOnly && LastConnectedAt == other.LastConnectedAt;
 
-        public static RemoteDeviceListItem FromDiscovered(DiscoveredHost host, SavedRemoteDevice? savedDevice)
+        public static RemoteDeviceListItem FromDiscovered(DiscoveredHost host, SavedRemoteDevice? savedDevice, string? sharedName = null)
         {
             return new RemoteDeviceListItem(
                 string.IsNullOrWhiteSpace(host.MachineName) ? host.Address : host.MachineName,
@@ -8912,10 +8933,12 @@ public sealed partial class MainForm : Form
                 host.CanRemoteStart,
                 isSaved: savedDevice is not null,
                 isSavedOnly: false,
-                GetSavedLastConnectedAt(savedDevice), host.DeviceId ?? savedDevice?.DeviceId);
+                GetSavedLastConnectedAt(savedDevice), host.DeviceId ?? savedDevice?.DeviceId)
+            { SharedName = sharedName, DirectoryDeviceId = RemoteDeviceIdentity.Normalize(host.DeviceId),
+                KnownPlatform = host.Platform, WindowsSshPort = host.WindowsSshPort };
         }
 
-        public static RemoteDeviceListItem FromSaved(SavedRemoteDevice savedDevice)
+        public static RemoteDeviceListItem FromSaved(SavedRemoteDevice savedDevice, string? sharedName = null, bool replaced = false)
         {
             string address = savedDevice.Address?.Trim() ?? string.Empty;
             string machineName = string.IsNullOrWhiteSpace(savedDevice.MachineName)
@@ -8937,7 +8960,9 @@ public sealed partial class MainForm : Form
                 canRemoteStart: false,
                 isSaved: true,
                 isSavedOnly: true,
-                GetSavedLastConnectedAt(savedDevice), savedDevice.DeviceId);
+                GetSavedLastConnectedAt(savedDevice), savedDevice.DeviceId)
+            { SharedName = sharedName, DirectoryDeviceId = RemoteDeviceIdentity.Normalize(savedDevice.DeviceId),
+                KnownPlatform = savedDevice.Platform, ReplacedAtAddress = replaced };
         }
 
         private static DateTimeOffset? GetSavedLastConnectedAt(SavedRemoteDevice? savedDevice)
@@ -8952,6 +8977,7 @@ public sealed partial class MainForm : Form
 
         public string GetShortStatus()
         {
+            if (ReplacedAtAddress) return "此地址当前由另一个设备 ID 使用";
             if (!IsSavedOnly)
             {
                 if (!CanOpenViewerNow)
@@ -8971,16 +8997,14 @@ public sealed partial class MainForm : Form
         public string GetListSecondaryText(
             string status)
         {
-            string machineNamePrefix =
-                string.IsNullOrWhiteSpace(Remark)
-                    ? string.Empty
-                    : $"{MachineName} | ";
-            return $"{machineNamePrefix}{Platform} | " +
-                $"{NetworkUtils.FormatEndpoint(Address, Port)} | {status}";
+            string detail = SharedName is not null && Remark is not null && Remark != DisplayName ? $" | 本机备注 {Remark}" : "";
+            string original = MachineName != DisplayName ? $" | {MachineName}" : "";
+            return $"{Platform} | {NetworkUtils.FormatEndpoint(Address, Port)}{detail}{original} | {status}";
         }
 
         public string GetLongStatus()
         {
+            if (ReplacedAtAddress) return "已保存的旧设备记录。当前在此地址监听的设备 ID 已变化。";
             if (!IsSavedOnly)
             {
                 if (!CanOpenViewerNow)
@@ -9000,11 +9024,7 @@ public sealed partial class MainForm : Form
 
         public override string ToString()
         {
-            string machineNameSuffix =
-                string.IsNullOrWhiteSpace(Remark)
-                    ? string.Empty
-                    : $" / {MachineName}";
-            return $"{DisplayName}{machineNameSuffix} " +
+            return $"{ListTitle} " +
                 $"[{Platform}] ({NetworkUtils.FormatEndpoint(Address, Port)}) - " +
                 GetShortStatus();
         }

@@ -26,6 +26,13 @@ internal sealed partial class RemoteViewerWindow
 
     private void OnScreenAttachmentAvailable() => OnUi(UpdateAdditionalScreenControls);
 
+    internal void SetScreenWindowTitle(string title)
+    {
+        if (_screenWindowTitle == title) return;
+        _screenWindowTitle = title;
+        UpdateAdditionalScreenControls();
+    }
+
     private void UpdateAdditionalScreenControls()
     {
         if (_additionalScreenButton.IsDisposed) return;

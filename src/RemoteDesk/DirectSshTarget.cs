@@ -30,6 +30,13 @@ internal sealed record DirectSshTarget(string Host, int? Port, string Username)
         return new(host, number, username);
     }
 
+    internal static bool SameHost(string? first, string? second)
+    {
+        string a = (first ?? "").Trim().Trim('[', ']'), b = (second ?? "").Trim().Trim('[', ']');
+        return string.Equals(a, b, StringComparison.OrdinalIgnoreCase) ||
+            IPAddress.TryParse(a, out var left) && IPAddress.TryParse(b, out var right) && left.Equals(right);
+    }
+
     internal string[] TerminalArguments()
     {
         List<string> args = ["-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3"];
@@ -48,4 +55,16 @@ internal sealed record DirectSshTarget(string Host, int? Port, string Username)
     }
 }
 
-internal sealed record DirectSshPreference(string Device, bool Wsl, DirectSshTarget Target);
+internal sealed record DirectSshPreference(string Device, bool Wsl, DirectSshTarget Target)
+{
+    public string? DeviceId { get; init; }
+    public bool UseReportedPort { get; init; }
+    internal (string, bool) Key => (RemoteDeviceIdentity.Normalize(DeviceId) is string id
+        ? "id:" + id : "host:" + Device.ToLowerInvariant(), Wsl);
+
+    internal static IEnumerable<DirectSshPreference> ForDevice(IEnumerable<DirectSshPreference> history,
+        string host, string? deviceId, bool sharedAddress) =>
+        history.Where(p => RemoteDeviceIdentity.Same(p.DeviceId, deviceId) ||
+            !sharedAddress && p.DeviceId is null && DirectSshTarget.SameHost(p.Device, host))
+        .OrderByDescending(p => RemoteDeviceIdentity.Same(p.DeviceId, deviceId));
+}

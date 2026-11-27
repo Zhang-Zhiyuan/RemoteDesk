@@ -45,6 +45,7 @@ internal sealed record RelayOnlineDevice(
 
 internal static class RelayDeviceName
 {
+    private const int MaxCachedNames = 512;
     public const string UnsupportedMessage = "此中继服务器尚不支持共享命名，请先点击“部署 / 更新服务器”，再刷新在线列表。";
     public const string InvalidMessage = "请使用不超过 80 个字符的单行名称，不要包含控制字符。";
 
@@ -73,6 +74,59 @@ internal static class RelayDeviceName
         if (detail.Contains("上限")) return "已达到服务器的设备命名数量上限。";
         if (detail.Contains("名称") && (detail.Contains("80") || detail.Contains("文字"))) return InvalidMessage;
         return "共享名称保存失败，请刷新在线列表核对后重试。";
+    }
+
+    private static string? Scope(RelaySettings settings) =>
+        !string.IsNullOrWhiteSpace(settings.ServerAddress) && !string.IsNullOrEmpty(settings.ProtectedAccessToken) &&
+        RelayTls.NormalizeFingerprint(settings.TlsCertificateSha256 ?? "").Length == 64
+            ? RelayDeviceKeys.Scope(settings.ServerAddress, settings.RelayPort, settings.TlsCertificateSha256!) : null;
+
+    internal static void RestoreCache(RelaySettings settings)
+    {
+        var names = new Dictionary<string, string>();
+        string? scope = Scope(settings);
+        if (scope is not null && scope == settings.SharedNameScope && settings.SharedDeviceNames is { } saved)
+            foreach (var (key, value) in saved)
+            {
+                if (names.Count == MaxCachedNames) break;
+                if (RemoteDeviceIdentity.Normalize(key) is string id && ValidName(value) is string name)
+                    names[id] = name;
+            }
+        settings.SharedDeviceNames = names;
+        settings.SharedNameScope = names.Count == 0 ? null : scope;
+    }
+
+    internal static bool UpdateCache(RelaySettings settings, IReadOnlyList<RelayOnlineDevice> devices)
+    {
+        string? scope = Scope(settings);
+        if (scope is null) return false;
+        var names = new Dictionary<string, string>();
+        var reported = new HashSet<string>();
+        foreach (var device in devices)
+        {
+            if (!device.CanRename || RemoteDeviceIdentity.Normalize(device.DeviceId) is not string id) continue;
+            if (device.SharedName.Length == 0) { reported.Add(id); continue; }
+            if (ValidName(device.SharedName) is not string name) continue;
+            reported.Add(id);
+            if (names.Count < MaxCachedNames) names[id] = name;
+        }
+        var previous = settings.SharedDeviceNames;
+        if (scope == settings.SharedNameScope)
+            foreach (var (id, name) in previous)
+                if (names.Count < MaxCachedNames && !reported.Contains(id)) names[id] = name;
+        string? newScope = names.Count == 0 ? null : scope;
+        if (settings.SharedNameScope == newScope && names.Count == previous.Count &&
+            names.All(pair => previous.GetValueOrDefault(pair.Key) == pair.Value)) return false;
+        settings.SharedDeviceNames = names;
+        settings.SharedNameScope = newScope;
+        return true;
+    }
+
+    private static string? ValidName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        try { return Normalize(value); }
+        catch (ArgumentException) { return null; }
     }
 }
 

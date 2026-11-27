@@ -13,9 +13,12 @@ internal sealed class RelayDeviceKey
 
 internal static class RelayDeviceKeys
 {
-    internal static string Scope(RelayConnectionOptions options) => Convert.ToHexString(SHA256.HashData(
-        Encoding.UTF8.GetBytes(options.ServerAddress.Trim().TrimEnd('.').ToLowerInvariant() + "\n" + options.Port +
-            "\n" + RelayTls.NormalizeFingerprint(options.TlsCertificateSha256))));
+    internal static string Scope(RelayConnectionOptions options) =>
+        Scope(options.ServerAddress, options.Port, options.TlsCertificateSha256);
+
+    internal static string Scope(string server, int port, string fingerprint) => Convert.ToHexString(SHA256.HashData(
+        Encoding.UTF8.GetBytes(server.Trim().TrimEnd('.').ToLowerInvariant() + "\n" + port +
+            "\n" + RelayTls.NormalizeFingerprint(fingerprint))));
 
     internal static string? Find(IEnumerable<RelayDeviceKey> keys, RelayConnectionOptions target) =>
         keys.FirstOrDefault(key => key.Scope == Scope(target) &&

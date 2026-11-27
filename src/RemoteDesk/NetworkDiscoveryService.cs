@@ -19,6 +19,8 @@ internal sealed record DiscoveredHost(
     string? BuildStamp = null,
     string? DeviceId = null)
 {
+    // null = not reported, 0 = Windows sshd listens only on loopback.
+    public int? WindowsSshPort { get; init; }
     public override string ToString()
     {
         string status = IsHostRunning ? "正在监听" : CanRemoteStart ? "可远程启动" : "仅软件运行";
@@ -33,7 +35,7 @@ internal readonly record struct DiscoveryPresence(
     bool CanRemoteStart,
     string Platform,
     RemoteDeviceCapabilities Capabilities,
-    string? BuildStamp = null);
+    string? BuildStamp = null, int? PreferredWindowsSshPort = null);
 
 internal readonly record struct DiscoveryProbeTarget(string Address, int HostPort);
 
@@ -66,6 +68,9 @@ internal sealed class NetworkDiscoveryResponder : IDisposable
     private CancellationTokenSource? _cancellationTokenSource;
     private Task? _listenTask;
     private readonly object _nonceLock = new();
+    private readonly object _sshListenersLock = new();
+    private IPEndPoint[]? _sshListeners;
+    private long _nextSshListenerCheck;
     private readonly Dictionary<string, DateTimeOffset> _remoteStartNonces = new(StringComparer.Ordinal);
     private Func<DiscoveryPresence>? _presenceProvider;
     private Func<string?>? _passwordProvider;
@@ -277,7 +282,23 @@ internal sealed class NetworkDiscoveryResponder : IDisposable
         IPEndPoint remoteEndPoint,
         CancellationToken cancellationToken)
     {
-        byte[] response = NetworkDiscoveryService.CreateResponse(GetPresence());
+        DiscoveryPresence presence = GetPresence();
+        int? windowsSshPort = null;
+        if (presence.PreferredWindowsSshPort is int preferred && OperatingSystem.IsWindows())
+        {
+            IPEndPoint[]? listeners;
+            lock (_sshListenersLock)
+            {
+                if (Environment.TickCount64 >= _nextSshListenerCheck)
+                {
+                    _sshListeners = WindowsSshListeners.TryRead();
+                    _nextSshListenerCheck = Environment.TickCount64 + 30_000;
+                }
+                listeners = _sshListeners;
+            }
+            windowsSshPort = WindowsSshListeners.PortForPeer(listeners, remoteEndPoint, preferred);
+        }
+        byte[] response = NetworkDiscoveryService.CreateResponse(presence, windowsSshPort);
         try
         {
             await udpClient.SendAsync(response, remoteEndPoint, cancellationToken);
@@ -595,7 +616,7 @@ internal static class NetworkDiscoveryService
                 RemoteDevicePlatforms.Normalize(response.Platform, RemoteDevicePlatforms.Windows),
                 capabilities,
                 RemoteDeskBuildInfo.NormalizeBuildStamp(response.BuildStamp),
-                RemoteDeviceIdentity.Normalize(response.DeviceId));
+                RemoteDeviceIdentity.Normalize(response.DeviceId)) { WindowsSshPort = response.ValidWindowsSshPort };
         }
 
         foreach (DiscoveredHost host in (await tcpProbeTask.ConfigureAwait(false))
@@ -650,7 +671,8 @@ internal static class NetworkDiscoveryService
                     response.IsHostRunning ?? true, canRemoteStart,
                     RemoteDevicePlatforms.Normalize(response.Platform, RemoteDevicePlatforms.Windows),
                     response.Capabilities ?? RemoteDeviceCapabilityInfo.LegacyWindows(canRemoteStart),
-                    RemoteDeskBuildInfo.NormalizeBuildStamp(response.BuildStamp), RemoteDeviceIdentity.Normalize(response.DeviceId));
+                    RemoteDeskBuildInfo.NormalizeBuildStamp(response.BuildStamp), RemoteDeviceIdentity.Normalize(response.DeviceId))
+                    { WindowsSshPort = response.ValidWindowsSshPort };
             }
         }
         catch (Exception ex) when (ex is OperationCanceledException or SocketException or NotSupportedException or ObjectDisposedException) { }
@@ -836,7 +858,7 @@ internal static class NetworkDiscoveryService
         throw new TimeoutException("远程启动请求超时。");
     }
 
-    public static byte[] CreateResponse(DiscoveryPresence presence)
+    public static byte[] CreateResponse(DiscoveryPresence presence, int? windowsSshPort = null)
     {
         int port = presence.HostPort > 0 && presence.HostPort <= IPEndPoint.MaxPort
             ? presence.HostPort
@@ -853,7 +875,8 @@ internal static class NetworkDiscoveryService
             Platform = RemoteDevicePlatforms.Normalize(presence.Platform, RemoteDevicePlatforms.Current),
             Capabilities = presence.Capabilities,
             BuildStamp = RemoteDeskBuildInfo.NormalizeBuildStamp(presence.BuildStamp) ?? RemoteDeskBuildInfo.BuildStamp,
-            DeviceId = RemoteDeviceIdentity.LocalId
+            DeviceId = RemoteDeviceIdentity.LocalId,
+            WindowsSshPort = windowsSshPort
         };
 
         return JsonSerializer.SerializeToUtf8Bytes(response);
@@ -1409,6 +1432,11 @@ internal static class NetworkDiscoveryService
 
     private sealed class DiscoveryResponse
     {
+        [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+        public int? WindowsSshPort { get; set; }
+        [System.Text.Json.Serialization.JsonIgnore]
+        public int? ValidWindowsSshPort => Platform == RemoteDevicePlatforms.Windows && WindowsSshPort is >= 0 and <= 65535
+            ? WindowsSshPort : null;
         public string? DeviceId { get; set; }
         public string? Type { get; set; }
 

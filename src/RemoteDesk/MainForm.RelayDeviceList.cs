@@ -13,6 +13,12 @@ public sealed partial class MainForm
         try { UpdateRelayDeviceList(_relayDevicesList, devices, _settings.Relay.DeviceId); }
         finally { _relayDeviceListUpdating = false; }
         SelectRelayDeviceKey();
+        if (RelayDeviceName.UpdateCache(_settings.Relay, devices))
+        {
+            if (!_layoutPreview) TrySaveSettings();
+            UpdateDiscoveredHosts(_lastDiscoveredHosts, silent: true);
+            RefreshViewerWindowTitles();
+        }
         return true;
     }
 

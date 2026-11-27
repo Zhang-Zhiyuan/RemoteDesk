@@ -121,6 +121,9 @@ internal sealed class RelaySettings
 
     public List<RelayDeviceKey> DeviceKeys { get; set; } = [];
 
+    public string? SharedNameScope { get; set; }
+    public Dictionary<string, string> SharedDeviceNames { get; set; } = [];
+
     public string DeviceId { get; set; } = Guid.NewGuid().ToString("D");
 
     public string? ProtectedAccessToken { get; set; }
@@ -346,7 +349,8 @@ internal sealed class AppSettingsService
         settings.Viewer.SshProfiles = SshTerminalProfile.Normalize(settings.Viewer.SshProfiles);
         settings.Viewer.DirectSshTargets = (settings.Viewer.DirectSshTargets ?? [])
             .Where(p => p?.Device is { Length: <= 253 } && p.Target is { Host.Length: > 0 and <= 253, Username.Length: <= 128, Port: null or (> 0 and <= 65535) })
-            .DistinctBy(p => (p.Device.ToLowerInvariant(), p.Wsl)).Take(50).ToList();
+            .Where(p => p.DeviceId is null || RemoteDeviceIdentity.Normalize(p.DeviceId) is not null)
+            .DistinctBy(p => p.Key).Take(50).ToList();
         settings.Viewer.VideoMode = NormalizeViewerVideoMode(settings.Viewer.VideoMode, settings.Viewer.PreferH264);
         settings.Viewer.PreferH264 = settings.Viewer.VideoMode != ViewerVideoMode.StableJpeg;
 
@@ -372,6 +376,7 @@ internal sealed class AppSettingsService
         settings.Relay.SshHostKeySha256 =
             NormalizeOptionalText(settings.Relay.SshHostKeySha256);
         settings.Relay.DeviceKeys = RelayDeviceKeys.Normalize(settings.Relay.DeviceKeys);
+        RelayDeviceName.RestoreCache(settings.Relay);
         return settings;
     }
 

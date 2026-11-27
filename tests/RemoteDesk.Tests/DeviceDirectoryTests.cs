@@ -33,6 +33,33 @@ public sealed class DeviceDirectoryTests
         Assert.Throws<ArgumentException>(() => MainForm.ParseDeviceEndpoint(host, port));
 
     [Fact]
+    public void SharedNamesSurviveOfflineAndRestartButFollowRenameRemovalAndRelayIdentity()
+    {
+        using var temp = TemporaryDirectory.Create();
+        var store = new AppSettingsService(Path.Combine(temp.Path, "names.json"));
+        var settings = new RemoteDeskSettings();
+        var relay = settings.Relay;
+        relay.ServerAddress = "relay.example";
+        relay.TlsCertificateSha256 = new string('A', 64);
+        relay.ProtectedAccessToken = AppSettingsService.ProtectSecret(new string('t', 32));
+        var machine = new RelayOnlineDevice(Guid.NewGuid().ToString(), "Lab", "Windows", null, false, 0)
+            { CanRename = true, SharedName = "Lab" };
+        Assert.True(RelayDeviceName.UpdateCache(relay, [machine]));
+        Assert.False(RelayDeviceName.UpdateCache(relay, []));
+        Assert.False(RelayDeviceName.UpdateCache(relay, [machine with { CanRename = false, SharedName = "" }]));
+        Assert.True(store.Save(settings).Success);
+        var loaded = store.Load().Relay;
+        Assert.Equal("Lab", loaded.SharedDeviceNames[machine.DeviceId]);
+        Assert.True(RelayDeviceName.UpdateCache(loaded, [machine with { SharedName = "New Lab" }]));
+        Assert.Equal("New Lab", loaded.SharedDeviceNames[machine.DeviceId]);
+        Assert.False(RelayDeviceName.UpdateCache(loaded, [machine with { SharedName = "New Lab" }]));
+        Assert.True(RelayDeviceName.UpdateCache(loaded, [machine with { SharedName = "" }]));
+        Assert.Empty(loaded.SharedDeviceNames);
+        relay.TlsCertificateSha256 = new string('B', 64);
+        Assert.True(store.Save(settings).Success);
+        Assert.Empty(store.Load().Relay.SharedDeviceNames);
+    }
+    [Fact]
     public void AuthenticatedIdentityMergesChangedAddressesAndPreservesRemark()
     {
         var rows = new List<SavedRemoteDevice>

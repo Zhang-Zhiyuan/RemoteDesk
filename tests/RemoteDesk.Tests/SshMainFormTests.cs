@@ -8,6 +8,63 @@ namespace RemoteDesk.Tests;
 public sealed class SshMainFormTests
 {
     [Fact]
+    public void DirectAndRelayShowSameMachineAndKeepWindowsAndWslRoutesDistinct() => OnSta(() =>
+    {
+        using var main = CreatePreview();
+        var settings = Field<RemoteDeskSettings>(main, "_settings");
+        const string address = "192.0.2.44";
+        string staleId = Guid.NewGuid().ToString();
+        settings.Viewer.RecentDevices = [new() { Address = address, Port = 40565, DeviceId = staleId, MachineName = "DESKTOP-LAB" }];
+        var live = new DiscoveredHost("DESKTOP-LAB", address, 40565, "", true, false, "Windows",
+            RemoteDeviceCapabilities.DeviceIdentity, DeviceId: Device.DeviceId) { WindowsSshPort = 2223 };
+        var guest = new SshDestination(Guid.NewGuid().ToString(), "WSL · Ubuntu");
+        var online = Device with { CanRename = true, SharedName = "Lab", MachineName = "Lab", SupportsSsh = true, WslDestinations = [guest] };
+        Call(main, "UpdateDiscoveredHosts", new[] { live }, false);
+        Assert.True(main.ApplyRelayDeviceList([online], 0));
+        var list = Field<ListBox>(main, "_discoveredHostsList");
+        var current = Assert.IsType<MainForm.RemoteDeviceListItem>(list.Items[0]);
+        Assert.Equal("Lab", current.ListTitle);
+        Assert.Equal("DESKTOP-LAB", current.MachineName);
+        Assert.Contains("旧记录", Assert.IsType<MainForm.RemoteDeviceListItem>(list.Items[1]).ListTitle);
+        Assert.Contains("Windows 原生", Field<Button>(main, "_directSshButton").Text);
+        using var dialog = (Form)Call(main, "CreateDirectSshDialog")!;
+        Assert.Contains("Lab", dialog.Text);
+        var controls = dialog.Controls.OfType<TableLayoutPanel>().Single().Controls;
+        var system = controls.OfType<ComboBox>().Single();
+        var port = controls.OfType<TextBox>().Single(box => box.AccessibleName == "SSH 端口");
+        Assert.Equal("Windows 原生", system.SelectedItem);
+        Assert.Equal("2223", port.Text);
+        Assert.Contains("192.0.2.44:2223", controls["sshEndpointPreview"]!.Text);
+        Assert.True(((Button)dialog.AcceptButton!).Enabled);
+        system.SelectedIndex = 1;
+        Assert.Empty(port.Text);
+        Assert.Contains("映射端口", controls["sshEndpointPreview"]!.Text);
+        Assert.False(((Button)dialog.AcceptButton!).Enabled);
+        port.Text = "2223";
+        Assert.False(((Button)dialog.AcceptButton!).Enabled);
+        port.Text = "2202";
+        Assert.Contains("WSL", controls["sshEndpointPreview"]!.Text);
+        Assert.True(((Button)dialog.AcceptButton!).Enabled);
+        Assert.Contains("Ubuntu", controls["sshRelayDestination"]!.Text);
+        Assert.True((bool)Call(main, "SelectRelaySshTarget", Device.DeviceId, guest.Id)!);
+        Assert.Equal(guest, Field<ComboBox>(main, "_sshSystem").SelectedItem);
+        Assert.False((bool)Call(main, "SelectRelaySshTarget", Device.DeviceId, Guid.NewGuid().ToString())!);
+    });
+
+    [Fact]
+    public void AnAddressReusedByAnotherIdentityDoesNotInheritSshPreferences()
+    {
+        var old = new DirectSshPreference("192.0.2.44", true, new("wsl.example", 2202, "guest")) { DeviceId = Guid.NewGuid().ToString() };
+        var known = old with { DeviceId = Device.DeviceId };
+        var legacy = old with { DeviceId = null };
+        Assert.Equal(known, Assert.Single(DirectSshPreference.ForDevice([old, legacy, known], "192.0.2.99", Device.DeviceId, true)));
+        Assert.Empty(DirectSshPreference.ForDevice([old, legacy], "192.0.2.44", Device.DeviceId, true));
+        Assert.Equal(legacy, Assert.Single(DirectSshPreference.ForDevice([old, legacy], "192.0.2.44", null, false)));
+        Assert.Throws<ArgumentException>(() => MainForm.ValidateDirectSshSystem(false, new("192.0.2.44", null, ""), "192.0.2.44", 0));
+        Assert.Throws<ArgumentException>(() => MainForm.ValidateDirectSshSystem(false, new("192.0.2.44", null, ""), "192.0.2.44", null, hasWsl: true));
+        MainForm.ValidateDirectSshSystem(false, new("windows-alias", null, ""), "192.0.2.44", null, hasWsl: true);
+    }
+    [Fact]
     public void DirectSshKeepsSeparateDraftsUntilDialogCloses() => OnSta(() =>
     {
         using var main = CreatePreview();

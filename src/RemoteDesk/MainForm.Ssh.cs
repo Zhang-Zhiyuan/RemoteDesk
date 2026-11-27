@@ -188,7 +188,7 @@ public sealed partial class MainForm
     private SshDestination? SelectedSshSystem(RelayOnlineDevice? device)
     {
         if (device is null) { _sshSystem.Visible = false; _sshSystemDevice = null; return null; }
-        var primary = new SshDestination(device.DeviceId, device.Platform);
+        var primary = new SshDestination(device.DeviceId, device.Platform == RemoteDevicePlatforms.Windows ? "Windows 原生" : device.Platform);
         var choices = new List<SshDestination> { primary };
         choices.AddRange(device.WslDestinations);
         var last = _sshSystemDevice == device.DeviceId ? _sshSystem.SelectedItem as SshDestination : null;
@@ -204,7 +204,7 @@ public sealed partial class MainForm
             }
             finally { _sshSystem.EndUpdate(); }
         }
-        _sshSystem.Visible = choices.Count > 1;
+        _sshSystem.Visible = device.SupportsSsh;
         _sshSystem.Enabled = _sshOpening is null;
         return _sshSystem.SelectedItem as SshDestination;
     }

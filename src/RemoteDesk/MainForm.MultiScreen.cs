@@ -5,6 +5,15 @@ public sealed partial class MainForm
     private readonly Dictionary<string, AdditionalScreenSession> _additionalScreens = new(StringComparer.OrdinalIgnoreCase);
     private bool _closingAdditionalScreens;
 
+    private void RefreshViewerWindowTitles()
+    {
+        if (_viewerWindow is not { IsDisposed: false } && _additionalScreens.Count == 0) return;
+        string title = GetViewerWindowTitle();
+        if (_viewerWindow is { IsDisposed: false } viewer) viewer.SetScreenWindowTitle(title);
+        foreach (var screen in _additionalScreens.Values)
+            if (!screen.Closing && screen.Window is { IsDisposed: false } window) window.SetScreenWindowTitle(title);
+    }
+
     private sealed class AdditionalScreenSession(RemoteViewerClient client, long controllerGeneration,
         ViewerConnectionSnapshot controllerConnection) : IDisposable
     {

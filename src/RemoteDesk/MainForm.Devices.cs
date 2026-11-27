@@ -36,7 +36,12 @@ public sealed partial class MainForm
         {
             if (ShouldPollDirectDevices(Visible, WindowState == FormWindowState.Minimized, _tabs.SelectedIndex == 1,
                     _viewerClient.IsConnected || _viewerActionInProgress || _isClosing) &&
-                _discoveryScanCancellation is null) await DiscoverHostsAsync(silent: true);
+                _discoveryScanCancellation is null)
+            {
+                await DiscoverHostsAsync(silent: true);
+                if (!_isClosing && !IsDisposed && _tabs.SelectedIndex == 1 && !_relayOperationInProgress && IsRelayConfigured())
+                    await RefreshRelayDevicesAsync(silent: true, optimizeRoute: false);
+            }
         };
         timer.Start();
         Disposed += (_, _) => timer.Dispose();
