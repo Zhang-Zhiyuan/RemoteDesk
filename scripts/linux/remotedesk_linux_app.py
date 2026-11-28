@@ -6837,6 +6837,7 @@ class RemoteDeskLinuxApp:
         style.configure("Treeview", rowheight=row_font.metrics("linespace") + 10)
         style.configure("TFrame", background=APP_BG)
         style.configure("App.TFrame", background=APP_BG)
+        style.configure("Panel.TFrame", background=PANEL_BG)
         style.configure("Header.TFrame", background=HEADER_BG)
         style.configure(
             "Panel.TLabelframe",
@@ -6855,6 +6856,7 @@ class RemoteDeskLinuxApp:
         style.configure("TNotebook.Tab", padding=(20, 10), font=("DejaVu Sans", 10, "bold"))
         style.map(
             "TNotebook.Tab",
+            padding=[("selected", (20, 10))],
             background=[("selected", PANEL_BG), ("active", "#e8eef7")],
             foreground=[("selected", ACCENT_COLOR), ("active", TEXT_COLOR)],
         )
@@ -6883,8 +6885,8 @@ class RemoteDeskLinuxApp:
         style.configure("Danger.TButton", padding=(14, 8), foreground="#ffffff", background=DANGER_COLOR, borderwidth=0)
         style.map(
             "Danger.TButton",
-            background=[("active", DANGER_ACTIVE_COLOR), ("pressed", "#991b1b"), ("disabled", "#fee2e2")],
-            foreground=[("disabled", "#991b1b")],
+            background=[("disabled", "#eef2f7"), ("pressed", "#991b1b"), ("active", DANGER_ACTIVE_COLOR)],
+            foreground=[("disabled", "#64748b")],
         )
         style.configure("Status.TLabel", background=APP_BG, foreground=MUTED_TEXT_COLOR, padding=(0, 7))
         style.configure(
@@ -6911,7 +6913,7 @@ class RemoteDeskLinuxApp:
         style.map("ViewerDanger.TButton", background=[("active", "#991b1b"), ("pressed", "#b91c1c")])
 
     def _build_header(self, parent: tk.Misc) -> None:
-        header = tk.Frame(parent, bg=HEADER_BG, padx=18, pady=14, bd=0, highlightthickness=0)
+        header = tk.Frame(parent, bg=HEADER_BG, padx=16, pady=9, bd=0, highlightthickness=0)
         header.pack(fill=tk.X)
         brand = tk.Label(
             header,
@@ -6922,7 +6924,7 @@ class RemoteDeskLinuxApp:
             padx=10,
             pady=8,
         )
-        brand.grid(row=0, column=0, rowspan=2, sticky=tk.W, padx=(0, 12))
+        brand.grid(row=0, column=0, sticky=tk.W, padx=(0, 12))
         title = tk.Label(
             header,
             text="RemoteDesk",
@@ -6931,20 +6933,11 @@ class RemoteDeskLinuxApp:
             font=("DejaVu Sans", 19, "bold"),
             anchor=tk.W,
         )
-        subtitle = tk.Label(
-            header,
-            text="Linux · 安全连接、远程控制与文件传输",
-            bg=HEADER_BG,
-            fg=HEADER_MUTED_COLOR,
-            font=("DejaVu Sans", 9),
-            anchor=tk.W,
-        )
         account = ttk.Button(
             header, name="account_package", text=ACCOUNT_PACKAGE_TITLE + "…",
             command=lambda: self.show_account_login(parent=self.root),
         )
         title.grid(row=0, column=1, sticky=tk.W)
-        subtitle.grid(row=1, column=1, sticky=tk.W, pady=(2, 0))
         header.columnconfigure(1, weight=1)
 
         compact_state = None
@@ -6952,14 +6945,14 @@ class RemoteDeskLinuxApp:
         def update_header_layout(event: tk.Event[Any] | None = None) -> None:
             nonlocal compact_state
             available_width = int(getattr(event, "width", header.winfo_width()))
-            compact = available_width < brand.winfo_reqwidth() + max(title.winfo_reqwidth(), subtitle.winfo_reqwidth()) + account.winfo_reqwidth() + 64
+            compact = available_width < brand.winfo_reqwidth() + title.winfo_reqwidth() + account.winfo_reqwidth() + 64
             if compact == compact_state:
                 return
             compact_state = compact
             if compact:
-                account.grid(row=2, column=0, columnspan=3, rowspan=1, sticky=tk.W, padx=0, pady=(6, 0))
+                account.grid(row=1, column=0, columnspan=3, sticky=tk.W, padx=0, pady=(6, 0))
             else:
-                account.grid(row=0, column=2, columnspan=1, rowspan=2, sticky=tk.E, padx=(16, 0), pady=0)
+                account.grid(row=0, column=2, columnspan=1, sticky=tk.E, padx=(16, 0), pady=0)
 
         header.bind("<Configure>", update_header_layout, add="+")
         header.after_idle(update_header_layout)
@@ -7184,7 +7177,7 @@ class RemoteDeskLinuxApp:
         return content
 
     def _build_host_tab(self, notebook: ttk.Notebook) -> None:
-        tab = self._create_scrollable_tab(notebook, "被控")
+        tab = self._create_scrollable_tab(notebook, "本机被控")
 
         form = ttk.LabelFrame(tab, text="被控设置", padding=16, style="Panel.TLabelframe")
         form.pack(fill=tk.X)
@@ -7291,7 +7284,7 @@ class RemoteDeskLinuxApp:
         self.host_log.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
 
     def _build_viewer_tab(self, notebook: ttk.Notebook) -> None:
-        tab = self._create_scrollable_tab(notebook, "控制")
+        tab = self._create_scrollable_tab(notebook, "IP 直连")
 
         form = ttk.LabelFrame(tab, text="远程连接", padding=16, style="Panel.TLabelframe")
         form.pack(fill=tk.X)

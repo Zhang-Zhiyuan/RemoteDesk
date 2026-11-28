@@ -46,13 +46,15 @@ class DevicePanel(ttk.LabelFrame):
         self.epoch = 0; self.scanner = None; self.busy = False; self.closed = False; self.refreshed = 0
         self.network_slots = threading.BoundedSemaphore(2)
         self.selected_id = ""; self.recorded_generation = None; self.connection_auto = True; self.ready = False
-        actions = ttk.Frame(self); actions.pack(fill=tk.X)
-        for title, action in (("查找附近设备", lambda:self.scan()), ("探测此 IP 的端口", self.detect),
-                              ("新增设备", self.add), ("修改备注", self.rename), ("删除记录", self.remove)):
+        actions = ttk.Frame(self, style="Panel.TFrame"); actions.pack(fill=tk.X)
+        for title, action in (("查找附近设备", lambda:self.scan()), ("新增设备", self.add),
+                              ("探测此 IP 的端口", self.detect)):
             ttk.Button(actions, text=title, command=action).pack(side=tk.LEFT, padx=(0, 5))
         app._wrap_action_buttons(actions, actions.winfo_children())
-        self.status = app._wrapping_label(self, text="正在读取已保存设备…"); self.status.pack(fill=tk.X, pady=6)
-        self.tree = app._device_table(self, columns=("address", "state"), show="tree headings", height=4, selectmode="browse")
+        self.status = app._wrapping_label(self, text="正在读取已保存设备…", style="PanelSubtitle.TLabel")
+        self.status.pack(fill=tk.X, pady=(3, 0))
+        self.results = ttk.Frame(self, style="Panel.TFrame")
+        self.tree = app._device_table(self.results, columns=("address", "state"), show="tree headings", height=4, selectmode="browse")
         self.tree.heading("#0", text="设备 / 备注"); self.tree.heading("address", text="IP / 端口"); self.tree.heading("state", text="状态")
         self.tree.column("#0", width=220); self.tree.column("address", width=210); self.tree.column("state", width=180)
         fit_table_columns(self.tree, {"#0": (220, 100, ()), "address": (210, 180, ()),
@@ -63,7 +65,13 @@ class DevicePanel(ttk.LabelFrame):
         self.tree.bind("<KeyRelease-Up>", self.fill_selection)
         self.tree.bind("<KeyRelease-Down>", self.fill_selection)
         self.tree.bind("<Double-1>", lambda _: self.connect_selected())
-        ttk.Button(self, text="连接选中设备", command=self.connect_selected, style="Accent.TButton").pack(anchor=tk.E, pady=(7, 0))
+        row = ttk.Frame(self.results, style="Panel.TFrame")
+        row.pack(fill=tk.X, pady=(4, 0))
+        self.connect_button = ttk.Button(row, text="连接选中设备", command=self.connect_selected, style="Accent.TButton")
+        self.rename_button = ttk.Button(row, text="修改备注", command=self.rename)
+        self.delete_button = ttk.Button(row, text="删除记录", command=self.remove)
+        app._wrap_action_buttons(row, (self.connect_button, self.rename_button, self.delete_button))
+        self.tree.bind("<<TreeviewSelect>>", self._update_selection_actions)
         self.mutate(None)
         self.after_id = self.after(60, self.poll)
 
@@ -167,6 +175,17 @@ class DevicePanel(ttk.LabelFrame):
                     self.tree.item(key, text=title, values=values)
                 if self.tree.index(key) != index: self.tree.move(key, "", index)
         if selected and selected[0] in self.rows and self.tree.selection() != selected: self.tree.selection_set(selected[0])
+        if self.rows and not self.results.winfo_manager():
+            self.results.pack(fill=tk.X)
+        elif not self.rows and self.results.winfo_manager():
+            self.results.pack_forget()
+        self._update_selection_actions()
+
+    def _update_selection_actions(self, _event=None):
+        node, device = self.selection()
+        self.connect_button.state(["!disabled" if node or device else "disabled"])
+        for button in (self.rename_button, self.delete_button):
+            button.state(["!disabled" if node else "disabled"])
 
     def selection(self):
         selection = self.tree.selection()

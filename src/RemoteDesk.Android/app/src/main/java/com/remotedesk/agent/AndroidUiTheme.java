@@ -58,16 +58,6 @@ final class AndroidUiTheme {
         return card;
     }
 
-    static TextView createEyebrow(Context context, String text) {
-        TextView view = new TextView(context);
-        view.setText(text);
-        view.setTextColor(PRIMARY);
-        view.setTextSize(11.0f);
-        view.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        view.setLetterSpacing(0.08f);
-        return view;
-    }
-
     static TextView createSectionTitle(Context context, String text) {
         TextView view = new TextView(context);
         view.setText(text);

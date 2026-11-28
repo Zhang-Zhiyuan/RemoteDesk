@@ -74,6 +74,7 @@ class DevicePanelUiTests(unittest.TestCase):
 
     def test_add_merge_rename_restart_and_delete(self):
         self.assertIn("暂无已保存设备", self.panel.status.cget("text"))
+        self.assertFalse(self.panel.results.winfo_ismapped())
         self.add_device("PC.", "45678", "test-one", "测试电脑")
         self.assertIn("已保存 1 个设备", self.panel.status.cget("text"))
         original = self.panel.book.nodes[0].id
@@ -82,6 +83,9 @@ class DevicePanelUiTests(unittest.TestCase):
         self.assertEqual("测试电脑", self.panel.book.nodes[0].remark)
         self.assertEqual("45678", self.app.viewer_port.get())
         self.panel.tree.selection_set("saved:" + original)
+        self.root.update()
+        self.assertTrue(self.panel.results.winfo_ismapped())
+        self.assertTrue(self.button("修改备注").instate(["!disabled"]))
         with mock.patch.object(panel.simpledialog, "askstring", return_value="新的备注"):
             self.button("修改备注").invoke()
         self.wait(lambda:self.panel.book.nodes[0].remark == "新的备注")
@@ -91,6 +95,7 @@ class DevicePanelUiTests(unittest.TestCase):
         self.wait(lambda:not self.panel.book.nodes)
         self.assertFalse(self.panel.store.load().nodes)
         self.assertIn("暂无已保存设备", self.panel.status.cget("text"))
+        self.assertFalse(self.panel.results.winfo_ismapped())
 
     def test_refresh_never_overwrites_edited_fields(self):
         self.add_device("pc", "", "test-password", "备注")
@@ -135,6 +140,10 @@ class DevicePanelUiTests(unittest.TestCase):
         self.panel.render(); self.root.update()
         self.assertEqual(2, len(self.panel.tree.get_children()))
         self.panel.tree.selection_set("found:pc:56565"); self.panel.fill_selection()
+        self.root.update()
+        self.assertTrue(self.panel.connect_button.instate(["!disabled"]))
+        self.assertTrue(self.panel.rename_button.instate(["disabled"]))
+        self.assertTrue(self.panel.delete_button.instate(["disabled"]))
         self.assertEqual("", self.app.viewer_password.get())
         self.assertIn("saved:" + first.id, self.panel.rows)
 

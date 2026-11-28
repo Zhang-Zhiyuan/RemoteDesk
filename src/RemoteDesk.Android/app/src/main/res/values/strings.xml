@@ -17,6 +17,9 @@
     <string name="relay_directory_failed">读取失败：请检查网络和服务器；配置有变化时重新用 root 密码登录。</string>
     <string name="relay_invalid_port">端口应为 1 至 65535 的数字；留空使用默认端口。</string>
     <string name="relay_online_count">在线设备 %1$d 台；点击连接，长按更改该设备密钥。</string>
-    <string name="discovery_enter_host">先在下方填写 IP 或主机名；不用填写端口。</string>
+    <string name="controller_ready">连接远端无需本机录屏授权</string>
+    <string name="direct_ssh_action">SSH 直连…</string>
+    <string name="add_device_action">新增设备</string>
+    <string name="discovery_enter_host">请在“远端地址”填写 IP 或主机名，即可探测端口。</string>
     <string name="discovery_no_port">未发现可连接端口。请确认被控端已启动；也可手动填写 IP:端口，或使用中转在线列表。</string>
 </resources>

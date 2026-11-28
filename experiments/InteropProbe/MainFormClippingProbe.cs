@@ -47,6 +47,18 @@ internal static class MainFormClippingProbe
             using var font = new Font("Microsoft YaHei UI", points);
             main.Font = font;
             main.Show(); Pump();
+            var tabs = Field<TabControl>(main, "_tabs");
+            if (points == 9.25f)
+            {
+                main.ClientSize = new Size(ResponsiveWindowLayout.ScaleLogical(960, main.DeviceDpi),
+                    ResponsiveWindowLayout.ScaleLogical(600, main.DeviceDpi));
+                tabs.SelectedIndex = 1; Pump();
+                var connect = Field<Button>(main, "_viewerToggleButton");
+                if (!tabs.SelectedTab!.RectangleToScreen(tabs.SelectedTab.ClientRectangle)
+                        .Contains(connect.RectangleToScreen(connect.ClientRectangle)))
+                    issues.Add("Direct connect must be reachable without scrolling at 960×600.");
+                Save(main, Path.Combine(output, "direct-connect.png"));
+            }
             SetText(main, "_localIpsBox", "192.0.2.123\r\n2001:db8:1234:5678:abcd:ef12:3456:7890\r\nfd12:3456::1");
             SetText(main, "_hostStatusLabel", "正在监听 192.0.2.123:56565；管理员模式");
             SetText(main, "_viewerStatusLabel", string.Join("\r\n", Enumerable.Range(1, 18).Select(i => $"诊断 {i}：已连接很长的测试设备名称，网络链路正常；文件已保存到 C:\\SyntheticReceived\\测试目录\\远程传输结果.txt。")));
@@ -62,11 +74,9 @@ internal static class MainFormClippingProbe
                 Remark = "实验室工作站 · 长备注完整信息测试",
                 Address = "2001:db8:1234:5678:abcd:ef12:3456:7890", Port = 56565
             };
-            Type deviceItem = typeof(MainForm).GetNestedType("RemoteDeviceListItem", BindingFlags.NonPublic)!;
-            directList.Items.Add(deviceItem.GetMethod("FromSaved", BindingFlags.Static | BindingFlags.Public)!.Invoke(null, new object[] { saved })!);
+            directList.Items.Add(MainForm.RemoteDeviceListItem.FromSaved(saved));
             var relayList = Field<ListView>(main, "_relayDevicesList");
             relayList.Items.Add(new ListViewItem(new[] { "Synthetic-长名称测试工作站", "Windows", "1.0.25", "正在监听", "刚刚", "[2001:db8:1234:5678:abcd:ef12:3456:7890]:56565" }));
-            var tabs = Field<TabControl>(main, "_tabs");
             var accountPackage = Field<Button>(main, "_sendAccountPackageButton");
             foreach (int logicalWidth in new[] { 1120, 800, 640, 520, 1120 })
             {
@@ -87,6 +97,27 @@ internal static class MainFormClippingProbe
                         accountBounds.Bottom > tabs.PointToScreen(Point.Empty).Y ||
                         accountPackage.Width < accountPreferred.Width || accountPackage.Height < accountPreferred.Height)
                         issues.Add($"{prefix}: account package action is hidden, clipped or unavailable before connecting");
+                    Button? toolsToggle = null;
+                    int collapsedHeight = 0;
+                    if (index == 1)
+                    {
+                        toolsToggle = (Button)page.Controls.Find("viewerToolsToggle", true).Single();
+                        var tasks = Field<Button>(main, "_transferTasksButton");
+                        var toolbar = toolsToggle.Parent!;
+                        var ssh = Field<Button>(main, "_directSshButton");
+                        string originalTarget = ssh.Text;
+                        ssh.Text = "SSH · Windows / WSL…"; Pump();
+                        if (toolbar.Controls.Cast<Control>().Any(c => c.Visible && c.Bottom > toolbar.ClientSize.Height))
+                            issues.Add($"{prefix}: changing SSH target clips a connection action");
+                        ssh.Text = originalTarget; Pump();
+                        collapsedHeight = toolbar.Height;
+                        if (!toolsToggle.Visible || tasks.Visible || !Field<Button>(main, "_viewerToggleButton").Visible)
+                            issues.Add($"{prefix}: initial connection actions are incorrect");
+                        toolsToggle.PerformClick(); Pump();
+                        if (!tasks.Visible || toolbar.Height <= collapsedHeight)
+                            issues.Add($"{prefix}: secondary actions did not expand");
+                        Save(main, Path.Combine(output, prefix + "-tools.png"));
+                    }
                     foreach (Control control in Descendants(page).Where(c => c.Visible))
                     {
                         if (control is Label label && label.Text.Length > 0)
@@ -128,6 +159,12 @@ internal static class MainFormClippingProbe
                                     Console.WriteLine($"Collapsed: {parent.GetType().Name} dock={parent.Dock} bounds={parent.Bounds} min={parent.MinimumSize} max={parent.MaximumSize} autosize={parent.AutoSize} owner={parent.Parent?.Bounds} ownerScroll={(parent.Parent as ScrollableControl)?.AutoScrollPosition}");
                                 }
                             }
+                    }
+                    if (toolsToggle is not null)
+                    {
+                        toolsToggle.PerformClick(); Pump();
+                        if (Field<Button>(main, "_transferTasksButton").Visible || toolsToggle.Parent!.Height != collapsedHeight)
+                            issues.Add($"{prefix}: collapsing tools did not restore the connection layout");
                     }
                     if (page.HorizontalScroll.Visible) issues.Add($"{prefix}: unexpected whole-page horizontal scroll");
                     if (index == 1 && directList.ItemHeight < directList.Font.Height * 2 + ResponsiveWindowLayout.ScaleLogical(14, main.DeviceDpi))

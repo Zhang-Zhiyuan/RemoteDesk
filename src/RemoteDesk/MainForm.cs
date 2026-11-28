@@ -681,11 +681,11 @@ public sealed partial class MainForm : Form
             Dock = DockStyle.Top,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            MinimumSize = new Size(0, 76),
+            MinimumSize = new Size(0, 56),
             ColumnCount = 3,
             RowCount = 1,
             BackColor = SurfaceBackColor,
-            Padding = new Padding(20, 12, 20, 11),
+            Padding = new Padding(20, 8, 20, 8),
             Margin = new Padding(0)
         };
         header.Paint += (_, args) =>
@@ -699,7 +699,7 @@ public sealed partial class MainForm : Form
                 Math.Max(0, header.ClientSize.Height - 1));
         };
 
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 56));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 48));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         header.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -707,44 +707,23 @@ public sealed partial class MainForm : Form
         var mark = new Label
         {
             Text = "RD",
-            Dock = DockStyle.Fill,
+            Anchor = AnchorStyles.Left,
+            Size = new Size(36, 36),
             BackColor = PrimaryColor,
             ForeColor = Color.White,
             Font = new Font(Font.FontFamily, 11F, FontStyle.Bold),
             TextAlign = ContentAlignment.MiddleCenter,
-            Margin = new Padding(0, 3, 12, 3)
+            Margin = new Padding(0)
         };
-        var copy = new BufferedTableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 1,
-            RowCount = 2,
-            BackColor = SurfaceBackColor,
-            Margin = new Padding(0),
-            Padding = new Padding(0)
-        };
-        copy.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        copy.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        copy.Controls.Add(new Label
+        var title = new Label
         {
             Text = "RemoteDesk",
-            Dock = DockStyle.Top,
+            Anchor = AnchorStyles.Left,
             AutoSize = true,
             ForeColor = TextColor,
             Font = new Font(Font.FontFamily, 15F, FontStyle.Bold),
-            Margin = new Padding(0, 0, 0, 1)
-        }, 0, 0);
-        copy.Controls.Add(new Label
-        {
-            Text = "安全连接、远程控制与文件传输",
-            Dock = DockStyle.Top,
-            AutoSize = true,
-            ForeColor = MutedTextColor,
             Margin = new Padding(0)
-        }, 0, 1);
+        };
 
         _sendAccountPackageButton = CreateSecondaryButton(DeveloperLogin.Action);
         _sendAccountPackageButton.Anchor = AnchorStyles.Right;
@@ -754,7 +733,7 @@ public sealed partial class MainForm : Form
             _viewerClient.IsConnected ? _viewerClient : null, ShowTransferTasks);
 
         header.Controls.Add(mark, 0, 0);
-        header.Controls.Add(copy, 1, 0);
+        header.Controls.Add(title, 1, 0);
         header.Controls.Add(_sendAccountPackageButton, 2, 0);
         return header;
     }
@@ -1172,10 +1151,10 @@ public sealed partial class MainForm : Form
                 "设备",
                 _discoveredHostsBox));
         toolbar.Controls.Add(_discoverHostsButton);
-        toolbar.Controls.Add(_diagnoseConnectionButton);
         _addDeviceButton = CreateSecondaryButton("新增设备");
         _addDeviceButton.Click += (_, _) => AddDevice();
         toolbar.Controls.Add(_addDeviceButton);
+        toolbar.SetFlowBreak(_addDeviceButton, true);
         toolbar.Controls.Add(
             CreateNonWrappingToolbarField(
                 "IP/主机名",
@@ -1185,31 +1164,30 @@ public sealed partial class MainForm : Form
                 "端口",
                 _viewerPortBox));
         toolbar.Controls.Add(_viewerAutoPortBox);
-        toolbar.Controls.Add(
-            CreateNonWrappingToolbarField(
-                "设备密钥",
-                _viewerPasswordBox));
-        toolbar.Controls.Add(
-            CreateNonWrappingToolbarField(
-                "远程屏幕",
-                _viewerCaptureTargetBox));
-        toolbar.Controls.Add(
-            CreateNonWrappingToolbarField(
-                "画面模式",
-                _viewerVideoModeBox));
-        toolbar.Controls.Add(_sendClipboardButton);
-        toolbar.Controls.Add(_readClipboardButton);
-        toolbar.Controls.Add(_sendFileButton);
-        toolbar.Controls.Add(_pasteFilesButton);
-        toolbar.Controls.Add(_pullRemoteFilesButton);
-        toolbar.Controls.Add(_openReceivedFilesButton);
-        toolbar.Controls.Add(_transferTasksButton);
-        toolbar.Controls.Add(_viewerInputPauseButton);
-        toolbar.Controls.Add(_remoteUpdateButton);
+        var deviceKey = CreateNonWrappingToolbarField("设备密钥", _viewerPasswordBox);
+        toolbar.Controls.Add(deviceKey);
+        toolbar.SetFlowBreak(deviceKey, true);
         toolbar.Controls.Add(_viewerToggleButton);
         _directSshButton = CreateSecondaryButton("SSH · 选择系统…");
         _directSshButton.Click += (_, _) => OpenDirectSsh();
         toolbar.Controls.Add(_directSshButton);
+        const string toolsDescription = "远程屏幕、画面模式、仅观看、剪贴板、文件传输、诊断和版本更新";
+        var toolsToggle = CreateSecondaryButton("展开会话工具 ▾");
+        toolsToggle.Name = "viewerToolsToggle";
+        toolsToggle.AccessibleDescription = toolsDescription;
+        SetToolTip(toolsToggle, toolsDescription);
+        toolbar.Controls.Add(toolsToggle);
+        toolbar.SetFlowBreak(toolsToggle, true);
+        Control[] sessionTools =
+        [
+            CreateNonWrappingToolbarField("远程屏幕", _viewerCaptureTargetBox),
+            CreateNonWrappingToolbarField("画面模式", _viewerVideoModeBox),
+            _viewerInputPauseButton, _sendClipboardButton, _readClipboardButton,
+            _sendFileButton, _pasteFilesButton, _pullRemoteFilesButton, _openReceivedFilesButton,
+            _transferTasksButton, _diagnoseConnectionButton, _remoteUpdateButton
+        ];
+        foreach (Control tool in sessionTools) tool.Visible = false;
+        toolbar.Controls.AddRange(sessionTools);
         long toolbarPopulatedAt = Stopwatch.GetTimestamp();
 
         // This section lives in an AutoSize root row. It must shrink after
@@ -1217,16 +1195,26 @@ public sealed partial class MainForm : Form
         // retains its initial one-control-per-line height and pushes the
         // percent-sized device/status workspace below the visible page.
         var toolbarSection = CreateSection(
-            "连接",
-            "选择设备并建立加密会话",
+            "连接设备",
             sizeToContent: true);
         toolbarSection.Controls.Add(toolbar, 0, 0);
         toolbarSection.SetColumnSpan(toolbar, 2);
         toolbarSection.RowStyles.Clear();
         toolbarSection.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        ConfigureResponsiveViewerToolbar(
-            toolbar,
-            toolbarSection);
+        Action resizeToolbar = ConfigureResponsiveViewerToolbar(toolbar, toolbarSection);
+        bool toolsExpanded = false;
+        toolsToggle.Click += (_, _) =>
+        {
+            toolsExpanded = !toolsExpanded;
+            toolbar.SuspendLayout();
+            try
+            {
+                toolsToggle.Text = toolsExpanded ? "收起会话工具 ▴" : "展开会话工具 ▾";
+                foreach (Control tool in sessionTools) tool.Visible = toolsExpanded;
+            }
+            finally { toolbar.ResumeLayout(); }
+            resizeToolbar();
+        };
         long toolbarConfiguredAt = Stopwatch.GetTimestamp();
 
         var workspace = new BufferedTableLayoutPanel
@@ -1271,9 +1259,7 @@ public sealed partial class MainForm : Form
         ConfigureWrappedActionRow(savedDeviceActions);
         long hostsCreatedAt = Stopwatch.GetTimestamp();
 
-        var hostsSection = CreateSection(
-            "设备",
-            "局域网发现、中继上报的地址与最近连接");
+        var hostsSection = CreateSection("直连设备");
         if (hostsSection.Parent is TableLayoutPanel hostsShell)
         {
             hostsShell.AutoSize = false;
@@ -1324,9 +1310,7 @@ public sealed partial class MainForm : Form
         ConfigureScrollableStatusLabel(statusTextPanel, _viewerStatusLabel);
         long statusCreatedAt = Stopwatch.GetTimestamp();
 
-        var statusSection = CreateSection(
-            "会话状态",
-            "连接、传输与诊断反馈");
+        var statusSection = CreateSection("会话状态");
         if (statusSection.Parent is TableLayoutPanel statusShell)
         {
             statusShell.AutoSize = false;
@@ -1346,7 +1330,9 @@ public sealed partial class MainForm : Form
         ConfigureResponsiveViewerWorkspace(workspace, hostsSection.Parent!, statusSection.Parent!);
         long workspaceConfiguredAt = Stopwatch.GetTimestamp();
 
-        root.Controls.Add(toolbarSection.Parent!, 0, 0);
+        Control toolbarShell = toolbarSection.Parent!;
+        toolbarShell.Margin = Padding.Empty;
+        root.Controls.Add(toolbarShell, 0, 0);
         root.Controls.Add(workspace, 0, 1);
         page.Controls.Add(root);
         ResponsiveWindowLayout.ConfigureScrollablePage(page, root);
@@ -1640,7 +1626,7 @@ public sealed partial class MainForm : Form
         SetToolTip(_discoveredHostsBox, "选择扫描到的在线设备或最近连接设备。");
         SetToolTip(
             _discoveredHostsList,
-            "双击设备可直接连接；已保存设备可右键修改备注或删除记录，也可按 F2/Delete。");
+            "局域网发现、中继上报的地址和最近连接都在这里。双击连接，已保存的设备可用 F2 修改备注或用 Delete 删除记录。");
         SetToolTip(_discoverHostsButton, "扫描局域网、手填地址和最近连接设备。");
         SetToolTip(_diagnoseConnectionButton, "检查目标 IP、端口、RemoteDesk 握手和视频模式。");
         SetToolTip(_editSavedDeviceRemarkButton, "修改所选已保存设备的备注；留空可清除备注。");
@@ -1762,7 +1748,7 @@ public sealed partial class MainForm : Form
         Apply();
     }
 
-    private void ConfigureResponsiveViewerToolbar(
+    private Action ConfigureResponsiveViewerToolbar(
         FlowLayoutPanel toolbar,
         TableLayoutPanel toolbarSection)
     {
@@ -1834,8 +1820,16 @@ public sealed partial class MainForm : Form
         toolbar.ParentChanged += (_, _) => Apply();
         toolbar.HandleCreated += (_, _) => Apply();
         toolbar.DpiChangedAfterParent += (_, _) => Apply();
+        foreach (Button action in toolbar.Controls.OfType<Button>())
+        {
+            action.TextChanged += (_, _) =>
+            {
+                if (action.Visible) Apply();
+            };
+        }
         toolbarSection.ClientSizeChanged += (_, _) => Apply();
         Apply();
+        return Apply;
     }
 
     internal static int GetWrappedToolbarAvailableWidth(Control toolbar, Control section)
@@ -1967,9 +1961,9 @@ public sealed partial class MainForm : Form
             toolbar.MaximumSize = wrappingLimit;
         }
 
-        int toolbarHeight = CalculateWrappedToolbarHeight(
-            toolbar,
-            availableWidth);
+        // The flow engine uses the assigned size of GrowOnly controls and
+        // honors explicit row breaks, including when hidden tools reappear.
+        int toolbarHeight = toolbar.GetPreferredSize(new Size(availableWidth, 0)).Height;
         toolbar.Height = toolbarHeight;
         int contentHeight = checked(
             toolbarHeight +

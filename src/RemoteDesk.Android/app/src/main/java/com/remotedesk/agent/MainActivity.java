@@ -247,42 +247,29 @@ public final class MainActivity extends Activity {
         connectionColumn = createVerticalColumn();
         addColumnView(
             connectionColumn,
-            AndroidUiTheme.createEyebrow(this, "远程控制"));
-        addColumnView(
-            connectionColumn,
             AndroidUiTheme.createSectionTitle(this, "连接另一台设备"));
-        addColumnView(
-            connectionColumn,
-            AndroidUiTheme.createSectionSubtitle(
-                this,
-                "点选发现的设备，或填写 IP / 主机名；端口可自动探测。"));
-        Button accountPackage = new Button(this);
-        accountPackage.setText(R.string.account_package_title);
-        AndroidUiTheme.styleButton(this, accountPackage, AndroidUiTheme.ButtonRole.SECONDARY);
-        accountPackage.setOnClickListener(view -> new AlertDialog.Builder(this)
-            .setTitle(R.string.account_package_title).setMessage(R.string.account_package_guide)
-            .setPositiveButton("知道了", null).show());
-        addColumnView(connectionColumn, accountPackage);
-        lanPanel = new AndroidLanDiscoveryPanel(this, () -> viewerAddressEdit.getText().toString(), this::openDiscoveredViewer);
-        addColumnView(connectionColumn, lanPanel);
-        Button addDevice = new Button(this); addDevice.setText("新增设备");
-        AndroidUiTheme.styleButton(this, addDevice, AndroidUiTheme.ButtonRole.SECONDARY);
-        addDevice.setOnClickListener(view -> historyPanel.add());
-        addColumnView(connectionColumn, addDevice);
         addLabeledField(connectionColumn, "远端地址", viewerAddressEdit);
         addLabeledField(connectionColumn, "设备密钥", viewerPasswordEdit);
         addColumnView(connectionColumn, viewerButton);
         Button directSsh = new Button(this);
-        directSsh.setText("SSH 直连…");
+        directSsh.setText(R.string.direct_ssh_action);
         AndroidUiTheme.styleButton(this, directSsh, AndroidUiTheme.ButtonRole.SECONDARY);
         directSsh.setOnClickListener(view -> {
             RemoteEndpoint device = parseRemoteEndpoint(viewerAddressEdit.getText().toString(), 56565);
             AndroidDirectSshDialog.show(this, device == null ? "" : device.host);
         });
         addColumnView(connectionColumn, directSsh);
+        addColumnDivider(connectionColumn);
         historyPanel = new AndroidConnectionHistoryPanel(this, this::openHistoryViewer,
             this::fillHistoryNode, this::updateStatusPanel);
+        Button addDevice = new Button(this);
+        addDevice.setText(R.string.add_device_action);
+        AndroidUiTheme.styleButton(this, addDevice, AndroidUiTheme.ButtonRole.SECONDARY);
+        addDevice.setOnClickListener(view -> historyPanel.add());
+        addColumnView(connectionColumn, addDevice);
         addColumnView(connectionColumn, historyPanel);
+        lanPanel = new AndroidLanDiscoveryPanel(this, () -> viewerAddressEdit.getText().toString(), this::openDiscoveredViewer);
+        addColumnView(connectionColumn, lanPanel);
         relayPanel = new AndroidRelayPanel(this, this::openRelayViewer, address -> {
             viewerAddressEdit.setText(address);
             viewerPasswordEdit.setText(""); // A new address must not inherit the previous direct target's key.
@@ -294,9 +281,6 @@ public final class MainActivity extends Activity {
         addColumnView(connectionColumn, relayPanel);
 
         hostColumn = createVerticalColumn();
-        addColumnView(
-            hostColumn,
-            AndroidUiTheme.createEyebrow(this, "本机被控"));
         addColumnView(
             hostColumn,
             AndroidUiTheme.createSectionTitle(this, "共享这台 Android"));
@@ -368,17 +352,16 @@ public final class MainActivity extends Activity {
         addColumnView(hostColumn, stopButton);
 
         statusColumn = createVerticalColumn();
-        addColumnView(
-            statusColumn,
-            AndroidUiTheme.createEyebrow(this, "设备状态"));
+        Button accountPackage = new Button(this);
+        accountPackage.setText(R.string.account_package_title);
+        AndroidUiTheme.styleButton(this, accountPackage, AndroidUiTheme.ButtonRole.SECONDARY);
+        accountPackage.setOnClickListener(view -> new AlertDialog.Builder(this)
+            .setTitle(R.string.account_package_title).setMessage(R.string.account_package_guide)
+            .setPositiveButton("知道了", null).show());
+        addColumnView(statusColumn, accountPackage);
         addColumnView(
             statusColumn,
             AndroidUiTheme.createSectionTitle(this, "就绪检查"));
-        addColumnView(
-            statusColumn,
-            AndroidUiTheme.createSectionSubtitle(
-                this,
-                "集中查看录屏、通知、电池、编码和输入控制状态。"));
         addColumnView(statusColumn, readinessView);
         addColumnDivider(statusColumn);
         addColumnView(
@@ -1572,7 +1555,7 @@ public final class MainActivity extends Activity {
     private String currentHeadline() {
         // This page controls another device. A missing local capture service
         // must not imply that connecting out requires screen-sharing permission.
-        if (selectedPage == 0) return "选择设备即可远控\n控制其他设备无需本机录屏授权";
+        if (selectedPage == 0) return getString(R.string.controller_ready);
         if (RemoteDeskForegroundService.isHostRunning()) {
             if (AndroidScreenCaptureSession.getInstance().isAccessibilityCapture()) {
                 return "免重复授权被控正在运行\n" + AndroidScreenCaptureSession.getInstance().captureStatus();

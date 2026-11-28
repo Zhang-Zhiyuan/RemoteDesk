@@ -65,7 +65,7 @@ def main():
         adb('shell', 'settings', 'put', 'system', 'user_rotation', '0')
         adb('shell', 'am', 'start', '-W', '-n', PACKAGE + '/.MainActivity')
         tree = select('设备', 'devices')
-        check('controller-does-not-demand-screen-capture', '控制其他设备无需本机录屏授权' in text(tree))
+        check('controller-does-not-demand-screen-capture', '连接远端无需本机录屏授权' in text(tree))
         check('devices-are-separated-from-host-permissions', '免重复录屏授权' not in text(tree))
         tree = select('本机被控', 'host')
         check('local-host-has-its-own-page', '共享这台 Android' in text(tree) and '连接另一台设备' not in text(tree))

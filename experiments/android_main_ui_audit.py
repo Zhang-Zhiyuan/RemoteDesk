@@ -46,6 +46,23 @@ def main():
     def find(nodes, text, description=False):
         return [n for n in nodes if n.get("content-desc" if description else "text") == text]
 
+    def scroll_to_button(label):
+        nodes = tree()
+        for _ in range(32):
+            if any(n.get("class") == "android.widget.Button" and bounds(n)[3] - bounds(n)[1] >= 20
+                   for n in find(nodes, label)):
+                break
+            scroll = next(n for n in nodes if n.get("class") == "android.widget.ScrollView")
+            x1, y1, x2, y2 = bounds(scroll)
+            height = y2 - y1
+            # A fast full-height fling can skip an entire action on a short screen.
+            adb("shell", "input", "swipe", (x1+x2)//2, y1+height*3//4, (x1+x2)//2, y1+height//3, 600)
+            previous = [(n.get("text"), n.get("bounds")) for n in nodes]
+            nodes = tree()
+            if previous == [(n.get("text"), n.get("bounds")) for n in nodes]:
+                break
+        return nodes
+
     def tap(nodes, text, description=False):
         # Discovery/status updates can move rows between dump and click. Locate
         # again just before input instead of tapping the previous page's bounds.
@@ -78,16 +95,10 @@ def main():
             if not any(n.get("selected") == "true" for n in find(nodes, page, True)):
                 raise AssertionError("Navigation did not select " + page)
             capture(name, nodes)
+        tap(scroll_to_button("Codex / Claude 登录"), "Codex / Claude 登录")
+        tap(tree(), "知道了")
         tap(tree(), "设备", True)
-        nodes = tree()
-        for _ in range(10):
-            if find(nodes, "新增设备"):
-                break
-            scroll = next(n for n in nodes if n.get("class") == "android.widget.ScrollView")
-            x1, y1, x2, y2 = bounds(scroll)
-            adb("shell", "input", "swipe", (x1+x2)//2, y2-30, (x1+x2)//2, y1+30, 300)
-            nodes = tree()
-        tap(nodes, "新增设备")
+        tap(scroll_to_button("新增设备"), "新增设备")
         nodes = tree()
         if not find(nodes, "保存设备"):
             if find(nodes, "取消"):
@@ -95,14 +106,7 @@ def main():
             raise AssertionError("New-device dialog did not open; no result certified")
         capture("new-device-dialog", nodes)
         tap(nodes, "取消")
-        nodes = tree()
-        for _ in range(16):
-            if find(nodes, "展开高级设置"):
-                break
-            scroll = next(n for n in nodes if n.get("class") == "android.widget.ScrollView")
-            x1, y1, x2, y2 = bounds(scroll)
-            adb("shell", "input", "swipe", (x1+x2)//2, y2-30, (x1+x2)//2, y1+30, 300)
-            nodes = tree()
+        nodes = scroll_to_button("展开高级设置")
         if find(nodes, "展开高级设置"):
             capture("relay-login", nodes)
             tap(nodes, "展开高级设置")

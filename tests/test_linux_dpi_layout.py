@@ -89,6 +89,8 @@ class RealServerDpiLayoutTests(unittest.TestCase):
             try:
                 self.settle()
                 self.assert_window_fits_screen(self.root)
+                ui.device_panel.nearby = [app.device_model.Device("192.0.2.1", 56565, "测试设备")]
+                ui.device_panel.render()
                 ui._show_relay_directory([dict(deviceId=f"owned-{index}", machineName="隔离测试设备-" + str(index) + "很长的名称" * 4,
                     platform="Linux", busy=bool(index % 2), directAddresses=["192.0.2.1"], directPort=56565) for index in range(30)])
                 self.root.minsize(1, 1)  # Also stress WM/work-area constraints below the preferred minimum.
@@ -111,10 +113,9 @@ class RealServerDpiLayoutTests(unittest.TestCase):
                             ui.relay_list.see(ui.relay_list.get_children()[-1])
                             self.settle()
                             self.assertGreater(ui.relay_list.yview()[0], 0)
-                    header_labels = [item for item in self.descendants(self.root) if isinstance(item, app.tk.Label)
-                                     and "Linux ·" in str(item.cget("text"))]
-                    for label in header_labels:
-                        self.assertLessEqual(label.winfo_rootx() + label.winfo_width(), self.root.winfo_width())
+                    title = next(item for item in self.descendants(self.root) if isinstance(item, app.tk.Label)
+                                 and item.cget("text") == "RemoteDesk")
+                    self.assertLessEqual(title.winfo_rootx() + title.winfo_width(), self.root.winfo_width())
                 ui.main_notebook.select(2)
                 for tree, samples in ((ui.relay_list, {"platform": "Windows", "status": "使用中（可接管）"}),
                                       (ui.device_panel.tree, {"state": "已保存 · 可自动探测"})):
