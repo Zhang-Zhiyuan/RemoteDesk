@@ -133,7 +133,16 @@ internal static class Program
     internal static void Save(string path, object value)
     {
         File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(value, Json));
-        File.Move(path + ".tmp", path, true);
+        for (int attempt = 0; ; attempt++)
+        {
+            try { File.Move(path + ".tmp", path, true); return; }
+            catch (Exception error) when (attempt < 4 && (error is IOException or UnauthorizedAccessException) &&
+                                         (error.HResult & 0xffff) is 5 or 32 or 33)
+            {
+                // A Windows reader can briefly hold the previous result without delete sharing.
+                Thread.Sleep(5);
+            }
+        }
     }
 
     internal static RelayConnectionOptions? RelayOptions(JsonElement config)
@@ -167,7 +176,7 @@ internal static class Program
         viewer.HandleCreated += (_, _) => { lock (logLock) log.WriteLine("PROBE viewer handle created"); };
         viewer.Load += (_, _) => { lock (logLock) log.WriteLine("PROBE viewer Load"); };
         client.Log += line => { lock (logLock) log.WriteLine(line); };
-        long frames = 0, bytes = 0;
+        long frames = 0, bytes = 0, jpegFrames = 0;
         int width = 0, height = 0;
         var clock = Stopwatch.StartNew();
         using var displayTimer = new System.Windows.Forms.Timer { Interval = 30 };
@@ -189,6 +198,7 @@ internal static class Program
         double firstMs = -1;
         client.FrameReceived += frame => {
             Interlocked.Increment(ref frames); Interlocked.Add(ref bytes, frame.EncodedLength);
+            if (frame.Encoding == RemoteFrameEncoding.Jpeg) Interlocked.Increment(ref jpegFrames);
             width = frame.Width; height = frame.Height;
             if (firstMs < 0) firstMs = clock.Elapsed.TotalMilliseconds;
         };
@@ -226,6 +236,44 @@ internal static class Program
                     await client.SendInputAsync(new(RemoteInputKind.MouseUp, RemoteMouseButton.Left, x, y, 0));
                     await Task.Delay(400);
                 }
+                var wheelToVisibleMs = new List<double>();
+                if (c.TryGetProperty("wheelTarget", out var wheelPoint))
+                {
+                    int x = (int)Math.Round(wheelPoint[0].GetDouble() * (width - 1));
+                    int y = (int)Math.Round(wheelPoint[1].GetDouble() * (height - 1));
+                    if (c.TryGetProperty("wheelMarker", out var marker) && marker.GetBoolean())
+                    {
+                        async Task WaitForMarker(bool green)
+                        {
+                            var limit = Stopwatch.StartNew();
+                            Color? color = null;
+                            while (limit.Elapsed < TimeSpan.FromSeconds(5))
+                            {
+                                // The remote pointer initially sits at the exact center of Xvfb.
+                                color = PresentedPixelProbe.Read(viewer, .52);
+                                if (color is { } pixel && (green ? pixel.G - pixel.R : pixel.R - pixel.G) > 80) return;
+                                await Task.Delay(10);
+                            }
+                            throw new IOException($"Scroll marker timeout: expected green={green}, last rendered pixel={color}.");
+                        }
+                        viewer.CaptureDirectSnapshotsForTests = true;
+                        try
+                        {
+                            await WaitForMarker(true);
+                            bool green = true;
+                            foreach (int delta in new[] { -120, 120, -120, 120, -120, 120, -360 })
+                            {
+                                green = !green;
+                                var elapsed = Stopwatch.StartNew();
+                                await client.SendInputAsync(RemoteInputCommand.MouseWheel(delta, x, y));
+                                await WaitForMarker(green);
+                                wheelToVisibleMs.Add(elapsed.Elapsed.TotalMilliseconds);
+                            }
+                        }
+                        finally { viewer.CaptureDirectSnapshotsForTests = false; }
+                    }
+                    else await client.SendInputAsync(RemoteInputCommand.MouseWheel(-360, x, y));
+                }
                 await Click("button"); await Click("editor");
                 var sent = client.SendTextInput(c.GetProperty("text").GetString()!);
                 // Require progress after startup: a dozen JPEG warm-up paints
@@ -244,7 +292,8 @@ internal static class Program
                 bool continuouslyRendered = steadyHardwarePresented >= 10 || steadyPainted >= 10;
                 Save(Path.Combine(output, "viewer.json"), new {
                     complete = client.IsConnected && encoding != null && frames >= 30 && continuouslyRendered,
-                    frames, width, height, firstMs, bytes, encoding, sent, telemetry, renderedImageChanges, paintedImageChanges,
+                    frames, jpegFrames, width, height, firstMs, bytes, encoding, sent, telemetry, renderedImageChanges, paintedImageChanges,
+                    wheelToVisibleMs,
                     steadyHardwarePresented, steadyPainted, windowVisible = IsWindowVisible(viewer.Handle),
                     windowState = viewer.WindowState.ToString(),
                     pictureVisible = picture.Visible, pictureWindowVisible = IsWindowVisible(picture.Handle),
@@ -355,7 +404,7 @@ internal static class Program
             timer.Tick += (_, _) => {
                 CheckForeground();
                 if (closing) return;
-                tick++; Invalidate(new Rectangle(100, 850, 1400, 200)); Snapshot();
+                tick++; Invalidate(new Rectangle(100, 850, 1400, 200));
                 if (lifetime.Elapsed.TotalSeconds > 1800 || File.Exists(Path.Combine(output, "stop"))) Close();
             };
             Shown += async (_, _) => {

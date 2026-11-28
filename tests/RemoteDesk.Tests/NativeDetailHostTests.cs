@@ -11,6 +11,109 @@ public sealed class NativeDetailHostTests
     private static readonly DetailContext Context = new(1, 1, 3840, 2160);
 
     [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public void LatePresentationUpdatesDecoderLagWithoutRefreshingBandwidth(bool udp)
+    {
+        var tcp = new NativeDetailLinkBudget();
+        var datagrams = new NativeDetailUdpLinkBudget();
+        var network = new LowLatencyVideoNetworkSnapshot(true, 0, 0, 0, 30, 40, false, 0, 0);
+        bool Observe(NativeDetailFeedback feedback, long now) =>
+            udp ? datagrams.Observe(feedback, now) : tcp.Observe(feedback, now);
+        long Rate(long now) => udp ? datagrams.DetailBitsPerSecond(now) : tcp.DetailBitsPerSecond(now);
+        // Even numbers are transmitted; an unused capture number must not qualify as a presentation.
+        for (int i = 1; i <= 10; i++)
+        {
+            if (udp)
+            {
+                datagrams.RecordBase(Context, i * 2);
+                datagrams.ObserveNetwork(network, i * 100);
+            }
+            else tcp.RecordSent(Context, i * 2, 90_000, i * 100);
+            Assert.True(Observe(new(Context, i * 2, 0, udp ? 0 : tcp.SentBytes), i * 100 + 20));
+        }
+        long bytes = udp ? 0 : tcp.SentBytes;
+        var receipt = new NativeDetailFeedback(Context, 20, 18, bytes);
+        Assert.Equal(0, Rate(1021));
+        Assert.False(Observe(receipt with { Context = Context with { Request = 2 } }, 1022));
+        Assert.False(Observe(receipt with { PresentedSequence = 17 }, 1022));
+        Assert.False(Observe(receipt with { ReceivedSequence = 18 }, 1022));
+        Assert.False(Observe(receipt with { AcknowledgementDelayMilliseconds = 10 }, 1022));
+        Assert.True(Observe(receipt, 1030));
+        Assert.True(Rate(1030) > 0);
+        Assert.False(Observe(receipt, 1040));
+        Assert.True(Observe(receipt with { PresentedSequence = 20 }, 1300));
+        Assert.Equal(0, Rate(1300));
+        Assert.Equal(bytes, tcp.AcknowledgedBytes);
+        if (udp) datagrams.BeginCapture(); else tcp.BeginCapture();
+        Assert.False(Observe(receipt, 1310));
+    }
+
+    [Fact]
+    public void ExtendedDetailUsesSustainedReceiptsAndStopsOnQueueGrowthOrSilence()
+    {
+        var link = new NativeDetailLinkBudget();
+        for (int i = 1; i <= 32; i++)
+        {
+            link.RecordSent(Context, i, 500_000, i * 100);
+            Assert.True(link.Observe(new(Context, i, i, link.SentBytes), i * 100 + 20));
+            if (i <= 20) Assert.True(link.DetailBitsPerSecond(i * 100 + 20, allowBoost: true) <= 1_000_000);
+        }
+        Assert.Equal(3_000_000, link.DetailBitsPerSecond(3220, allowBoost: true));
+        Assert.Equal(1_000_000, link.DetailBitsPerSecond(3220));
+        Assert.Equal(0, link.DetailBitsPerSecond(3450, allowBoost: true));
+        link.RecordSent(Context, 33, 500_000, 3460);
+        Assert.True(link.Observe(new(Context, 33, 33, link.SentBytes), 3480));
+        Assert.InRange(link.DetailBitsPerSecond(3480, allowBoost: true), 1, 1_000_000);
+        Assert.Equal(link.DetailBitsPerSecond(3480), link.DetailBitsPerSecond(3480, allowBoost: true));
+        link.RecordSent(Context, 34, 500_000, 3500);
+        Assert.True(link.Observe(new(Context, 34, 34, link.SentBytes), 3560));
+        Assert.Equal(0, link.DetailBitsPerSecond(3560, allowBoost: true));
+    }
+
+    [Fact]
+    public void AcknowledgingSmallFragmentsFasterThanVideoDoesNotResetHealthyBaseDelivery()
+    {
+        var link = new NativeDetailLinkBudget();
+        for (int i = 1; i <= 36; i++)
+        {
+            int now = i * 100;
+            link.RecordSent(Context, i, 500_000, now);
+            Assert.True(link.Observe(new(Context, i, i, link.SentBytes), now + 13));
+            link.RecordSent(Context, i, 400, now + 15, isBase: false);
+            Assert.True(link.Observe(new(Context, i, i, link.SentBytes), now + 16));
+        }
+        Assert.Equal(3_000_000, link.DetailBitsPerSecond(3616, allowBoost: true));
+        link.RecordSent(Context, 37, 500_000, 3700);
+        Assert.True(link.Observe(new(Context, 37, 37, link.SentBytes), 3719));
+        Assert.Equal(1_000_000, link.DetailBitsPerSecond(3719, allowBoost: true));
+    }
+
+    [Fact]
+    public void LargeUdpDetailRequiresFreshPacketAndPresentationReports()
+    {
+        var link = new NativeDetailUdpLinkBudget();
+        var net = new LowLatencyVideoNetworkSnapshot(true, 0, 0, 0, 40, 48, false, 0, 0);
+        for (int i = 1; i <= 30; i++)
+        {
+            link.RecordBase(Context, i);
+            Assert.True(link.Observe(new(Context, i, i, 0), i * 100));
+            link.ObserveNetwork(net with { PacketReportMicroseconds = (ulong)i }, i * 100);
+        }
+        Assert.Equal(3_000_000, link.DetailBitsPerSecond(3000, DetailWire.MaxWireChunkBytes, true));
+        link.RecordChunk(DetailWire.MaxWireChunkBytes);
+        Assert.Equal(0, link.DetailBitsPerSecond(3001, DetailWire.MaxWireChunkBytes, true));
+        for (int i = 31; i <= 38; i++)
+        {
+            link.RecordBase(Context, i);
+            Assert.True(link.Observe(new(Context, i, i, DetailWire.MaxWireChunkBytes), i * 100));
+            link.ObserveNetwork(net with { PacketReportMicroseconds = 30 }, i * 100);
+        }
+        Assert.True(link.DetailBitsPerSecond(3800, allowBoost: true) <= 1_000_000);
+        link.ObserveNetwork(net with { PacketLossRatio = .03, PacketReportMicroseconds = 31 }, 3801);
+        Assert.Equal(0, link.DetailBitsPerSecond(3801, allowBoost: true));
+    }
+
+    [Theory]
     [InlineData(1920, 1080)] [InlineData(1080, 1920)]
     public void ExtendedViewportIncludesEveryVisible1080pTile(int width, int height)
     {
@@ -32,7 +135,7 @@ public sealed class NativeDetailHostTests
         var budget = new NativeDetailUdpLinkBudget();
         budget.BeginCapture();
         var healthy = new LowLatencyVideoNetworkSnapshot(true, 0, 0, 0, 30, 40, false, 0, 0);
-        budget.ObserveNetwork(healthy);
+        budget.ObserveNetwork(healthy, 100);
         budget.RecordBase(Context, 3);
         budget.RecordBase(Context, 19);
         Assert.Equal(0, budget.DetailBitsPerSecond(100));
@@ -47,7 +150,7 @@ public sealed class NativeDetailHostTests
         Assert.True(budget.Observe(new(Context, 23, 23, 3900), 130));
         Assert.True(budget.DetailBitsPerSecond(130) > 0);
         Assert.Equal(0, budget.DetailBitsPerSecond(330));
-        budget.ObserveNetwork(healthy with { PacketLossRatio = .08 });
+        budget.ObserveNetwork(healthy with { PacketLossRatio = .08 }, 131);
         Assert.Equal(0, budget.DetailBitsPerSecond(131));
         Assert.Equal(0, NativeDetailSessionProtocol.DecodeFeedback(
             NativeDetailSessionProtocol.EncodeFeedback(new(Context, 1, 1, 0), true), true).ReceivedWireBytes);

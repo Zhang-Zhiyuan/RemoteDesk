@@ -37,12 +37,23 @@ def source(output):
     canvas.create_text(70, 100, anchor="nw", text="RemoteDesk owned Linux target",
                        font=("monospace", 24), fill="#152030")
     marker = canvas.create_rectangle(100, 800, 200, 900, fill="#1677ff", outline="")
-    clicks, tick = 0, 0
+    clicks, tick, wheel_steps = 0, 0, 0
     text = tk.StringVar()
     def snapshot(*_):
-        save(output / "target.json", {"clicks": clicks, "text": text.get(),
+        save(output / "target.json", {"clicks": clicks, "text": text.get(), "wheelSteps": wheel_steps,
             "screenWidth": 1920, "screenHeight": 1080,
+            "wheelTarget": [350 / 1919, 250 / 1079], "wheelMarker": True,
             "button": [350 / 1919, 400 / 1079], "editor": [350 / 1919, 620 / 1079]})
+    scroll_label = canvas.create_text(100, 230, anchor="nw", text="Scroll: 0", font=("monospace", 24))
+    scroll_marker = canvas.create_rectangle(845, 475, 1075, 605, fill="#20c040", outline="")
+    def wheel(event):
+        nonlocal wheel_steps
+        wheel_steps += 1 if event.num == 5 else -1
+        canvas.itemconfigure(scroll_label, text=f"Scroll: {wheel_steps}")
+        canvas.itemconfigure(scroll_marker, fill="#c02030" if wheel_steps % 2 else "#20c040")
+        snapshot()
+    canvas.bind("<Button-4>", wheel)
+    canvas.bind("<Button-5>", wheel)
     def click():
         nonlocal clicks
         clicks += 1

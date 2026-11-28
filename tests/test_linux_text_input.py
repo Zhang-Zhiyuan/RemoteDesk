@@ -17,6 +17,7 @@ class NativeTextFallbackTests(unittest.TestCase):
         controller.native = mock.Mock(available=verified)
         controller.native.apply.return_value = False
         controller.xdotool = helper
+        controller.next_text_helper_check = 0
         controller.xdotool_available = False
         return controller
 
@@ -42,8 +43,23 @@ class NativeTextFallbackTests(unittest.TestCase):
 
     def test_missing_helper_gives_actionable_error(self):
         controller = self.controller(helper=None)
-        with self.assertRaisesRegex(host.ProtocolError, "xdotool.*安装"):
+        with mock.patch.object(host.shutil, "which", return_value=None), self.assertRaisesRegex(host.ProtocolError, "xdotool.*安装"):
             controller.apply(self.command("a"), (1, 1), (1, 1))
+
+    def test_installing_helper_restores_text_without_reconnecting(self):
+        controller = self.controller(helper=None)
+        with mock.patch.object(host.shutil, "which", side_effect=(None, "/usr/bin/xdotool")) as lookup, \
+             mock.patch.object(host.time, "monotonic") as clock, mock.patch.object(controller, "_run") as run:
+            clock.return_value = 10.
+            for _ in range(2):
+                with self.assertRaises(host.ProtocolError):
+                    controller.apply(self.command("中"), (1, 1), (1, 1))
+            lookup.assert_called_once_with("xdotool")
+            clock.return_value = 11.
+            self.assertTrue(controller.apply(self.command("中"), (1, 1), (1, 1)))
+            self.assertTrue(controller.apply(self.command("文"), (1, 1), (1, 1)))
+            self.assertEqual(2, lookup.call_count)
+            self.assertEqual(2, run.call_count)
 
     def test_unverified_session_cannot_inject_text(self):
         controller = self.controller(verified=False)

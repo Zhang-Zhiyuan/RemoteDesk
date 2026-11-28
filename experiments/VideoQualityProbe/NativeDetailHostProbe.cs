@@ -135,8 +135,6 @@ internal static class NativeDetailHostProbe
             phase = label;
             var samples = new List<double>();
             viewer.CaptureDirectSnapshotsForTests = true;
-            const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
-            var gate = (CapturePresentationTransitionGate)typeof(RemoteViewerWindow).GetField("_capturePresentationTransitionGate", fields)!.GetValue(viewer)!;
             try
             {
                 FocusOwnedInput(source);
@@ -156,28 +154,8 @@ internal static class NativeDetailHostProbe
                         if (elapsed.ElapsedMilliseconds > 4000) throw new IOException($"Scroll marker timed out, received {source.WheelCount - seen} wheel events.");
                         if (source.WheelCount <= seen || elapsed.ElapsedMilliseconds < nextRead) return false;
                         nextRead = elapsed.ElapsedMilliseconds + 4;
-                        bool matched = false;
-                        gate.Run(() =>
-                        {
-                            if (Presenter() is not { } p) return;
-                            if (typeof(D3D11HwndVideoPresenter).GetField("_validationSource", fields)!.GetValue(p) is not ID3D11Texture2D surface) return;
-                            var borrowed = (ID3D11Device)typeof(D3D11HwndVideoPresenter).GetField("_device", fields)!.GetValue(p)!;
-                            var desc = surface.Description;
-                            int x = (int)desc.Width / 2, y = (int)desc.Height / 2;
-                            desc.Width = desc.Height = 1; desc.Usage = ResourceUsage.Staging;
-                            desc.BindFlags = BindFlags.None; desc.CPUAccessFlags = CpuAccessFlags.Read;
-                            using var pixel = borrowed.CreateTexture2D(desc);
-                            var context = borrowed.ImmediateContext;
-                            context.CopySubresourceRegion(pixel, 0, 0, 0, 0, surface, 0, new Vortice.Mathematics.Box(x,y,0,x+1,y+1,1));
-                            var map = context.Map(pixel, 0, MapMode.Read);
-                            try
-                            {
-                                int green = Marshal.ReadByte(map.DataPointer, 1), red = Marshal.ReadByte(map.DataPointer, 2);
-                                matched = wantGreen ? green - red > 100 : red - green > 100;
-                            }
-                            finally { context.Unmap(pixel, 0); }
-                        });
-                        return matched;
+                        var color = PresentedPixelProbe.Read(viewer);
+                        return color is { } pixel && (wantGreen ? pixel.G - pixel.R : pixel.R - pixel.G) > 100;
                     });
                     samples.Add(elapsed.Elapsed.TotalMilliseconds);
                 }

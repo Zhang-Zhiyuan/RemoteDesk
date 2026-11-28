@@ -5,8 +5,7 @@ namespace RemoteDesk;
 
 internal sealed partial class RemoteViewerClient
 {
-    // Capability availability is not activation. The UI switch is off by
-    // default and ordinary sessions retain their existing codec/UDP route.
+    // Capability negotiation is independent of the viewer's quality decision.
     internal bool EnableNativeDetailReception { get; init; } = true;
     private byte[] EncodeViewerVideoInfo(RemoteVideoCodecs codecs) => RemoteMessageCodec.EncodeViewerInfo(
         EnableNativeDetailReception ? codecs | RemoteVideoCodecs.NativeDetailH264 : codecs & ~RemoteVideoCodecs.NativeDetailH264);
@@ -199,7 +198,8 @@ internal sealed partial class RemoteViewerClient
 
     private async Task SendNativeFeedbackAsync(NativeFeedbackOwner feedback)
     {
-        long sent = 0, receivedSequence = 0;
+        long sent = 0, receivedSequence = 0, presentedSequence = 0;
+        DetailContext sentContext = default;
         int nextPage = 0;
         try
         {
@@ -207,19 +207,34 @@ internal sealed partial class RemoteViewerClient
             {
                 await Task.Delay(30, feedback.Connection.Token).ConfigureAwait(false);
                 NativeDetailFeedback? latest = Volatile.Read(ref feedback.Latest);
-                if (latest is null || (latest.ReceivedWireBytes <= sent &&
-                    (!feedback.DatagramBase || latest.ReceivedSequence == receivedSequence))) continue;
+                if (latest is null) continue;
+                bool sameContext = latest.Context == sentContext;
+                bool delivery = latest.ReceivedWireBytes > sent ||
+                    (feedback.DatagramBase && (!sameContext || latest.ReceivedSequence != receivedSequence));
+                // The last frame can leave the decoder after all the wire bytes have been
+                // acknowledged. Report that advance once, even on an idle desktop.
+                if (!delivery && (!sameContext || presentedSequence >= latest.ReceivedSequence ||
+                    NativeDetails.LastPresentedSequence <= presentedSequence || !NativeDetails.IsEnabled ||
+                    NativeDetails.RequestedContext != latest.Context)) continue;
                 var receipt = NativeDetails.ReadReceipt(latest.Context, nextPage);
+                long presented = Math.Min(latest.ReceivedSequence, receipt.Sequence);
+                if (!delivery && presented <= presentedSequence) continue;
+                if (sameContext && presented < presentedSequence && NativeDetails.IsEnabled &&
+                    NativeDetails.RequestedContext == latest.Context)
+                    presented = Math.Min(latest.ReceivedSequence, presentedSequence);
                 nextPage = receipt.Page + 1;
-                var message = latest with { PresentedSequence = Math.Min(latest.ReceivedSequence, receipt.Sequence),
-                    CachedTileMask = receipt.Sequence <= latest.ReceivedSequence ? receipt.Tiles : 0,
-                    TilePage = receipt.Sequence <= latest.ReceivedSequence ? receipt.Page : 0,
-                    AcknowledgementDelayMilliseconds = Math.Clamp((int)Stopwatch.GetElapsedTime(latest.LocalReceivedAt).TotalMilliseconds, 0, 500) };
+                var message = latest with { PresentedSequence = presented,
+                    CachedTileMask = receipt.Sequence == presented ? receipt.Tiles : 0,
+                    TilePage = receipt.Sequence == presented ? receipt.Page : 0,
+                    AcknowledgementDelayMilliseconds = delivery
+                        ? Math.Clamp((int)Stopwatch.GetElapsedTime(latest.LocalReceivedAt).TotalMilliseconds, 0, 500) : 0 };
                 // ReadReceipt assigns a nonzero page only to an explicitly negotiated request.
                 if (!await SendControlAsync(NativeDetailSessionProtocol.EncodeFeedback(message, feedback.DatagramBase, extendedViewport: message.TilePage != 0), feedback.Connection,
                         feedback.DatagramBase ? MessageType.NativeDetailUdpFeedback : MessageType.NativeDetailFeedback).ConfigureAwait(false)) return;
                 sent = latest.ReceivedWireBytes;
                 receivedSequence = latest.ReceivedSequence;
+                presentedSequence = presented;
+                sentContext = latest.Context;
             }
         }
         catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException) { }

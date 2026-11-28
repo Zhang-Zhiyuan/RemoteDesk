@@ -61,6 +61,27 @@ class AdaptiveVideoTests(unittest.TestCase):
                        (1, 10, 102, 0), (20, 10, 102, 20), (1, 30, .1, 11)] * 10:
             self.assertFalse(controller.observe(*sample))
 
+    def test_receiver_confirmed_capacity_promotes_at_reading_cadence_with_only_one_additional_trial(self):
+        controller = host.AdaptiveH264ResolutionController(3840, 2160, 30, max_bitrate_bps=50_000_000)
+        self.reduce(controller)
+        def sample(bps):
+            return controller.observe(1, 11, .1, 8, bps)
+        for _ in range(7):
+            self.assertFalse(sample(70_000_000))
+        self.assertFalse(sample(50_000_000))
+        for _ in range(7):
+            self.assertFalse(sample(70_000_000))
+        self.assertTrue(sample(70_000_000))
+        for i in range(3):
+            self.assertEqual(i == 2, controller.observe(1, 11, .1, 8, receiver_queue_delayed=True))
+        self.assertEqual((1920, 1080), controller.output_size)
+        for _ in range(44):
+            self.assertFalse(sample(70_000_000))
+        self.assertTrue(sample(70_000_000))
+        self.reduce(controller)
+        for _ in range(120):
+            self.assertFalse(sample(70_000_000))
+
     def test_fixed_or_small_output_remains_unchanged(self):
         for controller in (host.AdaptiveH264ResolutionController(3840, 2160, 30, False),
                            host.AdaptiveH264ResolutionController(1280, 720, 30)):

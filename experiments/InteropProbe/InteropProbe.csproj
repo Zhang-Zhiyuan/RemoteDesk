@@ -7,5 +7,8 @@
     <Nullable>enable</Nullable>
     <AssemblyName>RemoteDesk.InteropProbe</AssemblyName>
   </PropertyGroup>
-  <ItemGroup><ProjectReference Include="../../src/RemoteDesk/RemoteDesk.csproj" /></ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/RemoteDesk/RemoteDesk.csproj" />
+    <Compile Include="../VideoQualityProbe/PresentedPixelProbe.cs" Link="PresentedPixelProbe.cs" />
+  </ItemGroup>
 </Project>

@@ -38,8 +38,8 @@ if (args.ElementAtOrDefault(0) == "--native-detail-host-relay")
 }
 if (args.ElementAtOrDefault(0) == "--native-detail-session")
 {
-    if (args.Length != 3) throw new ArgumentException("Usage: --native-detail-session <text-fixtures> <new-output-directory>");
-    NativeDetailSessionProbe.Run(args[1], args[2]);
+    if (args.Length is not (3 or 4)) throw new ArgumentException("Usage: --native-detail-session <text-fixtures> <new-output-directory> [high-bitrate-1080p.h264]");
+    NativeDetailSessionProbe.Run(args[1], args[2], args.ElementAtOrDefault(3));
     return;
 }
 if (args.ElementAtOrDefault(0) == "--native-damage-refinement")

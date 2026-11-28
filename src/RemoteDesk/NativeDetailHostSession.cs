@@ -36,9 +36,13 @@ internal sealed class NativeDetailHostSession : IAsyncDisposable
             () => UdpLink.RecordChunk(payload.Length + 25), token, datagramBase: true);
         return !_udpChunkWrite.IsCompleted || _udpChunkWrite.GetAwaiter().GetResult();
     }
-    internal long DetailBitsPerSecond(long now) => DatagramBase ? UdpLink.DetailBitsPerSecond(now) :
-        Link.DetailBitsPerSecond(now, (Request?.Extended == true ? DetailWire.NarrowLinkChunkBytes : 512) +
-            DetailWire.ChunkHeaderBytes + DetailWire.OuterRecordBytes);
+    internal long DetailBitsPerSecond(long now, int wireBytes = 0)
+    {
+        bool extended = Request?.Extended == true, udp = DatagramBase;
+        if (wireBytes == 0) wireBytes = (extended && !udp ? DetailWire.NarrowLinkChunkBytes : 512) +
+            DetailWire.ChunkHeaderBytes + DetailWire.OuterRecordBytes;
+        return udp ? UdpLink.DetailBitsPerSecond(now, wireBytes, extended) : Link.DetailBitsPerSecond(now, wireBytes, extended);
+    }
     internal void ObserveFeedback(NativeDetailFeedback feedback, bool datagramBase = false)
     {
         long now = Environment.TickCount64;

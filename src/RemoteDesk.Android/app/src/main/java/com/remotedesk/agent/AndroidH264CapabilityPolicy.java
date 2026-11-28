@@ -64,8 +64,7 @@ final class AndroidH264CapabilityPolicy {
 
         int networkCap = clampNetworkTargetBitrate(udpTargetBitrate);
         // Feedback is an immediate ceiling, never an independent ramp-up
-        // controller. Recovery above the current rate remains gated by the
-        // slower local comfort window, preventing alternating up/down IDRs.
+        // controller. The caller supplies a separately qualified recovery target.
         int merged = Math.min(adaptive, networkCap);
         return merged == current ? 0 : merged;
     }

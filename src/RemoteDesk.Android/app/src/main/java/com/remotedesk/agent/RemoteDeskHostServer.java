@@ -821,10 +821,14 @@ final class RemoteDeskHostServer {
                     // UDP already has explicit receiver pressure feedback. Its
                     // enqueue time cannot be used as TCP bandwidth evidence.
                     if (sentUdp) adaptive.reset(System.nanoTime());
-                    int adaptiveRequestedBitrate = sentUdp ? 0 : adaptive.updateIfNeeded();
                     int currentBitrate = activeEncoder.getCurrentBitrate();
                     int udpTargetBitrate = state.udpTargetBitrate.get();
                     long bitrateDecisionAtNanos = System.nanoTime();
+                    AndroidLowLatencyVideoTransport.Host transport = state.lowLatencyVideo;
+                    int adaptiveRequestedBitrate = sentUdp
+                        ? (transport == null ? 0 : transport.qualityHeadroom.request(
+                            bitrateDecisionAtNanos, currentBitrate, adaptive.maxBitrate, udpTargetBitrate))
+                        : adaptive.updateIfNeeded();
                     int rateLimitedUdpCeiling =
                         AndroidH264CapabilityPolicy.rateLimitedNetworkCeiling(
                             currentBitrate,
@@ -853,7 +857,10 @@ final class RemoteDeskHostServer {
                         AndroidSessionLog.info("H.264 bitrate adjusted: " +
                             formatBitsPerSecond(previousBitrate) + " -> " +
                             formatBitsPerSecond(activeEncoder.getCurrentBitrate()) + ".");
-                        activeEncoder.requestKeyFrame();
+                        boolean returningFromBoost = currentBitrate > adaptive.maxBitrate &&
+                            requestedBitrate >= adaptive.maxBitrate;
+                        if (!returningFromBoost && (!sentUdp || requestedBitrate < currentBitrate))
+                            activeEncoder.requestKeyFrame();
                     }
                 }
             } catch (RuntimeException ex) {
@@ -1897,9 +1904,9 @@ final class RemoteDeskHostServer {
                 actualFps > targetFps * 0.9 &&
                 bitsPerSecond < currentBitrate * 0.72;
 
-            int nextBitrate = currentBitrate;
+            int nextBitrate = Math.min(currentBitrate, maxBitrate);
             if (overloaded) {
-                nextBitrate = Math.max(MIN_BITRATE, (int) Math.round(currentBitrate * 0.78));
+                nextBitrate = Math.min(nextBitrate, Math.max(MIN_BITRATE, (int) Math.round(currentBitrate * 0.78)));
             } else if (comfortable && currentBitrate < maxBitrate) {
                 nextBitrate = Math.min(maxBitrate, (int) Math.round(currentBitrate * 1.12));
             }
@@ -1913,7 +1920,7 @@ final class RemoteDeskHostServer {
         }
 
         void acceptBitrate(int bitrate) {
-            currentBitrate = Math.max(MIN_BITRATE, Math.min(maxBitrate, bitrate));
+            currentBitrate = Math.max(MIN_BITRATE, Math.min(MAX_BITRATE, bitrate));
         }
 
         int getCurrentBitrate() {

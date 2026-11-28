@@ -33,6 +33,27 @@ public sealed class AdaptiveH264ResolutionControllerTests
     private static AdaptiveH264ResolutionController Create(bool enabled = true) =>
         new(new Size(3840, 2160), 30, enabled);
 
+    [Fact]
+    public void SustainedEndToEndHeadroomCanRecoverAtReadingCadenceAndRetryOnceAfterARealLinkChange()
+    {
+        var c = new AdaptiveH264ResolutionController(new Size(3840, 2160), 30, true, startReduced: true);
+        bool Sample(double bps = 200_000_000) => c.Observe(TimeSpan.FromSeconds(1), 11, .1, 8, true, bps);
+        for (int i = 0; i < 7; i++) Assert.False(Sample());
+        Assert.False(Sample(0)); // Lose continuity.
+        for (int i = 0; i < 7; i++) Assert.False(Sample());
+        Assert.True(Sample());
+        // Fast writes to a relay can conceal a congested last hop after promotion.
+        bool SlowReceiver() => c.Observe(TimeSpan.FromSeconds(1), 11, .1, 8, true, receiverQueueDelayed: true);
+        Assert.False(SlowReceiver());
+        Assert.False(SlowReceiver());
+        Assert.True(SlowReceiver());
+        Assert.True(c.IsReduced);
+        for (int i = 0; i < 44; i++) Assert.False(Sample());
+        Assert.True(Sample());
+        Reduce(c);
+        for (int i = 0; i < 100; i++) Assert.False(Sample());
+    }
+
     private static bool Observe(AdaptiveH264ResolutionController controller, double fps = 9.5,
         double writeMs = 102, bool tcp = true, double seconds = 1, double mbps = 19) =>
         controller.Observe(TimeSpan.FromSeconds(seconds), fps, writeMs, mbps, tcp);

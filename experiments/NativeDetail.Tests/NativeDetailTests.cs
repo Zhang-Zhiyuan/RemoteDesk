@@ -328,6 +328,36 @@ public sealed class NativeDetailTests
         Assert.Null(queue.TryTake(221, 2_000_000, false, true, 0, _ => true)); Assert.Equal(0, queue.QueuedBytes);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void WholeTileUsesOneRecordOnlyIfTheTransferHasNotStarted(bool startFast)
+    {
+        var manifest = Manifest(Context);
+        var bounds = manifest.Context.Tile(0);
+        byte[] pixels = new byte[bounds.Width * bounds.Height * 4];
+        new Random(17).NextBytes(pixels.AsSpan(0, 1400));
+        var tile = DetailTransfer.Encode(manifest, 0, pixels);
+        Assert.InRange(tile.Encoded.Length, 513, 4096);
+        var queue = new DetailSendQueue(DetailWire.NarrowLinkChunkBytes);
+        Assert.True(queue.Enqueue(tile, 0));
+        var cache = new DetailCache();
+        cache.Reset(manifest.Context, bounds, extended: true);
+        Assert.True(cache.Present(manifest));
+        int records = 0;
+        for (int now = 20; queue.Count != 0 && now < 1200; now += 20)
+        {
+            Assert.Null(queue.TryTake(now, 3_000_000, true, false, 0, _ => true, true));
+            var packet = queue.TryTake(now, 3_000_000, false, false, 0, _ => true, startFast || records > 0);
+            Assert.NotNull(packet);
+            Assert.Equal(startFast ? DetailWire.ChunkBytes : DetailWire.NarrowLinkChunkBytes, DetailWire.DecodeChunk(packet).ChunkDataBytes);
+            cache.Receive(packet, now);
+            records++;
+        }
+        Assert.Equal(startFast, records == 1);
+        Assert.Equal(pixels, Assert.Single(cache.Patches).Rgba.ToArray());
+    }
+
     [Fact]
     public void SlowLinkCompletesSmallTextBehindANoisyTileAndResumesItWhenBudgetRises()
     {

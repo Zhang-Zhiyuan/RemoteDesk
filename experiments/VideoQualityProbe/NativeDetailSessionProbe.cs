@@ -12,7 +12,7 @@ using Vortice.Direct3D11;
 // no installed host, OS input injection, clipboard or external network.
 internal static class NativeDetailSessionProbe
 {
-    internal static void Run(string fixtures, string outputDirectory)
+    internal static void Run(string fixtures, string outputDirectory, string? highBitrate)
     {
         string output = Path.GetFullPath(outputDirectory);
         if (Directory.Exists(output)) throw new IOException("Preserving previous session evidence.");
@@ -20,7 +20,7 @@ internal static class NativeDetailSessionProbe
         Exception? failure = null;
         var thread = new Thread(() =>
         {
-            try { RunCore(fixtures, output); }
+            try { RunCore(fixtures, output, highBitrate); }
             catch (Exception ex)
             {
                 failure = ex;
@@ -34,7 +34,7 @@ internal static class NativeDetailSessionProbe
         if (failure is not null) throw new IOException("Session probe failed; see summary.json.", failure);
     }
 
-    private static void RunCore(string fixtures, string output)
+    private static void RunCore(string fixtures, string output, string? highBitrate)
     {
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         WindowsFormsSynchronizationContext.AutoInstall = false;
@@ -50,6 +50,14 @@ internal static class NativeDetailSessionProbe
         byte[] legacy = new byte[RemoteMessageCodec.VideoFrameHeaderLength + h264.Length];
         RemoteMessageCodec.WriteVideoFrameHeader(legacy, 1920, 1080, baseFrame.Encoding, baseFrame.Flags, 0, 0);
         h264.CopyTo(legacy, RemoteMessageCodec.VideoFrameHeaderLength);
+        byte[]? highRateFrame = null;
+        if (highBitrate is not null)
+        {
+            var encoded = NativeDetailProbe.LastIndependentAu(highBitrate);
+            highRateFrame = new byte[RemoteMessageCodec.VideoFrameHeaderLength + encoded.Length];
+            legacy.AsSpan(0, RemoteMessageCodec.VideoFrameHeaderLength).CopyTo(highRateFrame);
+            encoded.CopyTo(highRateFrame, RemoteMessageCodec.VideoFrameHeaderLength);
+        }
         var tileBytes = new List<byte[]>();
         for (int tile = 0; tile < 2; tile++)
         {
@@ -60,6 +68,7 @@ internal static class NativeDetailSessionProbe
         int paused = 0, inputs = 0;
         long sentFrames = 0, nativeDraws = 0, nativeReceived = 0;
         int respondToOneRefresh = 0;
+        int extendedRequested = 0;
         async Task Host()
         {
             using TcpClient peer = await listener.AcceptTcpClientAsync(token);
@@ -96,14 +105,21 @@ internal static class NativeDetailSessionProbe
             try
             {
                 long sequence = 0;
+                bool extended = false;
                 while (true)
                 {
                     token.ThrowIfCancellationRequested();
                     if (Volatile.Read(ref paused) == 0)
                     {
+                        if (!extended && Volatile.Read(ref extendedRequested) != 0)
+                        {
+                            extended = true;
+                            await Protocol.WriteMessageAsync(stream, MessageType.NativeDetailOffer,
+                                NativeDetailSessionProtocol.EncodeOffer(new(2, original.Size, true, true)), session, write, token);
+                        }
                         NativeDetailRequest? current = Volatile.Read(ref request);
-                        if (current is null)
-                            await Protocol.WriteMessageAsync(stream, MessageType.VideoFrame, legacy, session, write, token);
+                        if (current is null || (extended && !current.Enabled))
+                            await Protocol.WriteMessageAsync(stream, MessageType.VideoFrame, extended ? highRateFrame! : legacy, session, write, token);
                         else
                         {
                             var manifest = new DetailManifest(current.Context, ++sequence,
@@ -123,7 +139,7 @@ internal static class NativeDetailSessionProbe
                         }
                         Interlocked.Increment(ref sentFrames);
                     }
-                    await Task.Delay(25, token);
+                    await Task.Delay(extended ? 15 : 25, token);
                 }
             }
             finally
@@ -273,6 +289,27 @@ internal static class NativeDetailSessionProbe
             window.ClientSize = new(1000, 700); Application.DoEvents();
             PumpUntil(() => Volatile.Read(ref request) is { Enabled: false } && !client.NativeDetails.IsEnabled);
             checks.Add("small viewer sends zero requests; enlargement starts details; shrinking sends an ordered stop");
+            if (highRateFrame is not null)
+            {
+                phase = "automatic mode";
+                var menu = (ToolStripMenuItem)Field(window, "_nativeDetailMenuItem");
+                void Choose(NativeDetailMode mode) =>
+                    menu.DropDownItems.OfType<ToolStripMenuItem>().Single(item => Equals(item.Tag, mode)).PerformClick();
+                Choose(NativeDetailMode.Off);
+                window.ClientSize = new(2200, 1360);
+                Volatile.Write(ref extendedRequested, 1);
+                PumpUntil(() => client.NativeOffer is { Extended: true });
+                long drawsBeforeAuto = Interlocked.Read(ref nativeDraws);
+                Choose(NativeDetailMode.Automatic);
+                PumpUntil(() => Volatile.Read(ref request) is { Enabled: true, Extended: true } &&
+                    client.NativeDetails.IsEnabled && Interlocked.Read(ref nativeDraws) > drawsBeforeAuto);
+                Choose(NativeDetailMode.Off);
+                PumpUntil(() => Volatile.Read(ref request) is { Enabled: false } && !client.NativeDetails.IsEnabled);
+                long disabledAt = Environment.TickCount64;
+                PumpUntil(() => Environment.TickCount64 - disabledAt > 4800);
+                Check(!client.NativeDetails.IsEnabled, "Automatic mode overrode manual off.");
+                checks.Add("presented high-rate H.264 automatically draws native detail and manual off persists");
+            }
             Console.WriteLine($"PASS: production viewer over owned encrypted TCP, {sentFrames} frames, {nativeDraws} native GPU draws.");
         }
         catch (Exception ex) { failure = ex.ToString(); throw; }

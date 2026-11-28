@@ -68,6 +68,24 @@ internal sealed class ReliableVideoSendWindow
     private int _isolatedSamples;
     private double _isolatedMinimum = double.MaxValue;
     private long _dropped;
+    private double _deliveryFloor = double.PositiveInfinity;
+    private int _deliverySamples;
+    private long _lastAgedDrop = -1;
+
+    // Each confirmed frame crossed the whole route during its own round trip.
+    // This intentionally underestimates capacity on long-RTT paths. ACK bursts
+    // or a quick write into the first relay hop cannot inflate this estimate.
+    internal (double BitsPerSecond, bool QueueDelayed) TakeDeliverySample(long now)
+    {
+        lock (_gate)
+        {
+            double sample = _deliverySamples >= 3 && now - _lastAckAt is >= 0 and <= 250 ? _deliveryFloor : 0;
+            bool delayed = _lastAgedDrop >= 0 && now - _lastAgedDrop is >= 0 and <= 1000;
+            _deliverySamples = 0; _deliveryFloor = double.PositiveInfinity;
+            _lastAgedDrop = -1;
+            return (sample, delayed);
+        }
+    }
 
     internal long PendingBytes { get { lock (_gate) return _sentBytes - _ackedBytes; } }
     internal int PendingFrames { get { lock (_gate) return _pending.Count; } }
@@ -98,7 +116,12 @@ internal sealed class ReliableVideoSendWindow
                 (_minimumRtt == double.MaxValue && _pending.Count >= 2) || (_pending.Count > 0 &&
                 (aged || paced || bytes > _windowBytes || _sentBytes - _ackedBytes >= _windowBytes ||
                  _sentBytes - _ackedBytes + (long)bytes > MaximumWindowBytes)))
-            { _dropped++; return false; }
+            {
+                _dropped++;
+                _deliveryFloor = 0;
+                if (aged) _lastAgedDrop = now;
+                return false;
+            }
             _sentBytes = checked(_sentBytes + bytes);
             sequence = checked(++_sequence);
             _pending.Enqueue(new(sequence, _sentBytes, bytes, now, _pending.Count == 0));
@@ -120,6 +143,9 @@ internal sealed class ReliableVideoSendWindow
             _minimumRtt = Math.Min(_minimumRtt, _lastRtt);
             long confirmedBytes = receipt.WireBytes - _ackedBytes;
             bool congested = _lastRtt > _minimumRtt + QueueBudgetMilliseconds;
+            _deliverySamples++;
+            _deliveryFloor = Math.Min(_deliveryFloor, _lastRtt > _minimumRtt + 12 ? 0 :
+                exact.Bytes * 8000d / Math.Max(1, now - exact.At));
             // A slower path or a larger keyframe raises the irreducible
             // one-frame round trip too. Relearn only after three isolated
             // transmissions: all previous video was acknowledged before each

@@ -5,6 +5,24 @@ namespace RemoteDesk.Tests;
 
 public sealed class NativeDetailPresentationTests
 {
+    [Fact]
+    public void AutomaticQualityNeedsTwoRenderedWindowsAndHoldsOffAfterPressure()
+    {
+        var policy = new NativeDetailAutoQuality();
+        bool Sample(bool active, long time, double rate = 25, double fps = 25, double delay = 10,
+            bool input = false) => policy.Observe(active, time, 2, rate, fps, delay, true, input);
+        Assert.False(Sample(false, 2000));
+        Assert.False(Sample(false, 7000)); // A missing window breaks continuity.
+        Assert.True(Sample(false, 9000));
+        Assert.True(Sample(true, 11000, 1, 1)); // Reading an idle document.
+        Assert.True(Sample(true, 13000, delay: 80));
+        Assert.False(Sample(true, 15000, delay: 80));
+        for (long t = 17000; t < 45000; t += 2000) Assert.False(Sample(false, t));
+        Assert.True(Sample(false, 45000));
+        Assert.True(Sample(true, 47000, 3, 4, input: true));
+        Assert.False(Sample(true, 49000, 3, 4, input: true));
+    }
+
     private static NativeDetailTile Tile(int x = 0, int y = 0, int width = 128, int height = 128, long version = 1) =>
         new(new(x, y, width, height), version, new byte[width * height * 4]);
 

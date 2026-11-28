@@ -1751,6 +1751,7 @@ class LinuxInputController:
                 )
 
             self.xdotool = shutil.which("xdotool")
+            self.next_text_helper_check = time.monotonic() + 1.0
             self.xdotool_available = (
                 selected_backend == "xdotool"
                 and self.xdotool is not None
@@ -1824,16 +1825,20 @@ class LinuxInputController:
         # display proof for this text-only helper; never broaden unverified
         # pointer/key fallback or advertise input on an unavailable session.
         if command.kind == INPUT_TEXT and self.native.available:
+            commands = text_codepoint_to_xdotool_commands(command.data)
+            if not commands:
+                return False
+            if self.xdotool is None and time.monotonic() >= self.next_text_helper_check:
+                self.next_text_helper_check = time.monotonic() + 1.0
+                self.xdotool = shutil.which("xdotool")
             if self.xdotool is None:
                 raise ProtocolError(
-                    "Linux 文字输入缺少 xdotool，请重新启动 RemoteDesk 并同意安装运行依赖；"
+                    "Linux 文字输入需要安装 xdotool，安装后即可在当前连接中输入；"
                     "鼠标和实体按键仍可使用。"
                 )
-            sent = False
-            for item in text_codepoint_to_xdotool_commands(command.data):
+            for item in commands:
                 self._run(item, timeout=0.8)
-                sent = True
-            return sent
+            return True
 
         if self.xdotool is None or not self.xdotool_available:
             raise ProtocolError("Linux input command requires a working xdotool fallback.")
@@ -2181,15 +2186,19 @@ def calculate_h264_bitrate(
 class AdaptiveH264ResolutionController:
     """Session-local TCP spatial fallback; preserve the user's size ceiling."""
 
-    def __init__(self, width: int, height: int, fps: float, enabled: bool = True) -> None:
+    def __init__(self, width: int, height: int, fps: float, enabled: bool = True,
+                 max_bitrate_bps: int = DEFAULT_H264_MAX_BITRATE_BPS) -> None:
         self.requested_size = (max(2, int(width)) & ~1, max(2, int(height)) & ~1)
         self.reduced_size = self.fit_full_hd(*self.requested_size)
         self.output_size = self.requested_size
         self.target_fps = max(1.0, min(60.0, fps))
         self.enabled = enabled and self.reduced_size != self.requested_size
+        self.max_bitrate_bps = max_bitrate_bps
         self.recovery_attempted = False
         self.recovery_failed = False
-        self.pressure_seconds = self.comfortable_seconds = self.profile_seconds = 0.0
+        self.used_confirmed_retry = False
+        self.receiver_confirmed_profile = False
+        self.pressure_seconds = self.comfortable_seconds = self.confirmed_seconds = self.profile_seconds = 0.0
         self._reset_window(time.monotonic())
 
     @staticmethod
@@ -2204,11 +2213,11 @@ class AdaptiveH264ResolutionController:
         self.frames = self.encoded_bytes = 0
         self.write_seconds = 0.0
 
-    def record_frame(self, encoded_bytes: int, write_seconds: float, fps: float) -> bool:
+    def record_frame(self, encoded_bytes: int, write_seconds: float, fps: float, delivery_window=None) -> bool:
         now = time.monotonic()
         if fps != self.target_fps:
             self.target_fps = max(1.0, min(60.0, fps))
-            self.pressure_seconds = self.comfortable_seconds = 0.0
+            self.pressure_seconds = self.comfortable_seconds = self.confirmed_seconds = 0.0
             self._reset_window(now)
         self.frames += 1
         self.encoded_bytes += max(0, encoded_bytes)
@@ -2216,41 +2225,53 @@ class AdaptiveH264ResolutionController:
         elapsed = now - self.window_started
         if elapsed < 1.0:
             return False
+        confirmed_bps, delayed = delivery_window.take_delivery_sample(now * 1000) if delivery_window else (0, False)
         changed = self.observe(elapsed, self.frames / elapsed,
                                self.write_seconds * 1000 / self.frames,
-                               self.encoded_bytes * 8 / elapsed / 1_000_000)
+                               self.encoded_bytes * 8 / elapsed / 1_000_000,
+                               confirmed_bps, delayed)
         self._reset_window(now)
         return changed
 
-    def observe(self, seconds: float, fps: float, write_ms: float, mbps: float) -> bool:
+    def observe(self, seconds: float, fps: float, write_ms: float, mbps: float, confirmed_bps: float = 0,
+                receiver_queue_delayed: bool = False) -> bool:
         if not self.enabled:
             return False
         if (not all(math.isfinite(value) for value in (seconds, fps, write_ms, mbps))
                 or seconds <= 0 or fps <= 0 or write_ms < 0 or mbps <= 0):
-            self.pressure_seconds = self.comfortable_seconds = 0.0
+            self.pressure_seconds = self.comfortable_seconds = self.confirmed_seconds = 0.0
             return False
         self.profile_seconds += seconds
         evidence = min(seconds, 1.5)
         budget = 1000 / self.target_fps
         if self.output_size == self.requested_size:
-            pressure = fps < self.target_fps * 0.80 and write_ms > budget * 1.10
+            pressure = fps < self.target_fps * 0.80 and (
+                write_ms > budget * 1.10 or (self.receiver_confirmed_profile and receiver_queue_delayed))
             self.pressure_seconds = self.pressure_seconds + evidence if pressure else 0.0
             if self.pressure_seconds < 3:
                 return False
             self.recovery_failed = self.recovery_attempted
+            self.receiver_confirmed_profile = False
             self.output_size = self.reduced_size
         else:
             growth = max(1.0, calculate_h264_bitrate(*self.requested_size, self.target_fps) /
                          calculate_h264_bitrate(*self.reduced_size, self.target_fps))
             comfortable = fps >= self.target_fps * 0.95 and write_ms * growth < budget * 0.60
             self.comfortable_seconds = self.comfortable_seconds + evidence if comfortable else 0.0
-            # One bounded trial; fast writes at low bitrate cannot prove spare
-            # WAN capacity and must not cause recurring resolution oscillation.
-            if self.recovery_failed or self.profile_seconds < 45 or self.comfortable_seconds < 10:
+            native_bps = calculate_h264_bitrate(*self.requested_size, self.target_fps, self.max_bitrate_bps)
+            confirmed = (seconds <= 2 and math.isfinite(confirmed_bps) and confirmed_bps >= native_bps * 1.25
+                         and fps >= min(8, self.target_fps * .9) and write_ms * growth < budget * .60)
+            self.confirmed_seconds = self.confirmed_seconds + evidence if confirmed else 0.0
+            confirmed_trial = self.confirmed_seconds >= 8 and (
+                not self.recovery_failed or (not self.used_confirmed_retry and self.profile_seconds >= 45))
+            if not confirmed_trial and (self.recovery_failed or self.profile_seconds < 45 or self.comfortable_seconds < 10):
                 return False
+            if self.recovery_failed:
+                self.used_confirmed_retry = True
+            self.receiver_confirmed_profile = confirmed_trial
             self.output_size = self.requested_size
             self.recovery_attempted = True
-        self.pressure_seconds = self.comfortable_seconds = self.profile_seconds = 0.0
+        self.pressure_seconds = self.comfortable_seconds = self.confirmed_seconds = self.profile_seconds = 0.0
         return True
 
 
@@ -2994,9 +3015,7 @@ class ContinuousFrameCapture:
         with self.condition:
             if self.closed:
                 return
-            was_ready = self.source_size_ready
             size_changed = (self.source_width, self.source_height) != (width, height)
-            should_start = not was_ready or size_changed
             self.source_width = width
             self.source_height = height
             self.source_size_ready = True
@@ -3004,11 +3023,8 @@ class ContinuousFrameCapture:
                 # x11grab may exit before the periodic probe observes XRandR.
                 # A confirmed new geometry is a safe point to retry capture.
                 self.disabled = False
-            if should_start:
-                # Keep send-thread start attempts out until this worker has
-                # completed the initial launch or XRandR-driven replacement.
+            if size_changed and self.process is not None:
                 self.restarting = True
-            if size_changed and self.process is not None and self.process.poll() is None:
                 process = self.process
                 reader_thread = self.reader_thread
                 self.process = None
@@ -3018,16 +3034,14 @@ class ContinuousFrameCapture:
             self.condition.notify_all()
 
         if process is not None:
-            self._stop_process(process, reader_thread)
-
-        if should_start:
-            with self.condition:
-                self.restarting = False
-                self.condition.notify_all()
-                # The condition is re-entrant. Holding it here prevents a send
-                # thread from winning the launch race after `restarting` clears.
-                # This method itself runs only on the display-size worker.
-                self.start()
+            try:
+                self._stop_process(process, reader_thread)
+            finally:
+                with self.condition:
+                    self.restarting = False
+                    self.condition.notify_all()
+        # Only read_frame starts JPEG capture. Learning the screen size, including
+        # a resize during an H.264 session, must not launch a second FFmpeg encoder.
 
     def read_frame(self, timeout: float, after_frame_id: int | None = None) -> tuple[int, int, bytes, int] | None:
         if not self.start():
@@ -3290,16 +3304,32 @@ class ReliableVideoSendWindow:
         self.min_rtt = self.isolated_min = float("inf")
         self.isolated_samples = 0
         self.last_ack = self.last_reduction = -float("inf")
+        self.delivery_floor = float("inf")
+        self.delivery_samples = 0
+        self.last_aged_drop = -float("inf")
+
+    def take_delivery_sample(self, now: float) -> tuple[float, bool]:
+        with self.lock:
+            sample = self.delivery_floor if self.delivery_samples >= 3 and 0 <= now - self.last_ack <= 250 else 0.0
+            delayed = 0 <= now - self.last_aged_drop <= 1000
+            self.delivery_floor = float("inf")
+            self.delivery_samples = 0
+            self.last_aged_drop = -float("inf")
+            return sample, delayed
 
     def reserve(self, size: int, now: float) -> int | None:
         with self.lock:
             if not self.credit:
                 self.credit = min(self.MAX_BYTES, 2 * size)
             if self.pending:
+                aged = now - self.pending[0].sent_at > self.min_rtt + self.QUEUE_BUDGET_MS
                 if (len(self.pending) >= 128 or (self.min_rtt == float("inf") and len(self.pending) >= 2)
-                        or now - self.pending[0].sent_at > self.min_rtt + self.QUEUE_BUDGET_MS
+                        or aged
                         or now < self.next_send or size > self.credit or self.sent - self.acked >= self.credit
                         or self.sent - self.acked + size > self.MAX_BYTES):
+                    self.delivery_floor = 0.0
+                    if aged:
+                        self.last_aged_drop = now
                     return None
             elif now - self.last_ack > max(1000, self.min_rtt * 3):
                 self.credit = min(self.credit, size * 2)
@@ -3327,6 +3357,9 @@ class ReliableVideoSendWindow:
             size = frame.size
             rtt = max(0, now - frame.sent_at - delay)
             self.min_rtt = min(self.min_rtt, rtt)
+            self.delivery_samples += 1
+            self.delivery_floor = min(self.delivery_floor, 0.0 if rtt > self.min_rtt + 12 else
+                                      size * 8000.0 / max(1.0, now - frame.sent_at))
             congested = rtt > self.min_rtt + self.QUEUE_BUDGET_MS
             if congested and frame.started_empty and len(self.pending) == 1:
                 self.isolated_samples += 1
@@ -3391,8 +3424,6 @@ class LinuxHostSession:
         self.video_lock = threading.Lock()
         self.viewer_video_codecs = VIDEO_CODEC_JPEG
         self.viewer_info_received = False
-        self.startup_jpeg_sent = False
-        self.codec_negotiation_deadline = time.monotonic() + VIEWER_CODEC_NEGOTIATION_GRACE_SECONDS
         self.h264_stream_active = False
         self.last_h264_frame_id: int | None = None
         self.incoming: Any | None = None
@@ -3444,7 +3475,8 @@ class LinuxHostSession:
         )
         self.h264_resolution = AdaptiveH264ResolutionController(
             self.frame_width, self.frame_height, self.hardware_h264_capture.fps,
-            enabled=not getattr(args, "no_adaptive_video", False))
+            enabled=not getattr(args, "no_adaptive_video", False),
+            max_bitrate_bps=self.hardware_h264_capture.max_bitrate_bps)
         self._start_display_size_refresh_thread()
         if self.host_capabilities & CAPABILITY_INPUT_CONTROL:
             self.input_thread = threading.Thread(target=self._input_loop, name="RemoteDeskLinuxInput", daemon=True)
@@ -3461,6 +3493,7 @@ class LinuxHostSession:
                 log(f"Linux input backend: {self.input_controller.backend_name}")
             self._send_capture_targets()
             self._send_capture_target_changed()
+            self.codec_negotiation_deadline = time.monotonic() + VIEWER_CODEC_NEGOTIATION_GRACE_SECONDS
             self.reader_thread = threading.Thread(target=self._read_loop, name="RemoteDeskLinuxReader", daemon=True)
             self.inbound_liveness_thread = threading.Thread(
                 target=self._inbound_liveness_loop,
@@ -3470,9 +3503,6 @@ class LinuxHostSession:
             self.reader_thread.start()
             self.inbound_liveness_thread.start()
 
-            prestarted_capture = self.continuous_capture.start()
-            if prestarted_capture:
-                self.capture_warmup_until = time.monotonic() + FFMPEG_WARMUP_SECONDS
             while not self.stop_event.is_set() and not self.session_stop.is_set():
                 frame_started_at = time.monotonic()
                 sent_frame = self._send_frame()
@@ -3707,15 +3737,10 @@ class LinuxHostSession:
         with self.video_lock:
             viewer_codecs = self.viewer_video_codecs
             viewer_info_received = self.viewer_info_received
-            h264_stream_active = self.h264_stream_active
 
-        # A relay's loopback socket can accept many frames before the distant
-        # viewer's codec selection arrives. One full-quality preview is enough:
-        # a startup JPEG burst otherwise queues ahead of the first H.264 frame
-        # for tens of seconds on a congested uplink. Legacy clients which never
-        # send ViewerInfo resume normal JPEG after this bounded grace period.
-        if (not viewer_info_received and self.startup_jpeg_sent
-                and started < self.codec_negotiation_deadline):
+        # A full-size JPEG sent before negotiation delays the first H.264 frame on
+        # a narrow uplink. Old viewers that never send ViewerInfo keep their grace period.
+        if not viewer_info_received and started < self.codec_negotiation_deadline:
             return False
 
         if viewer_codecs & VIDEO_CODEC_H264_ANNEX_B:
@@ -3762,42 +3787,35 @@ class LinuxHostSession:
                 adaptive = getattr(self, "h264_resolution", None)
                 if adaptive is not None and isinstance(write_seconds, (int, float)):
                     if adaptive.record_frame(len(h264_frame.encoded), write_seconds,
-                                             self.hardware_h264_capture.fps):
+                                             self.hardware_h264_capture.fps, self.reliable_video if sequence else None):
                         width, height = adaptive.output_size
                         self.hardware_h264_capture.update_output_size(width, height)
                         log(f"H.264 bandwidth profile: {width}x{height}; hardware encoding, "
-                            "display mode unchanged; one recovery trial per session")
+                            "display mode unchanged")
                 return True
 
             if self.hardware_h264_capture.is_running() or self.hardware_h264_capture.is_starting():
-                # Do not interleave JPEG after the first H.264 AU. While the
-                # initial hardware probe runs, JPEG may continue only when the
-                # viewer explicitly advertised it.
-                if h264_stream_active or not viewer_codecs & VIDEO_CODEC_JPEG or self.startup_jpeg_sent:
-                    return False
-            else:
-                with self.video_lock:
-                    self.h264_stream_active = False
-                h264_stream_active = False
+                return False
+            # Geometry discovery can precede encoder selection. A compatibility
+            # viewer on a headless host must still get a picture if no geometry arrives.
+            if not self.hardware_h264_capture.has_exhausted_candidates() and (
+                not viewer_codecs & VIDEO_CODEC_JPEG or started < self.codec_negotiation_deadline
+            ):
+                return False
+            with self.video_lock:
+                self.h264_stream_active = False
 
         if viewer_info_received and not viewer_codecs & VIDEO_CODEC_JPEG:
-            if not viewer_codecs & VIDEO_CODEC_H264_ANNEX_B:
-                message = (
-                    "Linux host and viewer have no mutually supported video codec."
-                )
-                self._safe_status(False, message)
-                self.session_stop.set()
-                raise ProtocolError(message)
-            if self.hardware_h264_capture.has_exhausted_candidates():
-                message = (
-                    "Linux host could not start any hardware H.264 encoder, "
-                    "and the viewer did not advertise JPEG fallback."
-                )
-                self._safe_status(False, message)
-                self.session_stop.set()
-                raise ProtocolError(message)
-            return False
+            message = ("Linux host could not start any hardware H.264 encoder, "
+                       "and the viewer did not advertise JPEG fallback."
+                       if viewer_codecs & VIDEO_CODEC_H264_ANNEX_B else
+                       "Linux host and viewer have no mutually supported video codec.")
+            self._safe_status(False, message)
+            self.session_stop.set()
+            raise ProtocolError(message)
 
+        if not self.continuous_frame_ready and self.capture_warmup_until == 0:
+            self.capture_warmup_until = started + FFMPEG_WARMUP_SECONDS
         if self.continuous_frame_ready:
             wait_timeout = min(0.02, 1.0 / self.continuous_capture.fps)
         else:
@@ -3832,7 +3850,6 @@ class LinuxHostSession:
             + frame_bytes
         )
         self._write_message(MESSAGE_FRAME, payload)
-        self.startup_jpeg_sent = True
         return True
 
     def _handle_input(self, payload: bytes) -> None:

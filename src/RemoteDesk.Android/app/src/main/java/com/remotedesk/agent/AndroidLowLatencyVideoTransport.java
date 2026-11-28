@@ -127,6 +127,7 @@ final class AndroidLowLatencyVideoTransport {
         private final AtomicBoolean fatalNotificationSent = new AtomicBoolean();
         private final AtomicBoolean videoFallbackNotificationSent = new AtomicBoolean();
         private volatile long targetBitsPerSecond = 24_000_000L;
+        final AndroidH264BitratePolicy.UdpHeadroom qualityHeadroom = new AndroidH264BitratePolicy.UdpHeadroom();
         private volatile long pacingWindowStartedAtNanos;
         private volatile long pacingWindowWireBytes;
         private volatile int pacingWindowPackets;
@@ -552,6 +553,7 @@ final class AndroidLowLatencyVideoTransport {
             }
             lastFeedback = feedback;
 
+            qualityHeadroom.observe(previous, feedback, clock.nanoTime());
             long packetDelta = feedback.totalAuthenticatedPackets -
                 previous.totalAuthenticatedPackets;
             long lostDelta = feedback.totalSettledLostPackets -

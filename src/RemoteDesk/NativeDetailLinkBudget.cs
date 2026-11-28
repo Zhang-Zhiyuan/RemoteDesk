@@ -2,6 +2,29 @@ using RemoteDesk.NativeDetail;
 
 namespace RemoteDesk;
 
+// Spend extra credit only after independent receiver reports stay healthy.
+// A quiet screen does not establish unused capacity; normal refinement still works.
+internal sealed class NativeDetailHeadroom
+{
+    internal const long StandardLimit = 1_000_000;
+    internal const long MinimumDelivery = 20_000_000;
+    private long _since = -1, _last = -1;
+
+    internal void Reset() => _since = _last = -1;
+
+    internal void Observe(long now, bool healthy, long maximumGap)
+    {
+        if (!healthy) { Reset(); return; }
+        if (_since < 0 || now < _last || now - _last > maximumGap) _since = now;
+        _last = now;
+    }
+
+    internal long Rate(double delivered, long now, long maximumGap, bool allowBoost) =>
+        allowBoost && _since >= 0 && _last - _since >= 2000 && now >= _last && now - _last <= maximumGap
+            ? (long)Math.Min(3_000_000, delivered * .08)
+            : (long)Math.Min(StandardLimit, delivered * .04);
+}
+
 // End-to-end receiver acknowledgements, not NetworkStream.WriteAsync timing:
 // on a relay, a fast write only describes the local tunnel's socket buffer.
 // All times below are host-local monotonic milliseconds. One small window
@@ -11,9 +34,11 @@ internal sealed class NativeDetailLinkBudget
     private readonly object _gate = new();
     private readonly Queue<Sent> _history = new();
     private readonly Queue<(DetailContext Context, long Sequence)> _recentBases = new();
+    private readonly NativeDetailHeadroom _headroom = new();
     private int _inFlightBases, _renderLag;
     private long _sentBytes, _ackedBytes, _lastAckAt, _lastSequence, _presented, _firstAckAt;
-    private double _minimumRtt = double.MaxValue, _lastRtt, _rate;
+    private (DetailContext Context, long Sequence) _receivedBase;
+    private double _minimumRtt = double.MaxValue, _minimumBaseRtt = double.MaxValue, _lastRtt, _rate;
     private int _samples;
     private long _captureStartedBytes;
     private long _rateWindowAt, _rateWindowBytes;
@@ -37,8 +62,10 @@ internal sealed class NativeDetailLinkBudget
             // Keep the connection's absolute wire counter, but do not let a
             // retired capture's missing final ACK deadlock a later re-enable.
             _history.Clear(); _recentBases.Clear(); _inFlightBases = _renderLag = 0; _captureStartedBytes = _sentBytes;
-            _samples = 0; _rate = 0; _minimumRtt = double.MaxValue;
+            _samples = 0; _rate = 0; _minimumRtt = _minimumBaseRtt = double.MaxValue;
+            _headroom.Reset();
             _lastAckAt = _firstAckAt = _presented = 0;
+            _receivedBase = default;
         }
     }
 
@@ -77,10 +104,18 @@ internal sealed class NativeDetailLinkBudget
     {
         lock (_gate)
         {
-            if (now < _lastAckAt || feedback.ReceivedWireBytes <= _ackedBytes ||
+            if (now < _lastAckAt || feedback.ReceivedWireBytes < _ackedBytes ||
                 feedback.ReceivedWireBytes > _sentBytes || feedback.ReceivedSequence > _lastSequence ||
                 feedback.PresentedSequence < 0 || feedback.PresentedSequence > feedback.ReceivedSequence)
                 return false;
+            if (feedback.ReceivedWireBytes == _ackedBytes)
+            {
+                if (_samples == 0 || _receivedBase != (feedback.Context, feedback.ReceivedSequence) ||
+                    feedback.PresentedSequence <= _presented || feedback.AcknowledgementDelayMilliseconds != 0 ||
+                    !_recentBases.Contains((feedback.Context, feedback.PresentedSequence))) return false;
+                UpdatePresentation(feedback);
+                return true;
+            }
             Sent? exact = _history.FirstOrDefault(item => item.Bytes == feedback.ReceivedWireBytes &&
                 item.Context == feedback.Context && item.Sequence == feedback.ReceivedSequence);
             if (exact is null || now < exact.At) return false;
@@ -88,6 +123,7 @@ internal sealed class NativeDetailLinkBudget
                 feedback.AcknowledgementDelayMilliseconds > now - exact.At + 2) return false;
             _lastRtt = Math.Max(0, now - exact.At - feedback.AcknowledgementDelayMilliseconds);
             _minimumRtt = Math.Min(_minimumRtt, _lastRtt);
+            if (exact.Base) _minimumBaseRtt = Math.Min(_minimumBaseRtt, _lastRtt);
             if (_samples > 0 && now - _rateWindowAt >= Math.Clamp(1.5 * _minimumRtt, 300, 1500))
             {
                 // A coalesced ACK may contain only one 512-byte fragment. Use
@@ -100,17 +136,28 @@ internal sealed class NativeDetailLinkBudget
             }
             if (_samples++ == 0)
             { _firstAckAt = _rateWindowAt = now; _rateWindowBytes = feedback.ReceivedWireBytes; }
-            _lastAckAt = now; _ackedBytes = feedback.ReceivedWireBytes; _presented = feedback.PresentedSequence;
-            // Sequence numbers include captures which were never transmitted. Only bases
-            // which actually reached the peer can be part of its decoder/display backlog.
-            _renderLag = _recentBases.Contains((feedback.Context, _presented))
-                ? _recentBases.Count(item => item.Context == feedback.Context &&
-                    item.Sequence > _presented && item.Sequence <= feedback.ReceivedSequence)
-                : int.MaxValue;
+            _lastAckAt = now; _ackedBytes = feedback.ReceivedWireBytes;
+            _receivedBase = (feedback.Context, feedback.ReceivedSequence);
+            UpdatePresentation(feedback);
             while (_history.TryPeek(out var item) && item.Bytes <= _ackedBytes)
                 if (_history.Dequeue().Base) _inFlightBases--;
+            // A tiny fragment can be acknowledged sooner than even an unqueued H.264
+            // frame. Allow up to 8 ms of measured base serialization before judging jitter.
+            double baseRtt = _minimumBaseRtt == double.MaxValue ? _minimumRtt : Math.Min(_minimumBaseRtt, _minimumRtt + 8);
+            _headroom.Observe(now, _rate >= NativeDetailHeadroom.MinimumDelivery && _renderLag <= 1 &&
+                _presented > 0 && _lastRtt <= baseRtt + 8 && HasDetailCredit(), ReceiptLifetime);
             return true;
         }
+    }
+
+    private void UpdatePresentation(NativeDetailFeedback feedback)
+    {
+        _presented = feedback.PresentedSequence;
+        // Sequence numbers include captures that were never transmitted.
+        _renderLag = _recentBases.Contains((feedback.Context, _presented))
+            ? _recentBases.Count(item => item.Context == feedback.Context &&
+                item.Sequence > _presented && item.Sequence <= feedback.ReceivedSequence)
+            : int.MaxValue;
     }
 
     internal bool CanSendBase(long now, int nextWireBytes = 0)
@@ -138,18 +185,21 @@ internal sealed class NativeDetailLinkBudget
     }
 
     internal const int SmallChunkWireBytes = 512 + DetailWire.ChunkHeaderBytes + DetailWire.OuterRecordBytes;
-    internal long DetailBitsPerSecond(long now, int nextWireBytes = SmallChunkWireBytes)
+    private long ReceiptLifetime => (long)Math.Clamp(100 + _minimumRtt * .4, 150, 450);
+    private bool HasDetailCredit() => _history.Count < 192 &&
+        _sentBytes - _ackedBytes <= Math.Min(896 * 1024, _rate * _minimumRtt / 8000d) + 128 * 1024;
+
+    internal long DetailBitsPerSecond(long now, int nextWireBytes = SmallChunkWireBytes, bool allowBoost = false)
     {
         lock (_gate)
         {
             if (_samples < 4 || now - _firstAckAt < 300 ||
-                now - _lastAckAt > Math.Clamp(100 + _minimumRtt * .4, 150, 450) ||
-                _lastRtt > _minimumRtt + Math.Clamp(_minimumRtt * .1, 20, 80) || _history.Count >= 192 ||
-                _sentBytes - _ackedBytes > Math.Min(896 * 1024, _rate * _minimumRtt / 8000d) + 128 * 1024 ||
+                now - _lastAckAt > ReceiptLifetime ||
+                _lastRtt > _minimumRtt + Math.Clamp(_minimumRtt * .1, 20, 80) || !HasDetailCredit() ||
                 _renderLag > 4 || _presented == 0 ||
                 _rate <= 0 || nextWireBytes * 8000d / _rate > 2)
                 return 0;
-            return (long)Math.Min(1_000_000, _rate * .04);
+            return _headroom.Rate(_rate, now, ReceiptLifetime, allowBoost);
         }
     }
 }
@@ -163,7 +213,10 @@ internal sealed class NativeDetailUdpLinkBudget
     private readonly Queue<long> _recentBases = new();
     private DetailContext _context;
     private int _renderLag;
-    private long _lastBase, _received, _presented, _lastReceiptAt, _sentBytes, _ackedBytes, _rate;
+    private long _lastBase, _received, _presented, _lastReceiptAt, _sentBytes, _ackedBytes;
+    private double _delivered;
+    private ulong _packetReport;
+    private readonly NativeDetailHeadroom _headroom = new();
 
     internal void BeginCapture()
     {
@@ -171,18 +224,24 @@ internal sealed class NativeDetailUdpLinkBudget
         {
             _context = default;
             _recentBases.Clear(); _renderLag = 0;
-            _rate = _lastBase = _received = _presented = _lastReceiptAt = 0;
+            _lastBase = _received = _presented = _lastReceiptAt = 0;
+            _delivered = 0; _packetReport = 0; _headroom.Reset();
             // Fragment counters belong to the ordered connection and survive an off/on cycle.
         }
     }
 
-    internal void ObserveNetwork(LowLatencyVideoNetworkSnapshot network)
+    internal void ObserveNetwork(LowLatencyVideoNetworkSnapshot network, long now)
     {
         lock (_gate)
         {
             double delivered = network.DeliveryMegabitsPerSecond * 1_000_000;
-            _rate = network.IsComfortable && delivered >= NativeDetailLinkBudget.SmallChunkWireBytes * 4000d
-                ? (long)Math.Min(1_000_000, delivered * .04) : 0;
+            _delivered = network.IsComfortable && double.IsFinite(delivered) &&
+                delivered >= NativeDetailLinkBudget.SmallChunkWireBytes * 4000d ? delivered : 0;
+            if (_delivered < NativeDetailHeadroom.MinimumDelivery || _presented == 0 || _renderLag > 1 ||
+                now - _lastReceiptAt > 180) _headroom.Reset();
+            else if (network.PacketReportMicroseconds > _packetReport)
+                _headroom.Observe(now, true, 600);
+            _packetReport = network.PacketReportMicroseconds;
         }
     }
 
@@ -193,6 +252,7 @@ internal sealed class NativeDetailUdpLinkBudget
             if (context != _context)
             {
                 _context = context;
+                _headroom.Reset();
                 _recentBases.Clear(); _renderLag = 0;
                 _received = _presented = _lastReceiptAt = 0;
             }
@@ -208,26 +268,32 @@ internal sealed class NativeDetailUdpLinkBudget
     {
         lock (_gate)
         {
-            if (feedback.Context != _context || feedback.ReceivedSequence <= 0 ||
+            if (now < _lastReceiptAt || feedback.Context != _context || feedback.ReceivedSequence <= 0 ||
                 feedback.ReceivedSequence < _received || feedback.ReceivedSequence > _lastBase ||
                 feedback.PresentedSequence < _presented || feedback.PresentedSequence > feedback.ReceivedSequence ||
                 feedback.ReceivedWireBytes < _ackedBytes || feedback.ReceivedWireBytes > _sentBytes ||
-                (feedback.ReceivedSequence == _received && feedback.ReceivedWireBytes == _ackedBytes) ||
                 !_recentBases.Contains(feedback.ReceivedSequence)) return false;
+            bool delivery = feedback.ReceivedSequence != _received || feedback.ReceivedWireBytes != _ackedBytes;
+            if (!delivery && (feedback.PresentedSequence <= _presented || feedback.AcknowledgementDelayMilliseconds != 0 ||
+                !_recentBases.Contains(feedback.PresentedSequence))) return false;
             _received = feedback.ReceivedSequence;
             _presented = feedback.PresentedSequence;
             _renderLag = _recentBases.Contains(_presented)
                 ? _recentBases.Count(sent => sent > _presented && sent <= _received) : int.MaxValue;
+            if (!delivery) return true;
             _ackedBytes = feedback.ReceivedWireBytes;
+            if (_renderLag > 1 || now - _lastReceiptAt > 180) _headroom.Reset();
             _lastReceiptAt = now;
             return true;
         }
     }
 
-    internal long DetailBitsPerSecond(long now)
+    internal long DetailBitsPerSecond(long now, int nextWireBytes = NativeDetailLinkBudget.SmallChunkWireBytes, bool allowBoost = false)
     {
         lock (_gate)
             return _presented > 0 && now - _lastReceiptAt <= 180 && _renderLag <= 4 &&
-                _sentBytes - _ackedBytes + NativeDetailLinkBudget.SmallChunkWireBytes <= 4096 ? _rate : 0;
+                _delivered > 0 && nextWireBytes * 8000d / _delivered <= 2 &&
+                _sentBytes - _ackedBytes + nextWireBytes <= Math.Max(4096, nextWireBytes)
+                ? _headroom.Rate(_delivered, now, 600, allowBoost) : 0;
     }
 }

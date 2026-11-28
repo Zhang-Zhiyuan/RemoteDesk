@@ -19,6 +19,7 @@ public sealed class NativeDetailClientLoopbackTests
         listener.Start();
         var release = NewCompletion<bool>();
         var inputSeen = NewCompletion<int[]>();
+        var receivedBeforePresentation = NewCompletion<bool>();
         var frames = Channel.CreateUnbounded<RemoteFrame>();
         async Task Host()
         {
@@ -41,6 +42,22 @@ public sealed class NativeDetailClientLoopbackTests
             DetailManifest manifest = new(first.Context, 1, [1, 1]);
             await Protocol.WriteMessageAsync(stream, MessageType.NativeVideoFrame,
                 NativeDetailSessionProtocol.EncodeBase(manifest, NativeDetailSessionTests.BaseFrame()), session, write, timeout.Token);
+            async Task<NativeDetailFeedback> ReadFeedback()
+            {
+                var message = await Protocol.ReadMessageAsync(stream, session, timeout.Token);
+                Assert.Equal(MessageType.NativeDetailFeedback, message.Type);
+                return NativeDetailSessionProtocol.DecodeFeedback(message.PayloadSpan);
+            }
+            var delivered = await ReadFeedback();
+            Assert.Equal(1, delivered.ReceivedSequence);
+            Assert.Equal(0, delivered.PresentedSequence);
+            receivedBeforePresentation.SetResult(true);
+            // The decoder presents after the only frame has been acknowledged. The host
+            // must learn it can send the pending text detail without sending a second base.
+            var presented = await ReadFeedback();
+            Assert.Equal(delivered.ReceivedWireBytes, presented.ReceivedWireBytes);
+            Assert.Equal(1, presented.PresentedSequence);
+            Assert.Equal(0, presented.AcknowledgementDelayMilliseconds);
             var transfer = DetailTransfer.Encode(manifest, 0, Enumerable.Repeat((byte)29, 128 * 128 * 4).ToArray());
             await Protocol.WriteMessageAsync(stream, MessageType.NativeDetailChunk, transfer.Chunk(0), session, write, timeout.Token);
             var inputs = new List<int>();
@@ -69,6 +86,7 @@ public sealed class NativeDetailClientLoopbackTests
             Assert.True(await client.RequestNativeDetailsAsync(new(256, 128), new(0, 0, 256, 128)));
             RemoteFrame first = await frames.Reader.ReadAsync(timeout.Token);
             Assert.NotNull(first.NativeDetails);
+            await receivedBeforePresentation.Task.WaitAsync(timeout.Token);
             while (client.NativeDetails.LastPresentedSequence == 0)
             {
                 // Refusing a busy cache is intentional: production renders

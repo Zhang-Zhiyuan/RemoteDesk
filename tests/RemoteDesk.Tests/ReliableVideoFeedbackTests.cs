@@ -7,6 +7,29 @@ namespace RemoteDesk.Tests;
 public sealed class ReliableVideoFeedbackTests
 {
     [Fact]
+    public void CapacityEvidenceIncludesTheWholeRoundTripAndExpiresAfterSampling()
+    {
+        var window = new ReliableVideoSendWindow();
+        for (int i = 1; i <= 3; i++)
+        {
+            Assert.True(window.TryReserve(50_000, i * 100, out long sequence));
+            Assert.True(window.Observe(new(sequence, i * 50_000, 19), i * 100 + 20));
+        }
+        Assert.Equal((20_000_000d, false), window.TakeDeliverySample(325)); // Includes the delayed ACK.
+        Assert.Equal((0d, false), window.TakeDeliverySample(325));
+        for (int i = 4; i <= 6; i++)
+        {
+            Assert.True(window.TryReserve(50_000, i * 100, out long sequence));
+            Assert.True(window.Observe(new(sequence, i * 50_000, 19), i * 100 + 20));
+        }
+        Assert.Equal((0d, false), window.TakeDeliverySample(1000));
+        Assert.True(window.TryReserve(50_000, 1100, out _));
+        Assert.True(window.TryReserve(50_000, 1150, out _));
+        Assert.False(window.TryReserve(50_000, 1180, out _));
+        Assert.Equal((0d, true), window.TakeDeliverySample(1181));
+        Assert.Equal((0d, false), window.TakeDeliverySample(1181));
+    }
+    [Fact]
     public void MissingReceiptsBoundInFlightDataWithoutQueuingOrChangingQuality()
     {
         var window = new ReliableVideoSendWindow();

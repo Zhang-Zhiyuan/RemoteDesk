@@ -4359,14 +4359,16 @@ internal sealed partial class RemoteHostServer : IDisposable
                     shortGopMetrics +
                     tcpWriteTimings.DescribeAverage() + DescribeReliableVideoWindow(viewerState));
 
+                var delivery = viewerState.ReliableVideo.TakeDeliverySample(Environment.TickCount64);
                 if (resolutionController.Observe(metricsElapsed, actualFps,
                         tcpWriteTimings.AverageSocketWriteMilliseconds, megabitsPerSecond,
-                        reliableVideo: !lowLatencyVideo.IsRouteActive && tcpWriteTimings.Count == framesInWindow))
+                        reliableVideo: !lowLatencyVideo.IsRouteActive && tcpWriteTimings.Count == framesInWindow,
+                        confirmedDeliveryBitsPerSecond: delivery.BitsPerSecond, receiverQueueDelayed: delivery.QueueDelayed))
                 {
                     Size nextSize = resolutionController.OutputSize;
                     captureLog(resolutionController.IsReduced
                         ? $"带宽自适应：持续发送积压，切换 {nextSize.Width}x{nextSize.Height} 高质量 H.264；保持硬编与目标帧率，未修改系统分辨率。"
-                        : $"带宽自适应：发送积压已持续缓解，尝试恢复 {nextSize.Width}x{nextSize.Height}；若再次拥塞，本次连接将保持流畅档，避免反复卡顿。");
+                        : $"带宽自适应：链路持续稳定，尝试恢复 {nextSize.Width}x{nextSize.Height}。");
                     return new H264CaptureLoopResult(H264CaptureLoopExit.ResolutionChanged,
                         Stopwatch.GetElapsedTime(activeRunStartedAt));
                 }

@@ -5939,7 +5939,7 @@ internal sealed partial class RemoteViewerWindow : Form
         long decodeStartedAtTimestamp,
         long decodedAtTimestamp,
         long presentedAtTimestamp,
-        long presentationGeneration)
+        long presentationGeneration, bool directPresentation = false)
     {
         if (!CanPresentCaptureGeneration(
                 presentationGeneration))
@@ -5949,6 +5949,7 @@ internal sealed partial class RemoteViewerWindow : Form
 
         string? performanceStatus;
         bool appendDiagnostic;
+        double elapsedSeconds, fps, megabitsPerSecond, pipelineMilliseconds;
         lock (_frameStatsLock)
         {
             _framesInWindow++;
@@ -5998,13 +5999,15 @@ internal sealed partial class RemoteViewerWindow : Form
                 return;
             }
 
-            double elapsedSeconds = elapsed.TotalSeconds;
-            double fps =
+            elapsedSeconds = elapsed.TotalSeconds;
+            fps =
                 _framesInWindow / elapsedSeconds;
-            double megabitsPerSecond =
+            megabitsPerSecond =
                 _bytesInWindow * 8d /
                 elapsedSeconds /
                 1_000_000d;
+            pipelineMilliseconds = _viewerPipelineTimingSamplesInWindow >= 3
+                ? _receiveToPresentMillisecondsInWindow / _viewerPipelineTimingSamplesInWindow : double.NaN;
             string encodingName =
                 FormatDecodedVideoName(
                     frame.Encoding,
@@ -6086,11 +6089,14 @@ internal sealed partial class RemoteViewerWindow : Form
                 performanceStatus);
         }
 
+        long sampledAt = Environment.TickCount64;
         OnUi(() =>
         {
             if (CanPresentCaptureGeneration(
                     presentationGeneration))
             {
+                ObserveAutoNativeDetail(sampledAt, elapsedSeconds, megabitsPerSecond, fps, pipelineMilliseconds,
+                    directPresentation && decoderUsesHardwareAcceleration && frame.Encoding == RemoteFrameEncoding.H264AnnexB);
                 SetPerformanceStatus(
                     performanceStatus);
             }
@@ -8929,7 +8935,7 @@ internal sealed partial class RemoteViewerWindow : Form
             decodeStartedAtTimestamp,
             decodedAtTimestamp,
             presentedAtTimestamp,
-            presentationGeneration);
+            presentationGeneration, directPresentation: true);
     }
 
     internal sealed class BufferedPictureBox : PictureBox

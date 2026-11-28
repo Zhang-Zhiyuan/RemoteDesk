@@ -212,7 +212,7 @@ public sealed class DetailSendQueue
     }
     public void Clear() { _queue.Clear(); QueuedBytes = 0; _credit = 0; }
     public byte[]? TryTake(long nowMilliseconds, long availableBitsPerSecond, bool controlPending, bool interacting,
-        double sendQueueMilliseconds, Func<DetailTransfer, bool> isCurrent)
+        double sendQueueMilliseconds, Func<DetailTransfer, bool> isCurrent, bool allowWholeTile = false)
     {
         if (nowMilliseconds < _lastObserved || !double.IsFinite(sendQueueMilliseconds) || sendQueueMilliseconds < 0)
             throw new ArgumentOutOfRangeException(nameof(nowMilliseconds));
@@ -233,10 +233,14 @@ public sealed class DetailSendQueue
             long timeLeft = DetailCache.AssemblyLifetimeMilliseconds - (nowMilliseconds - item.CreatedAt);
             if (!isCurrent(item.Transfer) || timeLeft < 0)
             { ExpiredTiles++; Remove(); continue; }
+            // A complete small tile can use one existing wire record. Keep the
+            // fragment size of every partial assembly stable across link changes.
+            int length = item.Transfer.Encoded.Length;
+            int chunkBytes = allowWholeTile && item.Offset == 0 && length > _chunkBytes && length <= DetailWire.ChunkBytes
+                ? DetailWire.ChunkBytes : _chunkBytes;
             if (item.Offset == 0)
             {
-                int length = item.Transfer.Encoded.Length;
-                int chunks = (length + _chunkBytes - 1) / _chunkBytes;
+                int chunks = (length + chunkBytes - 1) / chunkBytes;
                 int wireLength = length + chunks * (DetailWire.ChunkHeaderBytes + DetailWire.OuterRecordBytes);
                 // An incomplete tile displays no pixels. Let a smaller tile go
                 // first and reconsider the unopened one if the budget recovers.
@@ -246,9 +250,9 @@ public sealed class DetailSendQueue
                     continue;
                 }
             }
-            int wireBytes = DetailWire.ChunkHeaderBytes + Math.Min(_chunkBytes, item.Transfer.Encoded.Length - item.Offset) + DetailWire.OuterRecordBytes;
+            int wireBytes = DetailWire.ChunkHeaderBytes + Math.Min(chunkBytes, length - item.Offset) + DetailWire.OuterRecordBytes;
             if (_credit < wireBytes) return null;
-            byte[] chunk = item.Transfer.Chunk(item.Offset, _chunkBytes); _credit -= wireBytes;
+            byte[] chunk = item.Transfer.Chunk(item.Offset, chunkBytes); _credit -= wireBytes;
             item.Offset += chunk.Length - DetailWire.ChunkHeaderBytes;
             if (item.Offset == item.Transfer.Encoded.Length) Remove();
             return chunk;

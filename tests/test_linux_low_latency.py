@@ -536,6 +536,14 @@ class LinuxLowLatencyPolicyTests(unittest.TestCase):
         self.assertFalse(capture.restarting)
         self.assertFalse(capture.disabled)
 
+    def test_reporting_geometry_for_h264_does_not_start_a_jpeg_encoder(self):
+        capture = host.ContinuousFrameCapture(1280, 720, 30.0, "x11")
+        with mock.patch.object(capture, "start") as start:
+            capture.update_source_size(1920, 1080)
+            capture.update_source_size(2560, 1440)
+            start.assert_not_called()
+        self.assertEqual((2560, 1440), (capture.source_width, capture.source_height))
+
     def test_detached_capture_reader_failure_does_not_disable_replacement(self) -> None:
         class BrokenOutput:
             @staticmethod
@@ -1049,7 +1057,6 @@ class LinuxLowLatencyPolicyTests(unittest.TestCase):
         session.viewer_video_codecs = host.VIDEO_CODEC_JPEG
         session.viewer_capabilities = 0
         session.viewer_info_received = False
-        session.startup_jpeg_sent = False
         session.codec_negotiation_deadline = float("inf")
         session.h264_stream_active = False
         session.last_h264_frame_id = None
@@ -1095,24 +1102,21 @@ class LinuxLowLatencyPolicyTests(unittest.TestCase):
         self.assertEqual([1, 2, 3], [struct.unpack_from("<q", call.args[1])[0]
                                     for call in session._write_message.call_args_list])
 
-    def test_startup_sends_one_unchanged_jpeg_until_codec_negotiation(self):
+    def test_startup_waits_for_codec_negotiation_before_capturing_a_preview(self):
         session = self.startup_preview_session()
-        self.assertTrue(session._send_frame())
         for _ in range(60):
             self.assertFalse(session._send_frame())
-        session._write_message.assert_called_once()
-        message_type, payload = session._write_message.call_args.args
-        self.assertEqual(host.MESSAGE_FRAME, message_type)
-        self.assertTrue(payload.endswith(b"\xff\xd8full-quality\xff\xd9"))
-        session.continuous_capture.read_frame.assert_called_once()
+        session._write_message.assert_not_called()
+        session.continuous_capture.read_frame.assert_not_called()
 
     def test_old_client_without_viewer_info_resumes_jpeg_after_grace(self):
         session = self.startup_preview_session()
-        self.assertTrue(session._send_frame())
+        self.assertFalse(session._send_frame())
         session.codec_negotiation_deadline = 0
         self.assertTrue(session._send_frame())
         self.assertTrue(session._send_frame())
-        self.assertEqual(3, session._write_message.call_count)
+        self.assertEqual(2, session._write_message.call_count)
+        self.assertTrue(session._write_message.call_args.args[1].endswith(b"\xff\xd8full-quality\xff\xd9"))
 
     def test_explicit_jpeg_selection_never_throttles_normal_stream(self):
         session = self.startup_preview_session()
@@ -1120,16 +1124,28 @@ class LinuxLowLatencyPolicyTests(unittest.TestCase):
         for _ in range(5): self.assertTrue(session._send_frame())
         self.assertEqual(5, session._write_message.call_count)
 
-    def test_hardware_startup_does_not_queue_more_jpeg_behind_preview(self):
+    def test_hardware_startup_sends_no_jpeg_even_to_a_dual_codec_viewer(self):
         session = self.startup_preview_session()
-        self.assertTrue(session._send_frame())
         session.viewer_info_received = True
         session.viewer_video_codecs |= host.VIDEO_CODEC_H264_ANNEX_B
         for _ in range(60): self.assertFalse(session._send_frame())
-        session._write_message.assert_called_once()
         session.hardware_h264_capture.is_starting.return_value = False
+        session.hardware_h264_capture.has_exhausted_candidates.return_value = False
+        self.assertFalse(session._send_frame())
+        session._write_message.assert_not_called()
+        session.hardware_h264_capture.has_exhausted_candidates.return_value = True
         self.assertTrue(session._send_frame())
-        self.assertEqual(2, session._write_message.call_count)
+        session._write_message.assert_called_once()
+
+    def test_compatibility_viewer_with_unavailable_geometry_gets_a_frame_after_grace(self):
+        session = self.startup_preview_session()
+        session.viewer_info_received = True
+        session.viewer_video_codecs |= host.VIDEO_CODEC_H264_ANNEX_B
+        session.codec_negotiation_deadline = 0
+        session.hardware_h264_capture.is_starting.return_value = False
+        session.hardware_h264_capture.has_exhausted_candidates.return_value = False
+        self.assertTrue(session._send_frame())
+        self.assertEqual(host.MESSAGE_FRAME, session._write_message.call_args.args[0])
 
     def test_h264_can_start_directly_without_waiting_for_a_jpeg_preview(self):
         session = self.startup_preview_session()

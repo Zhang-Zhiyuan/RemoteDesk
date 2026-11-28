@@ -88,11 +88,11 @@ internal sealed partial class RemoteHostServer
             {
                 native.DatagramBase = udp;
                 queue = NewQueue(udp); pendingChunk = null; pendingHeader = null; sentManifest = null;
-                if (!udp) native.Link.BeginCapture();
+                if (udp) native.UdpLink.BeginCapture(); else native.Link.BeginCapture();
             }
             if (udp && now >= networkSampleAt)
             {
-                native.UdpLink.ObserveNetwork(lowLatencyVideo.CollectNetworkSnapshot());
+                native.UdpLink.ObserveNetwork(lowLatencyVideo.CollectNetworkSnapshot(), now);
                 networkSampleAt = now + 250;
             }
             if (!udp && native.Link.FeedbackStalled(now))
@@ -162,25 +162,34 @@ internal sealed partial class RemoteHostServer
             { queue.Clear(); pendingChunk = null; pendingHeader = null; }
             while (worker.TryTakeTransfer(out DetailTransfer? transfer))
                 if (transfer is not null && !native.Interacting) queue.Enqueue(transfer, Environment.TickCount64);
-            worker.ObserveSendBacklog(queue.Count, queue.QueuedBytes, native.DetailBitsPerSecond(now));
-            if (sentManifest is not null && !priority.HasPendingControlWrite && native.CanEnhance)
+            long detailRate = native.DetailBitsPerSecond(now);
+            worker.ObserveSendBacklog(queue.Count, queue.QueuedBytes, detailRate);
+            if (sentManifest is not null && !priority.HasPendingControlWrite && !native.Interacting && detailRate > 0)
             {
+                bool allowWholeTile = extended && detailRate > NativeDetailHeadroom.StandardLimit;
+                if (!allowWholeTile && pendingHeader?.ChunkDataBytes == DetailWire.ChunkBytes)
+                { pendingChunk = null; pendingHeader = null; }
                 if (pendingHeader is { } held && (now - pendingAt > 200 || held.Context != sentManifest.Context ||
                     sentManifest[held.Tile] != held.Version || worker.LatestManifest is not { } current ||
                     current.Context != held.Context || current[held.Tile] != held.Version))
                 { pendingChunk = null; pendingHeader = null; queue.Clear(); }
-                byte[]? chunk = pendingChunk ?? queue.TryTake(Environment.TickCount64, native.DetailBitsPerSecond(Environment.TickCount64),
+                byte[]? chunk = pendingChunk ?? queue.TryTake(Environment.TickCount64, detailRate,
                     priority.HasPendingControlWrite, native.Interacting, 0,
                     transfer => native.Request?.Context == transfer.Context && sentManifest.Context == transfer.Context &&
                         sentManifest.Sequence >= transfer.ReferenceSequence && sentManifest[transfer.Tile] == transfer.Version &&
-                        worker.LatestManifest is { } latest && latest.Context == transfer.Context && latest[transfer.Tile] == transfer.Version);
+                        worker.LatestManifest is { } latest && latest.Context == transfer.Context && latest[transfer.Tile] == transfer.Version,
+                    allowWholeTile);
                 if (chunk is not null)
                 {
                     if (pendingChunk is null)
                     { pendingChunk = chunk; pendingHeader = DetailWire.DecodeChunk(chunk); pendingAt = now; }
                     // Only the capture sender handles optional writes: no
                     // background fragment competes with the next base.
-                    bool MayWrite() => !priority.HasPendingControlWrite && native.CanEnhance && native.Request?.Context == sentManifest.Context;
+                    long requiredRate = pendingHeader!.ChunkDataBytes == DetailWire.ChunkBytes ? NativeDetailHeadroom.StandardLimit : 0;
+                    DetailContext chunkContext = pendingHeader.Context;
+                    bool MayWrite() => !priority.HasPendingControlWrite && !native.Interacting && native.DatagramBase == udp &&
+                        native.Request?.Context == chunkContext &&
+                        native.DetailBitsPerSecond(Environment.TickCount64, chunk.Length + DetailWire.OuterRecordBytes) > requiredRate;
                     bool accepted = udp
                         ? native.TryWriteUdpChunk(stream, chunk, session, priority.Lock, MayWrite, token)
                         : await Protocol.TryWriteNativeChunkAsync(stream, chunk, session, priority.Lock, MayWrite,

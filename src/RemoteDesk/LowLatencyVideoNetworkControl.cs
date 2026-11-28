@@ -425,6 +425,8 @@ internal readonly record struct LowLatencyVideoNetworkSnapshot(
     long OversizedFrameDrops,
     long AbortedFrameSends)
 {
+    internal ulong PacketReportMicroseconds { get; init; }
+
     public bool IsSeverelyCongested =>
         OversizedFrameDrops > 0 ||
         SenderQueueDropRatio >= 0.25 ||
@@ -896,7 +898,7 @@ internal sealed class LowLatencyVideoCongestionController
                     1_000_000d,
                 _xorFecEnabled,
                 oversizedDelta,
-                abortedDelta);
+                abortedDelta) { PacketReportMicroseconds = _packetFeedbackBaseline.ReceiverElapsedMicroseconds };
         }
     }
 

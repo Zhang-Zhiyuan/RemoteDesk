@@ -53,6 +53,21 @@ class ReliableFeedbackCompatibilityTests(unittest.TestCase):
             wire.encode_video_frame(64, 48, wire.FRAME_FLAG_KEY_FRAME, encoded, sequence=18))
         self.assertEqual(32, wire.max_message_payload_bytes(wire.MESSAGE_RELIABLE_VIDEO_FEEDBACK))
 
+    def test_capacity_sample_requires_fresh_confirmed_frames_and_includes_ack_delay(self):
+        window = host.ReliableVideoSendWindow()
+        for i in range(1, 7):
+            self.assertEqual(i, window.reserve(50_000, i * 100))
+            window.acknowledge(self.receipt(i, i * 50_000, 19), i * 100 + 20)
+            if i == 3:
+                self.assertEqual((20_000_000, False), window.take_delivery_sample(325))
+                self.assertEqual((0, False), window.take_delivery_sample(325))
+        self.assertEqual((0, False), window.take_delivery_sample(1000))
+        self.assertIsNotNone(window.reserve(50_000, 1100))
+        self.assertIsNotNone(window.reserve(50_000, 1150))
+        self.assertIsNone(window.reserve(50_000, 1180))
+        self.assertEqual((0, True), window.take_delivery_sample(1181))
+        self.assertEqual((0, False), window.take_delivery_sample(1181))
+
 
 if __name__ == "__main__":
     unittest.main()

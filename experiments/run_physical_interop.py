@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shlex
 import socket
 import subprocess
 import sys
@@ -138,6 +139,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--adb", required=True); parser.add_argument("--serial", required=True)
     parser.add_argument("--linux", required=True, help="key-authenticated user@address")
+    parser.add_argument("--linux-python", default="python3", help="Remote Python interpreter with the GUI test dependencies")
     parser.add_argument("--windows-ip", required=True); parser.add_argument("--output", required=True)
     parser.add_argument("--relay-server", help="Use native product relay transport in every selected direction, never LAN fallback")
     parser.add_argument("--relay-ssh-pin")
@@ -189,7 +191,9 @@ def main():
     def route_config(platform): return {"relay": relay_for(platform)} if relay_config else {}
     route_label = "native public relay TLS/TCP; no UDP/LAN fallback" if relay_config else "direct LAN"
     output = Path(args.output).resolve(); output.mkdir(parents=True, exist_ok=False)
-    ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5", args.linux]
+    ssh_options = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5"]
+    ssh = ["ssh", *ssh_options, args.linux]
+    linux_python = shlex.quote(args.linux_python)
     adb = [args.adb, "-s", args.serial]
     linux_ip = args.linux.split("@")[-1]
     password = secrets.token_urlsafe(24)
@@ -281,6 +285,8 @@ def main():
                 if snapshot.get("geometryReady") and snapshot["frame"][0] > 0 and snapshot.get("mouseEnabled"): break
             else: raise RuntimeError("Android viewer did not present an interactive frame: " + json.dumps(samples[-1], ensure_ascii=False))
             broadcast("landscape"); time.sleep(1.5)
+            if "wheelTarget" in target:
+                broadcast("scroll")
             for key in ("button", "editor"):
                 broadcast("remote_tap", "--ef", "x", str(target[key][0]), "--ef", "y", str(target[key][1])); time.sleep(.6)
             broadcast("keyboard"); time.sleep(.5)
@@ -297,8 +303,11 @@ def main():
             route_verified = not relay_config or "公网中转" in samples[-1].get("health", "")
             h264 = samples[-1].get("h264") is True
             performance = rendering_meets_minimum(rendering, args.min_android_fps)
+            # The two fingers move down, which scrolls the page toward its top.
+            scroll = {"scrollVerified": after["wheelSteps"] < before["wheelSteps"]} if "wheelTarget" in target else {}
+            valid_input = valid_input and scroll.get("scrollVerified", True)
             return {"complete": moving and valid_input and route_verified and not samples[-1]["failure"]
-                    and performance and (not args.require_android_h264 or h264), "inputVerified": valid_input,
+                    and performance and (not args.require_android_h264 or h264), "inputVerified": valid_input, **scroll,
                     "minimumPresentedFps": args.min_android_fps, "performanceQualified": performance,
                     "renderingEvidence": rendering, "h264Active": h264,
                     "continuousRendering": moving, "target": after, "lastState": samples[-1], "route": route_label,
@@ -308,10 +317,16 @@ def main():
         before = read_target(); folder = output / label
         config = dict(host=host, port=port, password=password, output=str(folder), android=android,
                       button=target["button"], editor=target["editor"], text=label + "中文42", **route_config(platform))
+        if "wheelTarget" in target:
+            config["wheelTarget"] = target["wheelTarget"]
+            config["wheelMarker"] = target.get("wheelMarker", False)
         result = subprocess.run([str(WINDOWS), "viewer"], input=json.dumps(config).encode(), capture_output=True, timeout=150 if relay_config else 50)
         after = read_target()
         value = json.loads((folder / "viewer.json").read_text()) if (folder / "viewer.json").exists() else {}
         value["inputVerified"] = after["clicks"] == before["clicks"] + 1 and inserted(before["text"], after["text"], config["text"])
+        if "wheelTarget" in config:
+            value["scrollVerified"] = after["wheelSteps"] == before["wheelSteps"] + 3
+            value["inputVerified"] &= value["scrollVerified"]
         value["target"] = after; value["route"] = route_label
         value["complete"] = result.returncode == 0 and value.get("complete", False) and value["inputVerified"]
         if (folder / "failure.txt").exists(): value["failure"] = (folder / "failure.txt").read_text()
@@ -319,7 +334,7 @@ def main():
     def linux_view(label, host, port, target, read_target, platform):
         before = read_target(); directory = remote + "/" + label
         config = dict(host=host, port=port, password=password, button=target["button"], editor=target["editor"], text=label + "中文42", **route_config(platform))
-        sh(f"python3 -u {remote}/experiments/interop_linux_node.py viewer --output {directory}",
+        sh(f"{linux_python} -u {remote}/experiments/interop_linux_node.py viewer --output {directory}",
            data=json.dumps(config).encode() + b"\n", timeout=120 if relay_config else 50, check=False)
         value = remote_json(directory + "/viewer.json"); after = read_target()
         value["inputVerified"] = after["clicks"] == before["clicks"] + 1 and inserted(before["text"], after["text"], config["text"])
@@ -334,13 +349,14 @@ def main():
         with tarfile.open(archive, "w:gz") as tar:
             for path in (ROOT / "scripts/linux").glob("*.py"): tar.add(path, arcname=path.relative_to(ROOT))
             path = ROOT / "experiments/interop_linux_node.py"; tar.add(path, arcname=path.relative_to(ROOT))
-        run(["scp", "-q", str(archive), args.linux + ":" + remote + "/sources.tar.gz"])
+        run(["scp", "-q", *ssh_options, str(archive), args.linux + ":" + remote + "/sources.tar.gz"])
         sh(f"tar -xzf {remote}/sources.tar.gz -C {remote}")
         if selected & {"WindowsToLinux", "AndroidToLinux"}:
             log = (output / "linux-host-process.log").open("wb"); opened.append(log)
-            child = subprocess.Popen(ssh + [f"python3 -u {remote}/experiments/interop_linux_node.py host --output {remote}/host"],
+            child = subprocess.Popen(ssh + [f"{linux_python} -u {remote}/experiments/interop_linux_node.py host --output {remote}/host"],
                                      stdin=subprocess.PIPE, stdout=log, stderr=log)
-            children.append(child); child.stdin.write(json.dumps({"password": password, **route_config("Linux")}).encode()+b"\n"); child.stdin.close()
+            children.append(child); child.stdin.write(json.dumps({"password": password,
+                "bindAddress": "127.0.0.1" if relay_config else "0.0.0.0", **route_config("Linux")}).encode()+b"\n"); child.stdin.close()
             for _ in range(100 if relay_config else 45):
                 if child.poll() is not None:
                     raise RuntimeError("Linux host exited before becoming ready; see linux-host-process.log and Linux evidence")
@@ -459,7 +475,7 @@ def main():
         if remote:
             # Keep the bounded remote evidence directory for inspection; cleanup
             # requires explicit path validation after evidence has been copied.
-            run(["scp", "-q", "-r", args.linux + ":" + remote, str(output / "linux-evidence")], timeout=40, check=False)
+            run(["scp", "-q", *ssh_options, "-r", args.linux + ":" + remote, str(output / "linux-evidence")], timeout=40, check=False)
         write_report(); emit("FINAL " + str(output / "result.json"))
     return 0 if report["complete"] else 1
 

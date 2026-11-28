@@ -2,9 +2,39 @@ using System.Diagnostics;
 
 namespace RemoteDesk;
 
+internal enum NativeDetailMode { Automatic, On, Off }
+
+// Consume the viewer's existing two-second presentation reports. Ignore quiet
+// content, and leave the final wire budget to the sender's receiver receipts.
+internal sealed class NativeDetailAutoQuality
+{
+    private int _healthy, _pressured;
+    private long _lastReport = -1, _retryAt;
+
+    internal bool Observe(bool active, long now, double seconds, double mbps, double fps, double pipelineMs,
+        bool gpu, bool inputChanged)
+    {
+        if (now < _lastReport || now - _lastReport > 3500 || seconds is < 1.5 or > 3.5)
+            _healthy = _pressured = 0;
+        _lastReport = now;
+        bool timely = seconds is >= 1.5 and <= 3.5;
+        bool healthy = timely && gpu && mbps >= NativeDetailHeadroom.MinimumDelivery / 1_000_000d &&
+            fps >= 8 && pipelineMs is >= 0 and <= 25;
+        bool pressured = !gpu || pipelineMs >= 65 || (inputChanged && fps < 8 && mbps < 12);
+        _healthy = healthy ? Math.Min(2, _healthy + 1) : 0;
+        _pressured = pressured ? Math.Min(2, _pressured + 1) : 0;
+        if (active && _pressured == 2) { _retryAt = now + 30_000; return false; }
+        return active || (now >= _retryAt && _healthy == 2);
+    }
+}
+
 internal sealed partial class RemoteViewerWindow
 {
     private ToolStripMenuItem _nativeDetailMenuItem = null!;
+    private NativeDetailMode _nativeDetailMode;
+    private NativeDetailAutoQuality _nativeAutoQuality = new();
+    private NativeDetailOffer? _nativeAutoOffer;
+    private long _nativeAutoInputRevision;
     private System.Windows.Forms.Timer _nativeDetailTimer = null!;
     private bool _nativeDetailWanted, _nativeRequestPending, _nativeStopPending, _nativeStopInFlight;
     private bool _nativeViewportTooSmall;
@@ -15,7 +45,13 @@ internal sealed partial class RemoteViewerWindow
     private void InitializeNativeDetailControls()
     {
         _nativeDetailMenuItem = new ToolStripMenuItem("静止时补清文字");
-        _nativeDetailMenuItem.Click += async (_, _) => await ToggleNativeDetailsAsync();
+        foreach (var (mode, title) in new[] { (NativeDetailMode.Automatic, "自动（推荐）"),
+                     (NativeDetailMode.On, "开启"), (NativeDetailMode.Off, "关闭") })
+        {
+            var item = new ToolStripMenuItem(title) { Tag = mode };
+            item.Click += async (_, _) => await SetNativeDetailModeAsync(mode);
+            _nativeDetailMenuItem.DropDownItems.Add(item);
+        }
         _client.NativeDetailOfferChanged += OnNativeOfferChanged;
         _nativeDetailTimer = new System.Windows.Forms.Timer { Interval = 150 };
         _nativeDetailTimer.Tick += async (_, _) => await RefreshNativeRequestAsync();
@@ -24,6 +60,13 @@ internal sealed partial class RemoteViewerWindow
     private void OnNativeOfferChanged(NativeDetailOffer? offer) => OnUi(() =>
     {
         if (_isClosing || IsDisposed || offer != _client.NativeOffer) return;
+        if (_nativeAutoOffer != offer)
+        {
+            _nativeAutoOffer = offer;
+            _nativeAutoQuality = new();
+            if (_nativeDetailMode == NativeDetailMode.Automatic && _nativeDetailWanted)
+                _ = SetNativeDetailWantedAsync(false);
+        }
         if (_nativeRequestedOffer != offer)
         {
             _client.InvalidateNativeDetails(); _nativeRequestedOffer = null;
@@ -32,10 +75,35 @@ internal sealed partial class RemoteViewerWindow
         UpdateNativeDetailButton();
     });
 
-    internal async Task ToggleNativeDetailsAsync()
+    internal Task ToggleNativeDetailsAsync() =>
+        SetNativeDetailModeAsync(_nativeDetailWanted ? NativeDetailMode.Off : NativeDetailMode.On);
+
+    private async Task SetNativeDetailModeAsync(NativeDetailMode mode)
+    {
+        if (_isClosing || IsDisposed || _nativeDetailMode == mode) return;
+        _nativeDetailMode = mode;
+        _nativeAutoQuality = new();
+        await SetNativeDetailWantedAsync(mode == NativeDetailMode.On);
+        if (!_isClosing && !IsDisposed) _pictureBox.Focus();
+    }
+
+    private void ObserveAutoNativeDetail(long sampledAt, double elapsed, double mbps, double fps, double pipelineMs, bool gpu)
+    {
+        if (_isClosing || IsDisposed || _nativeDetailMode != NativeDetailMode.Automatic ||
+            _client.NativeOffer is not { Extended: true, Available: true } || !_client.IsConnected ||
+            Environment.TickCount64 - sampledAt > 1000) return;
+        long revision = _client.NativeInputRevision;
+        bool wanted = _nativeAutoQuality.Observe(_nativeDetailWanted, sampledAt, elapsed, mbps, fps, pipelineMs,
+            gpu, _nativeAutoInputRevision != revision);
+        _nativeAutoInputRevision = revision;
+        if (wanted != _nativeDetailWanted) _ = SetNativeDetailWantedAsync(wanted);
+    }
+
+    private async Task SetNativeDetailWantedAsync(bool wanted)
     {
         if (_isClosing || IsDisposed) return;
-        _nativeDetailWanted = !_nativeDetailWanted;
+        if (_nativeDetailWanted == wanted) { UpdateNativeDetailButton(); return; }
+        _nativeDetailWanted = wanted;
         _nativeViewportTooSmall = false;
         UpdateNativeDetailButton();
         if (!_nativeDetailWanted)
@@ -46,7 +114,7 @@ internal sealed partial class RemoteViewerWindow
             ScheduleNativeDetailPreparation();
             _nativeStopPending = true;
             await SendNativeStopAsync();
-            if (!_nativeDetailWanted && !_isClosing && !IsDisposed)
+            if (_nativeDetailMode != NativeDetailMode.Automatic && !_nativeDetailWanted && !_isClosing && !IsDisposed)
                 SetStatus("原生补清已关闭，使用普通远控画面。", MutedTextColor);
         }
         else
@@ -54,12 +122,12 @@ internal sealed partial class RemoteViewerWindow
             _nativeDetailTimer.Start();
             _nativeStopPending = false;
             _nativeRequestedOffer = null; _nativeIdleSince = Environment.TickCount64;
-            SetStatus(_client.NativeOffer is { Extended: true }
-                ? "文字补清已开启。停下操作后，可见区域会逐步变清。"
-                : "文字补清已开启。此版本的被控端会补清鼠标附近。", MutedTextColor);
+            if (_nativeDetailMode != NativeDetailMode.Automatic)
+                SetStatus(_client.NativeOffer is { Extended: true }
+                    ? "文字补清已开启。停下操作后，可见区域会逐步变清。"
+                    : "文字补清已开启。此版本的被控端会补清鼠标附近。", MutedTextColor);
             await RefreshNativeRequestAsync();
         }
-        if (!_isClosing && !IsDisposed) _pictureBox.Focus();
     }
 
     private void UpdateNativeDetailButton()
@@ -67,9 +135,14 @@ internal sealed partial class RemoteViewerWindow
         bool available = _client.NativeOffer is { Available: true };
         _nativeDetailMenuItem.Available = available || _nativeDetailWanted;
         _nativeDetailMenuItem.Checked = _nativeDetailWanted;
+        foreach (ToolStripMenuItem item in _nativeDetailMenuItem.DropDownItems)
+            item.Checked = item.Tag is NativeDetailMode mode && mode == _nativeDetailMode;
         bool paused = _nativeDetailWanted && (!available || _nativeViewportTooSmall);
         _nativeDetailMenuItem.Text = paused ? "静止时补清文字（已暂停）" : "静止时补清文字";
         _nativeDetailMenuItem.ToolTipText = _nativeViewportTooSmall ? "放大窗口后会自动恢复。"
+            : _nativeDetailMode == NativeDetailMode.Automatic && _client.NativeOffer is { Extended: true }
+                ? "带宽充足且显示流畅时，停下操作就会补清文字。"
+            : _nativeDetailMode == NativeDetailMode.Automatic ? "此被控端支持手动补清，选择“开启”可补清鼠标附近。"
             : _client.NativeOffer is { Extended: true } ? "停下操作后补清可见区域。操作和视频优先。"
             : "此版本的被控端使用可靠视频补清鼠标附近。";
     }
