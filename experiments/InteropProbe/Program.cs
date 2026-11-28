@@ -45,6 +45,7 @@ internal static class Program
         if (args[0] == "delayed-video-negotiation") return DelayedVideoNegotiationProbe.RunAsync(output).GetAwaiter().GetResult();
         if (args[0] == "delayed-video-feedback") return DelayedVideoNegotiationProbe.RunAsync(output, feedback: true).GetAwaiter().GetResult();
         if (args[0] == "reliable-video-pacing") return ReliableVideoPacingProbe.RunAsync(output).GetAwaiter().GetResult();
+        if (args[0] == "viewer-receipt-latency") return ReliableVideoReceiptProbe.RunAsync(output).GetAwaiter().GetResult();
         if (args[0] == "reliable-video-feedback") return ReliableVideoFeedbackProbe.RunAsync(output).GetAwaiter().GetResult();
         if (args[0] == "reliable-video-feedback-healthy") return ReliableVideoFeedbackProbe.RunAsync(output, healthy: true).GetAwaiter().GetResult();
         if (args[0] == "relay-video-observe") return RelayVideoObservationProbe.RunAsync(c.Clone(), output).GetAwaiter().GetResult();
@@ -398,8 +399,12 @@ internal static class Program
             button.Click += (_, _) => { clicks++; button.Text = $"Remote click target: {clicks}"; Snapshot(); };
             editor.TextChanged += (_, _) => Snapshot();
             log = new StreamWriter(Path.Combine(output, "host.log")) { AutoFlush = true };
-            host.Log += line => { lock (log) log.WriteLine(line); };
-            relay.StatusChanged += line => { lock (log) log.WriteLine(line); };
+            void WriteStatus(string line)
+            {
+                lock (log) log.WriteLine($"[{lifetime.ElapsedMilliseconds} ms] {line}");
+            }
+            host.Log += WriteStatus;
+            relay.StatusChanged += WriteStatus;
             Deactivate += (_, _) => CheckForeground();
             timer.Tick += (_, _) => {
                 CheckForeground();

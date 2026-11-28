@@ -349,7 +349,11 @@ class SshRelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_lan_ssh_banner_once_and_disabling_ssh_revokes_direct_stream(self):
         banner = b"SSH-2.0-RemoteDeskFixture\r\n"
-        with mock.patch.object(ssh.ssh_lan, "eligible", side_effect=lambda address: address == "127.0.0.1"):
+        probe = ssh.ssh_lan.try_candidate
+        # The local relay fixture and direct socket share a loopback interface.
+        # Supply a WAN relay sample so this test reaches the lease it revokes.
+        with mock.patch.object(ssh.ssh_lan, "eligible", side_effect=lambda address: address == "127.0.0.1"), \
+                mock.patch.object(ssh.ssh_lan, "try_candidate", lambda offer, key, elapsed: probe(offer, key, .4)):
             await self.start_ssh_host(banner=banner)
             reader, writer = await ssh.connect_ssh(self.options, KEY)
             try:
@@ -358,6 +362,29 @@ class SshRelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 await self.exchange((reader, writer), bytes(range(256)) * 70)
                 self.host.configure_services(desktop_enabled=True, ssh_enabled=False, ssh_port=self.ssh_port, device_key=KEY)
                 self.assertEqual(b"", await asyncio.wait_for(reader.read(1), 2))
+            finally:
+                await relay.close_writer(writer, abort=True)
+
+    async def test_fast_relay_keeps_banner_when_direct_handshake_is_slow(self):
+        banner = b"SSH-2.0-RemoteDeskFixture\r\n"
+        probe = ssh.ssh_lan.try_candidate
+        cancelled = asyncio.Event()
+        async def delayed_accept(offer):
+            try:
+                await asyncio.Future()  # No handshake response within the relay's probe budget.
+            finally:
+                cancelled.set()
+        with mock.patch.object(ssh.ssh_lan, "eligible", side_effect=lambda address: address == "127.0.0.1"), \
+                mock.patch.object(ssh.ssh_lan, "try_candidate", lambda offer, key, elapsed: probe(offer, key, .01)), \
+                mock.patch.object(ssh.ssh_lan.SshLanOffer, "_accept_authenticated", delayed_accept):
+            await self.start_ssh_host(banner=banner)
+            reader, writer = await ssh.connect_ssh(self.options, KEY)
+            try:
+                self.assertFalse(hasattr(writer, "_remotedesk_ssh_lease"))
+                self.assertEqual(banner, await asyncio.wait_for(reader.readexactly(len(banner)), 2))
+                await self.exchange((reader, writer))
+                self.assertEqual(1, self.local_connections)
+                await asyncio.wait_for(cancelled.wait(), 2)
             finally:
                 await relay.close_writer(writer, abort=True)
 

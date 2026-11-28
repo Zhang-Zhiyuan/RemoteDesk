@@ -140,6 +140,34 @@ class RealTkDisplayHandoffTests(unittest.TestCase):
     setUp = DisplayHandoffTests.setUp
     encoded = DisplayHandoffTests.encoded
 
+    def test_viewer_updates_pixels_in_the_bound_image_and_replaces_resized_stream(self):
+        root = app.tk.Tk()
+        try:
+            viewer = app.RemoteDeskLinuxApp.__new__(app.RemoteDeskLinuxApp)
+            root.geometry("320x240")
+            viewer.frame_label = app.tk.Label(root)
+            viewer.frame_label.pack(fill="both", expand=True)
+            root.update()
+            viewer.last_photo = None
+            viewer.last_frame_status_update = float("inf")
+            viewport = app.normalize_viewer_display_size(viewer.frame_label.winfo_width(),
+                                                         viewer.frame_label.winfo_height())
+            def show(width, height, color):
+                data = f"P6\n{width} {height}\n255\n".encode() + bytes(color) * (width * height)
+                viewer._show_frame(width, height, data, 0, *viewport)
+            show(64, 40, (12, 34, 56))
+            first = viewer.last_photo
+            show(64, 40, (98, 76, 54))
+            self.assertIs(first, viewer.last_photo)
+            self.assertEqual((98, 76, 54), first.get(63, 39))
+            self.assertEqual(str(first), str(viewer.frame_label.cget("image")))
+            show(32, 20, (11, 22, 33))
+            self.assertIsNot(first, viewer.last_photo)
+            self.assertEqual((32, 20), (viewer.last_photo.width(), viewer.last_photo.height()))
+            self.assertEqual((11, 22, 33), viewer.last_photo.get(31, 19))
+        finally:
+            root.destroy()
+
     def test_actual_tk_png_and_ppm_pixels_match(self):
         root = app.tk.Tk()
         root.withdraw()

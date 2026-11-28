@@ -3459,6 +3459,26 @@ Available hardware decoders:
         self.assertEqual("KP_0", host.x11_key_name(0x60))
         self.assertEqual("KP_Decimal", host.xdotool_key_name(0x6E))
 
+    def test_xdotool_positions_and_scrolls_within_one_bounded_command(self) -> None:
+        controller = host.LinuxInputController.__new__(host.LinuxInputController)
+        controller.native = SimpleNamespace(available=False, apply=lambda *_: False)
+        controller.available = controller.xdotool_available = True
+        controller.xdotool = "xdotool"
+        controller._run = mock.Mock()
+        for kind, delta, expected in (
+            (host.INPUT_MOUSE_WHEEL, 720, ["click", "--repeat", "6", "--delay", "8", "4"]),
+            (host.INPUT_PINCH_ZOOM, -1, ["click", "--repeat", "1", "--delay", "8", "5"]),
+            (host.INPUT_MOUSE_WHEEL, 0, []),
+            (host.INPUT_MOUSE_DOWN, 0, ["mousedown", "1"]),
+            (host.INPUT_MOUSE_UP, 0, ["mouseup", "1"]),
+        ):
+            with self.subTest(kind=kind, delta=delta):
+                controller._run.reset_mock()
+                self.assertTrue(controller.apply(host.InputCommand(kind, 1, 80, 75, delta),
+                                                 (400, 300), (400, 300)))
+                controller._run.assert_called_once()
+                self.assertEqual(["mousemove", "80", "75", *expected], controller._run.call_args.args[0])
+
     def test_pointer_capability_probe_moves_one_pixel_and_restores(self) -> None:
         position = [99, 50]
         moves: list[tuple[int, int]] = []

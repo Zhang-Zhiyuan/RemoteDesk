@@ -139,6 +139,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--adb", required=True); parser.add_argument("--serial", required=True)
     parser.add_argument("--linux", required=True, help="key-authenticated user@address")
+    parser.add_argument("--linux-address", help="Linux desktop address for direct sessions when SSH uses a separate alias")
     parser.add_argument("--linux-python", default="python3", help="Remote Python interpreter with the GUI test dependencies")
     parser.add_argument("--windows-ip", required=True); parser.add_argument("--output", required=True)
     parser.add_argument("--relay-server", help="Use native product relay transport in every selected direction, never LAN fallback")
@@ -195,7 +196,7 @@ def main():
     ssh = ["ssh", *ssh_options, args.linux]
     linux_python = shlex.quote(args.linux_python)
     adb = [args.adb, "-s", args.serial]
-    linux_ip = args.linux.split("@")[-1]
+    linux_ip = args.linux_address or args.linux.split("@")[-1]
     password = secrets.token_urlsafe(24)
     report = {"scope": "physical devices, direct LAN unless explicitly stated; owned synthetic OS targets",
               "pairs": {}, "complete": False}
@@ -322,14 +323,14 @@ def main():
             config["wheelMarker"] = target.get("wheelMarker", False)
         result = subprocess.run([str(WINDOWS), "viewer"], input=json.dumps(config).encode(), capture_output=True, timeout=150 if relay_config else 50)
         after = read_target()
-        value = json.loads((folder / "viewer.json").read_text()) if (folder / "viewer.json").exists() else {}
+        value = json.loads((folder / "viewer.json").read_text(encoding="utf-8-sig")) if (folder / "viewer.json").exists() else {}
         value["inputVerified"] = after["clicks"] == before["clicks"] + 1 and inserted(before["text"], after["text"], config["text"])
         if "wheelTarget" in config:
             value["scrollVerified"] = after["wheelSteps"] == before["wheelSteps"] + 3
             value["inputVerified"] &= value["scrollVerified"]
         value["target"] = after; value["route"] = route_label
         value["complete"] = result.returncode == 0 and value.get("complete", False) and value["inputVerified"]
-        if (folder / "failure.txt").exists(): value["failure"] = (folder / "failure.txt").read_text()
+        if (folder / "failure.txt").exists(): value["failure"] = (folder / "failure.txt").read_text(encoding="utf-8-sig")
         return require_h264_evidence(value, args.require_android_host_h264 and platform == "Android")
     def linux_view(label, host, port, target, read_target, platform):
         before = read_target(); directory = remote + "/" + label
@@ -395,7 +396,7 @@ def main():
             def target_reader():
                 if child.poll() is not None or (folder / "failure.txt").exists():
                     raise RuntimeError("Windows owned target stopped; no further input permitted")
-                value = json.loads((folder / "target.json").read_text())
+                value = json.loads((folder / "target.json").read_text(encoding="utf-8-sig"))
                 if not value.get("foregroundOwned"):
                     raise RuntimeError("Windows owned target is not foreground; no further input permitted")
                 return value
@@ -455,8 +456,14 @@ def main():
             pair("LinuxToAndroid", lambda: linux_view("LinuxToAndroid", config["host"], config["port"], target, phone_target, "Android"))
         report["complete"] = set(report["pairs"]) == selected and all(v["complete"] for v in report["pairs"].values())
     finally:
-        if remote:
-            sh(f"touch {remote}/host/stop", check=False)
+        if remote and selected & {"WindowsToLinux", "AndroidToLinux"}:
+            for attempt in range(2):
+                try:
+                    sh(f"if test -d {remote}/host; then touch {remote}/host/stop; fi", timeout=8)
+                    break
+                except (RuntimeError, subprocess.TimeoutExpired) as error:
+                    if attempt == 1:
+                        report["linuxStopErrorType"] = type(error).__name__
         if (output / "windows-host").exists(): (output / "windows-host/stop").touch()
         for child in children:
             try: child.wait(timeout=15)
@@ -473,9 +480,17 @@ def main():
                 report["androidHostLogErrorType"] = type(error).__name__
             run(adb + ["shell", "am", "force-stop", "com.remotedesk.relayhostprobe"], check=False)
         if remote:
-            # Keep the bounded remote evidence directory for inspection; cleanup
-            # requires explicit path validation after evidence has been copied.
-            run(["scp", "-q", *ssh_options, "-r", args.linux + ":" + remote, str(output / "linux-evidence")], timeout=40, check=False)
+            # Copy observations only. Re-downloading the uploaded source tree
+            # can exceed the collection timeout on a slow management link.
+            folders = (["host"] if selected & {"WindowsToLinux", "AndroidToLinux"} else [])
+            folders.extend(sorted(pair for pair in selected if pair.startswith("LinuxTo")))
+            evidence = output / "linux-evidence"
+            evidence.mkdir(exist_ok=True)
+            for folder in folders:
+                try:
+                    run(["scp", "-q", *ssh_options, "-r", f"{args.linux}:{remote}/{folder}", str(evidence)], timeout=40)
+                except (RuntimeError, subprocess.TimeoutExpired) as error:
+                    report.setdefault("linuxEvidenceErrors", {})[folder] = type(error).__name__
         write_report(); emit("FINAL " + str(output / "result.json"))
     return 0 if report["complete"] else 1
 

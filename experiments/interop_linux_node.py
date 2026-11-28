@@ -17,6 +17,7 @@ from collections import deque
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/linux"))
 import remotedesk_linux_app as app
+from remotedesk_protocol_probe import decode_frame
 
 
 def save(path, value):
@@ -118,6 +119,25 @@ def linux_viewer_continuity(transport_active, first_frame_at, last_frame_at, now
                 transportActive=bool(transport_active), lastFrameAgeSeconds=age)
 
 
+def record_first_tcp_video(first_by_type, kind, payload, received_ms):
+    if kind == app.MESSAGE_FRAME:
+        label = "legacyJpeg"
+    elif kind == app.MESSAGE_VIDEO_FRAME and len(payload) >= 4:
+        encoding = int.from_bytes(payload[:4], "little")
+        if encoding not in (app.FRAME_ENCODING_JPEG, app.FRAME_ENCODING_H264_ANNEX_B):
+            return
+        label = "videoJpeg" if encoding == app.FRAME_ENCODING_JPEG else "videoH264"
+    else:
+        return
+    if label not in first_by_type:
+        try:
+            frame = decode_frame(payload, kind)
+        except app.ProtocolError:
+            return
+        first_by_type[label] = dict(ms=received_ms, kind=kind, payloadBytes=len(payload),
+                                    width=frame["width"], height=frame["height"])
+
+
 def host(config, output):
     children = []
     logs = []
@@ -205,9 +225,14 @@ def viewer(config, output):
     # EOF cannot hide the heartbeat timeout which actually closed the socket.
     raw_status = deque(maxlen=512)
     wire_progress = deque(maxlen=1024)
+    first_tcp_video = {}
+    first_decoded_event_ms = None
     original_event = client._put_event
     original_read = app.read_message
     def measured_event(event, value):
+        nonlocal first_decoded_event_ms
+        if event == "viewer_frame" and first_decoded_event_ms is None:
+            first_decoded_event_ms = (time.monotonic() - started) * 1000
         if event in ("viewer_status", "viewer_error", "viewer_disconnected", "viewer_auth_failed"):
             raw_status.append(dict(ms=(time.monotonic() - started) * 1000,
                                    event=event, detail=str(value)))
@@ -220,8 +245,10 @@ def viewer(config, output):
             wire_progress.append(dict(ms=(time.monotonic() - started) * 1000,
                                       error=type(error).__name__))
             raise
-        wire_progress.append(dict(ms=(time.monotonic() - started) * 1000,
-                                  readMs=(time.monotonic() - read_started) * 1000,
+        received = time.monotonic()
+        received_ms = (received - started) * 1000
+        record_first_tcp_video(first_tcp_video, kind, payload, received_ms)
+        wire_progress.append(dict(ms=received_ms, readMs=(received - read_started) * 1000,
                                   kind=kind, payloadBytes=len(payload)))
         return kind, payload
     client._put_event = measured_event
@@ -275,12 +302,12 @@ def viewer(config, output):
                     last_frame_at = time.monotonic()
                     if first_frame_at is None:
                         first_frame_at = last_frame_at
+                        report["firstFrameMs"] = (first_frame_at - started) * 1000
                     digest = hashlib.sha256(png).digest()
                     if previous_hash is not None and previous_hash != digest: report["changes"] += 1
                     previous_hash = digest
                     report.update(width=w, height=h, backend=backend, decodeMs=decode_ms)
                     report["frames"] += 1
-                    if report["frames"] == 1: report["firstFrameMs"] = (time.monotonic()-started)*1000
                     if report["frames"] == 15:
                         photo.write(str(output / "rendered.png"), format="png")
                         inputs()
@@ -305,6 +332,14 @@ def viewer(config, output):
         app.read_message = original_read
         report["rawStatus"] = list(raw_status)
         report["wireProgress"] = list(wire_progress)
+        first_video_ms = min((sample["ms"] for sample in first_tcp_video.values()), default=None)
+        first_tk_ms = report.get("firstFrameMs")
+        # Startup milestones, not a per-frame trace: the viewer can coalesce decoded frames.
+        report["startupTiming"] = dict(firstTcpVideoByType=first_tcp_video.copy(),
+            firstTcpVideoMessageMs=first_video_ms, firstDecodedFrameEventMs=first_decoded_event_ms,
+            firstTkImageAssignedMs=first_tk_ms, firstTcpVideoToFirstTkImageMs=(
+                first_tk_ms - first_video_ms if first_video_ms is not None and first_tk_ms is not None
+                and first_video_ms <= first_tk_ms else None))
         app.is_h264_submission_fresh = original_fresh
         app.H264AnnexBDecoder._try_reserve_correlation = original_reserve
         report["correlationLags"] = lags

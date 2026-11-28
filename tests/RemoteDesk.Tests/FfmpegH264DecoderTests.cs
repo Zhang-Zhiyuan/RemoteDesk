@@ -119,7 +119,7 @@ public sealed class FfmpegH264DecoderTests
         string arguments = FfmpegH264Decoder.BuildDecoderArguments(
             new Size(1920, 1081));
 
-        Assert.Contains("-c:v mjpeg -threads 1", arguments);
+        Assert.Contains($"-c:v mjpeg -threads {Math.Clamp(Environment.ProcessorCount / 2, 1, 4)} -thread_type slice", arguments);
         Assert.Contains("-pix_fmt yuvj444p", arguments);
         Assert.Contains("-q:v 2", arguments);
         Assert.DoesNotContain("-pix_fmt yuvj420p", arguments);
@@ -192,6 +192,12 @@ public sealed class FfmpegH264DecoderTests
     }
 
     [Fact]
+    public void AboveUhdKeepsCompactSingleWorkerOutput()
+    {
+        Assert.Contains("-c:v mjpeg -threads 1 ", FfmpegH264Decoder.BuildDecoderArguments(new Size(4096, 4096)));
+    }
+
+    [Fact]
     public void HardwareMjpegArgumentsDownloadSurfaceBeforeEncoding()
     {
         string arguments =
@@ -202,7 +208,7 @@ public sealed class FfmpegH264DecoderTests
         Assert.Contains(
             "-vf hwdownload,format=nv12",
             arguments);
-        Assert.Contains("-c:v mjpeg -threads 1", arguments);
+        Assert.Contains($"-c:v mjpeg -threads {Math.Clamp(Environment.ProcessorCount / 2, 1, 4)} -thread_type slice", arguments);
         Assert.Contains("-pix_fmt yuvj444p", arguments);
         Assert.Contains("-q:v 2", arguments);
         Assert.DoesNotContain("format=bgra", arguments);
@@ -626,6 +632,46 @@ public sealed class FfmpegH264DecoderTests
     {
         Assert.False(FfmpegH264Decoder.ShouldDropPartialJpegFrame(FfmpegH264Decoder.MaxDecodedJpegBytes));
         Assert.True(FfmpegH264Decoder.ShouldDropPartialJpegFrame(FfmpegH264Decoder.MaxDecodedJpegBytes + 1));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(16384)]
+    public void JpegPipeReassemblesFragmentedAndAdjacentImages(int blockSize)
+    {
+        byte[] first = [0xFF, 0xD8, 0x10, 0xFF, 0, 0xD9, 0xFF, 0xD9];
+        byte[] second = [0xFF, 0xD8, 0x30, 0xFF, 0xD9];
+        byte[] stream = [0x70, 0xFF, .. first, .. second, 0xFF, 0xD8, 0x01];
+        using var input = new FragmentedReadStream(stream, blockSize);
+        var frames = new List<byte[]>();
+        FfmpegH264Decoder.ReadJpegFrames(input, CancellationToken.None,
+            (buffer, length) => frames.Add(buffer.AsSpan(0, length).ToArray()));
+        Assert.Collection(frames, frame => Assert.Equal(first, frame), frame => Assert.Equal(second, frame));
+    }
+
+    private sealed class FragmentedReadStream(byte[] data, int blockSize) : MemoryStream(data, writable: false)
+    {
+        public override int Read(byte[] buffer, int offset, int count) => base.Read(buffer, offset, Math.Min(count, blockSize));
+    }
+
+    [Fact]
+    public void JpegPipeSkipsOversizedImageAndReadsNextCompleteFrame()
+    {
+        byte[] next = [0xFF, 0xD8, 0x25, 0xFF, 0xD9];
+        byte[] input = new byte[FfmpegH264Decoder.MaxDecodedJpegBytes + 2 + next.Length];
+        input[0] = 0xFF;
+        input[1] = 0xD8;
+        input[FfmpegH264Decoder.MaxDecodedJpegBytes] = 0xFF;
+        input[FfmpegH264Decoder.MaxDecodedJpegBytes + 1] = 0xD9;
+        next.CopyTo(input, input.Length - next.Length);
+
+        var frames = new List<byte[]>();
+        using var stream = new MemoryStream(input, writable: false);
+        FfmpegH264Decoder.ReadJpegFrames(stream, CancellationToken.None,
+            (buffer, length) => frames.Add(buffer.AsSpan(0, length).ToArray()));
+        Assert.Equal(next, Assert.Single(frames));
     }
 
     [Fact]

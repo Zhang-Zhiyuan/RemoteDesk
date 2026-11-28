@@ -2797,6 +2797,44 @@ def choose_next_h264_decoder_backend(
     )
 
 
+def prioritize_local_h264_decoders(
+    candidates: tuple[FfmpegH264DecoderBackend, ...],
+    dev: Path = Path("/dev"),
+    drm_class: Path = Path("/sys/class/drm"),
+) -> tuple[FfmpegH264DecoderBackend, ...]:
+    """Try locally backed hardware, then software before speculative devices."""
+    if not sys.platform.startswith("linux") or not any(not b.hardware for b in candidates):
+        return candidates
+    available = {b.key for b in candidates}
+    # Jetson's dedicated decoder is provided by its board-specific FFmpeg.
+    preferred = {"jetson-nvv4l2"}
+    if (dev / "nvidiactl").exists() or (dev / "dxg").exists():
+        preferred.add("cuda-nvdec")
+    if any(dev.glob("video[0-9]*")):
+        preferred.add("v4l2m2m")
+    for node in (dev / "dri").glob("renderD[0-9]*"):
+        try:
+            vendor = (drm_class / node.name / "device/vendor").read_text().strip().lower()
+        except OSError:
+            # Embedded and container devices may provide no PCI vendor ID.
+            vendor = ""
+        if vendor == "0x10de":
+            preferred.add("cuda-nvdec")
+        else:
+            preferred.update(("vaapi", "drm"))
+            if vendor in ("", "0x8086"):
+                preferred.add("qsv")
+    if os.environ.get("LIBVA_DRIVER_NAME"):
+        preferred.add("vaapi")
+    if os.environ.get("VDPAU_DRIVER") or (os.environ.get("DISPLAY") and
+            not (preferred & available) and any((dev / "dri").glob("card[0-9]*"))):
+        preferred.add("vdpau")
+    local = tuple(b for b in candidates if b.key in preferred)
+    software = tuple(b for b in candidates if not b.hardware)
+    other = tuple(b for b in candidates if b.hardware and b.key not in preferred)
+    return local + software + other
+
+
 def h264_decoder_miss_threshold(backend: FfmpegH264DecoderBackend) -> int:
     return (
         H264_HARDWARE_DECODE_MISS_ROTATION_THRESHOLD
@@ -5076,7 +5114,7 @@ class ViewerConnection:
     def _run(self) -> None:
         self.ffmpeg_path = find_ffmpeg()
         self.h264_decoder_candidates = (
-            probe_ffmpeg_h264_decoder_backends(self.ffmpeg_path)
+            prioritize_local_h264_decoders(probe_ffmpeg_h264_decoder_backends(self.ffmpeg_path))
             if self.ffmpeg_path is not None
             else ()
         )
@@ -9753,8 +9791,16 @@ class RemoteDeskLinuxApp:
         )
         if current_viewport != (viewport_width, viewport_height):
             return
+        photo = self.last_photo
+        reuse_photo = (photo is not None and display_data.startswith(b"P6\n")
+                       and (width, height) == (self.remote_width, self.remote_height))
         try:
-            photo = create_tk_frame_photo(display_data)
+            if reuse_photo:
+                # Tk repaints a label when its bound image changes. Reuse the
+                # display buffer for consecutive local RGB frames.
+                photo.configure(data=display_data, format="ppm")
+            else:
+                photo = create_tk_frame_photo(display_data)
         except Exception as ex:
             self._set_viewer_status(f"Frame display failed: {ex}")
             return
@@ -9766,7 +9812,8 @@ class RemoteDeskLinuxApp:
         self.remote_height = height
         self.display_width = max(1, photo.width())
         self.display_height = max(1, photo.height())
-        frame_label.config(image=photo, text="")
+        if not reuse_photo:
+            frame_label.config(image=photo, text="")
         if resize_surface:
             self._layout_viewer_surface()
         now = time.monotonic()

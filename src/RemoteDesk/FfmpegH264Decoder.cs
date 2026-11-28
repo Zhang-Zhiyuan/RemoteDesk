@@ -187,6 +187,7 @@ internal sealed class FfmpegH264Decoder : IDisposable
         FfmpegH264BackendCacheKey,
         FfmpegH264Backend> WinningBackendCache = new();
     private static readonly byte[] JpegStartMarker = [0xFF, 0xD8];
+    private static readonly byte[] JpegEndMarker = [0xFF, 0xD9];
     private static readonly byte[] AccessUnitBoundary =
         [0x00, 0x00, 0x00, 0x01, 0x09, 0xF0];
     private static readonly TimeSpan DecodeTimeout = TimeSpan.FromMilliseconds(250);
@@ -462,11 +463,18 @@ internal sealed class FfmpegH264Decoder : IDisposable
                 ]);
             }
 
+            // Multi-slice MJPEG can produce larger images on detailed
+            // content. Above UHD retain the compact single-worker output so a
+            // previously accepted frame still fits the 32 MiB reader budget.
+            int mjpegWorkers = (long)frameSize.Width * frameSize.Height <= 3840L * 2160
+                ? Math.Clamp(Environment.ProcessorCount / 2, 1, 4) : 1;
             arguments.AddRange(
             [
                 "-f image2pipe",
                 "-c:v mjpeg",
-                "-threads 1",
+                // Slice workers finish the current image without waiting for future frames.
+                $"-threads {mjpegWorkers}",
+                "-thread_type slice",
                 // Above 1080p this compatibility path has to encode the
                 // decoded frame once more before System.Drawing can detach
                 // it from the pipe. Preserve full chroma resolution and use
@@ -1716,78 +1724,55 @@ internal sealed class FfmpegH264Decoder : IDisposable
             checked(row * stride));
     }
 
-    private void ReadJpegLoop()
+    private void ReadJpegLoop() =>
+        ReadJpegFrames(_process.StandardOutput.BaseStream, _cancellationTokenSource.Token,
+            (bytes, count) => PublishFrame(DetachedBitmapLoader.Load(bytes, 0, count)));
+
+    // The callback borrows the complete frame only until it returns.
+    internal static void ReadJpegFrames(Stream output, CancellationToken cancellationToken, Action<byte[], int> publish)
     {
-        var frameBytes = new ArrayBufferWriter<byte>(256 * 1024);
+        using var frame = new MemoryStream(256 * 1024);
         byte[] buffer = new byte[16 * 1024];
-        int previous = -1;
-        bool inJpeg = false;
-
-        Stream output = _process.StandardOutput.BaseStream;
-        while (!_cancellationTokenSource.IsCancellationRequested)
+        bool inFrame = false;
+        bool previousWasFf = false;
+        while (!cancellationToken.IsCancellationRequested)
         {
-            int read = output.Read(
-                buffer,
-                0,
-                buffer.Length);
-            if (read <= 0)
+            int read = output.Read(buffer, 0, buffer.Length);
+            if (read == 0) return;
+            ReadOnlySpan<byte> remaining = buffer.AsSpan(0, read);
+            while (!remaining.IsEmpty)
             {
-                return;
-            }
-
-            int segmentStart = 0;
-            for (int index = 0; index < read; index++)
-            {
-                int current = buffer[index] & 0xFF;
-                if (!inJpeg)
+                ReadOnlySpan<byte> marker = inFrame ? JpegEndMarker : JpegStartMarker;
+                int consumed;
+                if (previousWasFf && remaining[0] == marker[1])
+                    consumed = 1;
+                else
                 {
-                    if (previous == 0xFF && current == 0xD8)
-                    {
-                        inJpeg = true;
-                        frameBytes.Clear();
-                        frameBytes.Write(JpegStartMarker);
-                        segmentStart = index + 1;
-                    }
-                }
-                else if (previous == 0xFF && current == 0xD9)
-                {
-                    if (index >= segmentStart)
-                    {
-                        frameBytes.Write(buffer.AsSpan(
-                            segmentStart,
-                            index - segmentStart + 1));
-                    }
-
-                    if (!ShouldDropPartialJpegFrame(
-                            frameBytes.WrittenCount))
-                    {
-                        Bitmap bitmap = DetachedBitmapLoader.Load(
-                            frameBytes.WrittenSpan.ToArray(),
-                            offset: 0,
-                            count: frameBytes.WrittenCount);
-                        PublishFrame(bitmap);
-                    }
-
-                    inJpeg = false;
-                    frameBytes.Clear();
-                    segmentStart = index + 1;
+                    int index = remaining.IndexOf(marker);
+                    consumed = index < 0 ? 0 : index + marker.Length;
                 }
 
-                previous = current;
-            }
-
-            if (inJpeg && segmentStart < read)
-            {
-                frameBytes.Write(buffer.AsSpan(
-                    segmentStart,
-                    read - segmentStart));
-                if (ShouldDropPartialJpegFrame(
-                        frameBytes.WrittenCount))
+                int length = consumed == 0 ? remaining.Length : consumed;
+                previousWasFf = remaining[length - 1] == 0xFF;
+                if (inFrame)
                 {
-                    inJpeg = false;
-                    frameBytes.Clear();
-                    previous = -1;
+                    bool tooLarge = ShouldDropPartialJpegFrame(checked((int)frame.Length + length));
+                    if (!tooLarge) frame.Write(remaining[..length]);
+                    if (consumed != 0 || tooLarge)
+                    {
+                        if (!tooLarge) publish(frame.GetBuffer(), (int)frame.Length);
+                        frame.GetBuffer().AsSpan(0, (int)frame.Length).Clear();
+                        frame.SetLength(0);
+                        inFrame = false;
+                        previousWasFf = false;
+                    }
                 }
+                else if (consumed != 0)
+                {
+                    frame.Write(JpegStartMarker);
+                    inFrame = true;
+                }
+                remaining = remaining[length..];
             }
         }
     }

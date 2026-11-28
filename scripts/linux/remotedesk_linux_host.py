@@ -1847,23 +1847,22 @@ class LinuxInputController:
         display_width, display_height = display_size
         if command.kind in (INPUT_MOUSE_MOVE, INPUT_MOUSE_DOWN, INPUT_MOUSE_UP, INPUT_MOUSE_WHEEL, INPUT_PINCH_ZOOM):
             x, y = map_frame_point_to_display(command.x, command.y, frame_width, frame_height, display_width, display_height)
-            if command.kind == INPUT_MOUSE_MOVE:
-                self._run(["mousemove", str(x), str(y)], timeout=0.4)
-                return True
-            if command.kind == INPUT_MOUSE_WHEEL:
-                self._run(["mousemove", str(x), str(y)], timeout=0.4)
-                self._wheel(command.data)
-                return True
-            if command.kind == INPUT_PINCH_ZOOM:
-                self._run(["mousemove", str(x), str(y)], timeout=0.4)
-                self._wheel(command.data)
-                return True
-            button = XDOTOOL_MOUSE_BUTTONS.get(command.button)
-            if button is None:
-                raise ProtocolError("mouse down/up requires a supported button")
-            verb = "mousedown" if command.kind == INPUT_MOUSE_DOWN else "mouseup"
-            self._run(["mousemove", str(x), str(y)], timeout=0.4)
-            self._run([verb, str(button)], timeout=0.4)
+            args = ["mousemove", str(x), str(y)]
+            timeout = 0.4
+            if command.kind in (INPUT_MOUSE_WHEEL, INPUT_PINCH_ZOOM) and command.data:
+                button = "4" if command.data > 0 else "5"
+                repeat = max(1, min(6, abs(command.data) // 120))
+                # xdotool's default 100 ms per tick blocks the input worker
+                # for an entire 600 ms timeout on a six-tick wheel message.
+                args.extend(["click", "--repeat", str(repeat), "--delay", "8", button])
+                timeout = 0.6
+            elif command.kind in (INPUT_MOUSE_DOWN, INPUT_MOUSE_UP):
+                button_number = XDOTOOL_MOUSE_BUTTONS.get(command.button)
+                if button_number is None:
+                    raise ProtocolError("mouse down/up requires a supported button")
+                verb = "mousedown" if command.kind == INPUT_MOUSE_DOWN else "mouseup"
+                args.extend([verb, str(button_number)])
+            self._run(args, timeout=timeout)
             return True
 
         if command.kind in (INPUT_KEY_DOWN, INPUT_KEY_UP):
@@ -1882,13 +1881,6 @@ class LinuxInputController:
             return sent
 
         return False
-
-    def _wheel(self, delta: int) -> None:
-        if delta == 0:
-            return
-        button = "4" if delta > 0 else "5"
-        repeat = max(1, min(6, abs(delta) // 120 or 1))
-        self._run(["click", "--repeat", str(repeat), button], timeout=0.6)
 
     def _run(self, args: list[str], timeout: float) -> None:
         operation = args[0] if args else "input"

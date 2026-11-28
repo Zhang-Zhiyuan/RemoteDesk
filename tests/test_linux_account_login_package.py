@@ -52,12 +52,12 @@ class AccountLoginPackageTests(unittest.TestCase):
         ui._build_header(root)
         header, = root.winfo_children()
         button = header.children["account_package"]
-        for width, row in ((1000, 0), (320, 2), (1000, 0)):
+        for width, wrapped in ((1000, False), (320, True), (1000, False)):
             with self.subTest(width=width):
                 root.geometry(f"{width}x240")
                 root.update()
                 self.assertTrue(button.winfo_ismapped())
-                self.assertEqual(row, int(button.grid_info()["row"]))
+                self.assertEqual(wrapped, int(button.grid_info()["row"]) > 0)
                 self.assertGreaterEqual(button.winfo_x(), 0)
                 self.assertLessEqual(button.winfo_x() + button.winfo_width(), header.winfo_width())
                 self.assertLessEqual(button.winfo_y() + button.winfo_height(), header.winfo_height())

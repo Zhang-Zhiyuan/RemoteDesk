@@ -124,6 +124,15 @@ public final class CodecProbeActivity extends Activity {
             check(!decoder.rejectUnpresentedCandidateIfTimedOut(System.nanoTime()),
                 "Presentation watchdog rejected the active decoder");
             if (decoder.offer(frame) == AndroidH264SurfaceDecoder.OfferResult.ACCEPTED) accepted++;
+            if (!dependentFixture && frame == frames.get(0)) {
+                long deadline = started + TimeUnit.NANOSECONDS.toMillis(
+                    AndroidH264FrameRenderedPolicy.FIRST_PRESENTATION_TIMEOUT_NANOS);
+                while (decoder.submittedSurfaceOutputCount() == 0 && SystemClock.elapsedRealtime() < deadline) {
+                    SystemClock.sleep(2);
+                }
+                check(decoder.submittedSurfaceOutputCount() > 0, "Isolated keyframe stalled until the next input");
+                row.put("isolatedKeyframeSubmitMs", SystemClock.elapsedRealtime() - started);
+            }
             if (accepted == 20) {
                 row.put("callbacksAtPixelSample", rendered.get()).put("selectedAtPixelSample", selected.get());
                 try { row.put("earlySurfacePixels", inspectPixels(view)); }

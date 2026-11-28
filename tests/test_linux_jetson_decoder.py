@@ -5,12 +5,43 @@ from unittest import mock
 from collections import deque
 import threading
 import io
+import os
+import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/linux"))
 import remotedesk_linux_app as app
 
 
 class JetsonDecoderTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux decoder device files")
+    def test_device_backed_decoders_precede_software_without_discarding_other_candidates(self):
+        candidates = app.select_ffmpeg_h264_decoder_backends(
+            {"cuda", "vaapi", "qsv", "drm", "vdpau"}, {"h264", "h264_cuvid", "h264_v4l2m2m"})
+        with tempfile.TemporaryDirectory() as folder, mock.patch.dict(os.environ, {"DISPLAY": ":1",
+                "VDPAU_DRIVER": "", "LIBVA_DRIVER_NAME": ""}):
+            dev = Path(folder) / "dev"
+            drm = Path(folder) / "sys"
+            (dev / "dri").mkdir(parents=True)
+            def preferred():
+                ordered = app.prioritize_local_h264_decoders(candidates, dev, drm)
+                self.assertCountEqual(candidates, ordered)
+                keys = [b.key for b in ordered]
+                return keys[:keys.index("software")]
+            self.assertEqual([], preferred())
+            (dev / "dxg").touch()
+            self.assertEqual(["cuda-nvdec"], preferred())
+            (dev / "dxg").unlink()
+            (dev / "dri/renderD128").touch()
+            pci = drm / "renderD128/device"
+            pci.mkdir(parents=True)
+            (pci / "vendor").write_text("0x10de\n")
+            self.assertEqual(["cuda-nvdec"], preferred())
+            (pci / "vendor").write_text("0x8086\n")
+            self.assertEqual(["vaapi", "qsv", "drm"], preferred())
+            (pci / "vendor").write_text("0x1002\n")
+            (dev / "video0").touch()
+            self.assertEqual(["vaapi", "v4l2m2m", "drm"], preferred())
+
     def test_explicit_jetson_decoder_precedes_desktop_cuda(self):
         backends = app.select_ffmpeg_h264_decoder_backends({"cuda"}, {"h264", "h264_cuvid", "h264_nvv4l2dec"})
         self.assertEqual("jetson-nvv4l2", backends[0].key)

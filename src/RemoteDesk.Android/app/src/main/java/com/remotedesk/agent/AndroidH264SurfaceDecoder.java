@@ -39,10 +39,13 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
         REJECTED_CLOSED
     }
 
-    // Leave enough room for a slow vendor codec cold start. Once the decoder
-    // is running, independently decodable recovery units still collapse this
-    // queue to the newest frame below.
     static final int ACCESS_UNIT_QUEUE_CAPACITY = 3;
+    // Surface replacement may stop and start a vendor codec before its worker
+    // can consume the new IDR and its dependents. Bound this temporary backlog
+    // by count, bytes and elapsed time; an independent frame still supersedes it.
+    private static final int STARTUP_QUEUE_CAPACITY = 12;
+    private static final int STARTUP_QUEUE_BYTE_LIMIT = 4 * 1024 * 1024;
+    private static final long STARTUP_QUEUE_WINDOW_NANOS = TimeUnit.MILLISECONDS.toNanos(500);
 
     private static final String MIME_TYPE = "video/avc";
     private static final long INPUT_DEQUEUE_TIMEOUT_US = 5_000;
@@ -50,6 +53,7 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
     // Waiting for up to 8 ms here is still below a 60 Hz frame budget and avoids
     // sleeping until the next network access unit when output misses a 2 ms poll.
     static final long OUTPUT_DEQUEUE_BUDGET_US = 8_000;
+    private static final long IDLE_OUTPUT_WINDOW_NANOS = TimeUnit.MILLISECONDS.toNanos(250);
 
     private final Object stateLock = new Object();
     private final List<AndroidH264DecoderDiagnostics.DecoderCandidate> candidates;
@@ -76,6 +80,7 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
     private boolean unavailableReported;
     private boolean closed;
     private int generation;
+    private long startupQueueDeadline;
     private int configuredWidth;
     private int configuredHeight;
     private int consecutiveAccessUnitsWithoutOutput;
@@ -175,7 +180,7 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
                     AndroidH264DecoderPolicy.canSupersedeQueuedAccessUnits(frame.flags)) {
                     replaceQueuedChainWithRecoveryLocked(accessUnit);
                     result = OfferResult.ACCEPTED;
-                } else if (accessUnits.size() >= ACCESS_UNIT_QUEUE_CAPACITY) {
+                } else if (queueFullLocked(accessUnit.bytes.length)) {
                     AndroidH264DecoderPolicy.SaturationAction action =
                         AndroidH264DecoderPolicy.saturationAction(frame.flags);
                     beginRecoveryLocked();
@@ -375,6 +380,8 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
                     boolean reset = resetRequested;
                     resetRequested = false;
                     AccessUnit accessUnit = accessUnits.pollFirst();
+                    if (activeCandidateReported && activeCodecGeneration == generation &&
+                            accessUnits.size() < ACCESS_UNIT_QUEUE_CAPACITY) startupQueueDeadline = 0;
                     workItem = new WorkItem(reset, accessUnit);
                 }
 
@@ -392,7 +399,7 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
         }
     }
 
-    private void processAccessUnit(AccessUnit accessUnit) {
+    private void processAccessUnit(AccessUnit accessUnit) throws InterruptedException {
         Surface surface;
         int expectedSurfaceGeneration;
         synchronized (stateLock) {
@@ -429,7 +436,7 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
             }
 
             boolean renderedOutput =
-                drainOutputs(0, accessUnit.generation);
+                drainOutputs(0, accessUnit.generation) >= 0;
             int inputIndex = codec.dequeueInputBuffer(INPUT_DEQUEUE_TIMEOUT_US);
             if (inputIndex < 0) {
                 consecutiveInputDequeueMisses++;
@@ -469,9 +476,7 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
                 inputLength,
                 presentationTimeUs,
                 0);
-            renderedOutput |= drainOutputs(
-                OUTPUT_DEQUEUE_BUDGET_US,
-                accessUnit.generation);
+            renderedOutput |= drainAfterInput(presentationTimeUs, accessUnit.generation);
             AndroidH264DecoderPolicy.OutputProbeResult probeResult =
                 AndroidH264DecoderPolicy.afterAccessUnit(
                     consecutiveAccessUnitsWithoutOutput,
@@ -622,8 +627,32 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
         return format;
     }
 
-    private boolean drainOutputs(long firstTimeoutUs, int expectedGeneration) {
+    private boolean drainAfterInput(long inputPts, int expectedGeneration) throws InterruptedException {
+        long outputPts = drainOutputs(OUTPUT_DEQUEUE_BUDGET_US, expectedGeneration);
+        boolean rendered = outputPts >= 0;
+        // A static desktop may send just one update. A codec that finishes it
+        // after the first dequeue must still reach the Surface without a new packet.
+        long deadline = System.nanoTime() + IDLE_OUTPUT_WINDOW_NANOS;
+        long delayMs = 2;
+        while (outputPts != inputPts) {
+            synchronized (stateLock) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0 || !accessUnits.isEmpty() ||
+                        !isCurrentGenerationLocked(expectedGeneration, null)) break;
+                TimeUnit.NANOSECONDS.timedWait(stateLock,
+                    Math.min(remaining, TimeUnit.MILLISECONDS.toNanos(delayMs)));
+                if (!isCurrentGenerationLocked(expectedGeneration, null)) break;
+            }
+            outputPts = drainOutputs(0, expectedGeneration);
+            rendered |= outputPts >= 0;
+            delayMs = Math.min(delayMs * 2, 16);
+        }
+        return rendered;
+    }
+
+    private long drainOutputs(long firstTimeoutUs, int expectedGeneration) {
         int renderIndex = -1;
+        long renderPts = -1;
         long timeoutUs = firstTimeoutUs;
         while (true) {
             int outputIndex = codec.dequeueOutputBuffer(bufferInfo, timeoutUs);
@@ -649,10 +678,11 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
                 codec.releaseOutputBuffer(renderIndex, false);
             }
             renderIndex = outputIndex;
+            renderPts = bufferInfo.presentationTimeUs;
         }
 
         if (renderIndex < 0) {
-            return false;
+            return -1;
         }
 
         boolean render = isCurrentGeneration(expectedGeneration, null);
@@ -661,7 +691,7 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
         if (render) {
             recordSurfaceOutputSubmitted(activeCodec, expectedGeneration);
         }
-        return render;
+        return render ? renderPts : -1;
     }
 
     private void registerFrameRenderedListener(
@@ -980,10 +1010,20 @@ final class AndroidH264SurfaceDecoder implements AutoCloseable {
     private void enqueueRecoveryLocked(AccessUnit accessUnit) {
         accessUnits.clear();
         accessUnits.addLast(accessUnit);
+        startupQueueDeadline = System.nanoTime() + STARTUP_QUEUE_WINDOW_NANOS;
         recoveryNeeded = false;
         recoveryRequestReported = false;
         configuredWidth = accessUnit.width;
         configuredHeight = accessUnit.height;
+    }
+
+    private boolean queueFullLocked(int additionalBytes) {
+        if (accessUnits.size() < ACCESS_UNIT_QUEUE_CAPACITY) return false;
+        if (accessUnits.size() >= STARTUP_QUEUE_CAPACITY || startupQueueDeadline == 0 ||
+                startupQueueDeadline - System.nanoTime() <= 0) return true;
+        long bytes = additionalBytes;
+        for (AccessUnit queued : accessUnits) bytes += queued.bytes.length;
+        return bytes > STARTUP_QUEUE_BYTE_LIMIT;
     }
 
     private void replaceQueuedChainWithRecoveryLocked(AccessUnit accessUnit) {

@@ -53,6 +53,20 @@ For a targeted rerun use `--pairs LinuxToWindows` (or multiple explicit names).
 The report records the selected subset; its `complete` field does not certify
 directions omitted from that invocation.
 
+If SSH management uses an alias or a jump host, pass it to `--linux` and set
+`--linux-address` to the desktop service's actual LAN address for the direct test.
+
+Measure the Windows viewer's reliable H.264 receipt latency on loopback:
+
+```powershell
+'{"output":"artifacts/receipt-latency"}' | dotnet run -c Release --project experiments/InteropProbe -- viewer-receipt-latency
+```
+
+After one warm-up frame, the probe sends 30 single frames separated by idle
+gaps. It checks each cumulative byte count and writes median, P95 and raw timings to
+`receipt.json`. The physical Windows viewer test separately records
+`wheelToVisibleMs` from sending a wheel event to observing the target change.
+
 To test Windows/Linux→Android, use the printed **owned** Linux staging path:
 
 ```powershell
